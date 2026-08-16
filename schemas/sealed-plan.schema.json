@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/sealed-plan.schema.json",
+  "title": "Cymule Sealed Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["plan_id", "candidate"],
+  "properties": {
+    "plan_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "candidate": { "$ref": "plan-candidate.schema.json" }
+  }
+}
+

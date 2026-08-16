@@ -1,0 +1,56 @@
+{
+  "ir_version": "cymule.ir/1",
+  "name": "cross_language_echo",
+  "entry": "main",
+  "components": [
+    {
+      "id": "test.echo",
+      "input_schema": {},
+      "output_schema": {},
+      "requirements": {}
+    }
+  ],
+  "effects": [
+    {
+      "id": "test.capture",
+      "input_schema": {},
+      "output_schema": {},
+      "profile": {
+        "mutation": "mutating",
+        "dispatch": "on_scope_commit",
+        "reconciliation": "queryable",
+        "keyed_idempotency": true,
+        "irreversible": false
+      },
+      "requirements": {}
+    }
+  ],
+  "definitions": [
+    {
+      "id": "main",
+      "input_schema": {},
+      "output_schema": {},
+      "body": {
+        "steps": [
+          {
+            "id": "call.echo",
+            "op": "call",
+            "component": "test.echo",
+            "input": { "kind": "input" },
+            "bind": "echoed"
+          },
+          {
+            "id": "effect.capture",
+            "op": "effect",
+            "effect": "test.capture",
+            "input": { "kind": "binding", "name": "echoed" },
+            "occurrence": "primary"
+          }
+        ],
+        "result": { "kind": "binding", "name": "echoed" }
+      }
+    }
+  ],
+  "metadata": {}
+}
+

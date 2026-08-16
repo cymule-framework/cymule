@@ -1,0 +1,56 @@
+//! Rust SDK side of the shared cross-language end-to-end scenario.
+
+use std::env;
+
+use cymule_sdk::{
+    CliEngine, DispatchPolicy, EffectProfile, Engine, Expression, FlowBuilder, MutationKind,
+    ReconciliationMode,
+};
+use serde_json::json;
+
+#[test]
+fn rust_candidate_seals_and_executes_through_the_cli() {
+    let (Ok(engine_path), Ok(plugin_path), Ok(expected_plan_id)) = (
+        env::var("CYMULE_BIN"),
+        env::var("CYMULE_TEST_PLUGIN"),
+        env::var("CYMULE_EXPECTED_PLAN_ID"),
+    ) else {
+        return;
+    };
+    let candidate = FlowBuilder::new("cross_language_echo", json!({}), json!({}))
+        .component("test.echo", json!({}), json!({}))
+        .effect_contract(
+            "test.capture",
+            json!({}),
+            json!({}),
+            EffectProfile {
+                mutation: MutationKind::Mutating,
+                dispatch: DispatchPolicy::OnScopeCommit,
+                reconciliation: ReconciliationMode::Queryable,
+                keyed_idempotency: true,
+                irreversible: false,
+            },
+        )
+        .call("call.echo", "test.echo", Expression::Input, "echoed")
+        .effect(
+            "effect.capture",
+            "test.capture",
+            Expression::Binding {
+                name: "echoed".to_owned(),
+            },
+            "primary",
+        )
+        .finish(Expression::Binding {
+            name: "echoed".to_owned(),
+        });
+
+    let engine = CliEngine::new(engine_path);
+    let plan = engine.seal(&candidate).expect("candidate seals");
+    assert_eq!(plan.plan_id, expected_plan_id);
+    let input = json!({"message": "hello from Rust"});
+    let result = engine
+        .run(&plan, &input, plugin_path.as_ref(), "run:rust-e2e")
+        .expect("plan executes");
+    assert_eq!(result.value, input);
+    assert_eq!(result.effects.len(), 1);
+}

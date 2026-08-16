@@ -1,0 +1,22 @@
+{
+  "name": "@cymule/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript authoring and engine client SDK for Cymule",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test dist/test/e2e.js"
+  },
+  "devDependencies": {
+    "@types/node": "26.0.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT OR Apache-2.0"
+}
+

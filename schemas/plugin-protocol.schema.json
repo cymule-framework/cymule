@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/plugin-protocol.schema.json",
+  "title": "Cymule Process Plugin Message",
+  "oneOf": [
+    { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "describe" } } },
+    {
+      "type": "object", "additionalProperties": false, "required": ["type", "component", "input"],
+      "properties": { "type": { "const": "call" }, "component": { "$ref": "#/$defs/id" }, "input": true }
+    },
+    {
+      "type": "object", "additionalProperties": false, "required": ["type", "operation", "intent_id", "input"],
+      "properties": { "type": { "enum": ["prepare_effect", "dispatch_effect", "reconcile_effect"] }, "operation": { "$ref": "#/$defs/id" }, "intent_id": { "$ref": "#/$defs/id" }, "input": true }
+    }
+  ],
+  "$defs": { "id": { "type": "string", "minLength": 1, "maxLength": 200 } }
+}
+

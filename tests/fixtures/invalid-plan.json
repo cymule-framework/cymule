@@ -1,0 +1,26 @@
+{
+  "ir_version": "cymule.ir/1",
+  "name": "invalid_unknown_component",
+  "entry": "main",
+  "components": [],
+  "effects": [],
+  "definitions": [
+    {
+      "id": "main",
+      "input_schema": {},
+      "output_schema": {},
+      "body": {
+        "steps": [
+          {
+            "id": "call.missing",
+            "op": "call",
+            "component": "missing.component",
+            "input": { "kind": "input" }
+          }
+        ],
+        "result": { "kind": "literal", "value": null }
+      }
+    }
+  ],
+  "metadata": {}
+}

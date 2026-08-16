@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$ROOT"
+
+echo "== Rust formatting and static analysis =="
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- \
+  -D warnings \
+  -A clippy::missing-errors-doc \
+  -A clippy::missing-panics-doc \
+  -A clippy::too-many-lines
+cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+echo "== Build shared engine and plugin =="
+cargo build -p cymule-cli -p cymule-test-adapter
+CYMULE_BIN="$ROOT/target/debug/cymule"
+CYMULE_TEST_PLUGIN="$ROOT/target/debug/cymule-test-adapter"
+export CYMULE_BIN CYMULE_TEST_PLUGIN
+
+echo "== Frozen schemas and semantic rejection =="
+uv run --project sdk/python --frozen python "$ROOT/scripts/validate_schemas.py" "$ROOT" "$CYMULE_BIN"
+if "$CYMULE_BIN" seal --input "$ROOT/tests/fixtures/invalid-plan.json" >/dev/null 2>&1; then
+  echo "invalid semantic plan was unexpectedly accepted" >&2
+  exit 1
+fi
+
+CYMULE_EXPECTED_PLAN_ID=$(
+  "$CYMULE_BIN" seal --input "$ROOT/tests/fixtures/cross-language-plan.json" |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["plan_id"])'
+)
+export CYMULE_EXPECTED_PLAN_ID
+echo "shared Plan ID: $CYMULE_EXPECTED_PLAN_ID"
+
+echo "== Rust SDK end-to-end =="
+cargo test -p cymule-sdk --test cross_language
+
+echo "== TypeScript SDK end-to-end =="
+pnpm --dir sdk/typescript install --frozen-lockfile
+pnpm --dir sdk/typescript run build
+pnpm --dir sdk/typescript test
+
+echo "== Python SDK end-to-end =="
+uv run --project sdk/python --frozen python -m unittest discover -s "$ROOT/sdk/python/tests"
+
+echo "== Go SDK end-to-end =="
+(cd sdk/go && go test ./...)
+
+echo "== Optional MLIR workbench =="
+"$ROOT/compiler/mlir/verify.sh"
+
+echo "All Cymule verification passed."

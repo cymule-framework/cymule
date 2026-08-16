@@ -1,0 +1,63 @@
+# Cymule Agent Handbook
+
+## Authority
+
+Use this precedence order when guidance conflicts:
+
+1. Executable tests, frozen schemas, and live code.
+2. The nearest `AGENTS.md` in the target path.
+3. `docs/specification.md` for normative semantics.
+4. `docs/architecture.md` for realization guidance.
+5. Other documentation.
+
+## Project invariants
+
+- Keep the trusted semantic core in Rust and intentionally small. The core owns
+  canonical identity, admission laws, deterministic reduction, and replay. It
+  must not depend on a database, queue, network client, model SDK, object store,
+  process supervisor, or UI framework.
+- Canonical truth consists of sealed plans, causal events, and immutable
+  artifacts. Views, indexes, graphs, attention items, and schedulers are
+  rebuildable projections.
+- Plans describe meaning and requirements. Runtime bindings describe concrete
+  realization. Never place provider names, credentials, endpoints, or deployment
+  topology in canonical plan semantics.
+- Every persisted occurrence pins an immutable occurrence binding. M0 persists
+  Attempt and Effect bindings; new component, model, and context occurrence
+  records must add the same protection before claiming exact execution replay.
+  Updating future defaults must never reinterpret historical work.
+- Scope closure commits declared state and transfers effect obligations. It does
+  not claim that the external world has settled.
+- An ambiguous dispatch becomes `unknown` and follows reconciliation. Never turn
+  it into a fresh semantic intent or silently redispatch it.
+- Public mutation enters through typed commands with idempotent IDs and causal
+  preconditions. Raw canonical event append is internal only.
+- Cross-language SDKs author the same frozen IR and use the same engine contract.
+  They must not implement a second reducer or invent language-specific semantics.
+- New behavior is provider-neutral by default. Concrete persistence, activation,
+  execution, model, tool, and effect integrations belong behind plugin or
+  substrate interfaces.
+- Keep all source code, comments, documentation, commit messages, schemas, and
+  user-facing project metadata in English.
+
+## Change discipline
+
+- Read the nearest nested `AGENTS.md` before editing a directory.
+- Treat generated files and lockfiles as derived artifacts; update their source
+  and regenerate them in the same change.
+- Any semantic change requires a version-domain decision and updates to the
+  normative specification, schemas, conformance tests, and SDK fixtures.
+- Add a root rule only when it applies across multiple project areas. Put domain
+  detail in the nearest nested handbook.
+- Do not claim a conformance profile unless its complete fault-oriented suite
+  passes. Mark planned and partial behavior explicitly.
+
+## Required verification
+
+Run `./scripts/verify.sh` before committing. At minimum, changes must preserve:
+
+- Rust formatting, Clippy, unit tests, and documentation build;
+- deterministic canonical IDs and replay digests;
+- JSON Schema validation fixtures;
+- TypeScript, Python, Rust, and Go SDK end-to-end tests against the Rust engine;
+- the MLIR workbench smoke test when the pinned host MLIR toolchain is available.

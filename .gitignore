@@ -1,0 +1,16 @@
+/target/
+/.cache/
+/.idea/
+/.vscode/
+.DS_Store
+*.log
+
+sdk/typescript/node_modules/
+sdk/typescript/dist/
+sdk/python/.venv/
+sdk/python/.pytest_cache/
+sdk/python/**/__pycache__/
+sdk/python/*.egg-info/
+
+compiler/mlir/build/
+

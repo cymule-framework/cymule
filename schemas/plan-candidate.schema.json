@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/plan-candidate.schema.json",
+  "title": "Cymule Plan Candidate cymule.ir/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ir_version", "name", "entry", "components", "effects", "definitions", "metadata"],
+  "properties": {
+    "ir_version": { "const": "cymule.ir/1" },
+    "name": { "$ref": "#/$defs/id" },
+    "entry": { "$ref": "#/$defs/id" },
+    "components": { "type": "array", "items": { "$ref": "#/$defs/component" } },
+    "effects": { "type": "array", "items": { "$ref": "#/$defs/effectContract" } },
+    "definitions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/definition" } },
+    "metadata": { "type": "object", "additionalProperties": { "type": "string" } }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "schema": { "oneOf": [{ "type": "boolean" }, { "type": "object" }] },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "input_schema", "output_schema", "requirements"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "input_schema": { "$ref": "#/$defs/schema" },
+        "output_schema": { "$ref": "#/$defs/schema" },
+        "requirements": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "effectContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "input_schema", "output_schema", "profile", "requirements"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "input_schema": { "$ref": "#/$defs/schema" },
+        "output_schema": { "$ref": "#/$defs/schema" },
+        "profile": { "$ref": "#/$defs/effectProfile" },
+        "requirements": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "effectProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mutation", "dispatch", "reconciliation", "keyed_idempotency", "irreversible"],
+      "properties": {
+        "mutation": { "enum": ["observational", "mutating"] },
+        "dispatch": { "enum": ["eager", "on_scope_commit", "explicit"] },
+        "reconciliation": { "enum": ["queryable", "externally_attested", "human", "impossible"] },
+        "keyed_idempotency": { "type": "boolean" },
+        "irreversible": { "type": "boolean" }
+      }
+    },
+    "definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "input_schema", "output_schema", "body"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "input_schema": { "$ref": "#/$defs/schema" },
+        "output_schema": { "$ref": "#/$defs/schema" },
+        "body": { "$ref": "#/$defs/region" }
+      }
+    },
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steps", "result"],
+      "properties": {
+        "steps": { "type": "array", "items": { "$ref": "#/$defs/step" } },
+        "result": { "$ref": "#/$defs/expression" }
+      }
+    },
+    "step": {
+      "oneOf": [
+        { "$ref": "#/$defs/call" },
+        { "$ref": "#/$defs/wait" },
+        { "$ref": "#/$defs/effect" },
+        { "$ref": "#/$defs/scope" }
+      ]
+    },
+    "baseStep": {
+      "type": "object",
+      "required": ["id", "op"],
+      "properties": { "id": { "$ref": "#/$defs/id" } }
+    },
+    "call": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "op", "component", "input"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "op": { "const": "call" },
+        "component": { "$ref": "#/$defs/id" }, "input": { "$ref": "#/$defs/expression" },
+        "bind": { "$ref": "#/$defs/id" }
+      }
+    },
+    "wait": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "op", "wait"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "op": { "const": "wait" },
+        "wait": { "$ref": "#/$defs/waitSpec" }
+      }
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "op", "effect", "input", "occurrence"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "op": { "const": "effect" },
+        "effect": { "$ref": "#/$defs/id" }, "input": { "$ref": "#/$defs/expression" },
+        "occurrence": { "$ref": "#/$defs/id" }, "bind": { "$ref": "#/$defs/id" }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "op", "mode", "body"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "op": { "const": "scope" },
+        "mode": { "enum": ["transactional", "speculative"] },
+        "body": { "$ref": "#/$defs/region" }, "bind": { "$ref": "#/$defs/id" }
+      }
+    },
+    "waitSpec": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "key", "consume_once"],
+          "properties": { "kind": { "const": "signal" }, "key": { "$ref": "#/$defs/id" }, "consume_once": { "type": "boolean" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "timer_id"],
+          "properties": { "kind": { "const": "timer" }, "timer_id": { "$ref": "#/$defs/id" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "correlation", "schema"],
+          "properties": { "kind": { "const": "input" }, "correlation": { "$ref": "#/$defs/id" }, "schema": { "$ref": "#/$defs/schema" } }
+        }
+      ]
+    },
+    "expression": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "input" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "literal" }, "value": true } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "name"], "properties": { "kind": { "const": "binding" }, "name": { "$ref": "#/$defs/id" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "fields"], "properties": { "kind": { "const": "object" }, "fields": { "type": "object", "additionalProperties": { "$ref": "#/$defs/expression" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "items"], "properties": { "kind": { "const": "array" }, "items": { "type": "array", "items": { "$ref": "#/$defs/expression" } } } }
+      ]
+    }
+  }
+}
+

@@ -1,0 +1,17 @@
+[package]
+name = "cymule-test-adapter"
+description = "Deterministic external plugin for Cymule conformance tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cymule-core = { path = "../../crates/cymule-core" }
+cymule-runtime = { path = "../../crates/cymule-runtime" }
+serde_json.workspace = true
+
+[lints]
+workspace = true
+

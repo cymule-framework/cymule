@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/engine-protocol.schema.json",
+  "title": "Cymule Engine Request",
+  "oneOf": [
+    {
+      "type": "object", "additionalProperties": false, "required": ["type", "candidate"],
+      "properties": { "type": { "const": "seal" }, "candidate": { "$ref": "plan-candidate.schema.json" } }
+    },
+    {
+      "type": "object", "additionalProperties": false, "required": ["type", "plan"],
+      "properties": { "type": { "const": "verify" }, "plan": { "$ref": "sealed-plan.schema.json" } }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "plan", "input", "plugin", "run_id"],
+      "properties": {
+        "type": { "const": "run" }, "plan": { "$ref": "sealed-plan.schema.json" },
+        "input": true, "plugin": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    }
+  ]
+}
+
