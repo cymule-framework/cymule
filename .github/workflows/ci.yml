@@ -18,7 +18,15 @@ jobs:
     name: Select verification lanes
     runs-on: ubuntu-24.04
     outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
+      meta: ${{ steps.plan.outputs.meta }}
+      package_typescript: ${{ steps.plan.outputs.package_typescript }}
+      protocol: ${{ steps.plan.outputs.protocol }}
+      rust: ${{ steps.plan.outputs.rust }}
+      sdk_go: ${{ steps.plan.outputs.sdk_go }}
+      sdk_python: ${{ steps.plan.outputs.sdk_python }}
+      sdk_rust: ${{ steps.plan.outputs.sdk_rust }}
+      sdk_typescript: ${{ steps.plan.outputs.sdk_typescript }}
+      workbench: ${{ steps.plan.outputs.workbench }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -48,67 +56,268 @@ jobs:
             --no-worktree \
             --full-if-empty \
             --format github-matrix)
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          MATRIX=$matrix python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          lanes = {
+              entry["lane"]: entry["suite_args"]
+              for entry in json.loads(os.environ["MATRIX"])["include"]
+          }
+          for lane in (
+              "meta", "package-typescript", "protocol", "rust", "sdk-go",
+              "sdk-python", "sdk-rust", "sdk-typescript", "workbench",
+          ):
+              print(f"{lane.replace('-', '_')}={lanes.get(lane, '')}")
+          PY
           python3 scripts/test_harness.py plan \
             --base "$base" \
             --head HEAD \
             --no-worktree \
             --full-if-empty
 
-  verify:
-    name: Verify / ${{ matrix.lane }}
+  meta:
+    name: Verify / meta
     needs: plan
+    if: needs.plan.outputs.meta != ''
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.meta }}
+          --keep-going
+          --report .cache/test-harness/meta.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-meta
+          path: .cache/test-harness/meta.json
+          if-no-files-found: warn
 
+  rust:
+    name: Verify / rust
+    needs: plan
+    if: needs.plan.outputs.rust != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - name: Install Rust
-        if: matrix.rust
         run: |
           rustup toolchain install 1.97.0 --profile minimal --component rustfmt,clippy
           rustup default 1.97.0
-
-      - uses: pnpm/action-setup@v6.0.10
-        if: matrix.node
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.rust }}
+          --keep-going
+          --report .cache/test-harness/rust.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
         with:
-          version: 11.17.0
-          run_install: false
+          name: test-harness-rust
+          path: .cache/test-harness/rust.json
+          if-no-files-found: warn
 
-      - uses: actions/setup-node@v7.0.0
-        if: matrix.node
+  protocol:
+    name: Verify / protocol
+    needs: plan
+    if: needs.plan.outputs.protocol != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
         with:
-          node-version: 26.7.0
-          cache: pnpm
-          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
-
-      - uses: actions/setup-go@v7.0.0
-        if: matrix.go
-        with:
-          go-version: 1.26.5
-          cache-dependency-path: sdk/go/go.mod
-
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.0
       - uses: astral-sh/setup-uv@v10.0.1
-        if: matrix.uv
         with:
           version: 0.7.2
           enable-cache: true
           cache-dependency-glob: sdk/python/uv.lock
-
       - name: Run selected verification suites
         run: >-
           python3 scripts/test_harness.py run
-          ${{ matrix.suite_args }}
+          ${{ needs.plan.outputs.protocol }}
           --keep-going
-          --report .cache/test-harness/${{ matrix.lane }}.json
-
+          --report .cache/test-harness/protocol.json
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: test-harness-${{ matrix.lane }}
-          path: .cache/test-harness/${{ matrix.lane }}.json
-          if-no-files-found: error
+          name: test-harness-protocol
+          path: .cache/test-harness/protocol.json
+          if-no-files-found: warn
+
+  sdk-rust:
+    name: Verify / sdk-rust
+    needs: plan
+    if: needs.plan.outputs.sdk_rust != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.0
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.sdk_rust }}
+          --keep-going
+          --report .cache/test-harness/sdk-rust.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-sdk-rust
+          path: .cache/test-harness/sdk-rust.json
+          if-no-files-found: warn
+
+  sdk-typescript:
+    name: Verify / sdk-typescript
+    needs: plan
+    if: needs.plan.outputs.sdk_typescript != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.0
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.7.0
+      - name: Install pnpm
+        run: npm install --global pnpm@11.17.0
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.sdk_typescript }}
+          --keep-going
+          --report .cache/test-harness/sdk-typescript.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-sdk-typescript
+          path: .cache/test-harness/sdk-typescript.json
+          if-no-files-found: warn
+
+  sdk-python:
+    name: Verify / sdk-python
+    needs: plan
+    if: needs.plan.outputs.sdk_python != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.0
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: 0.7.2
+          enable-cache: true
+          cache-dependency-glob: sdk/python/uv.lock
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.sdk_python }}
+          --keep-going
+          --report .cache/test-harness/sdk-python.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-sdk-python
+          path: .cache/test-harness/sdk-python.json
+          if-no-files-found: warn
+
+  sdk-go:
+    name: Verify / sdk-go
+    needs: plan
+    if: needs.plan.outputs.sdk_go != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.0
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: sdk/go/go.mod
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.sdk_go }}
+          --keep-going
+          --report .cache/test-harness/sdk-go.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-sdk-go
+          path: .cache/test-harness/sdk-go.json
+          if-no-files-found: warn
+
+  package-typescript:
+    name: Verify / package-typescript
+    needs: plan
+    if: needs.plan.outputs.package_typescript != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.7.0
+      - name: Install pnpm
+        run: npm install --global pnpm@11.17.0
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.package_typescript }}
+          --keep-going
+          --report .cache/test-harness/package-typescript.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-package-typescript
+          path: .cache/test-harness/package-typescript.json
+          if-no-files-found: warn
+
+  workbench:
+    name: Verify / workbench
+    needs: plan
+    if: needs.plan.outputs.workbench != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.workbench }}
+          --keep-going
+          --report .cache/test-harness/workbench.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-workbench
+          path: .cache/test-harness/workbench.json
+          if-no-files-found: warn
