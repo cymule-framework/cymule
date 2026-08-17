@@ -74,6 +74,10 @@ standards.
   defines invariant JSON bytes suitable for content addressing.
 - [JSON Schema 2020-12](https://json-schema.org/specification) is the schema
   dialect used for Plan inputs, outputs, plugin operations, and public fixtures.
+- [`jsonschema`](https://github.com/Stranger6667/jsonschema) provides the
+  maintained Rust Draft 2020-12 compiler used by M2 typed input. Cymule disables
+  its default HTTP and filesystem resolvers so a validation boundary cannot
+  become ambient I/O; internal references remain supported.
 
 ## Deliberate differences
 

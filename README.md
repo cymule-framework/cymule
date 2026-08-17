@@ -10,10 +10,11 @@ through replaceable components and effect plugins. Cymule gives every Plan,
 state transition, and external effect a stable identity so retries, worker
 upgrades, ambiguous outcomes, and replay can be handled explicitly.
 
-> **Project status:** version `0.1.0` is an executable Embedded M0 framework and
-> semantic reference implementation. It is ready for local execution,
-> integration work, and conformance testing. Persistent crash recovery and a
-> distributed production runtime are roadmap work.
+> **Project status:** version `0.1.0` provides the executable Embedded M0
+> profile plus preview, fault-tested foundations for durable execution, agent
+> interaction, virtual work, and live evolution. The complete M1-M4 profiles
+> and a distributed production runtime remain in development; see the
+> [roadmap](docs/roadmap.md) for exact boundaries.
 
 ## What Cymule gives you
 
@@ -29,6 +30,9 @@ upgrades, ambiguous outcomes, and replay can be handled explicitly.
   an automatic duplicate operation.
 - **Explicit reconciliation.** An ambiguous effect is resolved through its
   original identity, arguments, and plugin binding.
+- **Durable typed input.** Agent input schemas, waits, Session state, and
+  Continuations advance under one optimistic CAS authority; invalid responses
+  make no durable change.
 - **Replaceable integrations.** Plans name abstract operations rather than
   queues, object stores, vendors, endpoints, or credentials.
 - **Deterministic state replay.** Canonical Events rebuild the same Run

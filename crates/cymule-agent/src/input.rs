@@ -33,6 +33,7 @@ impl AgentInputController {
                 "Session, Run, and elicitation identities must not be empty".to_owned(),
             ));
         }
+        compile_input_schema(&request)?;
         let digest = canonical_digest(&(session_id, run_id, &request))
             .map_err(|error| AgentError::Validation(error.to_string()))?;
         let wait_id = format!("wait:agent-input:{digest}");
@@ -137,6 +138,7 @@ impl AgentInputController {
                 revision: revision.to_owned(),
             });
         }
+        validate_input_completion(wait_id, &current.request, &response)?;
         let update_base = wait_id.replacen("wait:", "update:", 1);
         let elicitation_update = AgentUpdate::Elicitation {
             update_id: format!("{update_base}:completed"),
@@ -176,6 +178,42 @@ impl AgentInputController {
             revision,
         })
     }
+}
+
+fn compile_input_schema(request: &ElicitationRequest) -> AgentResult<jsonschema::Validator> {
+    jsonschema::draft202012::options()
+        .build(&request.schema)
+        .map_err(|error| {
+            AgentError::Validation(format!(
+                "elicitation {} has an invalid Draft 2020-12 schema: {error}",
+                request.request_id
+            ))
+        })
+}
+
+fn validate_input_completion(
+    wait_id: &str,
+    request: &ElicitationRequest,
+    response: &ElicitationResponse,
+) -> AgentResult<()> {
+    ElicitationProjection {
+        wait_id: wait_id.to_owned(),
+        request: request.clone(),
+        response: Some(response.clone()),
+    }
+    .validate()?;
+    let Some(value) = response.value.as_ref() else {
+        return Ok(());
+    };
+    let validator = compile_input_schema(request)?;
+    validator.validate(value).map_err(|error| {
+        AgentError::Validation(format!(
+            "elicitation {} value at {} does not satisfy schema at {}: {error}",
+            request.request_id,
+            error.instance_path(),
+            error.schema_path()
+        ))
+    })
 }
 
 const fn state_update_suffix(state: AgentState) -> &'static str {

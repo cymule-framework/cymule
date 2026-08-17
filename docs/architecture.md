@@ -77,7 +77,11 @@ Human or external input uses an M1 `WaitKind::Input`, not a blocked task or
 process-local channel. `AgentInputController` atomically couples the Session
 projection and Continuation wait, so a crash cannot expose `RequiresAction`
 without a deliverable wait or ready the Continuation without the resolved
-elicitation. Concrete UI, transport, and identity integrations remain adapters.
+elicitation. It compiles self-contained Draft 2020-12 schemas before suspension
+and validates accepted values from the persisted request before the completion
+CAS. The maintained Rust JSON Schema implementation runs with filesystem and
+HTTP resolvers disabled; schema validation does not introduce an I/O or provider
+boundary. Concrete UI, transport, and identity integrations remain adapters.
 
 An ambiguous host call is recovered by querying its original pinned binding.
 The query may return the original typed response, prove `not_applied`, or remain
