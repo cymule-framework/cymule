@@ -2,7 +2,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use cymule_agent::{AgentStreamProjection, AgentStreamRecord};
 use cymule_core::{CoreError, PlanCandidate, SealedPlan};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::ExecutionResult;
@@ -15,11 +14,6 @@ pub trait Engine {
     fn seal(&self, candidate: &PlanCandidate) -> Result<SealedPlan, CoreError>;
     /// Validate and seal a provider-neutral Resource Candidate.
     fn seal_resource(&self, candidate: &ResourceCandidate) -> Result<ResourceHandle, CoreError>;
-    /// Validate and reduce ordered Agent stream records with the Rust engine.
-    fn verify_agent_stream(
-        &self,
-        records: &[AgentStreamRecord],
-    ) -> Result<AgentStreamProjection, CoreError>;
     /// Execute a sealed plan through a selected plugin realization.
     fn run(
         &self,
@@ -97,20 +91,6 @@ impl Engine for CliEngine {
         CliEngine::seal_resource(self, candidate)
     }
 
-    fn verify_agent_stream(
-        &self,
-        records: &[AgentStreamRecord],
-    ) -> Result<AgentStreamProjection, CoreError> {
-        match self.request(&EngineRequest::VerifyAgentStream {
-            records: records.to_vec(),
-        })? {
-            EngineResponse::VerifiedAgentStream { stream } => Ok(stream),
-            response => Err(CoreError::Validation(format!(
-                "CLI returned unexpected response {response:?}"
-            ))),
-        }
-    }
-
     fn run(
         &self,
         plan: &SealedPlan,
@@ -141,9 +121,6 @@ enum EngineRequest {
     SealResource {
         candidate: ResourceCandidate,
     },
-    VerifyAgentStream {
-        records: Vec<AgentStreamRecord>,
-    },
     Run {
         plan: SealedPlan,
         input: Value,
@@ -157,7 +134,6 @@ enum EngineRequest {
 enum EngineResponse {
     Sealed { plan: SealedPlan },
     SealedResource { resource: ResourceHandle },
-    VerifiedAgentStream { stream: AgentStreamProjection },
     Executed { result: ExecutionResult },
     Verified,
 }

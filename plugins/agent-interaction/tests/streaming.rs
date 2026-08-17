@@ -54,10 +54,9 @@ fn session<S: DurableStore>(
 
 #[test]
 fn frozen_stream_fixture_replays_to_one_finalized_message() {
-    let records: Vec<AgentStreamRecord> = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/agent-stream-records.json"
-    ))
-    .expect("stream fixture deserializes");
+    let records: Vec<AgentStreamRecord> =
+        serde_json::from_str(include_str!("fixtures/agent-stream-records.json"))
+            .expect("stream fixture deserializes");
     let stream =
         cymule_agent::AgentStreamProjection::replay(records).expect("stream fixture replays");
     assert_eq!(stream.state, AgentStreamState::Finalized);

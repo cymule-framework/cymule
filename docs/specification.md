@@ -36,7 +36,6 @@ The following domains evolve independently:
 | Plugin protocol | `cymule.plugin/1` | capability negotiation is explicit |
 | Resource descriptor | `cymule.resource/1` | identity excludes realization locations |
 | Resource handoff | `cymule.resource-handoff/1` | transfer IDs are idempotent per target Run |
-| Agent stream | `cymule.agent-stream/1` | chunks stage; explicit finalization publishes output |
 | Conformance profile | `cymule.conformance/1` | complete profile cases are required |
 
 Changing effect identity, scope isolation, authority, causal admission, replay,
@@ -128,37 +127,12 @@ Continuation field set through a provider-neutral CAS store. Automatic capture
 and resumable interpretation at every safe point remain partial and are not
 claimed by the Embedded profile.
 
-M2 durable input suspension is one M1 safe-point transition: the pending
-elicitation projection, Session `RequiresAction` state, typed input wait, and
-Continuation `Waiting` state MUST enter the same CAS revision. Completion MUST
-atomically store the wait result and resolved elicitation; the Session remains
-`RequiresAction` while any elicitation is unresolved and returns to `Running`
-only when the final input wait completes.
-
-An M2 elicitation schema MUST be a self-contained JSON Schema Draft 2020-12
-document that compiles without external resource retrieval. The schema MUST be
-accepted before suspension. An accepted response MUST carry a value that
-satisfies the persisted request schema before any completion record is written;
-a declined response MUST NOT carry a value. Schema compilation or value
-validation failure leaves the wait, Session projection, Continuation, and CAS
-revision unchanged. Draft 2020-12 `format` remains an annotation rather than an
-additional validation assertion.
-
-M2 streaming uses a stable stream ID, immutable Message or Tool target, and
-zero-based contiguous chunks. Open, chunk, and abort records MAY be durable,
-but they MUST NOT appear in the finalized Session message/tool projection.
-Repeating an identical chunk sequence is idempotent; reusing a sequence with
-different content or skipping a sequence MUST fail. One chunk MUST remain
-within the profile's bounded canonical-byte limit; large values use a Resource
-Handle instead of bypassing the bound.
-
-Finalization MUST atomically append one terminal stream record and the exact
-final Message/Tool `AgentUpdate` to their separate M1 journals. A crash or stale
-CAS cannot expose only one side. Final content is the ordered concatenation of
-retained blocks and carries a canonical digest. A finalized message ID cannot
-later acquire different content. Abort is terminal and publishes no Session
-output. Large output SHOULD finalize as a verified Resource Handle instead of
-embedding unbounded provider bytes in Session history.
+An integration plugin MAY atomically checkpoint its own typed projection with
+a Continuation, wait, outbox entry, or effect transition through the M1
+application-journal boundary. The plugin owns its domain schema and transition
+rules. Framework conformance requires only that the shared CAS write is
+all-or-nothing, stale writers fail closed, and plugin records cannot widen
+authority or bypass Plan-declared effects.
 
 ## 8. Causal events
 
@@ -197,19 +171,11 @@ world-effect requirements into an `EffectObligationSet`. Scope closure does not
 claim that a provider action is applied. Run completion policy decides whether
 unresolved obligations block the Result.
 
-An M2 workspace commit MUST reference an immutable overlay Artifact and a
-Plan-declared Effect whose profile is mutating, `on_scope_commit`, queryable,
-and keyed-idempotent. The binding-pinned workspace occurrence, committed scope,
-transferred obligation, pending outbox entry, Machine snapshot, and
-Continuation MUST enter the same M1 CAS authority before dispatch. The outbox
-claim, `DispatchStarted` transition, and typed `started` occurrence MUST also be
-atomic. Provider settlement MUST atomically update the Effect outcome,
-obligation, outbox, retained occurrence, Machine, and Continuation.
-
-An M2 workspace abort MUST leave the scope open until the original binding
-returns or reconciliation recovers a typed receipt proving the overlay was not
-committed. An ambiguous or explicitly not-applied abort MUST NOT close the
-scope. A replacement cleanup attempt requires a new occurrence identity.
+A plugin-mediated resource or workspace mutation MUST still enter through a
+Plan-declared Effect. A domain controller cannot treat an external commit as an
+internal state update, close a scope around an ambiguous result, or bypass the
+effect obligation and reconciliation rules below. Domain-specific overlays,
+sessions, receipts, and controllers are outside this specification.
 
 ## 11. Effects
 
@@ -241,26 +207,10 @@ A Plan changes semantic meaning. A Binding Context changes realization defaults
 for future occurrences. Every persisted occurrence must pin an immutable
 binding at admission. Embedded M0 persists this for Attempts and Effect Intents,
 including reconciliation. M1 defines canonical component occurrence records.
-M2 records context, model, permission, tool, elicitation, and workspace calls as
-request-digested, binding-pinned occurrences.
-
-The caller or adapter owns its Agent/script loop, including ordering, strategy,
-program counter, and continuation decisions. M2 MUST NOT interpret a fixed
-model/tool loop or persist loop phases as framework semantics. For an individual
-interaction, the caller supplies a stable occurrence identity and typed request.
-Repeating a completed occurrence with the same request MUST return its retained
-typed response without binding or dispatching again. Reusing the identity with
-a different request MUST fail. A `prepared`, `started`, `unknown`, or
-`not_applied` occurrence MUST require explicit recovery, a separately admitted
-replacement identity, or caller-owned termination before execution can proceed.
-
-M2 host reconciliation MUST query the occurrence's pinned binding and MUST NOT
-redispatch its request. It may settle the occurrence as `completed` with a
-matching typed response or `not-applied` with explicit evidence. A `prepared`
-occurrence may enter `not-applied` only when dispatch is proven not to have
-started. A still-unknown result continues to block that occurrence. After
-reconciliation retains a matching typed response, repeating the same occurrence
-MUST return that response without redispatch.
+Optional plugins MAY define additional domain occurrences, but they MUST
+preserve the same immutable binding rule whenever replay or reconciliation
+depends on a selected implementation. Session, stream, and domain-controller
+semantics remain in the owning plugin rather than this framework specification.
 
 Changing a default MUST NOT rewrite an admitted occurrence. If its original
 binding is unavailable, the occurrence enters an explicit unavailable or

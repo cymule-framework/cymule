@@ -7,8 +7,6 @@
   from the checked-in shared fixture.
 - Export the Resource ID sealed from the checked-in Resource Candidate so every
   SDK verifies the same Rust-owned identity.
-- Cross-language Agent stream tests must use the Rust Engine reducer and cover
-  explicit finalization; transport completion alone is never the oracle.
 - Schema verification covers every `schemas/*.schema.json` file and must include
   positive and unknown-field rejection cases for each public protocol family.
 - Keep host-native verification reproducible and avoid container-only workflows.

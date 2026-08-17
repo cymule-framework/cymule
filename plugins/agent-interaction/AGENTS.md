@@ -1,5 +1,13 @@
 # Agent Interaction Guidance
 
+- This directory is an optional plugin. Session, AgentHost occurrence,
+  elicitation, workspace-interaction, and stream controllers are not Cymule
+  framework semantics and must not be re-exported by the core CLI or SDKs.
+- ACP, MCP, A2A, model-provider, editor, and concrete Agent Loop support belongs
+  in separately reviewable adapters above this plugin contract.
+- The plugin owns `schemas/agent-protocol.schema.json`, its fixtures, PROFILE,
+  and all corresponding conformance tests.
+
 - This crate owns protocol-neutral agent interaction contracts and projections,
   not a model loop, model SDK, UI transport, or tool catalog.
 - The caller or adapter owns Agent/script loop ordering, strategy, program

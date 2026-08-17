@@ -8,7 +8,4 @@
   effect occurrence keys, scopes, risk profiles, and version information.
 - Cross-language fixtures must produce the same Plan ID, Resource ID, and
   execution result.
-- Agent stream SDK types preserve stable stream/message/tool IDs, sequence, and
-  explicit finalization. Cross-language tests reduce through the Rust Engine;
-  no SDK may treat progress/chunk delivery as final Session state.
 - Avoid runtime dependencies unless they materially improve correctness.

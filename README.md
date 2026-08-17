@@ -25,9 +25,10 @@ than framework semantics.
 > **Project status:** Cymule `0.1.x` is an early executable reference
 > implementation of this model, not yet a complete production fabric. The
 > bounded M0 semantic profile is implemented; M1-M4 provide fault-tested but
-> partial foundations for durable single-domain execution, caller-owned agent
-> interaction, large virtual work, and live evolution. See the
-> [roadmap](docs/roadmap.md) for the exact implemented and remaining boundaries.
+> partial foundations for durable single-domain execution, large virtual work,
+> and live evolution. Optional Agent integration is maintained as a plugin. See
+> the [roadmap](docs/roadmap.md) for the exact implemented and remaining
+> boundaries.
 
 ## What Cymule gives you
 
@@ -43,11 +44,6 @@ than framework semantics.
   an automatic duplicate operation.
 - **Explicit reconciliation.** An ambiguous effect is resolved through its
   original identity, arguments, and plugin binding.
-- **Durable typed input.** Agent input schemas, waits, Session state, and
-  Continuations advance under one optimistic CAS authority; invalid responses
-  make no durable change.
-- **Explicit stream finalization.** Identified chunks may be durably staged, but
-  no message or tool output becomes Session truth until one atomic finalize.
 - **Portable resources between Runs.** Pass inline text/JSON/bytes, large
   objects, directories, collections, sandbox snapshots, remote-drive items, or
   public URLs through one versioned Resource Handle without choosing a storage
@@ -71,6 +67,17 @@ Cymule is designed for programs that may outlive one process or implementation:
 
 Cymule is probably not the right layer for a short, pure function or a normal
 request/response handler with no durable state or external side effects.
+
+## Optional Agent integration
+
+Cymule does not define an Agent Loop, Session model, message stream, model/tool
+turn, or wire protocol. Those are application-domain concerns. The separately
+owned [`plugins/agent-interaction`](plugins/agent-interaction/README.md) package
+shows how an Agent integration can lower Session updates, input waits, host
+occurrences, workspace changes, and finalized streams onto generic Cymule waits,
+effects, resources, and M1 application journals. ACP, MCP, A2A, editor, and
+provider support belongs in additional plugins above that package, not in
+framework core, CLI, or SDK semantics.
 
 ## Five-minute quick start
 
@@ -255,7 +262,6 @@ large object reads/writes are chunked rather than loaded into memory.
 | Dispatch starts but the response is lost | The effect becomes `unknown`. |
 | An unknown effect can be queried | The original effect is reconciled without creating a new intent. |
 | Required replay data has been removed | Replay availability is downgraded instead of silently regenerating data. |
-| A stream is interrupted before finalization | Staged chunks remain non-final; no partial message or tool output is published. |
 
 ## Effects are not ordinary retries
 
@@ -340,7 +346,7 @@ See [Architecture](docs/architecture.md) and the
 | Python SDK | Implemented | Dependency-light builder and engine client. |
 | Go SDK | Implemented | Builder and engine client. |
 | Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, M1 handoff journal. |
-| Agent streams | Implemented foundation | Durable staging, atomic Message/Tool finalization, Resource blocks, four SDK Rust-reducer clients. |
+| Agent interaction plugin | Optional, partial | Rust plugin with Session, occurrence, input, workspace, and stream conformance tests. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
 | JSON Schema contracts | Implemented | Draft 2020-12 Plan and protocol schemas. |
 | MLIR workbench | Partial | Generic-operation syntax and MLIR 22 smoke validation. |
@@ -373,18 +379,9 @@ Implemented today:
   component occurrence replay;
 - process reopen after a durable wait without reinvoking a recorded component;
 - ambiguous mutating-effect recovery by reconciliation without redispatch;
-- typed agent interactions with M1-backed Session journal replay and
-  binding-pinned host-call occurrences that block ambiguous redispatch;
-- caller-driven durable interaction execution that returns retained or
-  reconciled typed responses after reopen without owning the Agent loop;
-- atomic durable agent input waits that keep `RequiresAction`/`Running` Session
-  state and the owning Continuation wait in one CAS revision;
-- query-only recovery of ambiguous host calls through their original binding,
-  with typed completion or evidence-backed non-application and no redispatch;
-- durable workspace overlay commit/abort coupled to scope obligations and the
-  M1 outbox, including receipt-loss recovery without provider redispatch;
-- durable Agent stream staging with contiguous chunk identity and atomic
-  Message/Tool finalization across separate M1 journals;
+- an optional Agent interaction plugin with M1-backed Session/input replay,
+  binding-pinned host occurrences, workspace scope integration, and finalized
+  streams; none of these types enter the framework core or main SDKs;
 - provider-neutral cross-Run Resource Handles for inline values, objects,
   directories, collections, snapshots, remote references, and public URLs;
 - bounded resolver/store interfaces and durable idempotent M1 handoffs, with
@@ -398,8 +395,6 @@ Not yet claimed:
 - complete nested-scope durable interpretation and every crash window;
 - production resource resolver/store plugins and automatic interpreter
   activation of incoming handoffs;
-- ACP/MCP/A2A protocol adapters and remaining cross-language Session
-  control/query clients;
 - durable virtual-work partition migration and subtree rehydration;
 - automatic live-evolution diffing, shadow execution, observation gates, and
   mixed-version dispatch;
@@ -420,7 +415,6 @@ See [Conformance](docs/conformance.md) for precise profile claims and
 
 ```text
 crates/cymule-core      trusted Rust semantic kernel
-crates/cymule-agent     provider-neutral M2 agent interaction contracts
 crates/cymule-durable   provider-neutral M1 persistence and recovery contracts
 crates/cymule-evolution provider-neutral M4 Plan DAG and rollout semantics
 crates/cymule-runtime   embedded interpreter and plugin host
@@ -436,6 +430,7 @@ compiler/mlir           optional, partial MLIR workbench
 examples/hello-world    code-first Flow, Embedded runtime, and example plugin
 plugins/test-adapter    deterministic conformance plugin
 plugins/directory-store atomic local M1 DurableStore reference adapter
+plugins/agent-interaction optional Agent-domain integration plugin
 tests                   shared fixtures and conformance assets
 docs                    specification, architecture, and decisions
 scripts                 complete repository verification

@@ -1,4 +1,4 @@
-# Cymule Agent Handbook
+# Cymule Project Handbook
 
 ## Authority
 
@@ -29,16 +29,13 @@ Use this precedence order when guidance conflicts:
   realization. Never place provider names, credentials, endpoints, or deployment
   topology in canonical plan semantics.
 - Every persisted occurrence pins an immutable occurrence binding. M0 persists
-  Attempt and Effect bindings; new component, model, and context occurrence
+  Attempt and Effect bindings; new component or plugin-owned domain occurrence
   records must add the same protection before claiming exact execution replay.
   Updating future defaults must never reinterpret historical work.
 - Scope closure commits declared state and transfers effect obligations. It does
   not claim that the external world has settled.
 - An ambiguous dispatch becomes `unknown` and follows reconciliation. Never turn
   it into a fresh semantic intent or silently redispatch it.
-- Transport completion, progress notifications, and streamed chunks are not
-  canonical output. Only explicit, identity-checked finalization may publish a
-  Message, Tool result, Artifact, or Resource to durable projections.
 - Public mutation enters through typed commands with idempotent IDs and causal
   preconditions. Raw canonical event append is internal only.
 - Prefer optimistic CAS, immutable records, idempotency, fencing epochs, and
@@ -51,6 +48,9 @@ Use this precedence order when guidance conflicts:
 - New behavior is provider-neutral by default. Concrete persistence, activation,
   execution, model, tool, and effect integrations belong behind plugin or
   substrate interfaces.
+- Domain-specific Sessions, Agent Loops, transport streams, protocol objects,
+  and their controllers belong in optional plugins. Core crates, CLI, and SDKs
+  expose only technology-neutral semantic and substrate contracts.
 - Keep all source code, comments, documentation, commit messages, schemas, and
   user-facing project metadata in English.
 - GitHub Actions is the only publication authority for every public artifact,

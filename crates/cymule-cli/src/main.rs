@@ -5,7 +5,6 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
-use cymule_agent::{AgentStreamProjection, AgentStreamRecord};
 use cymule_core::{PlanCandidate, SealedPlan};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{EmbeddedRuntime, ExecutionResult, ProcessPlugin};
@@ -24,9 +23,6 @@ enum EngineRequest {
     SealResource {
         candidate: ResourceCandidate,
     },
-    VerifyAgentStream {
-        records: Vec<AgentStreamRecord>,
-    },
     Run {
         plan: SealedPlan,
         input: Value,
@@ -40,7 +36,6 @@ enum EngineRequest {
 enum EngineResponse {
     Sealed { plan: SealedPlan },
     SealedResource { resource: ResourceHandle },
-    VerifiedAgentStream { stream: AgentStreamProjection },
     Executed { result: ExecutionResult },
     Verified,
 }
@@ -71,11 +66,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let candidate: ResourceCandidate = read_path(argument_value(&arguments, "--input")?)?;
             print_json(&candidate.seal()?)
         }
-        Some("agent-stream") if arguments.get(1).map(String::as_str) == Some("verify") => {
-            let records: Vec<AgentStreamRecord> =
-                read_path(argument_value(&arguments, "--input")?)?;
-            print_json(&AgentStreamProjection::replay(records)?)
-        }
         Some("run") => {
             let plan: SealedPlan = read_path(argument_value(&arguments, "--plan")?)?;
             let input: Value = read_path(argument_value(&arguments, "--input")?)?;
@@ -85,10 +75,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let result = runtime.execute(plan, &input, run_id)?;
             print_json(&result)
         }
-        _ => Err(
-            "usage: cymule <rpc|seal|verify|run|resource seal|agent-stream verify> [options]"
-                .into(),
-        ),
+        _ => Err("usage: cymule <rpc|seal|verify|run|resource seal> [options]".into()),
     }
 }
 
@@ -106,9 +93,6 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
         }
         EngineRequest::SealResource { candidate } => EngineResponse::SealedResource {
             resource: candidate.seal()?,
-        },
-        EngineRequest::VerifyAgentStream { records } => EngineResponse::VerifiedAgentStream {
-            stream: AgentStreamProjection::replay(records)?,
         },
         EngineRequest::Run {
             plan,

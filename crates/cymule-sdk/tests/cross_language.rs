@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::env;
 
 use cymule_sdk::{
-    AgentStreamRecord, AgentStreamState, CliEngine, DispatchPolicy, EffectProfile, Engine,
-    Expression, FlowBuilder, MutationKind, ReconciliationMode, ResourceCandidate,
+    CliEngine, DispatchPolicy, EffectProfile, Engine, Expression, FlowBuilder, MutationKind,
+    ReconciliationMode, ResourceCandidate,
 };
 use serde_json::json;
 
@@ -73,20 +73,4 @@ fn rust_resource_seals_through_the_cli() {
         .seal_resource(&candidate)
         .expect("Resource Candidate seals");
     assert_eq!(resource.resource_id, expected_resource_id);
-}
-
-#[test]
-fn rust_agent_stream_is_reduced_by_the_cli() {
-    let Ok(engine_path) = env::var("CYMULE_BIN") else {
-        return;
-    };
-    let records: Vec<AgentStreamRecord> = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/agent-stream-records.json"
-    ))
-    .expect("stream fixture deserializes");
-    let stream = CliEngine::new(engine_path)
-        .verify_agent_stream(&records)
-        .expect("Agent stream verifies");
-    assert_eq!(stream.state, AgentStreamState::Finalized);
-    assert_eq!(stream.chunks.len(), 1);
 }
