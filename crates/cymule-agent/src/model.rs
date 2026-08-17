@@ -502,6 +502,18 @@ pub enum AgentHostResponse {
     Workspace(WorkspaceReceipt),
 }
 
+/// Query-only reconciliation observation for one original host occurrence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "resolution", rename_all = "snake_case")]
+pub enum AgentOccurrenceResolution {
+    /// The original occurrence completed and returned this typed response.
+    Completed { response: AgentHostResponse },
+    /// The original occurrence definitely did not apply.
+    NotApplied { evidence: Vec<ContentBlock> },
+    /// The provider still cannot determine the original outcome.
+    Unknown { evidence: Vec<ContentBlock> },
+}
+
 impl AgentHostResponse {
     /// Closed response kind used for request matching.
     pub const fn kind(&self) -> AgentHostCallKind {
@@ -536,6 +548,7 @@ pub enum AgentHostOccurrenceState {
     Started,
     Completed,
     Unknown,
+    NotApplied,
 }
 
 impl AgentHostOccurrenceState {
@@ -546,6 +559,7 @@ impl AgentHostOccurrenceState {
             Self::Started => "started",
             Self::Completed => "completed",
             Self::Unknown => "unknown",
+            Self::NotApplied => "not_applied",
         }
     }
 }
@@ -562,6 +576,8 @@ pub struct AgentHostOccurrence {
     pub response: Option<AgentHostResponse>,
     pub occurrence_binding: String,
     pub failure: Option<String>,
+    #[serde(default)]
+    pub recovery_evidence: Vec<ContentBlock>,
 }
 
 impl AgentHostOccurrence {
@@ -583,6 +599,7 @@ impl AgentHostOccurrence {
             response: None,
             occurrence_binding: occurrence_binding.into(),
             failure: None,
+            recovery_evidence: Vec::new(),
         };
         occurrence.validate()?;
         Ok(occurrence)
@@ -609,9 +626,47 @@ impl AgentHostOccurrence {
             response: None,
             occurrence_binding: self.occurrence_binding.clone(),
             failure: Some(failure.into()),
+            recovery_evidence: Vec::new(),
         };
         self.validate_successor(&next)?;
         Ok(next)
+    }
+
+    /// Record that reconciliation still cannot determine the world outcome.
+    pub fn mark_unknown_with_evidence(
+        &self,
+        failure: impl Into<String>,
+        evidence: Vec<ContentBlock>,
+    ) -> AgentResult<Self> {
+        let mut next = self.mark_unknown(failure)?;
+        next.recovery_evidence = evidence;
+        self.validate_successor(&next)?;
+        Ok(next)
+    }
+
+    /// Settle the occurrence as definitely not applied.
+    pub fn mark_not_applied(&self, evidence: Vec<ContentBlock>) -> AgentResult<Self> {
+        let next = Self {
+            occurrence_id: self.occurrence_id.clone(),
+            session_id: self.session_id.clone(),
+            request: self.request.clone(),
+            request_digest: self.request_digest.clone(),
+            state: AgentHostOccurrenceState::NotApplied,
+            response: None,
+            occurrence_binding: self.occurrence_binding.clone(),
+            failure: None,
+            recovery_evidence: evidence,
+        };
+        self.validate_successor(&next)?;
+        Ok(next)
+    }
+
+    /// Whether this occurrence no longer blocks Session recovery.
+    pub const fn is_terminal(&self) -> bool {
+        matches!(
+            self.state,
+            AgentHostOccurrenceState::Completed | AgentHostOccurrenceState::NotApplied
+        )
     }
 
     /// Stable idempotency key for this lifecycle transition.
@@ -639,7 +694,10 @@ impl AgentHostOccurrence {
         }
         match self.state {
             AgentHostOccurrenceState::Prepared | AgentHostOccurrenceState::Started => {
-                if self.response.is_some() || self.failure.is_some() {
+                if self.response.is_some()
+                    || self.failure.is_some()
+                    || !self.recovery_evidence.is_empty()
+                {
                     return Err(AgentError::Validation(
                         "prepared or started occurrence cannot contain an outcome".to_owned(),
                     ));
@@ -687,7 +745,7 @@ impl AgentHostOccurrence {
                         "host occurrence binding does not match its response".to_owned(),
                     ));
                 }
-                if self.failure.is_some() {
+                if self.failure.is_some() || !self.recovery_evidence.is_empty() {
                     return Err(AgentError::Validation(
                         "completed occurrence cannot contain a failure".to_owned(),
                     ));
@@ -702,6 +760,16 @@ impl AgentHostOccurrence {
                 if self.failure.as_deref().is_none_or(str::is_empty) {
                     return Err(AgentError::Validation(
                         "unknown occurrence requires failure evidence".to_owned(),
+                    ));
+                }
+            }
+            AgentHostOccurrenceState::NotApplied => {
+                if self.response.is_some()
+                    || self.failure.is_some()
+                    || self.recovery_evidence.is_empty()
+                {
+                    return Err(AgentError::Validation(
+                        "not-applied occurrence requires recovery evidence only".to_owned(),
                     ));
                 }
             }
@@ -730,13 +798,15 @@ impl AgentHostOccurrence {
             (self.state, next.state),
             (
                 AgentHostOccurrenceState::Prepared,
-                AgentHostOccurrenceState::Started
+                AgentHostOccurrenceState::Started | AgentHostOccurrenceState::NotApplied
             ) | (
                 AgentHostOccurrenceState::Started,
-                AgentHostOccurrenceState::Completed | AgentHostOccurrenceState::Unknown
+                AgentHostOccurrenceState::Completed
+                    | AgentHostOccurrenceState::Unknown
+                    | AgentHostOccurrenceState::NotApplied
             ) | (
                 AgentHostOccurrenceState::Unknown,
-                AgentHostOccurrenceState::Completed
+                AgentHostOccurrenceState::Completed | AgentHostOccurrenceState::NotApplied
             )
         ) {
             Ok(())
@@ -762,6 +832,7 @@ impl AgentHostOccurrence {
             response,
             occurrence_binding: self.occurrence_binding.clone(),
             failure: None,
+            recovery_evidence: Vec::new(),
         };
         self.validate_successor(&next)?;
         Ok(next)

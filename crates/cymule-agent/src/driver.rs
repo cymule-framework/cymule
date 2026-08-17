@@ -1,10 +1,10 @@
 use crate::{
-    AgentError, AgentHost, AgentHostOccurrence, AgentHostOccurrenceState, AgentHostRequest,
-    AgentHostResponse, AgentJournal, AgentMessage, AgentOccurrenceStore, AgentResult, AgentSession,
-    AgentState, AgentUpdate, ContentBlock, ContextRequest, ContextSnapshot, ElicitationRequest,
-    ElicitationResponse, MessageRole, ModelRequest, ModelResponse, NoopAgentJournal,
-    PermissionDecision, PermissionRequest, PermissionResponse, SessionStopReason, ToolCall,
-    ToolCallStatus, ToolRequest, ToolResponse, WorkspaceChange, WorkspaceReceipt,
+    AgentError, AgentHost, AgentHostOccurrence, AgentHostRequest, AgentHostResponse, AgentJournal,
+    AgentMessage, AgentOccurrenceStore, AgentResult, AgentSession, AgentState, AgentUpdate,
+    ContentBlock, ContextRequest, ContextSnapshot, ElicitationRequest, ElicitationResponse,
+    MessageRole, ModelRequest, ModelResponse, NoopAgentJournal, PermissionDecision,
+    PermissionRequest, PermissionResponse, SessionStopReason, ToolCall, ToolCallStatus,
+    ToolRequest, ToolResponse, WorkspaceChange, WorkspaceReceipt,
 };
 
 /// Synchronous reference turn driver over one replaceable `AgentHost`.
@@ -46,12 +46,18 @@ impl<H: AgentHost, J: AgentJournal + AgentOccurrenceStore> AgentTurnDriver<H, J>
         let session = AgentSession::replay(session_id, updates)?;
         if let Some(unsettled) = occurrences
             .iter()
-            .find(|occurrence| occurrence.state != AgentHostOccurrenceState::Completed)
+            .find(|occurrence| !occurrence.is_terminal())
         {
             return Err(AgentError::RecoveryRequired(format!(
                 "host occurrence {} is {:?}; reconcile or cancel it before resuming",
                 unsettled.occurrence_id, unsettled.state
             )));
+        }
+        if session.state == AgentState::Running && !occurrences.is_empty() {
+            return Err(AgentError::RecoveryRequired(
+                "foreground turn control is incomplete; consume retained occurrence responses before resuming"
+                    .to_owned(),
+            ));
         }
         let occurrence_sequence = occurrences
             .iter()

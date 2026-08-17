@@ -300,6 +300,8 @@ Implemented today:
   binding-pinned host-call occurrences that block ambiguous redispatch;
 - atomic durable agent input waits that keep `RequiresAction`/`Running` Session
   state and the owning Continuation wait in one CAS revision;
+- query-only recovery of ambiguous host calls through their original binding,
+  with typed completion or evidence-backed non-application and no redispatch;
 - bounded virtual work with deterministic fairness and portable snapshots;
 - immutable Plan evolution DAGs, impact cones, canaries, rollback pins,
   migration receipts, and shadow evidence.

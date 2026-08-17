@@ -4,7 +4,8 @@
   "title": "Cymule Agent Protocol cymule.agent/1",
   "oneOf": [
     { "$ref": "#/$defs/agentUpdate" },
-    { "$ref": "#/$defs/hostOccurrence" }
+    { "$ref": "#/$defs/hostOccurrence" },
+    { "$ref": "#/$defs/occurrenceResolution" }
   ],
   "$defs": {
     "nonEmpty": { "type": "string", "minLength": 1 },
@@ -277,10 +278,13 @@
         "session_id": { "$ref": "#/$defs/nonEmpty" },
         "request": { "$ref": "#/$defs/hostRequest" },
         "request_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "state": { "enum": ["prepared", "started", "completed", "unknown"] },
+        "state": { "enum": ["prepared", "started", "completed", "unknown", "not_applied"] },
         "response": { "oneOf": [{ "$ref": "#/$defs/hostResponse" }, { "type": "null" }] },
         "occurrence_binding": { "$ref": "#/$defs/nonEmpty" },
-        "failure": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] }
+        "failure": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+        "recovery_evidence": {
+          "type": "array", "items": { "$ref": "#/$defs/contentBlock" }
+        }
       },
       "allOf": [
         {
@@ -300,6 +304,52 @@
               "response": { "type": "null" },
               "occurrence_binding": { "$ref": "#/$defs/nonEmpty" },
               "failure": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "state": { "const": "not_applied" } } },
+          "then": {
+            "properties": {
+              "response": { "type": "null" },
+              "failure": { "type": "null" },
+              "recovery_evidence": {
+                "type": "array", "minItems": 1,
+                "items": { "$ref": "#/$defs/contentBlock" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "occurrenceResolution": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["resolution", "response"],
+          "properties": {
+            "resolution": { "const": "completed" },
+            "response": { "$ref": "#/$defs/hostResponse" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["resolution", "evidence"],
+          "properties": {
+            "resolution": { "const": "not_applied" },
+            "evidence": {
+              "type": "array", "minItems": 1,
+              "items": { "$ref": "#/$defs/contentBlock" }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["resolution", "evidence"],
+          "properties": {
+            "resolution": { "const": "unknown" },
+            "evidence": {
+              "type": "array", "items": { "$ref": "#/$defs/contentBlock" }
             }
           }
         }

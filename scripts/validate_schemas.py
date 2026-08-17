@@ -86,6 +86,14 @@ def main() -> int:
     )
     agent_validator.validate(
         {
+            "resolution": "not_applied",
+            "evidence": [
+                {"type": "text", "text": "dispatch boundary was never entered"}
+            ],
+        }
+    )
+    agent_validator.validate(
+        {
             "type": "elicitation",
             "update_id": "update:agent-input:fixture:pending",
             "elicitation": {

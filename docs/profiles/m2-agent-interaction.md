@@ -32,13 +32,18 @@ Status: partial.
   return the Session to `Running`;
 - reopen, idempotent retry, and stale-CAS tests proving input wait and Session
   projection cannot commit independently;
+- query-only `AgentRecoveryController` reconciliation against the original
+  binding, typed `completed`/`not_applied` resolutions, and evidence-gated
+  cancellation of calls that remained `prepared`;
+- fault tests proving reconciliation never redispatches the original tool call
+  and unresolved foreground turn control remains fail closed;
 - deterministic fake-host end-to-end tests;
 - adapter boundaries for ACP, MCP, A2A, editors, and model providers.
 
 ## Remaining completion gates
 
-- explicit reconciliation/cancellation commands for `started` and `unknown`
-  host occurrences and continuation from retained completed responses;
+- durable foreground turn control and continuation from retained completed
+  responses;
 - completed input value validation against its declared JSON Schema;
 - workspace overlay commit/abort integration with scope obligations;
 - streaming chunk staging and finalized durable content;
