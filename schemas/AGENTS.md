@@ -10,3 +10,6 @@
   and reconciliation wire shape. A binding or lifecycle change must update its
   fixture, Rust validation, profile documentation, and future SDK interaction
   clients.
+- `resource.schema.json` owns `cymule.resource/1` candidates/handles and
+  `cymule.resource-handoff/1`. Shape or integrity changes require Rust semantic
+  validation, all SDKs, fixtures, and cross-language Resource ID tests.

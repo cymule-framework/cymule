@@ -34,6 +34,8 @@ The following domains evolve independently:
 | Event schema | `cymule.event/1` | readers reject unknown semantic events |
 | Command protocol | `cymule.command/1` | typed envelope and stable error codes |
 | Plugin protocol | `cymule.plugin/1` | capability negotiation is explicit |
+| Resource descriptor | `cymule.resource/1` | identity excludes realization locations |
+| Resource handoff | `cymule.resource-handoff/1` | transfer IDs are idempotent per target Run |
 | Conformance profile | `cymule.conformance/1` | complete profile cases are required |
 
 Changing effect identity, scope isolation, authority, causal admission, replay,
@@ -61,23 +63,35 @@ invalid. A writer MUST validate the semantic schema before hashing.
 `PlanId` identifies a sealed plan. `EventId` identifies the event payload and
 causal parents. `ArtifactId` identifies artifact type metadata and bytes.
 
-### 5.1 Cross-Run resource values (proposed)
+### 5.1 Cross-Run resource values
 
-M1 will extend Artifact exchange with a versioned provider-neutral resource
-descriptor. A resource has a logical shape (`inline`, `object`, `collection`,
-`directory`, or `snapshot`), media type, optional byte size, and replay
-evidence. Inline text/JSON/bytes are content-addressed directly. External
-objects, directory manifests, sandbox snapshots, remote-drive items, and URL
-content MUST carry either a content digest or an immutable provider version to
-qualify for exact replay.
+M1 Artifact exchange includes a versioned provider-neutral Resource descriptor.
+A Resource has a logical shape (`inline`, `object`, `collection`, `directory`,
+or `snapshot`), media type, replay evidence, semantic annotations, and optional
+realization locations. Inline text/JSON/bytes and external content with verified
+SHA-256/size provide location-independent exact evidence; availability still
+requires retained inline bytes or a usable location. An immutable provider version
+requires the original resolver binding for exact retrieval. A `live` Resource
+is useful state but is never exact replay evidence.
 
 Resolver locators and access grants are realization data, not Plan semantics.
 Credentials MUST NOT enter a descriptor, Artifact, Event, Continuation, or IR.
-A mutable locator without immutable evidence MAY be passed between Runs as a
-live reference, but replay availability MUST be downgraded until a resolver
-materializes and verifies stable content. Collections and directories use
-immutable manifests of child descriptors rather than assuming one provider's
-listing or path semantics.
+A public URL MUST be credential-free HTTP(S) without userinfo, query, or
+fragment. Private object, drive, sandbox, and signed-URL access uses an opaque
+resolver binding/reference whose reference is non-secret. Locations do not
+participate in Resource ID; moving identical content MUST preserve identity.
+
+Read operations MUST be bounded chunks and directory/collection/snapshot lists
+MUST be bounded opaque-cursor pages. A resolver response that exceeds the
+requested bound, repeats an unsafe entry, stalls with an empty non-terminal
+chunk, or fails content verification MUST be rejected. Chunked stores use
+idempotent write IDs, exact offsets, explicit commit, and explicit abort.
+
+A Run-to-Run handoff carries one verified Resource Handle under a stable caller
+transfer ID and target slot. The handoff MUST be recorded in the target Run's
+M1 application journal by whole-state CAS. Repeating identical semantics is
+idempotent; reusing a transfer ID with different semantics MUST fail. One target
+slot has at most one handoff; multiple values use one collection Resource.
 
 ## 6. Frozen IR
 

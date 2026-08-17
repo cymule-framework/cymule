@@ -6,4 +6,6 @@
 - Subprocess errors must include bounded stderr and never expose environment
   variables or credentials.
 - The Rust engine remains the only authoritative sealer and reducer.
-
+- Resource builders preserve exact wire names and send candidates to the Rust
+  engine. Do not add a Python Resource ID implementation or accept credentials
+  in public URL helpers.

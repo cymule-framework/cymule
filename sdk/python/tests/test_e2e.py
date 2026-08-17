@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import unittest
 
-from cymule import CliEngine, FlowBuilder
+from cymule import CliEngine, FlowBuilder, ResourceBuilder
 
 
 class EndToEndTest(unittest.TestCase):
@@ -46,6 +46,20 @@ class EndToEndTest(unittest.TestCase):
         result = engine.run(plan, input_value, plugin_path, "run:python-e2e")
         self.assertEqual(result["value"], input_value)
         self.assertEqual(len(result["effects"]), 1)
+
+    def test_python_resource_seals_through_rust_engine(self) -> None:
+        engine_path = os.environ.get("CYMULE_BIN")
+        expected_resource_id = os.environ.get("CYMULE_EXPECTED_RESOURCE_ID")
+        if engine_path is None or expected_resource_id is None:
+            self.skipTest("resource engine conformance is not configured")
+        resource = CliEngine(engine_path).seal_resource(
+            ResourceBuilder.text(
+                "shared cross-run resource",
+                {"purpose": "cross-language-conformance"},
+            )
+        )
+        self.assertEqual(resource["resource_id"], expected_resource_id)
+        self.assertEqual(resource["integrity"], {"kind": "inline"})
 
 
 if __name__ == "__main__":

@@ -1,10 +1,26 @@
 package cymule
 
 import (
+	"encoding/json"
 	"os"
 	"reflect"
 	"testing"
 )
+
+func TestJSONResourcePreservesNullValue(t *testing.T) {
+	encoded, err := json.Marshal(JSONResource(nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	inline := wire["inline"].(map[string]any)
+	if value, exists := inline["value"]; !exists || value != nil {
+		t.Fatalf("inline JSON null was not preserved: %#v", inline)
+	}
+}
 
 func TestCrossLanguageEndToEnd(t *testing.T) {
 	enginePath := os.Getenv("CYMULE_BIN")
@@ -42,5 +58,26 @@ func TestCrossLanguageEndToEnd(t *testing.T) {
 	}
 	if len(result.Effects) != 1 {
 		t.Fatalf("expected one effect, got %d", len(result.Effects))
+	}
+}
+
+func TestResourceSealsThroughRustEngine(t *testing.T) {
+	enginePath := os.Getenv("CYMULE_BIN")
+	expectedResourceID := os.Getenv("CYMULE_EXPECTED_RESOURCE_ID")
+	if enginePath == "" || expectedResourceID == "" {
+		t.Skip("resource engine conformance is not configured")
+	}
+	resource, err := (CliEngine{Executable: enginePath}).SealResource(TextResource(
+		"shared cross-run resource",
+		map[string]string{"purpose": "cross-language-conformance"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resource.ResourceID != expectedResourceID {
+		t.Fatalf("resource ID %q does not match expected", resource.ResourceID)
+	}
+	if resource.Integrity.Kind != "inline" {
+		t.Fatalf("unexpected integrity kind %q", resource.Integrity.Kind)
 	}
 }

@@ -11,6 +11,172 @@ import (
 // Expression is one frozen IR expression.
 type Expression map[string]any
 
+// InlineData retains one small resource value.
+type InlineData struct {
+	Encoding string
+	Text     string
+	Value    any
+	Data     string
+}
+
+// MarshalJSON emits the closed encoding-specific wire shape.
+func (data InlineData) MarshalJSON() ([]byte, error) {
+	switch data.Encoding {
+	case "utf8":
+		return json.Marshal(struct {
+			Encoding string `json:"encoding"`
+			Text     string `json:"text"`
+		}{data.Encoding, data.Text})
+	case "json":
+		return json.Marshal(struct {
+			Encoding string `json:"encoding"`
+			Value    any    `json:"value"`
+		}{data.Encoding, data.Value})
+	case "base64":
+		return json.Marshal(struct {
+			Encoding string `json:"encoding"`
+			Data     string `json:"data"`
+		}{data.Encoding, data.Data})
+	default:
+		return nil, fmt.Errorf("unsupported inline encoding %q", data.Encoding)
+	}
+}
+
+// UnmarshalJSON reads one closed encoding-specific wire shape.
+func (data *InlineData) UnmarshalJSON(input []byte) error {
+	var tagged struct {
+		Encoding string `json:"encoding"`
+	}
+	if err := json.Unmarshal(input, &tagged); err != nil {
+		return err
+	}
+	switch tagged.Encoding {
+	case "utf8":
+		var value struct {
+			Encoding string `json:"encoding"`
+			Text     string `json:"text"`
+		}
+		if err := json.Unmarshal(input, &value); err != nil {
+			return err
+		}
+		*data = InlineData{Encoding: value.Encoding, Text: value.Text}
+	case "json":
+		var value struct {
+			Encoding string `json:"encoding"`
+			Value    any    `json:"value"`
+		}
+		if err := json.Unmarshal(input, &value); err != nil {
+			return err
+		}
+		*data = InlineData{Encoding: value.Encoding, Value: value.Value}
+	case "base64":
+		var value struct {
+			Encoding string `json:"encoding"`
+			Data     string `json:"data"`
+		}
+		if err := json.Unmarshal(input, &value); err != nil {
+			return err
+		}
+		*data = InlineData{Encoding: value.Encoding, Data: value.Data}
+	default:
+		return fmt.Errorf("unsupported inline encoding %q", tagged.Encoding)
+	}
+	return nil
+}
+
+// ResourceIntegrity describes exact, version-pinned, or live replay evidence.
+type ResourceIntegrity struct {
+	Kind      string `json:"kind"`
+	Digest    string `json:"digest,omitempty"`
+	Size      uint64 `json:"size,omitempty"`
+	Authority string `json:"authority,omitempty"`
+	Version   string `json:"version,omitempty"`
+	Identity  string `json:"identity,omitempty"`
+}
+
+// ResourceLocation is a non-authoritative realization hint.
+type ResourceLocation struct {
+	Kind      string `json:"kind"`
+	URL       string `json:"url,omitempty"`
+	Binding   string `json:"binding,omitempty"`
+	Reference string `json:"reference,omitempty"`
+}
+
+// ResourceCandidate is sealed by the trusted Rust resource engine.
+type ResourceCandidate struct {
+	ResourceVersion string             `json:"resource_version"`
+	Shape           string             `json:"shape"`
+	MediaType       string             `json:"media_type"`
+	Inline          *InlineData        `json:"inline,omitempty"`
+	Integrity       ResourceIntegrity  `json:"integrity"`
+	Locations       []ResourceLocation `json:"locations,omitempty"`
+	Annotations     map[string]string  `json:"annotations,omitempty"`
+}
+
+// ResourceHandle is a location-independent trusted resource descriptor.
+type ResourceHandle struct {
+	ResourceID string `json:"resource_id"`
+	ResourceCandidate
+}
+
+// ResourceHandoff transfers one Resource Handle between durable Runs.
+type ResourceHandoff struct {
+	HandoffVersion string         `json:"handoff_version"`
+	TransferID     string         `json:"transfer_id"`
+	FromRun        string         `json:"from_run"`
+	ToRun          string         `json:"to_run"`
+	Slot           string         `json:"slot"`
+	Resource       ResourceHandle `json:"resource"`
+}
+
+// NewResourceHandoff creates one M1 Run-to-Run handoff record.
+func NewResourceHandoff(transferID, fromRun, toRun, slot string, resource ResourceHandle) ResourceHandoff {
+	return ResourceHandoff{
+		HandoffVersion: "cymule.resource-handoff/1",
+		TransferID:     transferID,
+		FromRun:        fromRun,
+		ToRun:          toRun,
+		Slot:           slot,
+		Resource:       resource,
+	}
+}
+
+// TextResource creates one inline UTF-8 Resource Candidate.
+func TextResource(text string, annotations map[string]string) ResourceCandidate {
+	return ResourceCandidate{
+		ResourceVersion: "cymule.resource/1",
+		Shape:           "inline",
+		MediaType:       "text/plain;charset=utf-8",
+		Inline:          &InlineData{Encoding: "utf8", Text: text},
+		Integrity:       ResourceIntegrity{Kind: "inline"},
+		Annotations:     annotations,
+	}
+}
+
+// JSONResource creates one inline structured Resource Candidate.
+func JSONResource(value any, annotations map[string]string) ResourceCandidate {
+	return ResourceCandidate{
+		ResourceVersion: "cymule.resource/1",
+		Shape:           "inline",
+		MediaType:       "application/json",
+		Inline:          &InlineData{Encoding: "json", Value: value},
+		Integrity:       ResourceIntegrity{Kind: "inline"},
+		Annotations:     annotations,
+	}
+}
+
+// ExternalResource creates a provider-neutral external Resource Candidate.
+func ExternalResource(shape, mediaType string, integrity ResourceIntegrity, locations []ResourceLocation, annotations map[string]string) ResourceCandidate {
+	return ResourceCandidate{
+		ResourceVersion: "cymule.resource/1",
+		Shape:           shape,
+		MediaType:       mediaType,
+		Integrity:       integrity,
+		Locations:       locations,
+		Annotations:     annotations,
+	}
+}
+
 // EffectProfile describes provider-neutral effect behavior.
 type EffectProfile struct {
 	Mutation         string `json:"mutation"`
@@ -178,6 +344,19 @@ func (engine CliEngine) Seal(candidate PlanCandidate) (SealedPlan, error) {
 		err = fmt.Errorf("unexpected engine response %q", response.Type)
 	}
 	return response.Plan, err
+}
+
+// SealResource validates and seals a Resource Candidate with the Rust engine.
+func (engine CliEngine) SealResource(candidate ResourceCandidate) (ResourceHandle, error) {
+	var response struct {
+		Type     string         `json:"type"`
+		Resource ResourceHandle `json:"resource"`
+	}
+	err := engine.request(map[string]any{"type": "seal_resource", "candidate": candidate}, &response)
+	if err == nil && response.Type != "sealed_resource" {
+		err = fmt.Errorf("unexpected engine response %q", response.Type)
+	}
+	return response.Resource, err
 }
 
 // Run executes a sealed plan through one plugin realization.

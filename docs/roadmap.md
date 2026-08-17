@@ -34,9 +34,9 @@ Status: partial.
 - snapshot compaction and suffix rehydration;
 - canonical component-call occurrences and exact execution replay without
   reinvoking plugins;
-- provider-neutral cross-Run resource descriptors and resolver/store interfaces
-  for inline values, objects, directory manifests, sandbox snapshots, remote
-  resources, and URLs remain proposed;
+- provider-neutral cross-Run Resource descriptors, replay classification,
+  bounded resolver/store interfaces, M1 handoff journals, and four SDK builders
+  are implemented; production adapters and interpreter activation remain.
 
 ## M2 - Agent and script integration
 

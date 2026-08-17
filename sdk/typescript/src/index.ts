@@ -3,6 +3,43 @@ import { spawnSync } from "node:child_process";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type Schema = boolean | { [key: string]: Json };
 
+export type ResourceShape = "inline" | "object" | "collection" | "directory" | "snapshot";
+export type InlineData =
+  | { encoding: "utf8"; text: string }
+  | { encoding: "json"; value: Json }
+  | { encoding: "base64"; data: string };
+export type ResourceIntegrity =
+  | { kind: "inline" }
+  | { kind: "content"; digest: string; size: number }
+  | { kind: "version"; authority: string; version: string }
+  | { kind: "live"; identity: string };
+export type ResourceLocation =
+  | { kind: "public_url"; url: string }
+  | { kind: "resolver"; binding: string; reference: string };
+
+export interface ResourceCandidate {
+  resource_version: "cymule.resource/1";
+  shape: ResourceShape;
+  media_type: string;
+  inline?: InlineData;
+  integrity: ResourceIntegrity;
+  locations?: ResourceLocation[];
+  annotations?: Record<string, string>;
+}
+
+export interface ResourceHandle extends ResourceCandidate {
+  resource_id: string;
+}
+
+export interface ResourceHandoff {
+  handoff_version: "cymule.resource-handoff/1";
+  transfer_id: string;
+  from_run: string;
+  to_run: string;
+  slot: string;
+  resource: ResourceHandle;
+}
+
 export type Expression =
   | { kind: "input" }
   | { kind: "literal"; value: Json }
@@ -163,6 +200,64 @@ export class FlowBuilder {
   }
 }
 
+export class ResourceBuilder {
+  static text(text: string, annotations: Record<string, string> = {}): ResourceCandidate {
+    return {
+      resource_version: "cymule.resource/1",
+      shape: "inline",
+      media_type: "text/plain;charset=utf-8",
+      inline: { encoding: "utf8", text },
+      integrity: { kind: "inline" },
+      annotations,
+    };
+  }
+
+  static json(value: Json, annotations: Record<string, string> = {}): ResourceCandidate {
+    return {
+      resource_version: "cymule.resource/1",
+      shape: "inline",
+      media_type: "application/json",
+      inline: { encoding: "json", value },
+      integrity: { kind: "inline" },
+      annotations,
+    };
+  }
+
+  static external(
+    shape: Exclude<ResourceShape, "inline">,
+    mediaType: string,
+    integrity: Exclude<ResourceIntegrity, { kind: "inline" }>,
+    locations: ResourceLocation[],
+    annotations: Record<string, string> = {},
+  ): ResourceCandidate {
+    return {
+      resource_version: "cymule.resource/1",
+      shape,
+      media_type: mediaType,
+      integrity,
+      locations,
+      annotations,
+    };
+  }
+
+  static handoff(
+    transferId: string,
+    fromRun: string,
+    toRun: string,
+    slot: string,
+    resource: ResourceHandle,
+  ): ResourceHandoff {
+    return {
+      handoff_version: "cymule.resource-handoff/1",
+      transfer_id: transferId,
+      from_run: fromRun,
+      to_run: toRun,
+      slot,
+      resource,
+    };
+  }
+}
+
 export class CliEngine {
   constructor(readonly executable: string) {}
 
@@ -170,6 +265,14 @@ export class CliEngine {
     const response = this.request({ type: "seal", candidate });
     if (response.type !== "sealed") throw new Error(`unexpected response ${response.type}`);
     return response.plan;
+  }
+
+  sealResource(candidate: ResourceCandidate): ResourceHandle {
+    const response = this.request({ type: "seal_resource", candidate });
+    if (response.type !== "sealed_resource") {
+      throw new Error(`unexpected response ${response.type}`);
+    }
+    return response.resource;
   }
 
   run(plan: SealedPlan, input: Json, plugin: string, runId: string): ExecutionResult {
@@ -192,9 +295,11 @@ export class CliEngine {
 
 type EngineRequest =
   | { type: "seal"; candidate: PlanCandidate }
+  | { type: "seal_resource"; candidate: ResourceCandidate }
   | { type: "run"; plan: SealedPlan; input: Json; plugin: string; run_id: string };
 
 type EngineResponse =
   | { type: "sealed"; plan: SealedPlan }
+  | { type: "sealed_resource"; resource: ResourceHandle }
   | { type: "executed"; result: ExecutionResult }
   | { type: "verified" };

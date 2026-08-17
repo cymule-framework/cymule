@@ -9,6 +9,8 @@ For general mechanisms, prefer maintained libraries behind explicit interfaces:
 
 - Tokio for async tasks, channels, timers, cancellation, and process I/O;
 - Serde and JSON Schema implementations for encoding and structural schemas;
+- maintained URL and base64 libraries for credential-safe Resource validation
+  and inline byte decoding;
 - reviewed file-lock or atomic-write libraries inside concrete adapters;
 - established protocol SDKs inside ACP, MCP, and A2A adapters;
 - `git-filter-repo` for deterministic public-history rewriting;
@@ -39,6 +41,12 @@ does not use the lock for Session, wait, CAS, dispatch, or recovery authority;
 accepted schemas are recompiled at completion instead of introducing a shared
 framework cache. This bounded library mechanism is not a coordination primitive
 in Cymule's execution model.
+
+The Resource profile likewise uses `url` for WHATWG URL parsing and `base64`
+for RFC 4648 decoding outside `cymule-core`. Concrete multi-provider storage
+plugins should evaluate Apache OpenDAL before implementing service protocols
+from scratch; OpenDAL configuration and credentials remain inside the plugin,
+never in a Resource Handle or canonical state.
 
 ## Lock policy
 

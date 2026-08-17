@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CliEngine, FlowBuilder, type EffectProfile } from "../src/index.js";
+import { CliEngine, FlowBuilder, ResourceBuilder, type EffectProfile } from "../src/index.js";
 
 const profile: EffectProfile = {
   mutation: "mutating",
@@ -38,4 +38,18 @@ test("TypeScript candidate seals and executes through the Rust engine", () => {
   const result = engine.run(plan, input, pluginPath, "run:typescript-e2e");
   assert.deepEqual(result.value, input);
   assert.equal(result.effects.length, 1);
+});
+
+test("TypeScript resource seals through the Rust engine", () => {
+  const enginePath = process.env.CYMULE_BIN;
+  const expectedResourceId = process.env.CYMULE_EXPECTED_RESOURCE_ID;
+  if (enginePath === undefined || expectedResourceId === undefined) return;
+
+  const resource = new CliEngine(enginePath).sealResource(
+    ResourceBuilder.text("shared cross-run resource", {
+      purpose: "cross-language-conformance",
+    }),
+  );
+  assert.equal(resource.resource_id, expectedResourceId);
+  assert.equal(resource.integrity.kind, "inline");
 });

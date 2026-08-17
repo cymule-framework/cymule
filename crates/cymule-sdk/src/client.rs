@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use cymule_core::{CoreError, PlanCandidate, SealedPlan};
+use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::ExecutionResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,6 +12,8 @@ use serde_json::Value;
 pub trait Engine {
     /// Validate and seal a candidate with the trusted Rust kernel.
     fn seal(&self, candidate: &PlanCandidate) -> Result<SealedPlan, CoreError>;
+    /// Validate and seal a provider-neutral Resource Candidate.
+    fn seal_resource(&self, candidate: &ResourceCandidate) -> Result<ResourceHandle, CoreError>;
     /// Execute a sealed plan through a selected plugin realization.
     fn run(
         &self,
@@ -59,6 +62,17 @@ impl CliEngine {
         }
         serde_json::from_slice(&output.stdout).map_err(Into::into)
     }
+
+    fn seal_resource(&self, candidate: &ResourceCandidate) -> Result<ResourceHandle, CoreError> {
+        match self.request(&EngineRequest::SealResource {
+            candidate: candidate.clone(),
+        })? {
+            EngineResponse::SealedResource { resource } => Ok(resource),
+            response => Err(CoreError::Validation(format!(
+                "CLI returned unexpected response {response:?}"
+            ))),
+        }
+    }
 }
 
 impl Engine for CliEngine {
@@ -71,6 +85,10 @@ impl Engine for CliEngine {
                 "CLI returned unexpected response {response:?}"
             ))),
         }
+    }
+
+    fn seal_resource(&self, candidate: &ResourceCandidate) -> Result<ResourceHandle, CoreError> {
+        CliEngine::seal_resource(self, candidate)
     }
 
     fn run(
@@ -100,6 +118,9 @@ enum EngineRequest {
     Seal {
         candidate: PlanCandidate,
     },
+    SealResource {
+        candidate: ResourceCandidate,
+    },
     Run {
         plan: SealedPlan,
         input: Value,
@@ -112,6 +133,7 @@ enum EngineRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum EngineResponse {
     Sealed { plan: SealedPlan },
+    SealedResource { resource: ResourceHandle },
     Executed { result: ExecutionResult },
     Verified,
 }
