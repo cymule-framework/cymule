@@ -28,6 +28,13 @@ pub struct DurableState {
     pub component_occurrences: BTreeMap<String, ComponentOccurrence>,
     /// Portable snapshots keyed by snapshot ID.
     pub snapshots: BTreeMap<String, SnapshotRecord>,
+    /// Typed application journals keyed by stable journal identity.
+    ///
+    /// This extension seam lets higher profiles share the same CAS authority
+    /// without teaching M1 their domain types. Each record is self-validating,
+    /// and the owning profile must validate its typed payload while replaying.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub application_journals: BTreeMap<String, Vec<JournalRecord>>,
 }
 
 impl DurableState {
@@ -42,6 +49,7 @@ impl DurableState {
             outbox: BTreeMap::new(),
             component_occurrences: BTreeMap::new(),
             snapshots: BTreeMap::new(),
+            application_journals: BTreeMap::new(),
         }
     }
 
@@ -68,6 +76,23 @@ impl DurableState {
                 )));
             }
         }
+        for (journal_id, records) in &self.application_journals {
+            if journal_id.is_empty() {
+                return Err(DurableError::Validation(
+                    "application journal identity must not be empty".to_owned(),
+                ));
+            }
+            let mut record_ids = BTreeSet::new();
+            for record in records {
+                record.verify()?;
+                if !record_ids.insert(&record.record_id) {
+                    return Err(DurableError::Validation(format!(
+                        "application journal {journal_id} repeats record {}",
+                        record.record_id
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -75,6 +100,62 @@ impl DurableState {
     pub fn revision(&self) -> DurableResult<String> {
         self.validate()?;
         canonical_digest(self).map_err(Into::into)
+    }
+}
+
+/// Self-validating typed record stored in one higher-profile journal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JournalRecord {
+    /// Stable idempotency identity within the owning journal.
+    pub record_id: String,
+    /// Versioned payload schema or semantic domain.
+    pub schema: String,
+    /// Typed payload encoded as canonical JSON.
+    pub payload: serde_json::Value,
+    /// Canonical digest of `schema` and `payload`.
+    pub content_digest: String,
+}
+
+impl JournalRecord {
+    /// Construct a record with a verified content digest.
+    pub fn new(
+        record_id: impl Into<String>,
+        schema: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> DurableResult<Self> {
+        let schema = schema.into();
+        let content_digest = canonical_digest(&(schema.as_str(), &payload))?;
+        let record = Self {
+            record_id: record_id.into(),
+            schema,
+            payload,
+            content_digest,
+        };
+        record.verify()?;
+        Ok(record)
+    }
+
+    /// Verify identity, schema, and content digest.
+    pub fn verify(&self) -> DurableResult<()> {
+        if self.record_id.is_empty() {
+            return Err(DurableError::Validation(
+                "journal record identity must not be empty".to_owned(),
+            ));
+        }
+        if self.schema.is_empty() {
+            return Err(DurableError::Validation(
+                "journal record schema must not be empty".to_owned(),
+            ));
+        }
+        let expected = canonical_digest(&(self.schema.as_str(), &self.payload))?;
+        if self.content_digest != expected {
+            return Err(DurableError::Validation(format!(
+                "journal record {} digest does not match its payload",
+                self.record_id
+            )));
+        }
+        Ok(())
     }
 }
 

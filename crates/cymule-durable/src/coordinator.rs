@@ -2,8 +2,8 @@ use cymule_core::Machine;
 
 use crate::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableError,
-    DurableResult, DurableState, DurableStore, EffectDispatch, OutboxState, SnapshotRecord,
-    StoredState, WaitCondition, WaitState,
+    DurableResult, DurableState, DurableStore, EffectDispatch, JournalRecord, OutboxState,
+    SnapshotRecord, StoredState, WaitCondition, WaitState,
 };
 
 /// Transactional coordinator over one provider-neutral durable store.
@@ -473,6 +473,50 @@ impl<S: DurableStore> DurableCoordinator<S> {
                     .snapshots
                     .insert(snapshot.snapshot_id.clone(), snapshot);
                 Ok(())
+            }
+        })
+    }
+
+    /// Read one higher-profile journal in durable append order.
+    pub fn journal_records(&self, journal_id: &str) -> DurableResult<&[JournalRecord]> {
+        Ok(self
+            .state()?
+            .application_journals
+            .get(journal_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default())
+    }
+
+    /// Append one self-validating higher-profile record idempotently.
+    pub fn append_journal_record(
+        &mut self,
+        journal_id: &str,
+        record: JournalRecord,
+    ) -> DurableResult<String> {
+        if journal_id.is_empty() {
+            return Err(DurableError::Validation(
+                "application journal identity must not be empty".to_owned(),
+            ));
+        }
+        record.verify()?;
+        self.mutate_checked(|state| {
+            let records = state
+                .application_journals
+                .entry(journal_id.to_owned())
+                .or_default();
+            match records
+                .iter()
+                .find(|existing| existing.record_id == record.record_id)
+            {
+                Some(existing) if existing == &record => Ok(()),
+                Some(_) => Err(DurableError::IllegalTransition(format!(
+                    "journal record {} already has different content",
+                    record.record_id
+                ))),
+                None => {
+                    records.push(record);
+                    Ok(())
+                }
             }
         })
     }

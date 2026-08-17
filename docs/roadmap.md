@@ -39,9 +39,13 @@ Status: partial.
 
 - typed content, Session updates, Plans, tool lifecycle, context/model/tool,
   permission, elicitation, and workspace interfaces are implemented;
+- provider-neutral ordered Session journals, validate-before-append updates,
+  idempotent append, and projection replay after reopen are implemented;
+- Agent updates can use the same M1 whole-state CAS through typed durable
+  application journal records;
 - a bounded reference turn driver passes context-model-tool-model end-to-end
   tests;
-- durable occurrence integration, input suspension/resume, workspace scope
+- host-occurrence integration, input suspension/resume, workspace scope
   semantics, streaming finalization, protocol adapters, debugger queries, and
   evidence views remain proposed.
 

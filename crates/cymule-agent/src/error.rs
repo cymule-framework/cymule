@@ -14,6 +14,8 @@ pub enum AgentError {
     NotFound(String),
     /// A host adapter failed.
     Host(String),
+    /// Durable interaction storage failed or was temporarily unavailable.
+    Persistence(String),
 }
 
 impl Display for AgentError {
@@ -25,6 +27,7 @@ impl Display for AgentError {
             }
             Self::NotFound(message) => write!(formatter, "not_found: {message}"),
             Self::Host(message) => write!(formatter, "host_failed: {message}"),
+            Self::Persistence(message) => write!(formatter, "persistence_failed: {message}"),
         }
     }
 }

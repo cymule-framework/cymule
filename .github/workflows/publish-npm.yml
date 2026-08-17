@@ -4,22 +4,83 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: Existing public tag version without the v prefix
+        required: true
+        type: string
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  group: publish-npm-${{ github.ref }}
+  group: publish-npm-${{ github.event.release.tag_name || inputs.version }}
   cancel-in-progress: false
 
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        package-name: [cymule, "@cymule/sdk"]
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Verify release identity
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          package_version=$(node -p "require('./sdk/typescript/package.json').version")
+          if [ "$EVENT_NAME" = release ]; then
+            expected_tag=$RELEASE_TAG
+          else
+            expected_tag="v$REQUESTED_VERSION"
+          fi
+          if [ "$expected_tag" != "v$package_version" ]; then
+            echo "release tag $expected_tag does not match package version $package_version" >&2
+            exit 2
+          fi
+          tag_commit=$(git rev-list -n 1 "$expected_tag")
+          if [ "$tag_commit" != "$(git rev-parse HEAD)" ]; then
+            echo "release tag $expected_tag does not select the checked-out commit" >&2
+            exit 2
+          fi
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.0
+
+      - uses: pnpm/action-setup@v6.0.10
+        with:
+          version: 11.17.0
+          run_install: false
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.7.0
+          cache: pnpm
+          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: sdk/go/go.mod
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: 0.7.2
+          enable-cache: true
+          cache-dependency-glob: sdk/python/uv.lock
+
+      - name: Verify complete repository
+        run: ./scripts/verify.sh
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -42,14 +103,26 @@ jobs:
           pnpm --dir sdk/typescript run build
           pnpm --dir sdk/typescript test
 
-      - name: Prepare package manifest
-        run: >-
-          node sdk/typescript/scripts/prepare-package.mjs
-          '${{ matrix.package-name }}'
-          "$RUNNER_TEMP/npm-package"
+      - name: Prepare both public packages
+        run: |
+          node sdk/typescript/scripts/prepare-package.mjs \
+            cymule "$RUNNER_TEMP/npm-cymule"
+          node sdk/typescript/scripts/prepare-package.mjs \
+            '@cymule/sdk' "$RUNNER_TEMP/npm-cymule-sdk"
 
-      - name: Inspect package contents
-        run: npm pack --dry-run "$RUNNER_TEMP/npm-package"
+      - name: Inspect package contents and registry availability
+        run: |
+          npm pack --dry-run "$RUNNER_TEMP/npm-cymule"
+          npm pack --dry-run "$RUNNER_TEMP/npm-cymule-sdk"
+          package_version=$(node -p "require('./sdk/typescript/package.json').version")
+          for package_name in cymule '@cymule/sdk'; do
+            if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
+              echo "$package_name@$package_version is already published" >&2
+              exit 2
+            fi
+          done
 
-      - name: Publish with trusted provenance
-        run: npm publish "$RUNNER_TEMP/npm-package"
+      - name: Publish both packages with trusted provenance
+        run: |
+          npm publish "$RUNNER_TEMP/npm-cymule"
+          npm publish "$RUNNER_TEMP/npm-cymule-sdk"

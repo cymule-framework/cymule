@@ -52,6 +52,7 @@ name = "cymule-agent"
 version = "0.1.0"
 dependencies = [
  "cymule-core",
+ "cymule-durable",
  "serde",
  "serde_json",
 ]

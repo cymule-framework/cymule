@@ -8,7 +8,8 @@ use cymule_core::{
 };
 use cymule_durable::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
-    EffectDispatch, FrameState, MemoryStore, OutboxState, WaitCondition, WaitKind, WaitState,
+    EffectDispatch, FrameState, JournalRecord, MemoryStore, OutboxState, WaitCondition, WaitKind,
+    WaitState,
 };
 use serde_json::json;
 
@@ -212,4 +213,46 @@ fn component_occurrence_is_exactly_once_by_content() {
         coordinator.record_component(conflicting),
         Err(DurableError::IllegalTransition(_))
     ));
+}
+
+#[test]
+fn higher_profile_journal_is_cas_committed_and_replayed_in_order() {
+    let (machine, _) = machine_with_run();
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let first = JournalRecord::new("record:1", "example.record/1", json!({"sequence": 1}))
+        .expect("record seals");
+    coordinator
+        .append_journal_record("journal:example", first.clone())
+        .expect("record appends");
+    coordinator
+        .append_journal_record("journal:example", first)
+        .expect("retry is idempotent");
+    coordinator
+        .append_journal_record(
+            "journal:example",
+            JournalRecord::new("record:2", "example.record/1", json!({"sequence": 2}))
+                .expect("record seals"),
+        )
+        .expect("second record appends");
+    assert!(matches!(
+        coordinator.append_journal_record(
+            "journal:example",
+            JournalRecord::new("record:1", "example.record/1", json!({"sequence": 999}),)
+                .expect("conflicting record seals"),
+        ),
+        Err(DurableError::IllegalTransition(_))
+    ));
+    drop(coordinator);
+
+    let reopened = DurableCoordinator::open(store).expect("store reopens");
+    let records = reopened
+        .journal_records("journal:example")
+        .expect("journal reads");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].record_id, "record:1");
+    assert_eq!(records[1].record_id, "record:2");
 }

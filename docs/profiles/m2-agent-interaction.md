@@ -12,12 +12,19 @@ Status: partial.
   tools, elicitation, and workspace overlays;
 - bounded reference turn driver covering context, model, permission, tool,
   tool-result feedback, second model round, and terminal idle state;
+- provider-neutral `AgentJournal`, validate-before-append Session transitions,
+  idempotent durable update append, and full projection replay after reopen;
+- an M1 `DurableCoordinator` journal integration that commits agent updates
+  through the same whole-state CAS authority as Continuations and waits;
+- non-blocking in-memory reference journal with conflicting update identity
+  rejection;
 - deterministic fake-host end-to-end tests;
 - adapter boundaries for ACP, MCP, A2A, editors, and model providers.
 
 ## Remaining completion gates
 
-- durable persistence of Session updates and all host occurrences through M1;
+- durable occurrence records for every context, model, permission, tool,
+  elicitation, and workspace host call;
 - explicit input-required suspension/resume through durable waits;
 - workspace overlay commit/abort integration with scope obligations;
 - streaming chunk staging and finalized durable content;

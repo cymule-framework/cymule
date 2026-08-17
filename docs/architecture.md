@@ -68,13 +68,15 @@ network transports can implement the same `PluginHost` trait.
 
 ## Storage contracts
 
-The in-memory store is implemented. Durable stores are proposed and must provide:
+M1 defines a provider-neutral `DurableStore` as compare-and-swap over one
+complete `DurableState` revision. A successful write atomically covers the
+semantic Machine snapshot, Continuations, waits, leases, effect outbox,
+component occurrences, snapshot metadata, and typed higher-profile journals.
+This keeps M2-M4 records under the same revision authority without placing
+their domain types in `cymule-core`.
 
-- conditional event append against expected heads;
-- immutable artifact put/get/verify;
-- command deduplication with semantic hash checking;
-- causally closed snapshots;
-- fencing for attempts and dispatch ownership;
-- explicit retention and replay-availability behavior.
-
-No database name is part of the contract.
+The repository provides a non-blocking shared-memory reference store and an
+atomic local directory adapter. Both surface writer contention as a conflict;
+neither a mutex nor a file lock is semantic authority. Production adapters use
+their substrate's native CAS and remain plugins. No database, queue, or object
+store name is part of the contract.

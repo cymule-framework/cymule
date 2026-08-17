@@ -8,15 +8,17 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | --- | --- | --- |
 | Semantic Interpreter M0 | Implemented | frozen IR, canonical stores, admission, reducer, exact state replay |
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
-| Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, wait, lease, outbox, occurrence, directory reopen; resumable interpreter and crash recovery remain |
-| Agent Interaction | Partial | typed Session updates and host interfaces plus model-tool-model reference loop; durable protocol adapters and restart tests remain |
+| Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, wait, lease, outbox, occurrence replay, directory reopen, and ambiguous-effect reconciliation; nested scopes and the full crash matrix remain |
+| Agent Interaction | Partial | typed Session updates, host interfaces, M1-backed journal replay, and model-tool-model reference loop; host occurrence recovery and protocol adapters remain |
 | Large Virtual Graph | Partial | bounded virtual regions, cursors, fair capability claims, parked index, fencing, and snapshot restore; durable compaction remains |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
 | Live Evolution | Partial | Plan DAG, impact, occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; runtime rollout automation remains |
 
-The implemented rows do not claim persistent VEC storage, durable resumption,
-or exact execution replay of component outputs. Those are M1 gates.
+The M0 rows do not claim persistence. The partial M1 implementation does prove
+single-domain durable wait resumption, exact replay of recorded component
+outputs, and reconciliation after an ambiguous mutating dispatch. It does not
+yet claim the complete nested-scope runtime or every crash window.
 
 ## Required semantic cases
 
