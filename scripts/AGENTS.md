@@ -32,6 +32,10 @@
 - Keep host-native verification reproducible and avoid container-only workflows.
 - GitHub publication builds a snapshot on top of the prior public GitHub commit.
   Never push private source ancestry or remote configuration.
+- Public history containing workflow changes is pushed by `mirror.yml` with the
+  encrypted `CYMULE_PUBLIC_PUSH_TOKEN`, whose GitHub authorization includes
+  repository contents and workflow updates. The default Actions token cannot
+  update workflow files and must not be used as a fallback.
 - Public export removes private CI metadata and fails closed if a private host
   or project path remains in the snapshot.
 - GitHub CI derives one exact change plan, groups selected suites into

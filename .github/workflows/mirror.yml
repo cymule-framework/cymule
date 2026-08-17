@@ -64,7 +64,7 @@ jobs:
 
       - name: Force-publish rewritten public history
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CYMULE_PUBLIC_PUSH_TOKEN }}
         run: |
           cd "$RUNNER_TEMP/source"
           git remote add public "https://x-access-token:${GH_TOKEN}@github.com/cymule-framework/cymule.git"
