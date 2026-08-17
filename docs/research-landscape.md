@@ -36,6 +36,17 @@ standards.
   of inferring all failures as equivalent. Cymule adopts only the principle that
   failure classification is explicit; container and cluster concepts remain
   outside framework semantics.
+- [Temporal Activity execution](https://github.com/temporalio/documentation/blob/main/docs/encyclopedia/activities/activity-execution.mdx)
+  and its [service API](https://github.com/temporalio/api/blob/main/temporal/api/workflowservice/v1/service.proto)
+  show that one task token identifies one execution attempt and becomes invalid
+  after timeout or completion, while heartbeat details can retain retry
+  progress. Cymule similarly fences attempts, but records Clock-provided lease
+  epochs and recovery decisions in provider-neutral M1/M3 state.
+- [Kubernetes Leases](https://kubernetes.io/docs/concepts/architecture/leases/)
+  use holder identity, renewal time, duration, transition count, and optimistic
+  resource-version updates for takeover. Cymule adopts logical expiry,
+  monotonically increasing slot fences, and CAS competition without adopting
+  Kubernetes objects, wall-clock authority, or leader-election topology.
 - [Temporal Task Queue Priority and Fairness](https://temporal.io/changelog/priority-fairness-generally-available)
   separates priority from fairness keys and weighted dispatch, while
   [Kubernetes API Priority and Fairness](https://kubernetes.io/docs/concepts/cluster-administration/flow-control/)

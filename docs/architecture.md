@@ -167,6 +167,22 @@ Control checkpoints retain the full resolution command and its occurrence ID,
 so historical command replay reads the original receipt even after unrelated
 later claims; it never restores the older scheduler snapshot.
 
+Multi-worker capacity is represented by abstract slot leases. A claim command
+supplies the worker, slot, capabilities, binding, and Clock-derived logical
+lease window; `DurableVirtualController` previews the next M1 lease and commits
+it with the selected work in one CAS. Different slots can claim independently,
+while one slot cannot hold two active claims. An empty poll records an
+idempotent receipt without acquiring a lease.
+
+Renewal advances the slot lease epoch and the running occurrence fence in one
+checkpoint. Normal result commands carry both the work epoch and current lease
+epoch and must be observed before expiry. After expiry, a recovery controller
+must explicitly retry, fail, or cancel under the exact durable lease; expiry
+does not silently requeue work. Receipt-loss reopen tests cover claim, renewal,
+and recovery, and a later worker receives a greater work epoch before execution.
+The framework never models worker processes, heartbeats, queue endpoints, or an
+Agent Loop.
+
 Run selection uses integer weighted deficit accounting over exact item cost.
 Within the chosen Run, priority aging derives only from persisted successful
 dispatch count and ready-entry sequence. This makes fairness portable across
@@ -174,6 +190,8 @@ processes and avoids a clock or floating-point dependency. The guarantee applies
 to materialized, capability-compatible backlogs. `RegionSource` visibility is a
 separate deterministic round-robin layer because Cymule cannot know an item's
 cost before the source returns it.
+Run weight changes use the same idempotent control and M1 checkpoint path and
+reset old deficit before future selection.
 
 Region topology changes also stay behind the source boundary. A pinned
 `RegionMigrator` receives exact active source snapshots and produces opaque

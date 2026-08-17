@@ -162,6 +162,35 @@ type ParkReason struct {
 	Domain     string `json:"domain,omitempty"`
 }
 
+// WorkItem is one materialized provider-neutral virtual item.
+type WorkItem struct {
+	WorkID     string      `json:"work_id"`
+	RegionID   string      `json:"region_id"`
+	RunID      string      `json:"run_id"`
+	Payload    ArtifactRef `json:"payload"`
+	Capability *string     `json:"capability"`
+	Priority   int64       `json:"priority"`
+	Cost       uint64      `json:"cost"`
+}
+
+// VirtualClaimLease fences one worker capacity slot.
+type VirtualClaimLease struct {
+	Resource  string `json:"resource"`
+	Owner     string `json:"owner"`
+	Epoch     uint64 `json:"epoch"`
+	ExpiresAt uint64 `json:"expires_at"`
+}
+
+// ClaimedWork is one active occurrence and its current capacity-slot lease.
+type ClaimedWork struct {
+	Item              WorkItem          `json:"item"`
+	Owner             string            `json:"owner"`
+	Epoch             uint64            `json:"epoch"`
+	OccurrenceID      string            `json:"occurrence_id"`
+	OccurrenceBinding string            `json:"occurrence_binding"`
+	Lease             VirtualClaimLease `json:"lease"`
+}
+
 // WorkOccurrence is one binding-pinned M3 work attempt.
 type WorkOccurrence struct {
 	OccurrenceVersion string       `json:"occurrence_version"`
@@ -171,6 +200,7 @@ type WorkOccurrence struct {
 	RunID             string       `json:"run_id"`
 	Owner             string       `json:"owner"`
 	Epoch             uint64       `json:"epoch"`
+	LeaseEpoch        uint64       `json:"lease_epoch"`
 	OccurrenceBinding string       `json:"occurrence_binding"`
 	State             string       `json:"state"`
 	Result            *ArtifactRef `json:"result"`
@@ -282,12 +312,14 @@ func (resolution *WorkResolution) UnmarshalJSON(input []byte) error {
 
 // WorkResolutionCommand preconditions one idempotent M3 control mutation.
 type WorkResolutionCommand struct {
-	ControlVersion string         `json:"control_version"`
-	CommandID      string         `json:"command_id"`
-	WorkID         string         `json:"work_id"`
-	Owner          string         `json:"owner"`
-	Epoch          uint64         `json:"epoch"`
-	Resolution     WorkResolution `json:"resolution"`
+	ControlVersion     string         `json:"control_version"`
+	CommandID          string         `json:"command_id"`
+	WorkID             string         `json:"work_id"`
+	Owner              string         `json:"owner"`
+	Epoch              uint64         `json:"epoch"`
+	ExpectedLeaseEpoch uint64         `json:"expected_lease_epoch"`
+	ObservedAt         uint64         `json:"observed_at"`
+	Resolution         WorkResolution `json:"resolution"`
 }
 
 // VirtualCursor is an opaque provider-owned logical source position.
@@ -406,6 +438,75 @@ type VirtualRehydrationReceipt struct {
 	RestoredOccurrenceIDs []string                  `json:"restored_occurrence_ids"`
 }
 
+// VirtualClaimCommand requests at most one item through one capacity slot.
+type VirtualClaimCommand struct {
+	ControlVersion    string   `json:"control_version"`
+	CommandID         string   `json:"command_id"`
+	Owner             string   `json:"owner"`
+	SlotID            string   `json:"slot_id"`
+	OccurrenceBinding string   `json:"occurrence_binding"`
+	Capabilities      []string `json:"capabilities"`
+	LogicalNow        uint64   `json:"logical_now"`
+	LeaseTTL          uint64   `json:"lease_ttl"`
+}
+
+// VirtualClaimReceipt contains claimed work or a durable empty observation.
+type VirtualClaimReceipt struct {
+	Command VirtualClaimCommand `json:"command"`
+	Claim   *ClaimedWork        `json:"claim"`
+}
+
+// VirtualLeaseRenewalCommand advances one active capacity-slot lease fence.
+type VirtualLeaseRenewalCommand struct {
+	ControlVersion     string `json:"control_version"`
+	CommandID          string `json:"command_id"`
+	WorkID             string `json:"work_id"`
+	Owner              string `json:"owner"`
+	Epoch              uint64 `json:"epoch"`
+	ExpectedLeaseEpoch uint64 `json:"expected_lease_epoch"`
+	LogicalNow         uint64 `json:"logical_now"`
+	LeaseTTL           uint64 `json:"lease_ttl"`
+}
+
+// VirtualLeaseRenewalReceipt retains the new slot fence.
+type VirtualLeaseRenewalReceipt struct {
+	Command VirtualLeaseRenewalCommand `json:"command"`
+	Lease   VirtualClaimLease          `json:"lease"`
+}
+
+// VirtualRecoveryCommand explicitly retries, fails, or cancels expired work.
+type VirtualRecoveryCommand struct {
+	ControlVersion     string         `json:"control_version"`
+	CommandID          string         `json:"command_id"`
+	WorkID             string         `json:"work_id"`
+	ExpectedOwner      string         `json:"expected_owner"`
+	ExpectedEpoch      uint64         `json:"expected_epoch"`
+	ExpectedLeaseEpoch uint64         `json:"expected_lease_epoch"`
+	ObservedAt         uint64         `json:"observed_at"`
+	Resolution         WorkResolution `json:"resolution"`
+}
+
+// VirtualRecoveryReceipt retains the expired occurrence disposition.
+type VirtualRecoveryReceipt struct {
+	Command    VirtualRecoveryCommand `json:"command"`
+	Occurrence WorkOccurrence         `json:"occurrence"`
+}
+
+// VirtualRunWeightCommand updates one Run's future weighted share.
+type VirtualRunWeightCommand struct {
+	ControlVersion string `json:"control_version"`
+	CommandID      string `json:"command_id"`
+	RunID          string `json:"run_id"`
+	Weight         uint32 `json:"weight"`
+}
+
+// VirtualRunWeightReceipt retains previous and current scheduling shares.
+type VirtualRunWeightReceipt struct {
+	Command        VirtualRunWeightCommand `json:"command"`
+	PreviousWeight uint32                  `json:"previous_weight"`
+	CurrentWeight  uint32                  `json:"current_weight"`
+}
+
 // VirtualArchive is a replaceable immutable byte archive.
 type VirtualArchive interface {
 	Binding() string
@@ -429,37 +530,45 @@ type VirtualWorkControl interface {
 	Rehydrate(command VirtualRehydrationCommand) (VirtualRehydrationReceipt, error)
 }
 
+// VirtualSchedulingControl is a transport-neutral worker-slot control boundary.
+type VirtualSchedulingControl interface {
+	Claim(command VirtualClaimCommand) (VirtualClaimReceipt, error)
+	Renew(command VirtualLeaseRenewalCommand) (VirtualLeaseRenewalReceipt, error)
+	Recover(command VirtualRecoveryCommand) (VirtualRecoveryReceipt, error)
+	SetRunWeight(command VirtualRunWeightCommand) (VirtualRunWeightReceipt, error)
+}
+
 // SucceedWork creates a terminal-success control command.
-func SucceedWork(commandID, workID, owner string, epoch uint64, result ArtifactRef) WorkResolutionCommand {
-	return workResolutionCommand(commandID, workID, owner, epoch, WorkResolution{
+func SucceedWork(commandID, workID, owner string, epoch, expectedLeaseEpoch, observedAt uint64, result ArtifactRef) WorkResolutionCommand {
+	return workResolutionCommand(commandID, workID, owner, epoch, expectedLeaseEpoch, observedAt, WorkResolution{
 		Kind: "succeeded", Result: &result,
 	})
 }
 
 // RetryWork creates a retry control command with an optional indexed condition.
-func RetryWork(commandID, workID, owner string, epoch uint64, failure ArtifactRef, nextReason *ParkReason) WorkResolutionCommand {
-	return workResolutionCommand(commandID, workID, owner, epoch, WorkResolution{
+func RetryWork(commandID, workID, owner string, epoch, expectedLeaseEpoch, observedAt uint64, failure ArtifactRef, nextReason *ParkReason) WorkResolutionCommand {
+	return workResolutionCommand(commandID, workID, owner, epoch, expectedLeaseEpoch, observedAt, WorkResolution{
 		Kind: "retry", Error: &failure, NextReason: nextReason,
 	})
 }
 
 // ParkWork creates a non-failure parked disposition command.
-func ParkWork(commandID, workID, owner string, epoch uint64, reason ParkReason) WorkResolutionCommand {
-	return workResolutionCommand(commandID, workID, owner, epoch, WorkResolution{
+func ParkWork(commandID, workID, owner string, epoch, expectedLeaseEpoch, observedAt uint64, reason ParkReason) WorkResolutionCommand {
+	return workResolutionCommand(commandID, workID, owner, epoch, expectedLeaseEpoch, observedAt, WorkResolution{
 		Kind: "parked", ParkReason: &reason,
 	})
 }
 
 // FailWork creates a terminal-failure control command.
-func FailWork(commandID, workID, owner string, epoch uint64, failure ArtifactRef) WorkResolutionCommand {
-	return workResolutionCommand(commandID, workID, owner, epoch, WorkResolution{
+func FailWork(commandID, workID, owner string, epoch, expectedLeaseEpoch, observedAt uint64, failure ArtifactRef) WorkResolutionCommand {
+	return workResolutionCommand(commandID, workID, owner, epoch, expectedLeaseEpoch, observedAt, WorkResolution{
 		Kind: "failed", Error: &failure,
 	})
 }
 
 // CancelWork creates an active-occurrence cancellation command.
-func CancelWork(commandID, workID, owner string, epoch uint64, reason ArtifactRef) WorkResolutionCommand {
-	return workResolutionCommand(commandID, workID, owner, epoch, WorkResolution{
+func CancelWork(commandID, workID, owner string, epoch, expectedLeaseEpoch, observedAt uint64, reason ArtifactRef) WorkResolutionCommand {
+	return workResolutionCommand(commandID, workID, owner, epoch, expectedLeaseEpoch, observedAt, WorkResolution{
 		Kind: "cancelled", CancelReason: &reason,
 	})
 }
@@ -495,14 +604,68 @@ func RehydrateVirtualOccurrences(commandID, certificateID string, occurrenceIDs 
 	}
 }
 
-func workResolutionCommand(commandID, workID, owner string, epoch uint64, resolution WorkResolution) WorkResolutionCommand {
-	return WorkResolutionCommand{
-		ControlVersion: "cymule.virtual-work-control/1",
+// ClaimVirtualWork creates one idempotent capacity-slot claim command.
+func ClaimVirtualWork(commandID, owner, slotID, occurrenceBinding string, capabilities []string, logicalNow, leaseTTL uint64) VirtualClaimCommand {
+	return VirtualClaimCommand{
+		ControlVersion:    "cymule.virtual-claim-control/1",
+		CommandID:         commandID,
+		Owner:             owner,
+		SlotID:            slotID,
+		OccurrenceBinding: occurrenceBinding,
+		Capabilities:      uniqueSorted(capabilities),
+		LogicalNow:        logicalNow,
+		LeaseTTL:          leaseTTL,
+	}
+}
+
+// RenewVirtualClaim creates one active-claim lease renewal command.
+func RenewVirtualClaim(commandID, workID, owner string, epoch, expectedLeaseEpoch, logicalNow, leaseTTL uint64) VirtualLeaseRenewalCommand {
+	return VirtualLeaseRenewalCommand{
+		ControlVersion:     "cymule.virtual-lease-renewal-control/1",
+		CommandID:          commandID,
+		WorkID:             workID,
+		Owner:              owner,
+		Epoch:              epoch,
+		ExpectedLeaseEpoch: expectedLeaseEpoch,
+		LogicalNow:         logicalNow,
+		LeaseTTL:           leaseTTL,
+	}
+}
+
+// RecoverVirtualClaim creates one explicit expired-claim disposition command.
+func RecoverVirtualClaim(commandID, workID, expectedOwner string, expectedEpoch, expectedLeaseEpoch, observedAt uint64, resolution WorkResolution) VirtualRecoveryCommand {
+	return VirtualRecoveryCommand{
+		ControlVersion:     "cymule.virtual-recovery-control/1",
+		CommandID:          commandID,
+		WorkID:             workID,
+		ExpectedOwner:      expectedOwner,
+		ExpectedEpoch:      expectedEpoch,
+		ExpectedLeaseEpoch: expectedLeaseEpoch,
+		ObservedAt:         observedAt,
+		Resolution:         resolution,
+	}
+}
+
+// SetVirtualRunWeight creates one future weighted-share update command.
+func SetVirtualRunWeight(commandID, runID string, weight uint32) VirtualRunWeightCommand {
+	return VirtualRunWeightCommand{
+		ControlVersion: "cymule.virtual-run-weight-control/1",
 		CommandID:      commandID,
-		WorkID:         workID,
-		Owner:          owner,
-		Epoch:          epoch,
-		Resolution:     resolution,
+		RunID:          runID,
+		Weight:         weight,
+	}
+}
+
+func workResolutionCommand(commandID, workID, owner string, epoch, expectedLeaseEpoch, observedAt uint64, resolution WorkResolution) WorkResolutionCommand {
+	return WorkResolutionCommand{
+		ControlVersion:     "cymule.virtual-work-control/1",
+		CommandID:          commandID,
+		WorkID:             workID,
+		Owner:              owner,
+		Epoch:              epoch,
+		ExpectedLeaseEpoch: expectedLeaseEpoch,
+		ObservedAt:         observedAt,
+		Resolution:         resolution,
 	}
 }
 

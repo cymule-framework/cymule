@@ -1,0 +1,6 @@
+{
+  "control_version": "cymule.virtual-run-weight-control/1",
+  "command_id": "command:run-weight:fixture",
+  "run_id": "run:fixture",
+  "weight": 3
+}

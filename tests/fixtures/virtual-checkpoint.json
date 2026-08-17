@@ -42,7 +42,11 @@
     "compaction_receipts": {},
     "compacted_work": {},
     "compacted_regions": {},
-    "rehydration_receipts": {}
+    "rehydration_receipts": {},
+    "claim_receipts": {},
+    "lease_renewal_receipts": {},
+    "recovery_receipts": {},
+    "run_weight_receipts": {}
   },
   "control": null,
   "receipt_occurrence_id": null,
@@ -51,5 +55,13 @@
   "compaction_control": null,
   "receipt_compaction_id": null,
   "rehydration_control": null,
-  "receipt_rehydration_id": null
+  "receipt_rehydration_id": null,
+  "claim_control": null,
+  "receipt_claim_id": null,
+  "lease_renewal_control": null,
+  "receipt_lease_renewal_id": null,
+  "recovery_control": null,
+  "receipt_recovery_id": null,
+  "run_weight_control": null,
+  "receipt_run_weight_id": null
 }

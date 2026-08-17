@@ -10,7 +10,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
 | Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, identified signal/timer activation, lease, outbox, occurrence replay, Resource handoff, directory-store reopen, and ambiguous-effect reconciliation; nested scopes and the full crash matrix remain |
 | Optional Agent Interaction plugin | Partial plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces; not a framework profile |
-| Large Virtual Graph | Partial | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, priority aging, verified cursor split/merge, certified cold compaction/partial rehydration, four SDK controls, fencing, and restore; multi-worker crash/scheduling control remain |
+| Large Virtual Graph M3 | Implemented | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker slot leases/recovery, four SDK controls, and restore |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
 | Live Evolution | Partial | Plan DAG, impact, occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; runtime rollout automation remains |
@@ -71,10 +71,22 @@ The local suite verifies:
   later identical command returns its original receipt;
 - TypeScript, Python, Rust, and Go construct the same compaction and rehydration
   commands without computing a manifest or certificate;
+- distinct worker capacity slots claim independently while the same slot cannot
+  overclaim; lease acquisition/renewal and M3 checkpoints share one M1 CAS;
+- a normal result at logical expiry is rejected with no Artifact commit,
+  pre-expiry recovery is rejected, and explicit post-expiry retry lets a later
+  worker claim a greater work epoch while late old-worker output remains fenced;
+- lost claim, renewal, and recovery acknowledgements reopen to exactly one
+  transition and replay the original receipt; stale writers retain neither a
+  partial lease nor partial scheduler update;
+- Run-weight commands reset prior deficit for future selection, replay
+  idempotently, survive reopen, and reject stale CAS or conflicting ID reuse;
+- TypeScript, Python, Rust, and Go construct the same claim, renewal, recovery,
+  and Run-weight commands without reading clocks or implementing a scheduler;
 - M3 claim/result checkpoints survive reopen, stale CAS rolls back scheduler
   state, and result/evidence Artifacts commit with occurrence state;
 - TypeScript, Python, Rust, and Go parse one occurrence fixture and construct one
-  idempotent owner/epoch-fenced control command;
+  idempotent owner/work-epoch/lease-epoch/time-fenced control command;
 - a Binding Context update changes only future occurrences;
 - replay availability is not reported as exact when an artifact is missing;
 - TypeScript, Python, Rust, and Go author the same plan and execute through the

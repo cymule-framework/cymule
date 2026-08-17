@@ -1,6 +1,6 @@
 # M3 Large Virtual Work Profile
 
-Status: partial.
+Status: implemented.
 
 ## Implemented foundation
 
@@ -67,12 +67,31 @@ Status: partial.
   rollback, injected archive read/write failure, and tamper rejection;
 - shared Rust, TypeScript, Python, and Go compaction/rehydration commands and
   transport-neutral archive/control interfaces;
+- provider-neutral worker capacity-slot claim commands whose M1 lease and M3
+  occurrence/frontier enter one CAS, including durable empty-poll receipts;
+- atomic active-claim renewal that advances the slot and occurrence lease fence
+  without changing the work epoch or immutable binding;
+- normal result admission fenced by owner, work epoch, lease epoch, and logical
+  pre-expiry observation time;
+- explicit expired-claim retry/fail/cancel recovery against the exact current
+  durable lease, with evidence Artifact checkpointing and later work-epoch
+  takeover that rejects old worker output;
+- deterministic multi-worker tests for distinct-slot progress, same-slot
+  exclusion, stale CAS, pre-expiry rejection, post-expiry takeover, late output,
+  and lost claim/renewal/recovery receipts across reopen;
+- idempotent future Run-weight controls with deficit reset, stale-CAS rollback,
+  reopen, and historical receipt replay;
+- shared Rust, TypeScript, Python, and Go `VirtualSchedulingControl` contracts
+  and claim/renew/recover/Run-weight fixtures;
 - million-item source tests proving an eight-item bounded frontier, fairness,
   parking, waking, fencing, and restart behavior.
 
-## Remaining completion gates
+## Completion boundary
 
-- multi-worker crash tests and scheduling/partition SDK control interfaces.
+This profile covers provider-neutral large virtual work inside one durable M1
+domain. Cross-domain worker ownership, distributed consensus, infrastructure
+autoscaling, queue delivery, and execution isolation belong to M5 or plugins and
+are not M3 claims.
 
 `RegionSource` implementations may enumerate a database, object store, API, or
 generated range, but those technologies never enter M3 semantic state.
@@ -85,7 +104,7 @@ envelope. Work lifecycle adds independent `cymule.virtual-work-occurrence/1`
 and `cymule.virtual-work-control/1` domains; SDKs expose their closed wire types
 and transport interfaces but do not reduce scheduler state. Additive scheduling
 policy, integer weight/deficit, dispatch-sequence, and ready-age fields remain
-inside the partial `cymule.virtual-checkpoint/1` domain. Region topology adds
+inside the `cymule.virtual-checkpoint/1` domain. Region topology adds
 independent `cymule.virtual-region-migration/1` and
 `cymule.virtual-region-migration-control/1` domains; receipts and retired lineage
 remain in the same M3 checkpoint.
@@ -93,6 +112,12 @@ Cold history adds independent `cymule.virtual-archive-manifest/1`,
 `cymule.virtual-compaction-certificate/1`,
 `cymule.virtual-compaction-control/1`, and
 `cymule.virtual-rehydration-control/1` domains. Their receipts, bounded summary,
-and terminal fence index remain in the additive partial
+and terminal fence index remain in the additive
 `cymule.virtual-checkpoint/1` payload; exact occurrence bytes remain an ordinary
 content-addressed Artifact behind `VirtualArchive`.
+Multi-worker control adds independent `cymule.virtual-claim-control/1`,
+`cymule.virtual-lease-renewal-control/1`,
+`cymule.virtual-recovery-control/1`, and
+`cymule.virtual-run-weight-control/1` domains. Their receipts and active lease
+fences remain additive fields in `cymule.virtual-checkpoint/1`; Clock and worker
+substrates supply proposals but never mutate scheduler state directly.

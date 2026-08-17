@@ -214,6 +214,48 @@ def main() -> int:
         registry=registry,
     )
     rehydration_validator.validate(rehydration_control)
+    scheduling_fixtures = [
+        (
+            "virtual-claim-control.json",
+            "claimControlCommand",
+            "virtual claim",
+        ),
+        (
+            "virtual-lease-renewal-control.json",
+            "leaseRenewalControlCommand",
+            "virtual lease renewal",
+        ),
+        (
+            "virtual-recovery-control.json",
+            "recoveryControlCommand",
+            "virtual recovery",
+        ),
+        (
+            "virtual-run-weight-control.json",
+            "runWeightControlCommand",
+            "virtual Run weight",
+        ),
+    ]
+    for fixture_name, definition, label in scheduling_fixtures:
+        value = load(root / "tests/fixtures" / fixture_name)
+        validator = Draft202012Validator(
+            {
+                "$ref": (
+                    "https://cymule.dev/schemas/virtual-checkpoint.schema.json"
+                    f"#/$defs/{definition}"
+                )
+            },
+            registry=registry,
+        )
+        validator.validate(value)
+        malformed_value = dict(value)
+        malformed_value["provider"] = "must-not-enter-virtual-scheduling"
+        try:
+            validator.validate(malformed_value)
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError(f"{label} accepted a provider field")
     malformed_virtual = dict(virtual_checkpoint)
     malformed_virtual["provider"] = "must-not-enter-virtual-checkpoint"
     try:

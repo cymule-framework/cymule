@@ -20,3 +20,6 @@
 - Archive protocols expose immutable bytes without provider locators in semantic
   commands. Compaction/rehydration builders preserve the pinned binding, causal
   cut, certificate, and exact occurrence selection; Rust validates them.
+- Scheduling protocols keep capacity slots, logical time, work/lease fences,
+  Run weight, and recovery disposition explicit. Do not read a local clock or
+  add a Python worker registry/reducer.

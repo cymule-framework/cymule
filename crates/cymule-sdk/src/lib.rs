@@ -6,7 +6,7 @@ mod control;
 
 pub use builder::FlowBuilder;
 pub use client::{CliEngine, Engine};
-pub use control::VirtualWorkControl;
+pub use control::{VirtualSchedulingControl, VirtualWorkControl};
 pub use cymule_core::{
     ArtifactRef, DispatchPolicy, EffectProfile, Expression, MutationKind, PlanCandidate,
     ReconciliationMode, ScopeMode, SealedPlan, WaitSpec,
@@ -20,12 +20,16 @@ pub use cymule_runtime::ExecutionResult;
 pub use cymule_virtual::{
     ArchivedWorkIndex, CompactedWorkIndex, ParkReason, RegionMigrationCommand, RegionMigrationKind,
     RegionMigrationPlan, RegionMigrationReceipt, RegionMigrationRequest, RegionMigrator,
-    VIRTUAL_ARCHIVE_MANIFEST_KIND, VIRTUAL_ARCHIVE_MANIFEST_VERSION,
+    VIRTUAL_ARCHIVE_MANIFEST_KIND, VIRTUAL_ARCHIVE_MANIFEST_VERSION, VIRTUAL_CLAIM_CONTROL_VERSION,
     VIRTUAL_COMPACTION_CERTIFICATE_VERSION, VIRTUAL_COMPACTION_CONTROL_VERSION,
+    VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION, VIRTUAL_RECOVERY_CONTROL_VERSION,
     VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_VERSION,
-    VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION,
-    VIRTUAL_WORK_OCCURRENCE_VERSION, VirtualArchive, VirtualArchiveManifest,
+    VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_RUN_WEIGHT_CONTROL_VERSION,
+    VIRTUAL_WORK_CONTROL_VERSION, VIRTUAL_WORK_OCCURRENCE_VERSION, VirtualArchive,
+    VirtualArchiveManifest, VirtualClaimCommand, VirtualClaimLease, VirtualClaimReceipt,
     VirtualCompactionCertificate, VirtualCompactionCommand, VirtualCompactionReceipt,
-    VirtualCompletionSummary, VirtualRehydrationCommand, VirtualRehydrationReceipt, WorkOccurrence,
+    VirtualCompletionSummary, VirtualLeaseRenewalCommand, VirtualLeaseRenewalReceipt,
+    VirtualRecoveryCommand, VirtualRecoveryReceipt, VirtualRehydrationCommand,
+    VirtualRehydrationReceipt, VirtualRunWeightCommand, VirtualRunWeightReceipt, WorkOccurrence,
     WorkOccurrenceState, WorkResolution, WorkResolutionCommand,
 };

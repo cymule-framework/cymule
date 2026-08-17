@@ -536,6 +536,69 @@ fn stale_coordinator_and_stale_dispatch_owner_fail_closed() {
 }
 
 #[test]
+fn previewed_lease_and_higher_profile_record_share_one_cas() {
+    let (machine, _) = machine_with_run();
+    let store = MemoryStore::new();
+    let mut current = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let mut stale = DurableCoordinator::open(store.clone()).expect("stale view opens");
+    let lease = current
+        .preview_lease("virtual-slot:worker-a:0", "worker:a", 10, 20)
+        .expect("lease previews");
+    let record = JournalRecord::new(
+        "virtual:claim:1",
+        "test.virtual/1",
+        json!({"claim": "work:1"}),
+    )
+    .expect("record creates");
+    let batch = JournalBatch {
+        journal_id: "journal:virtual".to_owned(),
+        records: vec![record],
+    };
+    current
+        .checkpoint_lease_journals(&lease, 10, 20, std::slice::from_ref(&batch))
+        .expect("lease and record checkpoint");
+    assert_eq!(
+        current.state().expect("state").leases["virtual-slot:worker-a:0"],
+        lease
+    );
+    assert_eq!(
+        current
+            .journal_records("journal:virtual")
+            .expect("journal reads")
+            .len(),
+        1
+    );
+
+    assert!(matches!(
+        stale.checkpoint_lease_journals(&lease, 10, 20, &[batch]),
+        Err(DurableError::Conflict { .. })
+    ));
+    assert!(stale.state().expect("stale state").leases.is_empty());
+    assert!(
+        stale
+            .journal_records("journal:virtual")
+            .expect("stale journal reads")
+            .is_empty()
+    );
+
+    let reopened = DurableCoordinator::open(store).expect("store reopens");
+    assert_eq!(
+        reopened.state().expect("state").leases["virtual-slot:worker-a:0"],
+        lease
+    );
+    assert_eq!(
+        reopened
+            .journal_records("journal:virtual")
+            .expect("journal reopens")
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn component_occurrence_is_exactly_once_by_content() {
     let (mut machine, _) = machine_with_run();
     let input = machine.put_artifact("example/component-input", b"in".to_vec());

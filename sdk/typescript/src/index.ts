@@ -72,6 +72,32 @@ export type WorkOccurrenceState =
   | "failed"
   | "cancelled";
 
+export interface WorkItem {
+  work_id: string;
+  region_id: string;
+  run_id: string;
+  payload: ArtifactRef;
+  capability: string | null;
+  priority: number;
+  cost: number;
+}
+
+export interface VirtualClaimLease {
+  resource: string;
+  owner: string;
+  epoch: number;
+  expires_at: number;
+}
+
+export interface ClaimedWork {
+  item: WorkItem;
+  owner: string;
+  epoch: number;
+  occurrence_id: string;
+  occurrence_binding: string;
+  lease: VirtualClaimLease;
+}
+
 export interface WorkOccurrence {
   occurrence_version: "cymule.virtual-work-occurrence/1";
   occurrence_id: string;
@@ -80,6 +106,7 @@ export interface WorkOccurrence {
   run_id: string;
   owner: string;
   epoch: number;
+  lease_epoch: number;
   occurrence_binding: string;
   state: WorkOccurrenceState;
   result: ArtifactRef | null;
@@ -100,6 +127,8 @@ export interface WorkResolutionCommand {
   work_id: string;
   owner: string;
   epoch: number;
+  expected_lease_epoch: number;
+  observed_at: number;
   resolution: WorkResolution;
 }
 
@@ -207,6 +236,67 @@ export interface VirtualRehydrationReceipt {
   restored_occurrence_ids: string[];
 }
 
+export interface VirtualClaimCommand {
+  control_version: "cymule.virtual-claim-control/1";
+  command_id: string;
+  owner: string;
+  slot_id: string;
+  occurrence_binding: string;
+  capabilities: string[];
+  logical_now: number;
+  lease_ttl: number;
+}
+
+export interface VirtualClaimReceipt {
+  command: VirtualClaimCommand;
+  claim: ClaimedWork | null;
+}
+
+export interface VirtualLeaseRenewalCommand {
+  control_version: "cymule.virtual-lease-renewal-control/1";
+  command_id: string;
+  work_id: string;
+  owner: string;
+  epoch: number;
+  expected_lease_epoch: number;
+  logical_now: number;
+  lease_ttl: number;
+}
+
+export interface VirtualLeaseRenewalReceipt {
+  command: VirtualLeaseRenewalCommand;
+  lease: VirtualClaimLease;
+}
+
+export interface VirtualRecoveryCommand {
+  control_version: "cymule.virtual-recovery-control/1";
+  command_id: string;
+  work_id: string;
+  expected_owner: string;
+  expected_epoch: number;
+  expected_lease_epoch: number;
+  observed_at: number;
+  resolution: Extract<WorkResolution, { resolution: "retry" | "failed" | "cancelled" }>;
+}
+
+export interface VirtualRecoveryReceipt {
+  command: VirtualRecoveryCommand;
+  occurrence: WorkOccurrence;
+}
+
+export interface VirtualRunWeightCommand {
+  control_version: "cymule.virtual-run-weight-control/1";
+  command_id: string;
+  run_id: string;
+  weight: number;
+}
+
+export interface VirtualRunWeightReceipt {
+  command: VirtualRunWeightCommand;
+  previous_weight: number;
+  current_weight: number;
+}
+
 export interface VirtualArchive {
   readonly binding: string;
   put(reference: ArtifactRef, bytes: Uint8Array): Promise<void>;
@@ -225,6 +315,13 @@ export interface VirtualWorkControl {
   migrate(command: RegionMigrationCommand): Promise<RegionMigrationReceipt>;
   compact(command: VirtualCompactionCommand): Promise<VirtualCompactionReceipt>;
   rehydrate(command: VirtualRehydrationCommand): Promise<VirtualRehydrationReceipt>;
+}
+
+export interface VirtualSchedulingControl {
+  claim(command: VirtualClaimCommand): Promise<VirtualClaimReceipt>;
+  renew(command: VirtualLeaseRenewalCommand): Promise<VirtualLeaseRenewalReceipt>;
+  recover(command: VirtualRecoveryCommand): Promise<VirtualRecoveryReceipt>;
+  setRunWeight(command: VirtualRunWeightCommand): Promise<VirtualRunWeightReceipt>;
 }
 
 export type Expression =
@@ -437,9 +534,11 @@ export class VirtualWorkControlBuilder {
     workId: string,
     owner: string,
     epoch: number,
+    expectedLeaseEpoch: number,
+    observedAt: number,
     result: ArtifactRef,
   ): WorkResolutionCommand {
-    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, {
+    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, expectedLeaseEpoch, observedAt, {
       resolution: "succeeded",
       result,
     });
@@ -450,10 +549,12 @@ export class VirtualWorkControlBuilder {
     workId: string,
     owner: string,
     epoch: number,
+    expectedLeaseEpoch: number,
+    observedAt: number,
     error: ArtifactRef,
     nextReason: ParkReason | null = null,
   ): WorkResolutionCommand {
-    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, {
+    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, expectedLeaseEpoch, observedAt, {
       resolution: "retry",
       error,
       next_reason: nextReason,
@@ -465,9 +566,11 @@ export class VirtualWorkControlBuilder {
     workId: string,
     owner: string,
     epoch: number,
+    expectedLeaseEpoch: number,
+    observedAt: number,
     reason: ParkReason,
   ): WorkResolutionCommand {
-    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, {
+    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, expectedLeaseEpoch, observedAt, {
       resolution: "parked",
       reason,
     });
@@ -478,9 +581,11 @@ export class VirtualWorkControlBuilder {
     workId: string,
     owner: string,
     epoch: number,
+    expectedLeaseEpoch: number,
+    observedAt: number,
     error: ArtifactRef,
   ): WorkResolutionCommand {
-    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, {
+    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, expectedLeaseEpoch, observedAt, {
       resolution: "failed",
       error,
     });
@@ -491,9 +596,11 @@ export class VirtualWorkControlBuilder {
     workId: string,
     owner: string,
     epoch: number,
+    expectedLeaseEpoch: number,
+    observedAt: number,
     reason: ArtifactRef,
   ): WorkResolutionCommand {
-    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, {
+    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, expectedLeaseEpoch, observedAt, {
       resolution: "cancelled",
       reason,
     });
@@ -559,10 +666,15 @@ export class VirtualWorkControlBuilder {
     workId: string,
     owner: string,
     epoch: number,
+    expectedLeaseEpoch: number,
+    observedAt: number,
     resolution: WorkResolution,
   ): WorkResolutionCommand {
-    if (commandId.length === 0 || workId.length === 0 || owner.length === 0 || epoch < 1) {
-      throw new Error("virtual work control requires command, work, owner, and positive epoch");
+    if (
+      commandId.length === 0 || workId.length === 0 || owner.length === 0 || epoch < 1 ||
+      expectedLeaseEpoch < 1 || observedAt < 0
+    ) {
+      throw new Error("virtual work control requires identities, work and lease fences, and logical time");
     }
     return {
       control_version: "cymule.virtual-work-control/1",
@@ -570,7 +682,119 @@ export class VirtualWorkControlBuilder {
       work_id: workId,
       owner,
       epoch,
+      expected_lease_epoch: expectedLeaseEpoch,
+      observed_at: observedAt,
       resolution,
+    };
+  }
+}
+
+export class VirtualSchedulingControlBuilder {
+  static claim(
+    commandId: string,
+    owner: string,
+    slotId: string,
+    occurrenceBinding: string,
+    capabilities: string[],
+    logicalNow: number,
+    leaseTtl: number,
+  ): VirtualClaimCommand {
+    const sortedCapabilities = [...new Set(capabilities)].sort();
+    if (
+      commandId.length === 0 ||
+      owner.length === 0 ||
+      slotId.length === 0 ||
+      occurrenceBinding.length === 0 ||
+      sortedCapabilities.some((capability) => capability.length === 0) ||
+      logicalNow < 0 ||
+      leaseTtl < 1
+    ) {
+      throw new Error("virtual claim requires identities, binding, logical time, and positive TTL");
+    }
+    return {
+      control_version: "cymule.virtual-claim-control/1",
+      command_id: commandId,
+      owner,
+      slot_id: slotId,
+      occurrence_binding: occurrenceBinding,
+      capabilities: sortedCapabilities,
+      logical_now: logicalNow,
+      lease_ttl: leaseTtl,
+    };
+  }
+
+  static renew(
+    commandId: string,
+    workId: string,
+    owner: string,
+    epoch: number,
+    expectedLeaseEpoch: number,
+    logicalNow: number,
+    leaseTtl: number,
+  ): VirtualLeaseRenewalCommand {
+    if (
+      commandId.length === 0 ||
+      workId.length === 0 ||
+      owner.length === 0 ||
+      epoch < 1 ||
+      expectedLeaseEpoch < 1 ||
+      logicalNow < 0 ||
+      leaseTtl < 1
+    ) {
+      throw new Error("virtual renewal requires identities, fences, logical time, and positive TTL");
+    }
+    return {
+      control_version: "cymule.virtual-lease-renewal-control/1",
+      command_id: commandId,
+      work_id: workId,
+      owner,
+      epoch,
+      expected_lease_epoch: expectedLeaseEpoch,
+      logical_now: logicalNow,
+      lease_ttl: leaseTtl,
+    };
+  }
+
+  static recovery(
+    commandId: string,
+    workId: string,
+    expectedOwner: string,
+    expectedEpoch: number,
+    expectedLeaseEpoch: number,
+    observedAt: number,
+    resolution: VirtualRecoveryCommand["resolution"],
+  ): VirtualRecoveryCommand {
+    if (
+      commandId.length === 0 ||
+      workId.length === 0 ||
+      expectedOwner.length === 0 ||
+      expectedEpoch < 1 ||
+      expectedLeaseEpoch < 1 ||
+      observedAt < 0
+    ) {
+      throw new Error("virtual recovery requires identities, fences, and logical observation time");
+    }
+    return {
+      control_version: "cymule.virtual-recovery-control/1",
+      command_id: commandId,
+      work_id: workId,
+      expected_owner: expectedOwner,
+      expected_epoch: expectedEpoch,
+      expected_lease_epoch: expectedLeaseEpoch,
+      observed_at: observedAt,
+      resolution,
+    };
+  }
+
+  static runWeight(commandId: string, runId: string, weight: number): VirtualRunWeightCommand {
+    if (commandId.length === 0 || runId.length === 0 || weight < 1) {
+      throw new Error("virtual Run weight requires command, Run, and positive weight");
+    }
+    return {
+      control_version: "cymule.virtual-run-weight-control/1",
+      command_id: commandId,
+      run_id: runId,
+      weight,
     };
   }
 }

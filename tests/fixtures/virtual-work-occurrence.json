@@ -6,6 +6,7 @@
   "run_id": "run:fixture",
   "owner": "worker:fixture",
   "epoch": 1,
+  "lease_epoch": 1,
   "occurrence_binding": "binding:worker/fixture@1",
   "state": "succeeded",
   "result": {

@@ -7,13 +7,17 @@ use crate::{
     ArchivedWorkIndex, ClaimedWork, CompactedWorkIndex, FrontierLimits, MaterializedPage,
     ParkReason, ParkedWork, RegionMigrationKind, RegionMigrationPlan, RegionMigrationReceipt,
     RegionMigrationRequest, SchedulingPolicy, VIRTUAL_ARCHIVE_MANIFEST_VERSION,
-    VIRTUAL_COMPACTION_CERTIFICATE_VERSION, VIRTUAL_COMPACTION_CONTROL_VERSION,
-    VIRTUAL_REGION_MIGRATION_VERSION, VIRTUAL_REHYDRATION_CONTROL_VERSION,
-    VIRTUAL_WORK_OCCURRENCE_VERSION, VirtualArchive, VirtualArchiveManifest,
-    VirtualCompactionCertificate, VirtualCompactionCommand, VirtualCompactionReceipt,
-    VirtualCompletionSummary, VirtualError, VirtualRegion, VirtualRehydrationCommand,
-    VirtualRehydrationReceipt, VirtualResult, VirtualSnapshot, WorkItem, WorkOccurrence,
-    WorkOccurrenceState, WorkResolution, virtual_archive_record,
+    VIRTUAL_CLAIM_CONTROL_VERSION, VIRTUAL_COMPACTION_CERTIFICATE_VERSION,
+    VIRTUAL_COMPACTION_CONTROL_VERSION, VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION,
+    VIRTUAL_RECOVERY_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_VERSION,
+    VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_RUN_WEIGHT_CONTROL_VERSION,
+    VIRTUAL_WORK_OCCURRENCE_VERSION, VirtualArchive, VirtualArchiveManifest, VirtualClaimCommand,
+    VirtualClaimLease, VirtualClaimReceipt, VirtualCompactionCertificate, VirtualCompactionCommand,
+    VirtualCompactionReceipt, VirtualCompletionSummary, VirtualError, VirtualLeaseRenewalCommand,
+    VirtualLeaseRenewalReceipt, VirtualRecoveryCommand, VirtualRecoveryReceipt, VirtualRegion,
+    VirtualRehydrationCommand, VirtualRehydrationReceipt, VirtualResult, VirtualRunWeightCommand,
+    VirtualRunWeightReceipt, VirtualSnapshot, WorkItem, WorkOccurrence, WorkOccurrenceState,
+    WorkResolution, virtual_archive_record,
 };
 
 /// Replaceable source of bounded pages for one virtual region.
@@ -96,6 +100,10 @@ impl VirtualScheduler {
                 compacted_work: BTreeMap::new(),
                 compacted_regions: BTreeMap::new(),
                 rehydration_receipts: BTreeMap::new(),
+                claim_receipts: BTreeMap::new(),
+                lease_renewal_receipts: BTreeMap::new(),
+                recovery_receipts: BTreeMap::new(),
+                run_weight_receipts: BTreeMap::new(),
             },
         })
     }
@@ -182,6 +190,56 @@ impl VirtualScheduler {
                 .or_insert(0);
         }
         Ok(())
+    }
+
+    /// Apply one idempotent future Run scheduling-weight update.
+    pub fn set_run_weight_command(
+        &mut self,
+        command: &VirtualRunWeightCommand,
+    ) -> VirtualResult<VirtualRunWeightReceipt> {
+        let before = self.snapshot.clone();
+        match self.set_run_weight_command_inner(command) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                self.snapshot = before;
+                Err(error)
+            }
+        }
+    }
+
+    fn set_run_weight_command_inner(
+        &mut self,
+        command: &VirtualRunWeightCommand,
+    ) -> VirtualResult<VirtualRunWeightReceipt> {
+        validate_run_weight_command(command)?;
+        if let Some(existing) = self.snapshot.run_weight_receipts.get(&command.command_id) {
+            if existing.command == *command {
+                return Ok(existing.clone());
+            }
+            return Err(VirtualError::Conflict(format!(
+                "virtual Run weight command {} was reused with different semantics",
+                command.command_id
+            )));
+        }
+        let previous_weight = self
+            .snapshot
+            .run_weights
+            .get(&command.run_id)
+            .copied()
+            .ok_or_else(|| {
+                VirtualError::NotFound(format!("Run {} has no virtual region", command.run_id))
+            })?;
+        self.set_run_weight(&command.run_id, command.weight)?;
+        let receipt = VirtualRunWeightReceipt {
+            command: command.clone(),
+            previous_weight,
+            current_weight: command.weight,
+        };
+        self.snapshot
+            .run_weight_receipts
+            .insert(command.command_id.clone(), receipt.clone());
+        self.validate_bounds()?;
+        Ok(receipt)
     }
 
     /// Ask one pinned adapter to plan an opaque cursor split or merge.
@@ -447,8 +505,26 @@ impl VirtualScheduler {
         occurrence_binding: &str,
         capabilities: &BTreeSet<String>,
     ) -> VirtualResult<Option<ClaimedWork>> {
+        let sequence = self.snapshot.dispatch_sequence.saturating_add(1);
+        let lease = VirtualClaimLease {
+            resource: format!("embedded-slot:{owner}:{sequence}"),
+            owner: owner.to_owned(),
+            epoch: 1,
+            expires_at: u64::MAX,
+        };
+        self.claim_with_lease(owner, occurrence_binding, capabilities, &lease)
+    }
+
+    /// Claim one item under an externally coordinated capacity-slot lease.
+    pub fn claim_with_lease(
+        &mut self,
+        owner: &str,
+        occurrence_binding: &str,
+        capabilities: &BTreeSet<String>,
+        lease: &VirtualClaimLease,
+    ) -> VirtualResult<Option<ClaimedWork>> {
         let before = self.snapshot.clone();
-        match self.claim_inner(owner, occurrence_binding, capabilities) {
+        match self.claim_inner(owner, occurrence_binding, capabilities, lease) {
             Ok(claim) => Ok(claim),
             Err(error) => {
                 self.snapshot = before;
@@ -462,11 +538,29 @@ impl VirtualScheduler {
         owner: &str,
         occurrence_binding: &str,
         capabilities: &BTreeSet<String>,
+        lease: &VirtualClaimLease,
     ) -> VirtualResult<Option<ClaimedWork>> {
-        if owner.is_empty() || occurrence_binding.is_empty() {
+        if owner.is_empty()
+            || occurrence_binding.is_empty()
+            || lease.resource.is_empty()
+            || lease.owner != owner
+            || lease.epoch == 0
+        {
             return Err(VirtualError::Validation(
-                "claim owner and occurrence binding must not be empty".to_owned(),
+                "claim owner, occurrence binding, and fenced capacity-slot lease are required"
+                    .to_owned(),
             ));
+        }
+        if self
+            .snapshot
+            .active
+            .values()
+            .any(|claim| claim.lease.resource == lease.resource)
+        {
+            return Err(VirtualError::Conflict(format!(
+                "capacity slot {} already has active work",
+                lease.resource
+            )));
         }
         if self.snapshot.active.len() >= self.limits.max_active {
             return Ok(None);
@@ -541,6 +635,7 @@ impl VirtualScheduler {
             epoch: *epoch,
             occurrence_id: occurrence_id.clone(),
             occurrence_binding: occurrence_binding.to_owned(),
+            lease: lease.clone(),
         };
         let occurrence = WorkOccurrence {
             occurrence_version: VIRTUAL_WORK_OCCURRENCE_VERSION.to_owned(),
@@ -550,6 +645,7 @@ impl VirtualScheduler {
             run_id: item.run_id,
             owner: owner.to_owned(),
             epoch: *epoch,
+            lease_epoch: lease.epoch,
             occurrence_binding: occurrence_binding.to_owned(),
             state: WorkOccurrenceState::Running,
             result: None,
@@ -574,6 +670,207 @@ impl VirtualScheduler {
         Ok(Some(claim))
     }
 
+    /// Apply one idempotent worker-slot claim command.
+    pub fn claim_command(
+        &mut self,
+        command: &VirtualClaimCommand,
+        lease: &VirtualClaimLease,
+    ) -> VirtualResult<VirtualClaimReceipt> {
+        let before = self.snapshot.clone();
+        match self.claim_command_inner(command, lease) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                self.snapshot = before;
+                Err(error)
+            }
+        }
+    }
+
+    fn claim_command_inner(
+        &mut self,
+        command: &VirtualClaimCommand,
+        lease: &VirtualClaimLease,
+    ) -> VirtualResult<VirtualClaimReceipt> {
+        validate_claim_command(command)?;
+        if let Some(existing) = self.snapshot.claim_receipts.get(&command.command_id) {
+            if existing.command == *command {
+                return Ok(existing.clone());
+            }
+            return Err(VirtualError::Conflict(format!(
+                "virtual claim command {} was reused with different semantics",
+                command.command_id
+            )));
+        }
+        let expected_expiry = lease_expiry(command.logical_now, command.lease_ttl)?;
+        if lease.resource != command.slot_id
+            || lease.owner != command.owner
+            || lease.expires_at != expected_expiry
+        {
+            return Err(VirtualError::Validation(
+                "claim lease does not match command slot, owner, or logical expiry".to_owned(),
+            ));
+        }
+        let claim = self.claim_inner(
+            &command.owner,
+            &command.occurrence_binding,
+            &command.capabilities,
+            lease,
+        )?;
+        let receipt = VirtualClaimReceipt {
+            command: command.clone(),
+            claim,
+        };
+        self.snapshot
+            .claim_receipts
+            .insert(command.command_id.clone(), receipt.clone());
+        self.validate_bounds()?;
+        Ok(receipt)
+    }
+
+    /// Renew one active claim under an exact later capacity-slot lease epoch.
+    pub fn renew_claim(
+        &mut self,
+        command: &VirtualLeaseRenewalCommand,
+        lease: &VirtualClaimLease,
+    ) -> VirtualResult<VirtualLeaseRenewalReceipt> {
+        let before = self.snapshot.clone();
+        match self.renew_claim_inner(command, lease) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                self.snapshot = before;
+                Err(error)
+            }
+        }
+    }
+
+    fn renew_claim_inner(
+        &mut self,
+        command: &VirtualLeaseRenewalCommand,
+        lease: &VirtualClaimLease,
+    ) -> VirtualResult<VirtualLeaseRenewalReceipt> {
+        validate_lease_renewal_command(command)?;
+        if let Some(existing) = self
+            .snapshot
+            .lease_renewal_receipts
+            .get(&command.command_id)
+        {
+            if existing.command == *command {
+                return Ok(existing.clone());
+            }
+            return Err(VirtualError::Conflict(format!(
+                "virtual lease renewal command {} was reused with different semantics",
+                command.command_id
+            )));
+        }
+        let claim = self
+            .snapshot
+            .active
+            .get_mut(&command.work_id)
+            .ok_or_else(|| {
+                VirtualError::NotFound(format!("active work {} is missing", command.work_id))
+            })?;
+        let next_lease_epoch = command.expected_lease_epoch.checked_add(1).ok_or_else(|| {
+            VirtualError::Validation(format!(
+                "capacity slot for {} exhausted its fencing epoch",
+                command.work_id
+            ))
+        })?;
+        let expected_expiry = lease_expiry(command.logical_now, command.lease_ttl)?;
+        if claim.owner != command.owner
+            || claim.epoch != command.epoch
+            || claim.lease.epoch != command.expected_lease_epoch
+            || lease.resource != claim.lease.resource
+            || lease.owner != claim.owner
+            || lease.epoch != next_lease_epoch
+            || lease.expires_at != expected_expiry
+        {
+            return Err(VirtualError::Conflict(format!(
+                "stale lease renewal for {}",
+                command.work_id
+            )));
+        }
+        claim.lease = lease.clone();
+        let occurrence_id = claim.occurrence_id.clone();
+        self.snapshot
+            .occurrences
+            .get_mut(&occurrence_id)
+            .expect("active claim occurrence exists")
+            .lease_epoch = lease.epoch;
+        let receipt = VirtualLeaseRenewalReceipt {
+            command: command.clone(),
+            lease: lease.clone(),
+        };
+        self.snapshot
+            .lease_renewal_receipts
+            .insert(command.command_id.clone(), receipt.clone());
+        self.validate_bounds()?;
+        Ok(receipt)
+    }
+
+    /// Apply one explicit retry, failure, or cancellation after lease expiry.
+    pub fn recover_expired(
+        &mut self,
+        command: &VirtualRecoveryCommand,
+    ) -> VirtualResult<VirtualRecoveryReceipt> {
+        let before = self.snapshot.clone();
+        match self.recover_expired_inner(command) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                self.snapshot = before;
+                Err(error)
+            }
+        }
+    }
+
+    fn recover_expired_inner(
+        &mut self,
+        command: &VirtualRecoveryCommand,
+    ) -> VirtualResult<VirtualRecoveryReceipt> {
+        validate_recovery_command(command)?;
+        if let Some(existing) = self.snapshot.recovery_receipts.get(&command.command_id) {
+            if existing.command == *command {
+                return Ok(existing.clone());
+            }
+            return Err(VirtualError::Conflict(format!(
+                "virtual recovery command {} was reused with different semantics",
+                command.command_id
+            )));
+        }
+        let claim = self.snapshot.active.get(&command.work_id).ok_or_else(|| {
+            VirtualError::NotFound(format!("active work {} is missing", command.work_id))
+        })?;
+        if claim.owner != command.expected_owner
+            || claim.epoch != command.expected_epoch
+            || claim.lease.epoch != command.expected_lease_epoch
+            || claim.lease.expires_at > command.observed_at
+        {
+            return Err(VirtualError::Conflict(format!(
+                "claim {} is not expired under the expected fence",
+                command.work_id
+            )));
+        }
+        let occurrence = self.resolve_inner(
+            ResolutionFence {
+                work_id: &command.work_id,
+                owner: &command.expected_owner,
+                work_epoch: command.expected_epoch,
+                lease_epoch: command.expected_lease_epoch,
+                observed_at: command.observed_at,
+                require_unexpired: false,
+            },
+            &command.resolution,
+        )?;
+        let receipt = VirtualRecoveryReceipt {
+            command: command.clone(),
+            occurrence,
+        };
+        self.snapshot
+            .recovery_receipts
+            .insert(command.command_id.clone(), receipt.clone());
+        self.validate_bounds()?;
+        Ok(receipt)
+    }
+
     /// Resolve exactly one fenced active occurrence.
     pub fn resolve(
         &mut self,
@@ -582,8 +879,40 @@ impl VirtualScheduler {
         epoch: u64,
         resolution: &WorkResolution,
     ) -> VirtualResult<WorkOccurrence> {
+        let occurrence_id = work_occurrence_id(work_id, epoch)?;
+        let lease_epoch = self
+            .snapshot
+            .occurrences
+            .get(&occurrence_id)
+            .ok_or_else(|| {
+                VirtualError::NotFound(format!("work occurrence {occurrence_id} is missing"))
+            })?
+            .lease_epoch;
+        self.resolve_fenced(work_id, owner, epoch, lease_epoch, 0, resolution)
+    }
+
+    /// Resolve one active occurrence under exact work and capacity-slot fences.
+    pub fn resolve_fenced(
+        &mut self,
+        work_id: &str,
+        owner: &str,
+        epoch: u64,
+        expected_lease_epoch: u64,
+        observed_at: u64,
+        resolution: &WorkResolution,
+    ) -> VirtualResult<WorkOccurrence> {
         let before = self.snapshot.clone();
-        match self.resolve_inner(work_id, owner, epoch, resolution) {
+        match self.resolve_inner(
+            ResolutionFence {
+                work_id,
+                owner,
+                work_epoch: epoch,
+                lease_epoch: expected_lease_epoch,
+                observed_at,
+                require_unexpired: true,
+            },
+            resolution,
+        ) {
             Ok(occurrence) => Ok(occurrence),
             Err(error) => {
                 self.snapshot = before;
@@ -616,13 +945,11 @@ impl VirtualScheduler {
 
     fn resolve_inner(
         &mut self,
-        work_id: &str,
-        owner: &str,
-        epoch: u64,
+        fence: ResolutionFence<'_>,
         resolution: &WorkResolution,
     ) -> VirtualResult<WorkOccurrence> {
         validate_resolution(resolution)?;
-        let occurrence_id = work_occurrence_id(work_id, epoch)?;
+        let occurrence_id = work_occurrence_id(fence.work_id, fence.work_epoch)?;
         let existing = self
             .snapshot
             .occurrences
@@ -631,9 +958,14 @@ impl VirtualScheduler {
                 VirtualError::NotFound(format!("work occurrence {occurrence_id} is missing"))
             })?
             .clone();
-        if existing.owner != owner || existing.work_id != work_id || existing.epoch != epoch {
+        if existing.owner != fence.owner
+            || existing.work_id != fence.work_id
+            || existing.epoch != fence.work_epoch
+            || existing.lease_epoch != fence.lease_epoch
+        {
             return Err(VirtualError::Conflict(format!(
-                "stale resolution for {work_id}"
+                "stale resolution for {}",
+                fence.work_id
             )));
         }
         if existing.state != WorkOccurrenceState::Running {
@@ -644,17 +976,19 @@ impl VirtualScheduler {
                 "work occurrence {occurrence_id} already has a different disposition"
             )));
         }
-        let claim =
-            self.snapshot.active.get(work_id).ok_or_else(|| {
-                VirtualError::NotFound(format!("active work {work_id} is missing"))
-            })?;
-        if claim.owner != owner
-            || claim.epoch != epoch
+        let claim = self.snapshot.active.get(fence.work_id).ok_or_else(|| {
+            VirtualError::NotFound(format!("active work {} is missing", fence.work_id))
+        })?;
+        if claim.owner != fence.owner
+            || claim.epoch != fence.work_epoch
             || claim.occurrence_id != occurrence_id
             || claim.occurrence_binding != existing.occurrence_binding
+            || claim.lease.epoch != fence.lease_epoch
+            || (fence.require_unexpired && fence.observed_at >= claim.lease.expires_at)
         {
             return Err(VirtualError::Conflict(format!(
-                "stale resolution for {work_id}"
+                "stale resolution for {}",
+                fence.work_id
             )));
         }
         let item = claim.item.clone();
@@ -682,7 +1016,7 @@ impl VirtualScheduler {
                 resolved.error = Some(reason.clone());
             }
         }
-        self.snapshot.active.remove(work_id);
+        self.snapshot.active.remove(fence.work_id);
         self.snapshot
             .occurrences
             .insert(occurrence_id, resolved.clone());
@@ -751,6 +1085,11 @@ impl VirtualScheduler {
     /// Query one binding-pinned attempt occurrence by stable identity.
     pub fn occurrence(&self, occurrence_id: &str) -> Option<&WorkOccurrence> {
         self.snapshot.occurrences.get(occurrence_id)
+    }
+
+    /// Query one currently active fenced claim by logical work identity.
+    pub fn active_claim(&self, work_id: &str) -> Option<&ClaimedWork> {
+        self.snapshot.active.get(work_id)
     }
 
     /// Move one completed region's exact occurrence history into a replaceable
@@ -1193,6 +1532,7 @@ impl VirtualScheduler {
             }
         }
         self.validate_compaction_state()?;
+        self.validate_scheduling_control_state()?;
         if self.materialized_count() > self.limits.max_materialized {
             return Err(VirtualError::Validation(
                 "snapshot exceeds max_materialized".to_owned(),
@@ -1206,6 +1546,7 @@ impl VirtualScheduler {
         let mut materialized = BTreeSet::new();
         let mut ready_ids = BTreeSet::new();
         let mut active_per_run = BTreeMap::<String, usize>::new();
+        let mut active_slots = BTreeSet::new();
         for (run_id, queue) in &self.snapshot.ready {
             for item in queue {
                 if &item.run_id != run_id {
@@ -1224,6 +1565,9 @@ impl VirtualScheduler {
                 || claim.epoch == 0
                 || claim.occurrence_id.is_empty()
                 || claim.occurrence_binding.is_empty()
+                || validate_claim_lease(&claim.lease).is_err()
+                || claim.lease.owner != claim.owner
+                || !active_slots.insert(claim.lease.resource.clone())
             {
                 return Err(VirtualError::Validation(format!(
                     "active claim {work_id} is malformed"
@@ -1250,6 +1594,7 @@ impl VirtualScheduler {
                 || occurrence.work_id != *work_id
                 || occurrence.owner != claim.owner
                 || occurrence.epoch != claim.epoch
+                || occurrence.lease_epoch != claim.lease.epoch
                 || occurrence.occurrence_binding != claim.occurrence_binding
             {
                 return Err(VirtualError::Validation(format!(
@@ -1382,6 +1727,138 @@ impl VirtualScheduler {
                         "terminal work {work_id} remains materialized"
                     )));
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_scheduling_control_state(&self) -> VirtualResult<()> {
+        for (command_id, receipt) in &self.snapshot.claim_receipts {
+            validate_claim_command(&receipt.command)?;
+            if receipt.command.command_id != *command_id {
+                return Err(VirtualError::Validation(format!(
+                    "virtual claim receipt {command_id} is stored under the wrong identity"
+                )));
+            }
+            if let Some(claim) = &receipt.claim {
+                validate_claim_lease(&claim.lease)?;
+                let expected_expiry =
+                    lease_expiry(receipt.command.logical_now, receipt.command.lease_ttl)?;
+                if claim.owner != receipt.command.owner
+                    || claim.occurrence_binding != receipt.command.occurrence_binding
+                    || claim.lease.resource != receipt.command.slot_id
+                    || claim.lease.owner != receipt.command.owner
+                    || claim.lease.expires_at != expected_expiry
+                    || self
+                        .snapshot
+                        .claim_epochs
+                        .get(&claim.item.work_id)
+                        .is_none_or(|epoch| *epoch < claim.epoch)
+                    || !self.snapshot.known.contains(&claim.item.work_id)
+                {
+                    return Err(VirtualError::Validation(format!(
+                        "virtual claim receipt {command_id} is inconsistent"
+                    )));
+                }
+                let region = self
+                    .snapshot
+                    .regions
+                    .get(&claim.item.region_id)
+                    .ok_or_else(|| {
+                        VirtualError::Validation(format!(
+                            "virtual claim receipt {command_id} references a missing region"
+                        ))
+                    })?;
+                validate_work_item(&claim.item, region)?;
+                let occurrence_is_retained = self
+                    .snapshot
+                    .occurrences
+                    .get(&claim.occurrence_id)
+                    .is_some_and(|occurrence| {
+                        occurrence.work_id == claim.item.work_id
+                            && occurrence.epoch == claim.epoch
+                            && occurrence.owner == claim.owner
+                            && occurrence.occurrence_binding == claim.occurrence_binding
+                    });
+                let occurrence_is_compacted = self
+                    .snapshot
+                    .compacted_work
+                    .get(&claim.item.work_id)
+                    .is_some_and(|index| index.max_epoch >= claim.epoch);
+                if !occurrence_is_retained && !occurrence_is_compacted {
+                    return Err(VirtualError::Validation(format!(
+                        "virtual claim receipt {command_id} has no retained occurrence evidence"
+                    )));
+                }
+            }
+        }
+        for (command_id, receipt) in &self.snapshot.lease_renewal_receipts {
+            validate_lease_renewal_command(&receipt.command)?;
+            validate_claim_lease(&receipt.lease)?;
+            let Some(expected_epoch) = receipt.command.expected_lease_epoch.checked_add(1) else {
+                return Err(VirtualError::Validation(format!(
+                    "virtual lease renewal receipt {command_id} exhausted its fencing epoch"
+                )));
+            };
+            let expected_expiry =
+                lease_expiry(receipt.command.logical_now, receipt.command.lease_ttl)?;
+            if receipt.command.command_id != *command_id
+                || receipt.lease.owner != receipt.command.owner
+                || receipt.lease.epoch != expected_epoch
+                || receipt.lease.expires_at != expected_expiry
+                || self
+                    .snapshot
+                    .claim_epochs
+                    .get(&receipt.command.work_id)
+                    .is_none_or(|epoch| *epoch < receipt.command.epoch)
+            {
+                return Err(VirtualError::Validation(format!(
+                    "virtual lease renewal receipt {command_id} is inconsistent"
+                )));
+            }
+        }
+        for (command_id, receipt) in &self.snapshot.recovery_receipts {
+            validate_recovery_command(&receipt.command)?;
+            if receipt.command.command_id != *command_id
+                || receipt.occurrence.work_id != receipt.command.work_id
+                || receipt.occurrence.owner != receipt.command.expected_owner
+                || receipt.occurrence.epoch != receipt.command.expected_epoch
+                || receipt.occurrence.lease_epoch != receipt.command.expected_lease_epoch
+                || !occurrence_matches_resolution(&receipt.occurrence, &receipt.command.resolution)
+            {
+                return Err(VirtualError::Validation(format!(
+                    "virtual recovery receipt {command_id} is inconsistent"
+                )));
+            }
+            let occurrence_is_retained = self
+                .snapshot
+                .occurrences
+                .get(&receipt.occurrence.occurrence_id)
+                == Some(&receipt.occurrence);
+            let occurrence_is_compacted = self
+                .snapshot
+                .compacted_work
+                .get(&receipt.command.work_id)
+                .is_some_and(|index| index.max_epoch >= receipt.command.expected_epoch);
+            if !occurrence_is_retained && !occurrence_is_compacted {
+                return Err(VirtualError::Validation(format!(
+                    "virtual recovery receipt {command_id} has no retained occurrence evidence"
+                )));
+            }
+        }
+        for (command_id, receipt) in &self.snapshot.run_weight_receipts {
+            validate_run_weight_command(&receipt.command)?;
+            if receipt.command.command_id != *command_id
+                || receipt.previous_weight == 0
+                || receipt.current_weight != receipt.command.weight
+                || !self
+                    .snapshot
+                    .run_weights
+                    .contains_key(&receipt.command.run_id)
+            {
+                return Err(VirtualError::Validation(format!(
+                    "virtual Run weight receipt {command_id} is inconsistent"
+                )));
             }
         }
         Ok(())
@@ -1524,6 +2001,16 @@ impl VirtualScheduler {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ResolutionFence<'a> {
+    work_id: &'a str,
+    owner: &'a str,
+    work_epoch: u64,
+    lease_epoch: u64,
+    observed_at: u64,
+    require_unexpired: bool,
+}
+
 struct RunCandidate {
     run_id: String,
     item_index: usize,
@@ -1542,6 +2029,90 @@ fn validate_scheduling_policy(policy: SchedulingPolicy) -> VirtualResult<()> {
     if policy.base_quantum == 0 || policy.aging_interval == 0 {
         return Err(VirtualError::Validation(
             "scheduling quantum and aging interval must be positive".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_claim_lease(lease: &VirtualClaimLease) -> VirtualResult<()> {
+    if lease.resource.is_empty() || lease.owner.is_empty() || lease.epoch == 0 {
+        return Err(VirtualError::Validation(
+            "claim lease resource, owner, and positive epoch are required".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn lease_expiry(logical_now: u64, lease_ttl: u64) -> VirtualResult<u64> {
+    logical_now.checked_add(lease_ttl).ok_or_else(|| {
+        VirtualError::Validation("claim lease expiry exceeds logical time range".to_owned())
+    })
+}
+
+fn validate_claim_command(command: &VirtualClaimCommand) -> VirtualResult<()> {
+    if command.control_version != VIRTUAL_CLAIM_CONTROL_VERSION
+        || command.command_id.is_empty()
+        || command.owner.is_empty()
+        || command.slot_id.is_empty()
+        || command.occurrence_binding.is_empty()
+        || command.capabilities.iter().any(String::is_empty)
+        || command.lease_ttl == 0
+    {
+        return Err(VirtualError::Validation(
+            "claim command version, identities, capabilities, binding, and positive TTL are required"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_lease_renewal_command(command: &VirtualLeaseRenewalCommand) -> VirtualResult<()> {
+    if command.control_version != VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION
+        || command.command_id.is_empty()
+        || command.work_id.is_empty()
+        || command.owner.is_empty()
+        || command.epoch == 0
+        || command.expected_lease_epoch == 0
+        || command.lease_ttl == 0
+    {
+        return Err(VirtualError::Validation(
+            "lease renewal version, identities, work/lease epochs, and positive TTL are required"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_recovery_command(command: &VirtualRecoveryCommand) -> VirtualResult<()> {
+    if command.control_version != VIRTUAL_RECOVERY_CONTROL_VERSION
+        || command.command_id.is_empty()
+        || command.work_id.is_empty()
+        || command.expected_owner.is_empty()
+        || command.expected_epoch == 0
+        || command.expected_lease_epoch == 0
+        || !matches!(
+            command.resolution,
+            WorkResolution::Retry { .. }
+                | WorkResolution::Failed { .. }
+                | WorkResolution::Cancelled { .. }
+        )
+    {
+        return Err(VirtualError::Validation(
+            "recovery version, identities, fences, and retry/fail/cancel disposition are required"
+                .to_owned(),
+        ));
+    }
+    validate_resolution(&command.resolution)
+}
+
+fn validate_run_weight_command(command: &VirtualRunWeightCommand) -> VirtualResult<()> {
+    if command.control_version != VIRTUAL_RUN_WEIGHT_CONTROL_VERSION
+        || command.command_id.is_empty()
+        || command.run_id.is_empty()
+        || command.weight == 0
+    {
+        return Err(VirtualError::Validation(
+            "Run weight command version, identities, and positive weight are required".to_owned(),
         ));
     }
     Ok(())
@@ -1840,6 +2411,7 @@ fn validate_occurrence(occurrence_id: &str, occurrence: &WorkOccurrence) -> Virt
         || occurrence.run_id.is_empty()
         || occurrence.owner.is_empty()
         || occurrence.epoch == 0
+        || occurrence.lease_epoch == 0
         || occurrence.occurrence_binding.is_empty()
     {
         return Err(VirtualError::Validation(format!(

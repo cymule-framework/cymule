@@ -115,6 +115,12 @@ counter value, reopen from durable state and assert that the transition is
 either wholly absent or wholly committed; ambiguous external effects remain
 `unknown` and are reconciled, never redispatched as a new intent.
 
+Multi-worker M3 sweeps the authority windows separately: before claim CAS,
+after claim commit before receipt, renewal versus expiry, normal result at
+expiry, recovery CAS, recovery receipt loss, and late output after takeover.
+Integrity probes compare both the M1 lease map and M3 journal/snapshot; a green
+scheduler-only assertion cannot prove atomic ownership.
+
 Fault adapters belong in test support or behind existing substrate interfaces.
 Do not add test-only branches to the semantic reducer. Do not use wall-clock
 races as correctness evidence when an explicit barrier, counter, epoch, or CAS

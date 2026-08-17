@@ -20,6 +20,14 @@ pub const VIRTUAL_COMPACTION_CERTIFICATE_VERSION: &str = "cymule.virtual-compact
 pub const VIRTUAL_COMPACTION_CONTROL_VERSION: &str = "cymule.virtual-compaction-control/1";
 /// Idempotent partial rehydration command version.
 pub const VIRTUAL_REHYDRATION_CONTROL_VERSION: &str = "cymule.virtual-rehydration-control/1";
+/// Idempotent worker-slot claim command version.
+pub const VIRTUAL_CLAIM_CONTROL_VERSION: &str = "cymule.virtual-claim-control/1";
+/// Idempotent active-claim lease renewal command version.
+pub const VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION: &str = "cymule.virtual-lease-renewal-control/1";
+/// Idempotent expired-claim recovery command version.
+pub const VIRTUAL_RECOVERY_CONTROL_VERSION: &str = "cymule.virtual-recovery-control/1";
+/// Idempotent future Run scheduling-weight update command version.
+pub const VIRTUAL_RUN_WEIGHT_CONTROL_VERSION: &str = "cymule.virtual-run-weight-control/1";
 
 /// Opaque provider-neutral durable cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +130,20 @@ pub struct ParkedWork {
 /// Fenced active claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct VirtualClaimLease {
+    /// Stable worker capacity-slot resource.
+    pub resource: String,
+    /// Current lease holder.
+    pub owner: String,
+    /// Monotone fencing epoch for the capacity slot.
+    pub epoch: u64,
+    /// Logical expiry supplied by a Clock substrate.
+    pub expires_at: u64,
+}
+
+/// Fenced active claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClaimedWork {
     /// Work item.
     pub item: WorkItem,
@@ -133,6 +155,8 @@ pub struct ClaimedWork {
     pub occurrence_id: String,
     /// Immutable implementation binding selected before claim admission.
     pub occurrence_binding: String,
+    /// Current fenced worker capacity-slot lease.
+    pub lease: VirtualClaimLease,
 }
 
 /// Lifecycle of one binding-pinned work attempt occurrence.
@@ -171,6 +195,8 @@ pub struct WorkOccurrence {
     pub owner: String,
     /// Monotone per-work claim epoch.
     pub epoch: u64,
+    /// Current or terminal capacity-slot lease fence for this attempt.
+    pub lease_epoch: u64,
     /// Immutable execution binding selected before the claim was published.
     pub occurrence_binding: String,
     /// Current occurrence lifecycle.
@@ -230,8 +256,134 @@ pub struct WorkResolutionCommand {
     pub owner: String,
     /// Expected current claim epoch.
     pub epoch: u64,
+    /// Expected current capacity-slot lease epoch.
+    pub expected_lease_epoch: u64,
+    /// Logical observation time supplied by the runtime Clock substrate.
+    pub observed_at: u64,
     /// Proposed terminal, retry, park, or cancellation disposition.
     pub resolution: WorkResolution,
+}
+
+/// Idempotent request to claim at most one work item through a capacity slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualClaimCommand {
+    /// Control schema and semantic version.
+    pub control_version: String,
+    /// Stable caller-generated command identity.
+    pub command_id: String,
+    /// Stable worker identity.
+    pub owner: String,
+    /// Stable capacity-slot resource owned by the worker substrate.
+    pub slot_id: String,
+    /// Immutable implementation binding selected for a new occurrence.
+    pub occurrence_binding: String,
+    /// Worker capabilities used for deterministic selection.
+    pub capabilities: BTreeSet<String>,
+    /// Logical time supplied by a Clock substrate.
+    pub logical_now: u64,
+    /// Positive logical lease duration.
+    pub lease_ttl: u64,
+}
+
+/// Durable result of one worker-slot claim command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualClaimReceipt {
+    /// Exact admitted command.
+    pub command: VirtualClaimCommand,
+    /// Claimed work, or a durable observation that no work was eligible.
+    pub claim: Option<ClaimedWork>,
+}
+
+/// Idempotent request to extend one active claim under a later slot epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualLeaseRenewalCommand {
+    /// Control schema and semantic version.
+    pub control_version: String,
+    /// Stable caller-generated command identity.
+    pub command_id: String,
+    /// Logical work identity.
+    pub work_id: String,
+    /// Expected active owner.
+    pub owner: String,
+    /// Expected work occurrence epoch.
+    pub epoch: u64,
+    /// Expected current capacity-slot lease epoch.
+    pub expected_lease_epoch: u64,
+    /// Logical time supplied by a Clock substrate.
+    pub logical_now: u64,
+    /// Positive logical lease duration.
+    pub lease_ttl: u64,
+}
+
+/// Durable result of one active-claim lease renewal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualLeaseRenewalReceipt {
+    /// Exact admitted command.
+    pub command: VirtualLeaseRenewalCommand,
+    /// New fenced lease retained by the active claim.
+    pub lease: VirtualClaimLease,
+}
+
+/// Idempotent recovery decision for an expired active claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualRecoveryCommand {
+    /// Control schema and semantic version.
+    pub control_version: String,
+    /// Stable caller-generated command identity.
+    pub command_id: String,
+    /// Logical work identity.
+    pub work_id: String,
+    /// Expected failed/stale worker owner.
+    pub expected_owner: String,
+    /// Expected work occurrence epoch.
+    pub expected_epoch: u64,
+    /// Expected expired capacity-slot lease epoch.
+    pub expected_lease_epoch: u64,
+    /// Logical observation time proving expiry.
+    pub observed_at: u64,
+    /// Explicit retry, terminal failure, or cancellation decision.
+    pub resolution: WorkResolution,
+}
+
+/// Durable result of one expired-claim recovery decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualRecoveryReceipt {
+    /// Exact admitted command.
+    pub command: VirtualRecoveryCommand,
+    /// Original occurrence after its recovery disposition.
+    pub occurrence: WorkOccurrence,
+}
+
+/// Idempotent update to one Run's future weighted scheduling share.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualRunWeightCommand {
+    /// Control schema and semantic version.
+    pub control_version: String,
+    /// Stable caller-generated command identity.
+    pub command_id: String,
+    /// Registered Run whose future share changes.
+    pub run_id: String,
+    /// Positive integer future scheduling weight.
+    pub weight: u32,
+}
+
+/// Durable receipt for one Run scheduling-weight update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualRunWeightReceipt {
+    /// Exact admitted command.
+    pub command: VirtualRunWeightCommand,
+    /// Previous positive Run weight.
+    pub previous_weight: u32,
+    /// New positive Run weight.
+    pub current_weight: u32,
 }
 
 /// Closed virtual-region topology migration kind.
@@ -560,4 +712,16 @@ pub struct VirtualSnapshot {
     /// Partial rehydration command receipts keyed by idempotency identity.
     #[serde(default)]
     pub rehydration_receipts: BTreeMap<String, VirtualRehydrationReceipt>,
+    /// Worker-slot claim receipts keyed by idempotency identity.
+    #[serde(default)]
+    pub claim_receipts: BTreeMap<String, VirtualClaimReceipt>,
+    /// Active-claim lease renewal receipts keyed by idempotency identity.
+    #[serde(default)]
+    pub lease_renewal_receipts: BTreeMap<String, VirtualLeaseRenewalReceipt>,
+    /// Expired-claim recovery receipts keyed by idempotency identity.
+    #[serde(default)]
+    pub recovery_receipts: BTreeMap<String, VirtualRecoveryReceipt>,
+    /// Run scheduling-weight update receipts keyed by idempotency identity.
+    #[serde(default)]
+    pub run_weight_receipts: BTreeMap<String, VirtualRunWeightReceipt>,
 }

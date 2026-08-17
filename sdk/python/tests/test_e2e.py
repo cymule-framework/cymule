@@ -10,6 +10,7 @@ from cymule import (
     CliEngine,
     FlowBuilder,
     ResourceBuilder,
+    VirtualSchedulingControlBuilder,
     VirtualWorkControlBuilder,
     WaitActivationBuilder,
 )
@@ -104,6 +105,8 @@ class EndToEndTest(unittest.TestCase):
             "work:fixture",
             "worker:fixture",
             1,
+            1,
+            101,
             {
                 "artifact_id": (
                     "sha256:abcdef0123456789abcdef0123456789"
@@ -150,6 +153,64 @@ class EndToEndTest(unittest.TestCase):
                         "0123456789abcdef0123456789abcdef"
                     ),
                     [occurrence["occurrence_id"]],
+                ),
+                json.load(source),
+            )
+        claim_path = os.environ.get("CYMULE_VIRTUAL_CLAIM_FIXTURE")
+        renewal_path = os.environ.get("CYMULE_VIRTUAL_LEASE_RENEWAL_FIXTURE")
+        recovery_path = os.environ.get("CYMULE_VIRTUAL_RECOVERY_FIXTURE")
+        run_weight_path = os.environ.get("CYMULE_VIRTUAL_RUN_WEIGHT_FIXTURE")
+        if (
+            claim_path is None
+            or renewal_path is None
+            or recovery_path is None
+            or run_weight_path is None
+        ):
+            self.skipTest("virtual scheduling SDK conformance is not configured")
+        with open(claim_path, encoding="utf-8") as source:
+            self.assertEqual(
+                VirtualSchedulingControlBuilder.claim(
+                    "command:claim:fixture",
+                    "worker:fixture",
+                    "slot:worker-fixture:0",
+                    "binding:worker/fixture@1",
+                    ["sandbox", "cpu", "cpu"],
+                    100,
+                    30,
+                ),
+                json.load(source),
+            )
+        with open(renewal_path, encoding="utf-8") as source:
+            self.assertEqual(
+                VirtualSchedulingControlBuilder.renew(
+                    "command:renew:fixture",
+                    "work:fixture",
+                    "worker:fixture",
+                    1,
+                    1,
+                    120,
+                    30,
+                ),
+                json.load(source),
+            )
+        with open(recovery_path, encoding="utf-8") as source:
+            recovery_fixture = json.load(source)
+        self.assertEqual(
+            VirtualSchedulingControlBuilder.recovery(
+                "command:recovery:fixture",
+                "work:fixture",
+                "worker:fixture",
+                1,
+                2,
+                150,
+                recovery_fixture["resolution"],
+            ),
+            recovery_fixture,
+        )
+        with open(run_weight_path, encoding="utf-8") as source:
+            self.assertEqual(
+                VirtualSchedulingControlBuilder.run_weight(
+                    "command:run-weight:fixture", "run:fixture", 3
                 ),
                 json.load(source),
             )

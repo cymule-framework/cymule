@@ -1,23 +1,31 @@
 //! Bounded-cardinality, fairness, parking, and restart tests.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use cymule_core::{
     ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, Definition, Expression, Machine,
     PlanCandidate, Region,
 };
 use cymule_durable::{
-    Continuation, ContinuationStatus, DurableCoordinator, FrameState, MemoryStore, WaitActivation,
+    Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
+    DurableState, DurableStore, FrameState, MemoryStore, StoreCommit, StoredState, WaitActivation,
     WaitActivationSource, WaitCondition, WaitKind, WaitState,
 };
 use cymule_virtual::{
     DurableVirtualController, FrontierLimits, MaterializedPage, ParkReason, ParkedWork,
     RegionMigrationCommand, RegionMigrationKind, RegionMigrationPlan, RegionMigrationRequest,
-    RegionMigrator, RegionSource, SchedulingPolicy, VIRTUAL_COMPACTION_CONTROL_VERSION,
-    VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_VERSION,
-    VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive,
-    VirtualCheckpoint, VirtualCompactionCommand, VirtualCursor, VirtualError, VirtualRegion,
-    VirtualRehydrationCommand, VirtualResult, VirtualScheduler, WorkItem, WorkOccurrenceState,
+    RegionMigrator, RegionSource, SchedulingPolicy, VIRTUAL_CLAIM_CONTROL_VERSION,
+    VIRTUAL_COMPACTION_CONTROL_VERSION, VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION,
+    VIRTUAL_RECOVERY_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_CONTROL_VERSION,
+    VIRTUAL_REGION_MIGRATION_VERSION, VIRTUAL_REHYDRATION_CONTROL_VERSION,
+    VIRTUAL_RUN_WEIGHT_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive,
+    VirtualCheckpoint, VirtualClaimCommand, VirtualCompactionCommand, VirtualCursor, VirtualError,
+    VirtualLeaseRenewalCommand, VirtualRecoveryCommand, VirtualRegion, VirtualRehydrationCommand,
+    VirtualResult, VirtualRunWeightCommand, VirtualScheduler, WorkItem, WorkOccurrenceState,
     WorkResolution, WorkResolutionCommand,
 };
 use serde_json::json;
@@ -41,6 +49,32 @@ struct MemoryArchive {
     records: BTreeMap<ArtifactRef, Vec<u8>>,
     calls: usize,
     fail_at: Option<usize>,
+}
+
+#[derive(Clone)]
+struct LostReceiptStore {
+    inner: MemoryStore,
+    lose_next_commit_receipt: Arc<AtomicBool>,
+}
+
+impl DurableStore for LostReceiptStore {
+    fn load(&mut self) -> DurableResult<Option<StoredState>> {
+        self.inner.load()
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        expected_revision: Option<&str>,
+        next: &DurableState,
+    ) -> DurableResult<StoreCommit> {
+        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        if self.lose_next_commit_receipt.swap(false, Ordering::SeqCst) {
+            return Err(DurableError::Substrate(
+                "simulated loss after durable virtual transition".to_owned(),
+            ));
+        }
+        Ok(commit)
+    }
 }
 
 struct TestRegionMigrator {
@@ -1587,6 +1621,8 @@ fn durable_claim_and_result_survive_reopen_and_stale_cas() {
         work_id: claim.item.work_id.clone(),
         owner: "worker:durable".to_owned(),
         epoch: claim.epoch,
+        expected_lease_epoch: claim.lease.epoch,
+        observed_at: 0,
         resolution: resolution.clone(),
     };
     let succeeded = DurableVirtualController::resolve_command_and_checkpoint(
@@ -1758,6 +1794,83 @@ fn weighted_fairness_and_aging_accounting_survive_m1_reopen() {
         .expect("restored work");
     assert_eq!(restored_claim.item.work_id, expected_claim.item.work_id);
     assert_eq!(restored.snapshot(), original.snapshot());
+}
+
+#[test]
+fn durable_run_weight_control_replays_and_stale_cas_changes_nothing() {
+    let machine = Machine::new();
+    let store = MemoryStore::new();
+    let mut current = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let mut scheduler = VirtualScheduler::new(limits()).expect("scheduler creates");
+    scheduler
+        .register(region("region:weight-control", "run:weight-control"))
+        .expect("region registers");
+    DurableVirtualController::checkpoint(
+        &mut current,
+        &scheduler,
+        "journal:virtual",
+        "virtual:weight-control:initial",
+    )
+    .expect("initial scheduler checkpoints");
+    let mut stale = DurableCoordinator::open(store.clone()).expect("stale coordinator opens");
+    let mut stale_scheduler = DurableVirtualController::load(&stale, "journal:virtual", limits())
+        .expect("stale scheduler restores");
+    let stale_before = stale_scheduler.snapshot();
+    let command = VirtualRunWeightCommand {
+        control_version: VIRTUAL_RUN_WEIGHT_CONTROL_VERSION.to_owned(),
+        command_id: "command:run-weight:durable".to_owned(),
+        run_id: "run:weight-control".to_owned(),
+        weight: 3,
+    };
+    let receipt = DurableVirtualController::set_run_weight_command_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &command,
+        "journal:virtual",
+    )
+    .expect("Run weight checkpoints");
+    assert_eq!(receipt.previous_weight, 1);
+    assert_eq!(receipt.current_weight, 3);
+    assert_eq!(scheduler.snapshot().run_weights["run:weight-control"], 3);
+    assert_eq!(
+        DurableVirtualController::set_run_weight_command_and_checkpoint(
+            &mut current,
+            &mut scheduler,
+            &command,
+            "journal:virtual",
+        )
+        .expect("lost Run weight receipt replays"),
+        receipt
+    );
+    assert!(matches!(
+        DurableVirtualController::set_run_weight_command_and_checkpoint(
+            &mut stale,
+            &mut stale_scheduler,
+            &command,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Durable(_))
+    ));
+    assert_eq!(stale_scheduler.snapshot(), stale_before);
+    let mut conflicting = command;
+    conflicting.weight = 4;
+    assert!(matches!(
+        DurableVirtualController::set_run_weight_command_and_checkpoint(
+            &mut current,
+            &mut scheduler,
+            &conflicting,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Conflict(_))
+    ));
+
+    let reopened = DurableCoordinator::open(store).expect("store reopens");
+    let restored = DurableVirtualController::load(&reopened, "journal:virtual", limits())
+        .expect("weighted scheduler restores");
+    assert_eq!(restored.snapshot(), scheduler.snapshot());
 }
 
 fn completed_scheduler() -> (VirtualScheduler, String) {
@@ -2070,5 +2183,537 @@ fn durable_compaction_and_partial_rehydration_reopen_without_stale_partial_commi
         )
         .expect("durable compaction receipt replays without a new write"),
         receipt
+    );
+}
+
+fn worker_claim_command(
+    command_id: &str,
+    owner: &str,
+    slot_id: &str,
+    binding: &str,
+    logical_now: u64,
+    lease_ttl: u64,
+) -> VirtualClaimCommand {
+    VirtualClaimCommand {
+        control_version: VIRTUAL_CLAIM_CONTROL_VERSION.to_owned(),
+        command_id: command_id.to_owned(),
+        owner: owner.to_owned(),
+        slot_id: slot_id.to_owned(),
+        occurrence_binding: binding.to_owned(),
+        capabilities: BTreeSet::from(["cpu".to_owned()]),
+        logical_now,
+        lease_ttl,
+    }
+}
+
+#[test]
+fn multi_worker_claim_renew_recover_and_late_output_matrix_is_fenced() {
+    let mut machine = Machine::new();
+    let store = MemoryStore::new();
+    let mut current = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let mut scheduler = VirtualScheduler::new(limits()).expect("scheduler creates");
+    scheduler
+        .register(region("region:workers", "run:workers"))
+        .expect("region registers");
+    DurableVirtualController::fill_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &mut CompletedSource,
+        "journal:virtual",
+        "virtual:workers:fill",
+    )
+    .expect("frontier checkpoints");
+    let mut stale = DurableCoordinator::open(store.clone()).expect("stale coordinator opens");
+    let mut stale_scheduler = DurableVirtualController::load(&stale, "journal:virtual", limits())
+        .expect("stale scheduler restores");
+    let stale_before = stale_scheduler.snapshot();
+
+    let claim_a = worker_claim_command(
+        "command:claim:a",
+        "worker:a",
+        "slot:worker-a:0",
+        "binding:worker/a@1",
+        10,
+        5,
+    );
+    let receipt_a = DurableVirtualController::claim_command_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &claim_a,
+        "journal:virtual",
+    )
+    .expect("worker A claim checkpoints");
+    let active_a = receipt_a.claim.clone().expect("worker A claims work");
+    assert_eq!(active_a.lease.epoch, 1);
+    assert_eq!(active_a.lease.expires_at, 15);
+    assert_eq!(
+        DurableVirtualController::claim_command_and_checkpoint(
+            &mut current,
+            &mut scheduler,
+            &claim_a,
+            "journal:virtual",
+        )
+        .expect("lost claim acknowledgement replays"),
+        receipt_a
+    );
+
+    assert!(matches!(
+        DurableVirtualController::claim_command_and_checkpoint(
+            &mut stale,
+            &mut stale_scheduler,
+            &claim_a,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Durable(_))
+    ));
+    assert_eq!(stale_scheduler.snapshot(), stale_before);
+    assert!(stale.state().expect("stale state").leases.is_empty());
+
+    let competing_slot = worker_claim_command(
+        "command:claim:competing-slot",
+        "worker:b",
+        "slot:worker-a:0",
+        "binding:worker/b@1",
+        11,
+        5,
+    );
+    let before_competition = scheduler.snapshot();
+    assert!(matches!(
+        DurableVirtualController::claim_command_and_checkpoint(
+            &mut current,
+            &mut scheduler,
+            &competing_slot,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Durable(_))
+    ));
+    assert_eq!(scheduler.snapshot(), before_competition);
+
+    let renewal = VirtualLeaseRenewalCommand {
+        control_version: VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION.to_owned(),
+        command_id: "command:renew:a".to_owned(),
+        work_id: active_a.item.work_id.clone(),
+        owner: "worker:a".to_owned(),
+        epoch: active_a.epoch,
+        expected_lease_epoch: active_a.lease.epoch,
+        logical_now: 14,
+        lease_ttl: 10,
+    };
+    let renewed = DurableVirtualController::renew_claim_command_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &renewal,
+        "journal:virtual",
+    )
+    .expect("claim lease renews");
+    assert_eq!(renewed.lease.epoch, 2);
+    assert_eq!(renewed.lease.expires_at, 24);
+    assert_eq!(
+        DurableVirtualController::renew_claim_command_and_checkpoint(
+            &mut current,
+            &mut scheduler,
+            &renewal,
+            "journal:virtual",
+        )
+        .expect("lost renewal acknowledgement replays"),
+        renewed
+    );
+
+    let failure = machine.put_artifact("example/worker-crash", b"worker A expired".to_vec());
+    let too_early = VirtualRecoveryCommand {
+        control_version: VIRTUAL_RECOVERY_CONTROL_VERSION.to_owned(),
+        command_id: "command:recover:too-early".to_owned(),
+        work_id: active_a.item.work_id.clone(),
+        expected_owner: "worker:a".to_owned(),
+        expected_epoch: active_a.epoch,
+        expected_lease_epoch: renewed.lease.epoch,
+        observed_at: 23,
+        resolution: WorkResolution::Retry {
+            error: failure.clone(),
+            next_reason: None,
+        },
+    };
+    let before_early_recovery = scheduler.snapshot();
+    assert!(matches!(
+        DurableVirtualController::recover_expired_command_and_checkpoint(
+            &mut current,
+            &mut scheduler,
+            &machine,
+            &too_early,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Conflict(_))
+    ));
+    assert_eq!(scheduler.snapshot(), before_early_recovery);
+
+    let expired_result = machine.put_artifact("example/result", b"expired worker output".to_vec());
+    let before_expired_result = scheduler.snapshot();
+    assert!(matches!(
+        DurableVirtualController::resolve_command_and_checkpoint(
+            &mut current,
+            &mut scheduler,
+            &machine,
+            &WorkResolutionCommand {
+                control_version: VIRTUAL_WORK_CONTROL_VERSION.to_owned(),
+                command_id: "command:expired-result:a".to_owned(),
+                work_id: active_a.item.work_id.clone(),
+                owner: "worker:a".to_owned(),
+                epoch: active_a.epoch,
+                expected_lease_epoch: renewed.lease.epoch,
+                observed_at: 24,
+                resolution: WorkResolution::Succeeded {
+                    result: expired_result.clone(),
+                },
+            },
+            "journal:virtual",
+        ),
+        Err(VirtualError::Conflict(_))
+    ));
+    assert_eq!(scheduler.snapshot(), before_expired_result);
+    assert!(
+        current
+            .restore_machine()
+            .expect("durable Machine restores")
+            .artifact(&expired_result)
+            .is_none()
+    );
+    machine.remove_artifact_for_test(&expired_result.artifact_id);
+
+    let recovery = VirtualRecoveryCommand {
+        command_id: "command:recover:a".to_owned(),
+        observed_at: 24,
+        ..too_early
+    };
+    let recovered = DurableVirtualController::recover_expired_command_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &machine,
+        &recovery,
+        "journal:virtual",
+    )
+    .expect("expired claim requeues explicitly");
+    assert_eq!(
+        recovered.occurrence.state,
+        WorkOccurrenceState::RetryScheduled
+    );
+    assert_eq!(
+        DurableVirtualController::recover_expired_command_and_checkpoint(
+            &mut current,
+            &mut scheduler,
+            &machine,
+            &recovery,
+            "journal:virtual",
+        )
+        .expect("lost recovery acknowledgement replays"),
+        recovered
+    );
+    assert!(matches!(
+        scheduler.succeed(
+            &active_a.item.work_id,
+            "worker:a",
+            active_a.epoch,
+            ArtifactRef {
+                artifact_id: "artifact:late-worker-a".to_owned(),
+                kind: "example/result".to_owned(),
+            },
+        ),
+        Err(VirtualError::Conflict(_))
+    ));
+
+    let claim_b = worker_claim_command(
+        "command:claim:b",
+        "worker:b",
+        "slot:worker-b:0",
+        "binding:worker/b@1",
+        25,
+        10,
+    );
+    let receipt_b = DurableVirtualController::claim_command_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &claim_b,
+        "journal:virtual",
+    )
+    .expect("worker B claims recovered work");
+    let active_b = receipt_b.claim.expect("worker B has work");
+    assert_eq!(active_b.item.work_id, active_a.item.work_id);
+    assert_eq!(active_b.epoch, active_a.epoch + 1);
+    assert_ne!(active_b.occurrence_binding, active_a.occurrence_binding);
+
+    let result = machine.put_artifact("example/result", b"worker B result".to_vec());
+    DurableVirtualController::resolve_command_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &machine,
+        &WorkResolutionCommand {
+            control_version: VIRTUAL_WORK_CONTROL_VERSION.to_owned(),
+            command_id: "command:result:b".to_owned(),
+            work_id: active_b.item.work_id.clone(),
+            owner: active_b.owner.clone(),
+            epoch: active_b.epoch,
+            expected_lease_epoch: active_b.lease.epoch,
+            observed_at: 26,
+            resolution: WorkResolution::Succeeded { result },
+        },
+        "journal:virtual",
+    )
+    .expect("worker B result checkpoints");
+
+    let empty_claim = worker_claim_command(
+        "command:claim:empty",
+        "worker:c",
+        "slot:worker-c:0",
+        "binding:worker/c@1",
+        30,
+        10,
+    );
+    let empty_receipt = DurableVirtualController::claim_command_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &empty_claim,
+        "journal:virtual",
+    )
+    .expect("empty claim observation checkpoints");
+    assert!(empty_receipt.claim.is_none());
+    assert!(
+        !current
+            .state()
+            .expect("state")
+            .leases
+            .contains_key("slot:worker-c:0")
+    );
+    assert_eq!(
+        DurableVirtualController::claim_command_and_checkpoint(
+            &mut current,
+            &mut scheduler,
+            &empty_claim,
+            "journal:virtual",
+        )
+        .expect("empty claim receipt replays"),
+        empty_receipt
+    );
+
+    drop(current);
+    let reopened = DurableCoordinator::open(store).expect("store reopens");
+    let restored = DurableVirtualController::load(&reopened, "journal:virtual", limits())
+        .expect("multi-worker state restores");
+    assert_eq!(restored.snapshot(), scheduler.snapshot());
+    assert!(
+        reopened
+            .restore_machine()
+            .expect("Machine restores")
+            .artifact(&failure)
+            .is_some()
+    );
+}
+
+#[test]
+fn distinct_capacity_slots_bound_parallel_claims_without_locks() {
+    let machine = Machine::new();
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let mut scheduler = VirtualScheduler::new(limits()).expect("scheduler creates");
+    scheduler
+        .register(region("region:parallel", "run:parallel"))
+        .expect("region registers");
+    DurableVirtualController::fill_and_checkpoint(
+        &mut coordinator,
+        &mut scheduler,
+        &mut MillionItemSource,
+        "journal:virtual",
+        "virtual:parallel:fill",
+    )
+    .expect("frontier checkpoints");
+    let first = DurableVirtualController::claim_command_and_checkpoint(
+        &mut coordinator,
+        &mut scheduler,
+        &worker_claim_command(
+            "command:parallel:a",
+            "worker:a",
+            "slot:worker-a:0",
+            "binding:worker/a@1",
+            1,
+            10,
+        ),
+        "journal:virtual",
+    )
+    .expect("first slot claims")
+    .claim
+    .expect("first work exists");
+    let second = DurableVirtualController::claim_command_and_checkpoint(
+        &mut coordinator,
+        &mut scheduler,
+        &worker_claim_command(
+            "command:parallel:b",
+            "worker:b",
+            "slot:worker-b:0",
+            "binding:worker/b@1",
+            1,
+            10,
+        ),
+        "journal:virtual",
+    )
+    .expect("second slot claims")
+    .claim
+    .expect("second work exists");
+    assert_ne!(first.item.work_id, second.item.work_id);
+    assert_eq!(scheduler.snapshot().active.len(), 2);
+    assert_eq!(coordinator.state().expect("state").leases.len(), 2);
+}
+
+#[test]
+fn claim_renewal_and_recovery_receipt_loss_reopen_to_one_transition() {
+    let lose_receipt = Arc::new(AtomicBool::new(false));
+    let store = LostReceiptStore {
+        inner: MemoryStore::new(),
+        lose_next_commit_receipt: lose_receipt.clone(),
+    };
+    let mut machine = Machine::new();
+    let mut coordinator = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let mut scheduler = VirtualScheduler::new(limits()).expect("scheduler creates");
+    scheduler
+        .register(region("region:lost-receipt", "run:lost-receipt"))
+        .expect("region registers");
+    DurableVirtualController::fill_and_checkpoint(
+        &mut coordinator,
+        &mut scheduler,
+        &mut CompletedSource,
+        "journal:virtual",
+        "virtual:lost-receipt:fill",
+    )
+    .expect("frontier checkpoints");
+
+    let claim_command = worker_claim_command(
+        "command:lost-receipt:claim",
+        "worker:lost-receipt",
+        "slot:lost-receipt:0",
+        "binding:worker/lost-receipt@1",
+        10,
+        5,
+    );
+    let before_claim = scheduler.snapshot();
+    lose_receipt.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        DurableVirtualController::claim_command_and_checkpoint(
+            &mut coordinator,
+            &mut scheduler,
+            &claim_command,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Durable(_))
+    ));
+    assert_eq!(scheduler.snapshot(), before_claim);
+    drop(coordinator);
+
+    let mut coordinator = DurableCoordinator::open(store.clone()).expect("store reopens");
+    let mut scheduler = DurableVirtualController::load(&coordinator, "journal:virtual", limits())
+        .expect("claimed scheduler restores");
+    let claim_receipt = DurableVirtualController::claim_command_and_checkpoint(
+        &mut coordinator,
+        &mut scheduler,
+        &claim_command,
+        "journal:virtual",
+    )
+    .expect("claim receipt replays after lost acknowledgement");
+    let claim = claim_receipt.claim.expect("claim committed once");
+    assert_eq!(scheduler.snapshot().active.len(), 1);
+
+    let renewal_command = VirtualLeaseRenewalCommand {
+        control_version: VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION.to_owned(),
+        command_id: "command:lost-receipt:renew".to_owned(),
+        work_id: claim.item.work_id.clone(),
+        owner: claim.owner.clone(),
+        epoch: claim.epoch,
+        expected_lease_epoch: claim.lease.epoch,
+        logical_now: 14,
+        lease_ttl: 6,
+    };
+    let before_renewal = scheduler.snapshot();
+    lose_receipt.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        DurableVirtualController::renew_claim_command_and_checkpoint(
+            &mut coordinator,
+            &mut scheduler,
+            &renewal_command,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Durable(_))
+    ));
+    assert_eq!(scheduler.snapshot(), before_renewal);
+    drop(coordinator);
+
+    let mut coordinator = DurableCoordinator::open(store.clone()).expect("store reopens again");
+    let mut scheduler = DurableVirtualController::load(&coordinator, "journal:virtual", limits())
+        .expect("renewed scheduler restores");
+    let renewal_receipt = DurableVirtualController::renew_claim_command_and_checkpoint(
+        &mut coordinator,
+        &mut scheduler,
+        &renewal_command,
+        "journal:virtual",
+    )
+    .expect("renewal receipt replays after lost acknowledgement");
+    assert_eq!(renewal_receipt.lease.epoch, 2);
+
+    let failure = machine.put_artifact("example/worker-crash", b"expired worker".to_vec());
+    let recovery_command = VirtualRecoveryCommand {
+        control_version: VIRTUAL_RECOVERY_CONTROL_VERSION.to_owned(),
+        command_id: "command:lost-receipt:recover".to_owned(),
+        work_id: claim.item.work_id,
+        expected_owner: claim.owner,
+        expected_epoch: claim.epoch,
+        expected_lease_epoch: renewal_receipt.lease.epoch,
+        observed_at: renewal_receipt.lease.expires_at,
+        resolution: WorkResolution::Retry {
+            error: failure.clone(),
+            next_reason: None,
+        },
+    };
+    let before_recovery = scheduler.snapshot();
+    lose_receipt.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        DurableVirtualController::recover_expired_command_and_checkpoint(
+            &mut coordinator,
+            &mut scheduler,
+            &machine,
+            &recovery_command,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Durable(_))
+    ));
+    assert_eq!(scheduler.snapshot(), before_recovery);
+    drop(coordinator);
+
+    let mut coordinator = DurableCoordinator::open(store).expect("store reopens finally");
+    let mut scheduler = DurableVirtualController::load(&coordinator, "journal:virtual", limits())
+        .expect("recovered scheduler restores");
+    let recovery_receipt = DurableVirtualController::recover_expired_command_and_checkpoint(
+        &mut coordinator,
+        &mut scheduler,
+        &machine,
+        &recovery_command,
+        "journal:virtual",
+    )
+    .expect("recovery receipt replays after lost acknowledgement");
+    assert_eq!(
+        recovery_receipt.occurrence.state,
+        WorkOccurrenceState::RetryScheduled
+    );
+    assert_eq!(scheduler.snapshot().active.len(), 0);
+    assert_eq!(scheduler.materialized_count(), 1);
+    assert!(
+        coordinator
+            .restore_machine()
+            .expect("Machine restores")
+            .artifact(&failure)
+            .is_some()
     );
 }

@@ -57,6 +57,17 @@
   reason directly rather than scan all parked work. A wait park reason uses the
   exact M1 wait ID so one identified activation can wake only its selected work.
 - Claims use monotonically increasing epochs and reject stale completion.
+- Durable multi-worker claims also bind one abstract capacity-slot lease.
+  Slot IDs express bounded capacity, not a queue, host, Pod, process, or worker
+  registry. One slot has at most one active claim; separate slots may progress
+  independently through optimistic M1 CAS without blocking locks.
+- Claim, renewal, and Run-weight controls retain stable command receipts. A
+  no-eligible-work claim checkpoints an empty receipt but acquires no lease.
+  Renewal atomically advances the M1 lease and active occurrence lease epoch.
+- Normal worker resolution supplies exact work/lease epochs and Clock-provided
+  logical observation time and must precede lease expiry. Expiry authorizes no
+  implicit mutation; a recovery controller must explicitly retry, fail, or
+  cancel under the current expired durable lease. Takeover fences old output.
 - Resolve the immutable execution binding before claim admission. Each claim
   creates one `cymule.virtual-work-occurrence/1` record keyed by work and epoch;
   owner and binding are evidence, not mutable scheduler hints.
