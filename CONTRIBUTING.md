@@ -8,7 +8,7 @@ Use the pinned Rust toolchain from `rust-toolchain.toml`, Go 1.26 or newer,
 Python 3.12 or newer, Node.js 22 or newer, and pnpm 11 or newer. The optional
 MLIR workbench is tested with LLVM/MLIR 22.1.8.
 
-Run the complete local gate before opening a merge request:
+Run the complete local gate before opening a pull request:
 
 ```sh
 ./scripts/verify.sh
@@ -29,4 +29,3 @@ Run the complete local gate before opening a merge request:
 
 Use focused English commit messages. Do not combine semantic changes with
 unrelated cleanup.
-

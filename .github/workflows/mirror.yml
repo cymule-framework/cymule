@@ -1,0 +1,55 @@
+name: Sync public mirror
+
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: public-mirror
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Read private source
+        env:
+          SOURCE_URL: ${{ secrets.CYMULE_SOURCE_URL }}
+          SOURCE_USERNAME: ${{ secrets.CYMULE_SOURCE_USERNAME }}
+          SOURCE_TOKEN: ${{ secrets.CYMULE_SOURCE_TOKEN }}
+        run: |
+          authenticated_url="https://${SOURCE_USERNAME}:${SOURCE_TOKEN}@${SOURCE_URL#https://}"
+          git clone --quiet --depth=1 "$authenticated_url" "$RUNNER_TEMP/source"
+
+      - name: Build public snapshot
+        run: |
+          mkdir "$RUNNER_TEMP/snapshot"
+          git -C "$RUNNER_TEMP/source" archive --format=tar HEAD |
+            tar -xf - -C "$RUNNER_TEMP/snapshot"
+          rm -rf "$RUNNER_TEMP/snapshot/.gitlab"
+          rm -f "$RUNNER_TEMP/snapshot/.gitlab-ci.yml"
+          if grep -R -n -E 'git\.f\.cv|cymule-framework/cymule' "$RUNNER_TEMP/snapshot"; then
+            echo "public snapshot contains a private repository reference" >&2
+            exit 2
+          fi
+          rsync --archive --delete --exclude=.git/ "$RUNNER_TEMP/snapshot/" ./
+
+      - name: Publish changed snapshot
+        run: |
+          git config user.name "Cymule Mirror"
+          git config user.email "cymule-framework@users.noreply.github.com"
+          git add --all
+          if git diff --cached --quiet; then
+            echo "public mirror is already current"
+            exit 0
+          fi
+          git commit -m "Sync Cymule source"
+          git push origin main

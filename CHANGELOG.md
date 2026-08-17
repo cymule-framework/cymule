@@ -8,6 +8,8 @@ domains described in `docs/specification.md`.
 
 - Add a self-contained Hello World Flow and example plugin as the stable user
   quick start.
+- Publish GitHub-native repository metadata, CI, and a clean-history public
+  mirror workflow.
 
 ## [0.1.0] - 2026-08-16
 

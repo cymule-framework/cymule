@@ -7,9 +7,10 @@ version 1.0.
 
 ## Reporting a vulnerability
 
-Report vulnerabilities privately to the repository maintainers through the
-hosting platform's confidential issue mechanism. Do not include credentials,
-private customer data, or exploit payloads in public issues.
+Report vulnerabilities through
+[GitHub private vulnerability reporting](https://github.com/cymule-framework/cymule/security/advisories/new).
+Do not include credentials, private customer data, or exploit payloads in
+public issues.
 
 ## Security boundaries
 
@@ -21,4 +22,3 @@ private customer data, or exploit payloads in public issues.
   provider contract support it. Ambiguity is represented as `unknown`.
 - The embedded profile does not provide process or tenant isolation. Do not run
   untrusted plugins under that profile without an external isolation substrate.
-

@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible Cymule defect
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include a minimal Flow, command, or repository link.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Cymule version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, language SDK, Rust version, and plugin transport.
+    validations:
+      required: true
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security check
+      options:
+        - label: This report does not contain a vulnerability or sensitive data.
+          required: true

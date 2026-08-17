@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.0
+
+      - uses: pnpm/action-setup@v6.0.10
+        with:
+          version: 11.17.0
+          run_install: false
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.7.0
+          cache: pnpm
+          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: sdk/go/go.mod
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: 0.7.2
+          enable-cache: true
+          cache-dependency-glob: sdk/python/uv.lock
+
+      - name: Verify Cymule
+        run: ./scripts/verify.sh
