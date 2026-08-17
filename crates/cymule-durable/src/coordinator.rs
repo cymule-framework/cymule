@@ -499,25 +499,84 @@ impl<S: DurableStore> DurableCoordinator<S> {
             ));
         }
         record.verify()?;
+        self.mutate_checked(|state| append_journal_record(state, journal_id, record))
+    }
+
+    /// Atomically append higher-profile records and register one durable wait.
+    pub fn checkpoint_journal_wait(
+        &mut self,
+        journal_id: &str,
+        records: &[JournalRecord],
+        wait: &WaitCondition,
+    ) -> DurableResult<String> {
+        validate_journal_batch(journal_id, records)?;
+        if wait.state != WaitState::Pending || wait.result.is_some() {
+            return Err(DurableError::Validation(
+                "new journal checkpoint wait must be pending without a result".to_owned(),
+            ));
+        }
         self.mutate_checked(|state| {
-            let records = state
-                .application_journals
-                .entry(journal_id.to_owned())
-                .or_default();
-            match records
-                .iter()
-                .find(|existing| existing.record_id == record.record_id)
-            {
-                Some(existing) if existing == &record => Ok(()),
-                Some(_) => Err(DurableError::IllegalTransition(format!(
-                    "journal record {} already has different content",
-                    record.record_id
-                ))),
+            for record in records {
+                append_journal_record(state, journal_id, record.clone())?;
+            }
+            match state.waits.get(&wait.wait_id) {
+                Some(existing) if existing == wait => {}
+                Some(_) => {
+                    return Err(DurableError::IllegalTransition(format!(
+                        "wait {} already exists with different semantics",
+                        wait.wait_id
+                    )));
+                }
                 None => {
-                    records.push(record);
-                    Ok(())
+                    state
+                        .waits
+                        .insert(wait.wait_id.clone(), WaitCondition::clone(wait));
                 }
             }
+            let continuation = state.continuations.get_mut(&wait.run_id).ok_or_else(|| {
+                DurableError::NotFound(format!("continuation {} does not exist", wait.run_id))
+            })?;
+            continuation.wait_set.insert(wait.wait_id.clone());
+            continuation.status = ContinuationStatus::Waiting;
+            Ok(())
+        })
+    }
+
+    /// Atomically complete one durable wait and append higher-profile records.
+    pub fn checkpoint_journal_wait_completion(
+        &mut self,
+        journal_id: &str,
+        records: &[JournalRecord],
+        wait_id: &str,
+        result: cymule_core::ArtifactRef,
+    ) -> DurableResult<String> {
+        validate_journal_batch(journal_id, records)?;
+        self.mutate_checked(|state| {
+            for record in records {
+                append_journal_record(state, journal_id, record.clone())?;
+            }
+            let wait = state
+                .waits
+                .get_mut(wait_id)
+                .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
+            if wait.state == WaitState::Completed && wait.result.as_ref() == Some(&result) {
+                return Ok(());
+            }
+            if wait.state != WaitState::Pending {
+                return Err(DurableError::IllegalTransition(format!(
+                    "wait {wait_id} is not pending"
+                )));
+            }
+            wait.state = WaitState::Completed;
+            wait.result = Some(result);
+            let continuation = state.continuations.get_mut(&wait.run_id).ok_or_else(|| {
+                DurableError::NotFound(format!("continuation {} does not exist", wait.run_id))
+            })?;
+            continuation.wait_set.remove(wait_id);
+            if continuation.wait_set.is_empty() {
+                continuation.status = ContinuationStatus::Ready;
+            }
+            Ok(())
         })
     }
 
@@ -551,5 +610,42 @@ impl<S: DurableStore> DurableCoordinator<S> {
             state: next,
         });
         Ok(revision)
+    }
+}
+
+fn validate_journal_batch(journal_id: &str, records: &[JournalRecord]) -> DurableResult<()> {
+    if journal_id.is_empty() {
+        return Err(DurableError::Validation(
+            "application journal identity must not be empty".to_owned(),
+        ));
+    }
+    for record in records {
+        record.verify()?;
+    }
+    Ok(())
+}
+
+fn append_journal_record(
+    state: &mut DurableState,
+    journal_id: &str,
+    record: JournalRecord,
+) -> DurableResult<()> {
+    let records = state
+        .application_journals
+        .entry(journal_id.to_owned())
+        .or_default();
+    match records
+        .iter()
+        .find(|existing| existing.record_id == record.record_id)
+    {
+        Some(existing) if existing == &record => Ok(()),
+        Some(_) => Err(DurableError::IllegalTransition(format!(
+            "journal record {} already has different content",
+            record.record_id
+        ))),
+        None => {
+            records.push(record);
+            Ok(())
+        }
     }
 }

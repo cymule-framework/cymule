@@ -66,6 +66,19 @@ The reference process protocol is request/response JSON over stdin/stdout. It is
 designed for testability, not as the only production transport. Future WIT and
 network transports can implement the same `PluginHost` trait.
 
+## Agent interaction
+
+`cymule-agent` keeps protocol-neutral Session projections and replaceable host
+interfaces outside the semantic kernel. Durable context, model, permission,
+tool, elicitation, and workspace calls pin their implementation binding before
+invocation and journal typed lifecycle snapshots under the M1 CAS revision.
+
+Human or external input uses an M1 `WaitKind::Input`, not a blocked task or
+process-local channel. `AgentInputController` atomically couples the Session
+projection and Continuation wait, so a crash cannot expose `RequiresAction`
+without a deliverable wait or ready the Continuation without the resolved
+elicitation. Concrete UI, transport, and identity integrations remain adapters.
+
 ## Storage contracts
 
 M1 defines a provider-neutral `DurableStore` as compare-and-swap over one

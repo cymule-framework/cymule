@@ -154,6 +154,10 @@ pub enum AgentUpdate {
         update_id: String,
         usage: Usage,
     },
+    Elicitation {
+        update_id: String,
+        elicitation: ElicitationProjection,
+    },
 }
 
 impl AgentUpdate {
@@ -164,7 +168,8 @@ impl AgentUpdate {
             | Self::State { update_id, .. }
             | Self::Plan { update_id, .. }
             | Self::Tool { update_id, .. }
-            | Self::Usage { update_id, .. } => update_id,
+            | Self::Usage { update_id, .. }
+            | Self::Elicitation { update_id, .. } => update_id,
         }
     }
 }
@@ -187,6 +192,8 @@ pub struct AgentSession {
     pub tools: BTreeMap<String, ToolCall>,
     /// Latest cumulative usage report.
     pub usage: Option<Usage>,
+    /// Durable input requests keyed by elicitation identity.
+    pub elicitations: BTreeMap<String, ElicitationProjection>,
     applied_updates: BTreeMap<String, String>,
 }
 
@@ -201,6 +208,7 @@ impl AgentSession {
             plan: None,
             tools: BTreeMap::new(),
             usage: None,
+            elicitations: BTreeMap::new(),
             applied_updates: BTreeMap::new(),
         }
     }
@@ -255,6 +263,21 @@ impl AgentSession {
                 self.tools.insert(tool.tool_call_id.clone(), tool);
             }
             AgentUpdate::Usage { usage, .. } => self.usage = Some(usage),
+            AgentUpdate::Elicitation { elicitation, .. } => {
+                elicitation.validate()?;
+                if let Some(current) = self.elicitations.get(&elicitation.request.request_id)
+                    && (current.wait_id != elicitation.wait_id
+                        || current.request != elicitation.request
+                        || current.response.is_some() && current.response != elicitation.response)
+                {
+                    return Err(AgentError::IllegalTransition(format!(
+                        "elicitation {} changed immutable content or resolved twice",
+                        elicitation.request.request_id
+                    )));
+                }
+                self.elicitations
+                    .insert(elicitation.request.request_id.clone(), elicitation);
+            }
         }
         self.applied_updates.insert(update_id, update_hash);
         Ok(())
@@ -373,6 +396,45 @@ pub struct ElicitationResponse {
     pub accepted: bool,
     pub value: Option<Value>,
     pub occurrence_binding: String,
+}
+
+/// Durable projection of one typed input request and optional completion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ElicitationProjection {
+    pub wait_id: String,
+    pub request: ElicitationRequest,
+    pub response: Option<ElicitationResponse>,
+}
+
+impl ElicitationProjection {
+    /// Validate immutable request identity and completion shape.
+    pub fn validate(&self) -> AgentResult<()> {
+        if self.wait_id.is_empty() || self.request.request_id.is_empty() {
+            return Err(AgentError::Validation(
+                "elicitation and wait identities must not be empty".to_owned(),
+            ));
+        }
+        if let Some(response) = &self.response {
+            if response.request_id != self.request.request_id {
+                return Err(AgentError::Validation(
+                    "elicitation response identity does not match its request".to_owned(),
+                ));
+            }
+            if response.occurrence_binding.is_empty() {
+                return Err(AgentError::Validation(
+                    "elicitation response requires an occurrence binding".to_owned(),
+                ));
+            }
+            if response.accepted != response.value.is_some() {
+                return Err(AgentError::Validation(
+                    "accepted elicitation requires a value and declined elicitation forbids one"
+                        .to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

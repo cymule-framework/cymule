@@ -17,6 +17,10 @@
   `prepared` and `started` before invocation, and retain it in a typed
   `completed` or `unknown` outcome. A missing receipt or host error is ambiguous
   and must block automatic redispatch until explicit recovery.
+- Durable input requests atomically append the pending/resolved elicitation and
+  Session state updates with the owning M1 wait transition. Never expose
+  `RequiresAction` without a committed wait or ready a Continuation without the
+  matching resolved Session projection.
 - Login, capability advertisement, permission, policy, credential access, and
   effect release are separate decisions and must remain fail closed.
 - Add reducer and end-to-end tests for every new update or interaction state.

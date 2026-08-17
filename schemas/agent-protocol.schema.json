@@ -352,8 +352,31 @@
             "type": { "const": "usage" }, "update_id": { "$ref": "#/$defs/nonEmpty" },
             "usage": { "$ref": "#/$defs/usage" }
           }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "update_id", "elicitation"],
+          "properties": {
+            "type": { "const": "elicitation" },
+            "update_id": { "$ref": "#/$defs/nonEmpty" },
+            "elicitation": { "$ref": "#/$defs/elicitationProjection" }
+          }
         }
       ]
+    },
+    "elicitationProjection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wait_id", "request", "response"],
+      "properties": {
+        "wait_id": { "$ref": "#/$defs/nonEmpty" },
+        "request": { "$ref": "#/$defs/elicitationRequest" },
+        "response": {
+          "oneOf": [
+            { "$ref": "#/$defs/elicitationResponse" },
+            { "type": "null" }
+          ]
+        }
+      }
     },
     "agentPlan": {
       "type": "object", "additionalProperties": false, "required": ["plan_id", "entries"],

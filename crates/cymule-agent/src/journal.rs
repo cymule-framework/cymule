@@ -145,7 +145,7 @@ impl AgentOccurrenceStore for MemoryAgentJournal {
     }
 }
 
-const AGENT_UPDATE_SCHEMA: &str = "cymule.agent-update/1";
+pub(crate) const AGENT_UPDATE_SCHEMA: &str = "cymule.agent-update/1";
 const AGENT_OCCURRENCE_SCHEMA: &str = "cymule.agent-host-occurrence/1";
 
 fn occurrence_journal_id(session_id: &str) -> String {
@@ -179,14 +179,18 @@ impl<S: DurableStore> AgentJournal for DurableCoordinator<S> {
     }
 
     fn append(&mut self, session_id: &str, update: &AgentUpdate) -> AgentResult<()> {
-        let payload = serde_json::to_value(update)
-            .map_err(|error| AgentError::Persistence(error.to_string()))?;
-        let record = JournalRecord::new(update.update_id(), AGENT_UPDATE_SCHEMA, payload)
-            .map_err(|error| AgentError::Persistence(error.to_string()))?;
+        let record = agent_update_record(update)?;
         self.append_journal_record(session_id, record)
             .map(|_| ())
             .map_err(|error| AgentError::Persistence(error.to_string()))
     }
+}
+
+pub(crate) fn agent_update_record(update: &AgentUpdate) -> AgentResult<JournalRecord> {
+    let payload =
+        serde_json::to_value(update).map_err(|error| AgentError::Persistence(error.to_string()))?;
+    JournalRecord::new(update.update_id(), AGENT_UPDATE_SCHEMA, payload)
+        .map_err(|error| AgentError::Persistence(error.to_string()))
 }
 
 impl<S: DurableStore> AgentOccurrenceStore for DurableCoordinator<S> {

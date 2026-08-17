@@ -3,18 +3,20 @@
 mod driver;
 mod error;
 mod host;
+mod input;
 mod journal;
 mod model;
 
 pub use driver::AgentTurnDriver;
 pub use error::{AgentError, AgentResult};
 pub use host::AgentHost;
+pub use input::{AgentInputCheckpoint, AgentInputController};
 pub use journal::{AgentJournal, AgentOccurrenceStore, MemoryAgentJournal, NoopAgentJournal};
 pub use model::{
     AgentHostCallKind, AgentHostOccurrence, AgentHostOccurrenceState, AgentHostRequest,
     AgentHostResponse, AgentMessage, AgentPlan, AgentPlanEntry, AgentSession, AgentState,
-    AgentUpdate, ContentBlock, ContextRequest, ContextSnapshot, ElicitationRequest,
-    ElicitationResponse, MessageRole, ModelRequest, ModelResponse, PermissionDecision,
-    PermissionRequest, PermissionResponse, PlanEntryStatus, SessionStopReason, ToolCall,
-    ToolCallStatus, ToolRequest, ToolResponse, Usage, WorkspaceChange, WorkspaceReceipt,
+    AgentUpdate, ContentBlock, ContextRequest, ContextSnapshot, ElicitationProjection,
+    ElicitationRequest, ElicitationResponse, MessageRole, ModelRequest, ModelResponse,
+    PermissionDecision, PermissionRequest, PermissionResponse, PlanEntryStatus, SessionStopReason,
+    ToolCall, ToolCallStatus, ToolRequest, ToolResponse, Usage, WorkspaceChange, WorkspaceReceipt,
 };
