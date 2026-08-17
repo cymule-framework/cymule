@@ -15,6 +15,9 @@ domains described in `docs/specification.md`.
   component occurrences, snapshot records, and an atomic directory adapter.
 - Add resumable sequential call/wait execution with process reopen, Attempt
   epoch advancement, and exact component-result replay.
+- Add the M2 agent interaction foundation with typed Session updates,
+  context/model/tool/permission/elicitation/workspace interfaces, ordered
+  projections, and a tested model-tool-model reference turn driver.
 
 ## [0.1.0] - 2026-08-16
 

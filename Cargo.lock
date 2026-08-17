@@ -48,6 +48,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cymule-agent"
+version = "0.1.0"
+dependencies = [
+ "cymule-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cymule-cli"
 version = "0.1.0"
 dependencies = [

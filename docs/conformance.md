@@ -9,6 +9,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | Semantic Interpreter M0 | Implemented | frozen IR, canonical stores, admission, reducer, exact state replay |
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
 | Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, wait, lease, outbox, occurrence, directory reopen; resumable interpreter and crash recovery remain |
+| Agent Interaction | Partial | typed Session updates and host interfaces plus model-tool-model reference loop; durable protocol adapters and restart tests remain |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
 | Live Evolution | Partial | future binding update and pinning implemented; state migration proposed |
