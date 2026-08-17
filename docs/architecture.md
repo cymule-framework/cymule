@@ -166,3 +166,11 @@ failed attempt.
 Control checkpoints retain the full resolution command and its occurrence ID,
 so historical command replay reads the original receipt even after unrelated
 later claims; it never restores the older scheduler snapshot.
+
+Run selection uses integer weighted deficit accounting over exact item cost.
+Within the chosen Run, priority aging derives only from persisted successful
+dispatch count and ready-entry sequence. This makes fairness portable across
+processes and avoids a clock or floating-point dependency. The guarantee applies
+to materialized, capability-compatible backlogs. `RegionSource` visibility is a
+separate deterministic round-robin layer because Cymule cannot know an item's
+cost before the source returns it.

@@ -36,6 +36,12 @@ standards.
   of inferring all failures as equivalent. Cymule adopts only the principle that
   failure classification is explicit; container and cluster concepts remain
   outside framework semantics.
+- [Temporal Task Queue Priority and Fairness](https://temporal.io/changelog/priority-fairness-generally-available)
+  separates priority from fairness keys and weighted dispatch, while
+  [Kubernetes API Priority and Fairness](https://kubernetes.io/docs/concepts/cluster-administration/flow-control/)
+  accounts for flow shares, bounded queues, and request cost in seats. Cymule
+  adopts integer cost/share accounting and starvation resistance but keeps its
+  state portable and provider-neutral.
 - [Dapr components](https://docs.dapr.io/concepts/components-concept/) show how
   stable building-block interfaces can support built-in and independently
   deployed implementations. Cymule similarly separates semantic operations from

@@ -10,7 +10,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
 | Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, identified signal/timer activation, lease, outbox, occurrence replay, Resource handoff, directory-store reopen, and ambiguous-effect reconciliation; nested scopes and the full crash matrix remain |
 | Optional Agent Interaction plugin | Partial plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces; not a framework profile |
-| Large Virtual Graph | Partial | bounded virtual regions, M1 cursor/frontier checkpoints, exact parked index, atomic activation wake, binding-pinned work occurrences, closed dispositions, four SDK control contracts, fencing, and restore; durable compaction remains |
+| Large Virtual Graph | Partial | bounded virtual regions, M1 checkpoints, exact parked index, atomic activation wake, binding-pinned occurrences, closed dispositions, weighted cost fairness, priority aging, four SDK work control contracts, fencing, and restore; partition/compaction remain |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
 | Live Evolution | Partial | Plan DAG, impact, occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; runtime rollout automation remains |
@@ -52,6 +52,12 @@ The local suite verifies:
   occurrence, and cancellation rejects late success;
 - a resolution command replayed after later claims returns its original
   occurrence receipt, while semantic command-ID reuse fails without state change;
+- weighted backlogged Runs receive deterministic cost-normalized shares (1:3
+  weight yields 20:60 equal-cost dispatch and 40:40 when the weighted Run costs
+  three units); snapshot restore predicts the same next claim;
+- priority aging selects an old priority-zero item after six continuous
+  priority-five dispatches, and one-slot region rotation gives both sources
+  equal materialization visibility;
 - M3 claim/result checkpoints survive reopen, stale CAS rolls back scheduler
   state, and result/evidence Artifacts commit with occurrence state;
 - TypeScript, Python, Rust, and Go parse one occurrence fixture and construct one

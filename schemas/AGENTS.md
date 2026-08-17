@@ -19,3 +19,6 @@
   Its owned definitions also freeze `cymule.virtual-work-occurrence/1` and
   `cymule.virtual-work-control/1`; disposition variants are closed and preserve
   owner/epoch/binding preconditions.
+  Scheduling policy, integer Run weights/deficits, dispatch sequence, ready age,
+  and last selections are checkpoint authority; derived parked indexes remain
+  omitted.

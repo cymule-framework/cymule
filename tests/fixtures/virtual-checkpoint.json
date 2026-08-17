@@ -3,6 +3,10 @@
   "checkpoint_id": "virtual:fixture:1",
   "parent_checkpoint": null,
   "snapshot": {
+    "scheduling_policy": {
+      "base_quantum": 1,
+      "aging_interval": 1
+    },
     "regions": {
       "region:fixture": {
         "region_id": "region:fixture",
@@ -21,8 +25,17 @@
     "parked": {},
     "known": [],
     "last_run": null,
+    "last_region": null,
     "claim_epochs": {},
-    "occurrences": {}
+    "occurrences": {},
+    "run_weights": {
+      "run:fixture": 1
+    },
+    "run_deficits": {
+      "run:fixture": 0
+    },
+    "dispatch_sequence": 0,
+    "ready_since": {}
   },
   "control": null,
   "receipt_occurrence_id": null

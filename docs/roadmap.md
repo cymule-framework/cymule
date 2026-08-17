@@ -77,10 +77,13 @@ Status: partial.
   fencing and atomic result/evidence Artifacts;
 - Rust, TypeScript, Python, and Go expose the same occurrence and idempotent
   control-command contracts through transport-neutral interfaces;
+- integer weighted-deficit selection accounts for item cost, durable priority
+  aging prevents fixed-priority starvation, and region round-robin preserves
+  visibility under a one-item frontier;
 - million-item tests prove bounded frontiers, fairness, park/wake, stale-owner
   rejection, and restore behavior;
-- weighted fairness, priority aging, partition migration, subtree compaction,
-  partial rehydration, and multi-worker crash matrices remain proposed.
+- partition migration, subtree compaction, partial rehydration, scheduling
+  control clients, and multi-worker crash matrices remain proposed.
 
 ## M4 - Live evolution
 

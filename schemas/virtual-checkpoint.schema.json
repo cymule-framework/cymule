@@ -43,6 +43,15 @@
         "exhausted": { "type": "boolean" }
       }
     },
+    "schedulingPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base_quantum", "aging_interval"],
+      "properties": {
+        "base_quantum": { "type": "integer", "minimum": 1 },
+        "aging_interval": { "type": "integer", "minimum": 1 }
+      }
+    },
     "region": {
       "type": "object",
       "additionalProperties": false,
@@ -242,9 +251,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "regions", "ready", "active", "parked", "known", "last_run", "claim_epochs", "occurrences"
+        "scheduling_policy", "regions", "ready", "active", "parked", "known", "last_run",
+        "last_region",
+        "claim_epochs", "occurrences", "run_weights", "run_deficits", "dispatch_sequence",
+        "ready_since"
       ],
       "properties": {
+        "scheduling_policy": { "$ref": "#/$defs/schedulingPolicy" },
         "regions": { "type": "object", "additionalProperties": { "$ref": "#/$defs/region" } },
         "ready": {
           "type": "object",
@@ -254,6 +267,7 @@
         "parked": { "type": "object", "additionalProperties": { "$ref": "#/$defs/parked" } },
         "known": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmpty" } },
         "last_run": { "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }] },
+        "last_region": { "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }] },
         "claim_epochs": {
           "type": "object",
           "additionalProperties": { "type": "integer", "minimum": 1 }
@@ -261,6 +275,19 @@
         "occurrences": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/occurrence" }
+        },
+        "run_weights": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 1 }
+        },
+        "run_deficits": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "dispatch_sequence": { "type": "integer", "minimum": 0 },
+        "ready_since": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
         }
       }
     }
