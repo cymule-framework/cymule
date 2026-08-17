@@ -337,6 +337,24 @@ fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
         assert!(machine.projection().runs.is_empty());
     }
 
+    let mut boundary_machine = Machine::new();
+    boundary_machine
+        .insert_plan(sealed.clone())
+        .expect("Plan inserts for boundary envelope test");
+    boundary_machine
+        .submit(CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: "c".repeat(200),
+            actor: "actor:test".to_owned(),
+            run_id: "run:boundary".to_owned(),
+            expected_precondition: None,
+            command: Command::StartRun {
+                plan_id: sealed.plan_id.clone(),
+                binding_context: "binding:test".to_owned(),
+            },
+        })
+        .expect("200-character command identity is legal");
+
     let mut machine = Machine::new();
     machine.insert_plan(sealed.clone()).expect("Plan inserts");
     machine
