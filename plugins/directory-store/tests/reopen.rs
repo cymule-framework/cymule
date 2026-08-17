@@ -13,6 +13,7 @@ use cymule_core::{
 use cymule_directory_store::DirectoryStore;
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableStore, FrameState,
+    StoredState,
 };
 use fs4::FileExt;
 use serde_json::json;
@@ -133,5 +134,36 @@ fn committed_state_reopens_and_stale_writer_is_rejected() {
             .continuations
             .contains_key("run:directory")
     );
+    fs::remove_dir_all(directory).expect("test directory removes");
+}
+
+#[test]
+fn malformed_or_revision_tampered_state_fails_closed() {
+    let directory = test_directory();
+    let (machine, _) = machine_with_run();
+    DurableCoordinator::open(DirectoryStore::open(&directory).expect("opens"))
+        .expect("coordinator opens")
+        .initialize(&machine)
+        .expect("state initializes");
+    let state_path = directory.join("state.json");
+    let committed = fs::read(&state_path).expect("committed bytes read");
+
+    fs::write(&state_path, b"{\"revision\":").expect("truncated state writes");
+    let mut truncated = DirectoryStore::open(&directory).expect("truncated store opens");
+    assert!(matches!(truncated.load(), Err(DurableError::Encoding(_))));
+
+    let mut tampered: StoredState = serde_json::from_slice(&committed).expect("state decodes");
+    tampered.revision = format!("sha256:{}", "0".repeat(64));
+    fs::write(
+        &state_path,
+        cymule_core::canonical_bytes(&tampered).expect("tampered state encodes"),
+    )
+    .expect("tampered state writes");
+    let mut invalid_revision = DirectoryStore::open(&directory).expect("tampered store opens");
+    assert!(matches!(
+        invalid_revision.load(),
+        Err(DurableError::Validation(_))
+    ));
+
     fs::remove_dir_all(directory).expect("test directory removes");
 }

@@ -1153,6 +1153,80 @@ fn crash_after_provider_application_reconciles_without_redispatch() {
 }
 
 #[test]
+fn recovery_survives_lost_unknown_receipt_after_provider_crash() {
+    let lost = Arc::new(AtomicBool::new(false));
+    let store = StageReceiptLossStore {
+        inner: MemoryStore::new(),
+        stage: ReceiptLossStage::Unknown,
+        lost: lost.clone(),
+    };
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let reconciliations = Arc::new(AtomicUsize::new(0));
+    let mut runtime = ResumableRuntime::open(
+        store,
+        CrashAfterApplyPlugin {
+            dispatches: dispatches.clone(),
+            reconciliations: reconciliations.clone(),
+            crash_after_apply: true,
+            unknown_reconciliations: 0,
+        },
+    )
+    .expect("runtime opens");
+    assert!(
+        runtime
+            .start(
+                effect_candidate(),
+                &json!({"value": "compound-fault"}),
+                "run:compound-effect-recovery",
+            )
+            .is_err()
+    );
+    assert!(!lost.load(Ordering::SeqCst));
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+
+    let (store, _) = runtime.into_parts();
+    let mut first_recovery = ResumableRuntime::open(
+        store,
+        CrashAfterApplyPlugin {
+            dispatches: dispatches.clone(),
+            reconciliations: reconciliations.clone(),
+            crash_after_apply: false,
+            unknown_reconciliations: 0,
+        },
+    )
+    .expect("first recovery opens");
+    assert!(
+        first_recovery
+            .resume("run:compound-effect-recovery")
+            .is_err()
+    );
+    assert!(lost.load(Ordering::SeqCst));
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(reconciliations.load(Ordering::SeqCst), 0);
+
+    let (store, _) = first_recovery.into_parts();
+    let mut second_recovery = ResumableRuntime::open(
+        store,
+        CrashAfterApplyPlugin {
+            dispatches: dispatches.clone(),
+            reconciliations: reconciliations.clone(),
+            crash_after_apply: false,
+            unknown_reconciliations: 0,
+        },
+    )
+    .expect("second recovery opens");
+    let DriveOutcome::Completed(result) = second_recovery
+        .resume("run:compound-effect-recovery")
+        .expect("second recovery reconciles")
+    else {
+        panic!("compound recovery should complete");
+    };
+    assert_eq!(result.value, json!({"value": "compound-fault"}));
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(reconciliations.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn unknown_outbox_reconciles_after_another_process_reopen_without_redispatch() {
     let dispatches = Arc::new(AtomicUsize::new(0));
     let reconciliations = Arc::new(AtomicUsize::new(0));

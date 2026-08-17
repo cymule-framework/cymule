@@ -55,6 +55,7 @@ jobs:
             --head HEAD \
             --no-worktree \
             --full-if-empty \
+            --report .cache/test-harness/plan.json \
             --format github-matrix)
           MATRIX=$matrix python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json
@@ -75,6 +76,12 @@ jobs:
             --head HEAD \
             --no-worktree \
             --full-if-empty
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-plan
+          path: .cache/test-harness/plan.json
+          if-no-files-found: warn
 
   meta:
     name: Verify / meta

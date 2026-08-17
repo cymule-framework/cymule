@@ -114,6 +114,28 @@ lane = "rust"
 tools = ["rust"]
 commands = [["./scripts/verify-soak.sh"]]
 
+[suites.rust-coverage]
+description = "Measure semantic Rust coverage against the recorded non-regression floor."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-analysis.sh", "coverage"]]
+
+[suites.rust-mutation]
+description = "Prove cymule-core tests kill generated semantic mutations."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-analysis.sh", "mutation"]]
+
+[suites.rust-portability]
+description = "Run portable core, durable, and directory-store witnesses."
+lane = "rust"
+tools = ["rust"]
+commands = [
+  ["./scripts/verify-rust.sh", "cymule-core"],
+  ["./scripts/verify-rust.sh", "cymule-durable"],
+  ["./scripts/verify-rust.sh", "cymule-directory-store"],
+]
+
 [suites.full]
 description = "Run every required Cymule verification family."
 abstract = true
@@ -130,3 +152,102 @@ requires = [
   "package-typescript",
   "mlir",
 ]
+
+# Ordered path ownership. Matching routes form a conservative union; a path
+# matching no route escalates the complete change to `full`.
+
+[[routes]]
+patterns = ["README.md", "docs/**", "**/AGENTS.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "LICENSE*"]
+suites = ["docs"]
+
+[[routes]]
+patterns = ["crates/cymule-core/tests/**"]
+suites = ["rust-core"]
+
+[[routes]]
+patterns = ["crates/cymule-core/src/**", "crates/cymule-core/Cargo.toml", "crates/cymule-runtime/**", "crates/cymule-cli/**"]
+suites = ["rust-workspace", "protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go", "example"]
+
+[[routes]]
+patterns = ["crates/cymule-durable/tests/**", "crates/cymule-durable/src/executor.rs", "crates/cymule-durable/src/error.rs", "crates/cymule-durable/src/wait_source.rs"]
+suites = ["rust-durable"]
+
+[[routes]]
+patterns = ["crates/cymule-durable/src/coordinator.rs", "crates/cymule-durable/src/store.rs"]
+suites = ["rust-durable", "rust-directory-plugin", "rust-virtual", "rust-resource", "rust-agent-plugin"]
+
+[[routes]]
+patterns = ["crates/cymule-durable/src/model.rs", "crates/cymule-durable/src/lib.rs", "crates/cymule-durable/Cargo.toml"]
+suites = ["rust-durable", "rust-directory-plugin", "rust-virtual", "rust-resource", "rust-agent-plugin", "protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go"]
+
+[[routes]]
+patterns = ["crates/cymule-virtual/**"]
+suites = ["rust-virtual", "protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go"]
+
+[[routes]]
+patterns = ["crates/cymule-evolution/**"]
+suites = ["rust-evolution"]
+
+[[routes]]
+patterns = ["crates/cymule-resource/**"]
+suites = ["rust-resource", "protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go"]
+
+[[routes]]
+patterns = ["crates/cymule-sdk/**"]
+suites = ["sdk-rust", "protocol"]
+
+[[routes]]
+patterns = ["plugins/agent-interaction/**"]
+suites = ["rust-agent-plugin"]
+
+[[routes]]
+patterns = ["plugins/directory-store/**"]
+suites = ["rust-directory-plugin", "rust-durable"]
+
+[[routes]]
+patterns = ["plugins/test-adapter/**"]
+suites = ["protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go"]
+
+[[routes]]
+patterns = ["sdk/typescript/**"]
+suites = ["sdk-typescript", "package-typescript"]
+
+[[routes]]
+patterns = ["sdk/python/**"]
+suites = ["sdk-python"]
+
+[[routes]]
+patterns = ["sdk/go/**"]
+suites = ["sdk-go"]
+
+[[routes]]
+patterns = ["schemas/**", "tests/fixtures/**", "scripts/validate_schemas.py"]
+suites = ["protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go"]
+
+[[routes]]
+patterns = ["examples/**"]
+suites = ["example"]
+
+[[routes]]
+patterns = ["compiler/**"]
+suites = ["mlir"]
+
+[[routes]]
+patterns = ["tests/harness/**", "scripts/test_harness.py", "scripts/validate_docs.py"]
+suites = ["harness", "docs"]
+
+[[routes]]
+patterns = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+suites = ["rust-workspace", "protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go", "example"]
+
+[[routes]]
+patterns = ["sdk/typescript/package.json", "sdk/typescript/pnpm-lock.yaml"]
+suites = ["sdk-typescript", "package-typescript"]
+
+[[routes]]
+patterns = [".gitignore"]
+suites = ["docs"]
+
+[[routes]]
+patterns = ["scripts/verify*.sh", ".github/workflows/**"]
+suites = ["full"]
