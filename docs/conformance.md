@@ -10,10 +10,10 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
 | Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, wait, lease, outbox, occurrence, directory reopen; resumable interpreter and crash recovery remain |
 | Agent Interaction | Partial | typed Session updates and host interfaces plus model-tool-model reference loop; durable protocol adapters and restart tests remain |
+| Large Virtual Graph | Partial | bounded virtual regions, cursors, fair capability claims, parked index, fencing, and snapshot restore; durable compaction remains |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
 | Live Evolution | Partial | future binding update and pinning implemented; state migration proposed |
-| Large Virtual Graph | Proposed | bounded materialization, parked index, compaction |
 
 The implemented rows do not claim persistent VEC storage, durable resumption,
 or exact execution replay of component outputs. Those are M1 gates.
