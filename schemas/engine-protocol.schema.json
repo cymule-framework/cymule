@@ -19,16 +19,6 @@
       }
     },
     {
-      "type": "object", "additionalProperties": false, "required": ["type", "records"],
-      "properties": {
-        "type": { "const": "verify_agent_stream" },
-        "records": {
-          "type": "array", "minItems": 1,
-          "items": { "$ref": "agent-protocol.schema.json#/$defs/agentStreamRecord" }
-        }
-      }
-    },
-    {
       "type": "object", "additionalProperties": false,
       "required": ["type", "plan", "input", "plugin", "run_id"],
       "properties": {

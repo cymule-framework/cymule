@@ -23,9 +23,6 @@ Use `ResourceBuilder.external` for content-addressed/version-pinned objects,
 directories, collections, snapshots, and live references. Concrete access stays
 behind resolver plugins; Resource Candidates never contain credentials.
 
-`CliEngine.verifyAgentStream(records)` validates `cymule.agent-stream/1` data
-with the Rust reducer. SDK records carry stable targets, contiguous sequences,
-and explicit finalization; TypeScript never infers finality or hashes content.
 
 The package is published from GitHub Actions with npm trusted publishing and
 provenance. The Rust Engine remains the semantic authority.

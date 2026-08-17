@@ -416,10 +416,9 @@ fn workspace_coordinator(
 
 #[test]
 fn frozen_agent_occurrence_fixture_matches_the_rust_contract() {
-    let occurrence: cymule_agent::AgentHostOccurrence = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/agent-occurrence.json"
-    ))
-    .expect("fixture deserializes");
+    let occurrence: cymule_agent::AgentHostOccurrence =
+        serde_json::from_str(include_str!("fixtures/agent-occurrence.json"))
+            .expect("fixture deserializes");
     assert_eq!(
         occurrence.request_digest,
         canonical_digest(&occurrence.request).expect("request hashes")

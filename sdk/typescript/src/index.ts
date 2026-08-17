@@ -40,62 +40,6 @@ export interface ResourceHandoff {
   resource: ResourceHandle;
 }
 
-export type AgentRole = "user" | "agent" | "tool" | "system";
-export type AgentContentBlock =
-  | { type: "text"; text: string }
-  | { type: "json"; value: Json }
-  | { type: "artifact"; artifact: { artifact_id: string; kind: string } }
-  | { type: "resource"; uri: string; mime_type: string | null }
-  | { type: "resource_handle"; resource: ResourceHandle };
-
-export interface AgentMessage {
-  message_id: string;
-  role: AgentRole;
-  content: AgentContentBlock[];
-}
-
-export interface AgentToolCall {
-  tool_call_id: string;
-  operation: string;
-  status: "pending" | "awaiting_permission" | "in_progress" | "completed" | "failed" | "cancelled";
-  input: Json;
-  output: AgentContentBlock[] | null;
-  locations: string[];
-}
-
-export type AgentStreamFinalUpdate =
-  | { type: "message"; update_id: string; message: AgentMessage }
-  | { type: "tool"; update_id: string; tool: AgentToolCall };
-export type AgentStreamTarget =
-  | { kind: "message"; message_id: string; role: AgentRole }
-  | { kind: "tool"; tool_call_id: string };
-export interface AgentStreamChunk {
-  sequence: number;
-  content: AgentContentBlock[];
-}
-export type AgentStreamRecord =
-  | { record: "opened"; stream_id: string; session_id: string; target: AgentStreamTarget }
-  | { record: "chunk"; stream_id: string; session_id: string; chunk: AgentStreamChunk }
-  | {
-      record: "finalized";
-      stream_id: string;
-      session_id: string;
-      content_digest: string;
-      update: AgentStreamFinalUpdate;
-    }
-  | { record: "aborted"; stream_id: string; session_id: string; reason: string };
-
-export interface AgentStreamProjection {
-  stream_id: string;
-  session_id: string;
-  target: AgentStreamTarget;
-  chunks: AgentStreamChunk[];
-  state: "open" | "finalized" | "aborted";
-  final_update: AgentStreamFinalUpdate | null;
-  content_digest: string | null;
-  abort_reason: string | null;
-}
-
 export type Expression =
   | { kind: "input" }
   | { kind: "literal"; value: Json }
@@ -331,14 +275,6 @@ export class CliEngine {
     return response.resource;
   }
 
-  verifyAgentStream(records: AgentStreamRecord[]): AgentStreamProjection {
-    const response = this.request({ type: "verify_agent_stream", records });
-    if (response.type !== "verified_agent_stream") {
-      throw new Error(`unexpected response ${response.type}`);
-    }
-    return response.stream;
-  }
-
   run(plan: SealedPlan, input: Json, plugin: string, runId: string): ExecutionResult {
     const response = this.request({ type: "run", plan, input, plugin, run_id: runId });
     if (response.type !== "executed") throw new Error(`unexpected response ${response.type}`);
@@ -360,12 +296,10 @@ export class CliEngine {
 type EngineRequest =
   | { type: "seal"; candidate: PlanCandidate }
   | { type: "seal_resource"; candidate: ResourceCandidate }
-  | { type: "verify_agent_stream"; records: AgentStreamRecord[] }
   | { type: "run"; plan: SealedPlan; input: Json; plugin: string; run_id: string };
 
 type EngineResponse =
   | { type: "sealed"; plan: SealedPlan }
   | { type: "sealed_resource"; resource: ResourceHandle }
-  | { type: "verified_agent_stream"; stream: AgentStreamProjection }
   | { type: "executed"; result: ExecutionResult }
   | { type: "verified" };

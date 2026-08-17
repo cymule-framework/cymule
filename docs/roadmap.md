@@ -38,37 +38,25 @@ Status: partial.
   bounded resolver/store interfaces, M1 handoff journals, and four SDK builders
   are implemented; production adapters and interpreter activation remain.
 
-## M2 - Agent and script integration
+## Optional plugin track - Agent interaction
 
 Status: partial.
 
-- typed content, Session updates, Plans, tool lifecycle, context/model/tool,
-  permission, elicitation, and workspace interfaces are implemented;
-- provider-neutral ordered Session journals, validate-before-append updates,
-  idempotent append, and projection replay after reopen are implemented;
-- Agent updates can use the same M1 whole-state CAS through typed durable
-  application journal records;
-- all six replaceable agent host boundaries persist request-digested,
-  binding-pinned occurrences and fail closed after ambiguous receipt loss;
-- typed input requests atomically couple `RequiresAction` and `Running` Session
-  projections to M1 wait registration and completion across process reopen;
-- self-contained Draft 2020-12 input schemas and accepted values are enforced
-  before durable suspension/completion writes, with external retrieval disabled;
-- ambiguous host calls reconcile through their original binding to typed
-  `completed` or evidence-backed `not_applied` without redispatch;
-- a caller-driven durable interaction controller replays completed or
-  reconciled typed responses after reopen and blocks unresolved occurrences
-  without owning the caller's Agent/script loop;
-- workspace overlay commit/abort is coupled to scope closure, Effect
-  obligations, outbox state, typed occurrences, Machine, and Continuation under
-  the M1 CAS, with receipt-loss and reconciliation fault tests;
-- identified Agent streams stage contiguous chunks outside Session authority,
-  atomically finalize Message/Tool output through M1 multi-journal CAS, and pass
-  receipt-loss/reopen plus four-SDK Rust-reducer tests;
-- a bounded reference turn driver passes context-model-tool-model end-to-end
-  tests;
-- protocol adapters, remaining cross-language Session clients, debugger
-  queries, and evidence views remain proposed.
+This track is not a Cymule framework milestone or a requirement for M1, M3, or
+M4 conformance. The optional
+[`plugins/agent-interaction`](../plugins/agent-interaction) package owns Session,
+Agent-host occurrence, input, workspace, and stream controllers. It uses the
+generic M1 CAS, application journals, waits, effects, scopes, resources, and
+binding rules without exporting Agent-domain types from the framework CLI or
+language SDKs.
+
+The Rust plugin currently includes durable projection/replay, input suspension,
+binding-pinned host interactions, no-redispatch reconciliation, workspace
+effect integration, staged stream finalization, and fault-oriented reopen/CAS
+tests. Its remaining gates and exact behavior live in the
+[plugin profile](../plugins/agent-interaction/PROFILE.md). ACP, MCP, A2A,
+provider, editor, and concrete Agent Loop support are separate plugin layers and
+do not block the framework roadmap.
 
 ## M3 - Large virtual work
 

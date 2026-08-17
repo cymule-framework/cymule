@@ -66,60 +66,23 @@ The reference process protocol is request/response JSON over stdin/stdout. It is
 designed for testability, not as the only production transport. Future WIT and
 network transports can implement the same `PluginHost` trait.
 
-## Agent interaction
+## Optional integration plugins
 
-`cymule-agent` keeps protocol-neutral Session projections and replaceable host
-interfaces outside the semantic kernel. Durable context, model, permission,
-tool, elicitation, and workspace calls pin their implementation binding before
-invocation and journal typed lifecycle snapshots under the M1 CAS revision.
+Cymule does not define a Session, Agent Loop, message or tool lifecycle,
+transport stream, or Agent-host occurrence. Those are integration-domain
+objects, not semantic-kernel concepts.
 
-Cymule does not own an Agent or script loop. The caller decides how context,
-models, permissions, tools, user input, and workspace changes are ordered and
-when its own loop continues or terminates. For each external interaction the
-caller supplies a stable occurrence ID and typed request to
-`AgentInteractionController`. The controller owns only binding pinning,
-`prepared -> started -> completed | unknown` persistence, retained-response
-replay, and fail-closed recovery. Reopening a completed occurrence returns the
-recorded typed response without binding or dispatching again; conflicting reuse
-of an ID is rejected.
+The separately owned [`plugins/agent-interaction`](../plugins/agent-interaction)
+package is one optional integration. It lowers Agent-domain projections,
+controllers, and occurrences onto generic M1 journals, waits, effects, scopes,
+resources, bindings, and CAS checkpoints. Its types are not re-exported by the
+framework CLI or language SDKs, and its schema and conformance suite evolve in
+the plugin's own version domain.
 
-Human or external input uses an M1 `WaitKind::Input`, not a blocked task or
-process-local channel. `AgentInputController` atomically couples the Session
-projection and Continuation wait, so a crash cannot expose `RequiresAction`
-without a deliverable wait or ready the Continuation without the resolved
-elicitation. It compiles self-contained Draft 2020-12 schemas before suspension
-and validates accepted values from the persisted request before the completion
-CAS. The maintained Rust JSON Schema implementation runs with filesystem and
-HTTP resolvers disabled; schema validation does not introduce an I/O or provider
-boundary. Concrete UI, transport, and identity integrations remain adapters.
-
-An ambiguous host call is recovered by querying its original pinned binding.
-The query may return the original typed response, prove `not_applied`, or remain
-`unknown`; it never dispatches a replacement request. A call that never left
-`prepared` may be cancelled only with explicit non-dispatch evidence. Once a
-recovery records the original typed response, the caller can reopen the
-interaction controller and consume that response without redispatch. A
-`not_applied` result requires the caller to admit a separately identified
-replacement or terminate its own loop.
-
-A workspace overlay is an immutable Artifact prepared by an adapter. Commit is
-not a filesystem-specific primitive: `WorkspaceScopeController` admits it as a
-Plan-declared mutating Effect, commits the scope to transfer its obligation,
-then atomically records the host occurrence and outbox claim before provider
-dispatch. A terminal receipt or reconciliation observation updates the Effect,
-obligation, outbox, occurrence, Machine snapshot, and Continuation in one M1
-CAS. Abort has no commit Effect; the scope remains open until a retained receipt
-proves the overlay was not committed. Git repositories, local directories,
-sandboxes, and remote storage remain `AgentHost` adapters.
-
-Agent transport streaming is staging, not Session authority.
-`AgentStreamController` persists identified, contiguous chunks in a separate M1
-journal. Until explicit finalization, `AgentSession.messages` and tool output do
-not change. Finalization uses `checkpoint_journals` to append the terminal
-stream record and exact Session update under one CAS; receipt loss reopens to
-one finalized output, while stale writers commit neither side. Content blocks
-may carry `ResourceHandle` for large output. ACP/A2A/MCP transports map their
-chunk/progress forms to this boundary but do not define finality themselves.
+ACP, MCP, A2A, editor, model-provider, and concrete Agent Loop support belongs
+in additional adapters or plugins above that package. The same core interfaces
+can support unrelated integration domains without acquiring Agent-specific
+semantics.
 
 ## Storage contracts
 
