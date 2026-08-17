@@ -177,6 +177,56 @@ class ResourceBuilder:
         }
 
 
+class WaitActivationBuilder:
+    """Build identified provider-neutral signal and timer deliveries."""
+
+    @staticmethod
+    def signal(
+        activation_id: str,
+        key: str,
+        wait_ids: list[str],
+        result: dict[str, str],
+    ) -> dict[str, Any]:
+        return WaitActivationBuilder._build(
+            activation_id,
+            {"kind": "signal", "key": key},
+            wait_ids,
+            result,
+        )
+
+    @staticmethod
+    def timer(
+        activation_id: str,
+        timer_id: str,
+        wait_id: str,
+        result: dict[str, str],
+    ) -> dict[str, Any]:
+        return WaitActivationBuilder._build(
+            activation_id,
+            {"kind": "timer", "timer_id": timer_id},
+            [wait_id],
+            result,
+        )
+
+    @staticmethod
+    def _build(
+        activation_id: str,
+        source: dict[str, str],
+        wait_ids: list[str],
+        result: dict[str, str],
+    ) -> dict[str, Any]:
+        targets = sorted(set(wait_ids))
+        if not activation_id or not targets:
+            raise ValueError("wait activation requires an identity and at least one target")
+        return {
+            "activation_version": "cymule.wait-activation/1",
+            "activation_id": activation_id,
+            "source": source,
+            "wait_ids": targets,
+            "result": dict(result),
+        }
+
+
 class CliEngine:
     """CLI-backed Engine transport."""
 
@@ -195,6 +245,15 @@ class CliEngine:
         if response.get("type") != "sealed_resource":
             raise RuntimeError(f"unexpected engine response: {response!r}")
         return response["resource"]
+
+    def verify_wait_activation(self, activation: dict[str, Any]) -> dict[str, Any]:
+        """Validate an identified signal or timer delivery with the Rust engine."""
+        response = self._request(
+            {"type": "verify_wait_activation", "activation": activation}
+        )
+        if response.get("type") != "verified_wait_activation":
+            raise RuntimeError(f"unexpected engine response: {response!r}")
+        return response["activation"]
 
     def run(
         self,
@@ -230,4 +289,10 @@ class CliEngine:
         return json.loads(completed.stdout)
 
 
-__all__ = ["CliEngine", "FlowBuilder", "Json", "ResourceBuilder"]
+__all__ = [
+    "CliEngine",
+    "FlowBuilder",
+    "Json",
+    "ResourceBuilder",
+    "WaitActivationBuilder",
+]

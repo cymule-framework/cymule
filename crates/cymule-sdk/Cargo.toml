@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 cymule-core = { path = "../cymule-core" }
+cymule-durable = { path = "../cymule-durable" }
 cymule-resource = { path = "../cymule-resource" }
 cymule-runtime = { path = "../cymule-runtime" }
 serde.workspace = true

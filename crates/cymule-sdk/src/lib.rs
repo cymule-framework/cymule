@@ -6,9 +6,10 @@ mod client;
 pub use builder::FlowBuilder;
 pub use client::{CliEngine, Engine};
 pub use cymule_core::{
-    DispatchPolicy, EffectProfile, Expression, MutationKind, PlanCandidate, ReconciliationMode,
-    ScopeMode, SealedPlan, WaitSpec,
+    ArtifactRef, DispatchPolicy, EffectProfile, Expression, MutationKind, PlanCandidate,
+    ReconciliationMode, ScopeMode, SealedPlan, WaitSpec,
 };
+pub use cymule_durable::{WAIT_ACTIVATION_VERSION, WaitActivation, WaitActivationSource};
 pub use cymule_resource::{
     InlineData, ResourceCandidate, ResourceHandle, ResourceHandoff, ResourceIntegrity,
     ResourceLocation, ResourceReplayClass, ResourceShape,

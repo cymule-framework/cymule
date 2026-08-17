@@ -9,3 +9,7 @@
 - `resource.schema.json` owns `cymule.resource/1` candidates/handles and
   `cymule.resource-handoff/1`. Shape or integrity changes require Rust semantic
   validation, all SDKs, fixtures, and cross-language Resource ID tests.
+- `wait-activation.schema.json` owns the provider-neutral
+  `cymule.wait-activation/1` delivery record. Source, targets, and result must
+  stay closed and pass Rust plus four-SDK fixture conformance; concrete clock,
+  signal, queue, and transport fields never enter this schema.

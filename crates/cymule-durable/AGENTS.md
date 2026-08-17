@@ -9,6 +9,17 @@
   ambient time.
 - Wait completion, lease acquisition, outbox claims, occurrence recording, and
   snapshot publication must be idempotent and fenced.
+- Signal and timer waits complete only through an identified
+  `cymule.wait-activation/1` record. Match the declared source, atomically store
+  its result and ready every selected Continuation, and allow one signal token
+  to consume at most one consume-once wait. Stable activation redelivery is
+  idempotent; conflicting ID reuse and stale writers fail closed.
+- Activation admission may add only its result Artifact to the current Machine
+  snapshot. Reject a caller snapshot that also changes Plans, Events, commands,
+  or unrelated Artifacts; wait ingress is not a raw Machine mutation surface.
+- A `Ready` Continuation resumed after a crash must advance its epoch and commit
+  a new fenced Attempt before interpretation. Never reuse the yielded Attempt
+  that originally parked the wait.
 - `unknown` outbox entries remain active reconciliation work under their
   original claim. Reopen must query them again and may settle them as applied or
   not applied; it must never redispatch the original Effect or reuse one command

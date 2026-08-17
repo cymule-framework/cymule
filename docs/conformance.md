@@ -8,7 +8,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | --- | --- | --- |
 | Semantic Interpreter M0 | Implemented | frozen IR, canonical stores, admission, reducer, exact state replay |
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
-| Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, wait, lease, outbox, occurrence replay, Resource handoff, directory-store reopen, and ambiguous-effect reconciliation; nested scopes and the full crash matrix remain |
+| Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, identified signal/timer activation, lease, outbox, occurrence replay, Resource handoff, directory-store reopen, and ambiguous-effect reconciliation; nested scopes and the full crash matrix remain |
 | Optional Agent Interaction plugin | Partial plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces; not a framework profile |
 | Large Virtual Graph | Partial | bounded virtual regions, cursors, fair capability claims, parked index, fencing, and snapshot restore; durable compaction remains |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
@@ -35,12 +35,19 @@ The local suite verifies:
 - effect transitions reject illegal jumps;
 - dispatch ambiguity becomes `unknown`, never a fresh intent;
 - reconciliation retains the original occurrence binding;
+- identical signal/timer activation redelivery returns the original durable
+  decision, source mismatch and conflicting ID reuse fail, one signal token
+  consumes at most one consume-once wait, and stale writers commit nothing;
+- a process reopening after wait activation advances the Continuation epoch and
+  begins a new fenced Attempt before interpretation;
 - a Binding Context update changes only future occurrences;
 - replay availability is not reported as exact when an artifact is missing;
 - TypeScript, Python, Rust, and Go author the same plan and execute through the
   same Rust kernel and external plugin;
 - TypeScript, Python, Rust, and Go submit the same Resource Candidate to the
   Rust resource sealer and receive the same Resource ID;
+- TypeScript, Python, Rust, and Go construct the same identified wait activation
+  fixture and validate its closed wire contract through the Rust Engine;
 - Resource identity ignores locations, public credential-bearing URLs fail,
   bounded reads/lists reject malformed adapters, content bytes are verified,
   and Run-to-Run handoffs survive M1 reopen and reject conflicting transfer IDs.

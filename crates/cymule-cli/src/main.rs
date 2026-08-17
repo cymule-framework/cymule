@@ -6,6 +6,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use cymule_core::{PlanCandidate, SealedPlan};
+use cymule_durable::WaitActivation;
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{EmbeddedRuntime, ExecutionResult, ProcessPlugin};
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,9 @@ enum EngineRequest {
     SealResource {
         candidate: ResourceCandidate,
     },
+    VerifyWaitActivation {
+        activation: WaitActivation,
+    },
     Run {
         plan: SealedPlan,
         input: Value,
@@ -36,6 +40,7 @@ enum EngineRequest {
 enum EngineResponse {
     Sealed { plan: SealedPlan },
     SealedResource { resource: ResourceHandle },
+    VerifiedWaitActivation { activation: WaitActivation },
     Executed { result: ExecutionResult },
     Verified,
 }
@@ -66,6 +71,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let candidate: ResourceCandidate = read_path(argument_value(&arguments, "--input")?)?;
             print_json(&candidate.seal()?)
         }
+        Some("wait-activation") if arguments.get(1).map(String::as_str) == Some("verify") => {
+            let activation: WaitActivation = read_path(argument_value(&arguments, "--input")?)?;
+            activation.verify()?;
+            print_json(&activation)
+        }
         Some("run") => {
             let plan: SealedPlan = read_path(argument_value(&arguments, "--plan")?)?;
             let input: Value = read_path(argument_value(&arguments, "--input")?)?;
@@ -75,7 +85,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let result = runtime.execute(plan, &input, run_id)?;
             print_json(&result)
         }
-        _ => Err("usage: cymule <rpc|seal|verify|run|resource seal> [options]".into()),
+        _ => Err(
+            "usage: cymule <rpc|seal|verify|run|resource seal|wait-activation verify> [options]"
+                .into(),
+        ),
     }
 }
 
@@ -94,6 +107,10 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
         EngineRequest::SealResource { candidate } => EngineResponse::SealedResource {
             resource: candidate.seal()?,
         },
+        EngineRequest::VerifyWaitActivation { activation } => {
+            activation.verify()?;
+            EngineResponse::VerifiedWaitActivation { activation }
+        }
         EngineRequest::Run {
             plan,
             input,

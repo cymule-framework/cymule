@@ -1,6 +1,6 @@
 //! Restart-level resumable interpreter tests.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -8,7 +8,7 @@ use cymule_core::{
     ComponentContract, Definition, DispatchPolicy, EffectContract, EffectProfile, Expression,
     MutationKind, Operation, PlanCandidate, ReconciliationMode, Region, Step, WaitSpec,
 };
-use cymule_durable::{DriveOutcome, MemoryStore, ResumableRuntime};
+use cymule_durable::{DriveOutcome, MemoryStore, ResumableRuntime, WaitActivationSource};
 use cymule_runtime::{
     PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginOperation, PluginRequest,
     PluginResponse, RuntimeError, RuntimeResult,
@@ -188,6 +188,29 @@ fn effect_candidate() -> PlanCandidate {
     }
 }
 
+fn external_wait_candidate(name: &str, wait: WaitSpec) -> PlanCandidate {
+    PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: name.to_owned(),
+        entry: "main".to_owned(),
+        components: Vec::new(),
+        effects: Vec::new(),
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: vec![Step {
+                    id: "wait.external".to_owned(),
+                    operation: Operation::Wait { wait },
+                }],
+                result: Expression::Input,
+            },
+        }],
+        metadata: BTreeMap::new(),
+    }
+}
+
 #[test]
 fn process_reopen_resumes_after_wait_without_reinvoking_component() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -231,6 +254,90 @@ fn process_reopen_resumes_after_wait_without_reinvoking_component() {
             .len(),
         1
     );
+}
+
+#[test]
+fn identified_signal_and_timer_activations_resume_after_process_reopen() {
+    let cases = [
+        (
+            "run:signal-activation",
+            external_wait_candidate(
+                "signal_activation",
+                WaitSpec::Signal {
+                    key: "signal:continue".to_owned(),
+                    consume_once: true,
+                },
+            ),
+            WaitActivationSource::Signal {
+                key: "signal:continue".to_owned(),
+            },
+        ),
+        (
+            "run:timer-activation",
+            external_wait_candidate(
+                "timer_activation",
+                WaitSpec::Timer {
+                    timer_id: "timer:continue".to_owned(),
+                },
+            ),
+            WaitActivationSource::Timer {
+                timer_id: "timer:continue".to_owned(),
+            },
+        ),
+    ];
+
+    for (run_id, candidate, source) in cases {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut runtime = ResumableRuntime::open(
+            MemoryStore::new(),
+            CountingPlugin {
+                calls: calls.clone(),
+            },
+        )
+        .expect("runtime opens");
+        let DriveOutcome::Suspended { wait_id } = runtime
+            .start(candidate, &json!({"case": run_id}), run_id)
+            .expect("run reaches external wait")
+        else {
+            panic!("run should suspend");
+        };
+        let ready_runs = runtime
+            .admit_wait_activation(
+                format!("activation:{run_id}"),
+                source.clone(),
+                BTreeSet::from([wait_id.clone()]),
+                &json!({"delivered": true}),
+            )
+            .expect("activation commits");
+        assert_eq!(ready_runs, BTreeSet::from([run_id.to_owned()]));
+
+        let (store, _) = runtime.into_parts();
+        let mut reopened = ResumableRuntime::open(
+            store,
+            CountingPlugin {
+                calls: calls.clone(),
+            },
+        )
+        .expect("runtime reopens");
+        let DriveOutcome::Completed(result) =
+            reopened.resume(run_id).expect("activated run resumes")
+        else {
+            panic!("activated run should complete");
+        };
+        assert_eq!(result.value, json!({"case": run_id}));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(
+            reopened
+                .admit_wait_activation(
+                    format!("activation:{run_id}"),
+                    source,
+                    BTreeSet::from([wait_id]),
+                    &json!({"delivered": true}),
+                )
+                .expect("completed activation redelivery is retained")
+                .is_empty()
+        );
+    }
 }
 
 #[test]

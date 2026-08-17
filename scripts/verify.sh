@@ -18,7 +18,8 @@ echo "== Build shared engine and plugin =="
 cargo build -p cymule-cli -p cymule-test-adapter
 CYMULE_BIN="$ROOT/target/debug/cymule"
 CYMULE_TEST_PLUGIN="$ROOT/target/debug/cymule-test-adapter"
-export CYMULE_BIN CYMULE_TEST_PLUGIN
+CYMULE_WAIT_ACTIVATION_FIXTURE="$ROOT/tests/fixtures/wait-activation.json"
+export CYMULE_BIN CYMULE_TEST_PLUGIN CYMULE_WAIT_ACTIVATION_FIXTURE
 
 echo "== Frozen schemas and semantic rejection =="
 uv run --project sdk/python --frozen python "$ROOT/scripts/validate_schemas.py" "$ROOT" "$CYMULE_BIN"

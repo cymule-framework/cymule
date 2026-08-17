@@ -89,9 +89,16 @@ semantics.
 M1 defines a provider-neutral `DurableStore` as compare-and-swap over one
 complete `DurableState` revision. A successful write atomically covers the
 semantic Machine snapshot, Continuations, waits, leases, effect outbox,
-component occurrences, snapshot metadata, and typed higher-profile journals.
-This keeps M2-M4 records under the same revision authority without placing
-their domain types in `cymule-core`.
+identified signal/timer activation receipts, component occurrences, snapshot
+metadata, and typed higher-profile journals. This keeps M2-M4 records under the
+same revision authority without placing their domain types in `cymule-core`.
+
+Clock and signal plugins do not wake processes directly. They submit a stable
+`cymule.wait-activation/1` proposal naming the declared source and exact parked
+waits. M1 admits the receipt, result Artifact, wait completions, and Continuation
+readiness in one CAS. Stable redelivery is safe, a consume-once signal token has
+at most one consuming winner, and a resumed Continuation receives a new fenced
+Attempt epoch.
 
 The repository provides a non-blocking shared-memory reference store and an
 atomic local directory adapter. Both surface writer contention as a conflict;

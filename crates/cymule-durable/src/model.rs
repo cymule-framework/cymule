@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use cymule_core::{ArtifactRef, MachineSnapshot, canonical_digest};
+use cymule_core::{ArtifactRef, Machine, MachineSnapshot, canonical_digest};
 use serde::{Deserialize, Serialize};
 
 use crate::{DurableError, DurableResult};
 
 /// Durable profile state version.
 pub const DURABLE_STATE_VERSION: &str = "cymule.durable-state/1";
+/// Identified external wait activation version.
+pub const WAIT_ACTIVATION_VERSION: &str = "cymule.wait-activation/1";
 
 /// Complete provider-neutral state committed by one single-domain CAS write.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -20,6 +22,14 @@ pub struct DurableState {
     pub continuations: BTreeMap<String, Continuation>,
     /// Wait registrations keyed by stable wait ID.
     pub waits: BTreeMap<String, WaitCondition>,
+    /// Admitted signal and timer activations keyed by external activation ID.
+    ///
+    /// The record is the consume-once and idempotency authority for substrate
+    /// redelivery. A concrete signal or timer plugin may deliver the same
+    /// activation repeatedly, but it cannot reinterpret its source, targets,
+    /// or result.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub wait_activations: BTreeMap<String, WaitActivation>,
     /// Fenced authority leases keyed by coordination resource.
     pub leases: BTreeMap<String, AuthorityLease>,
     /// Effect dispatch outbox keyed by structural intent ID.
@@ -45,6 +55,7 @@ impl DurableState {
             machine,
             continuations: BTreeMap::new(),
             waits: BTreeMap::new(),
+            wait_activations: BTreeMap::new(),
             leases: BTreeMap::new(),
             outbox: BTreeMap::new(),
             component_occurrences: BTreeMap::new(),
@@ -61,7 +72,7 @@ impl DurableState {
                 self.durable_version
             )));
         }
-        cymule_core::Machine::restore(self.machine.clone())?;
+        let machine = Machine::restore(self.machine.clone())?;
         for (run_id, continuation) in &self.continuations {
             if &continuation.run_id != run_id {
                 return Err(DurableError::Validation(format!(
@@ -75,6 +86,58 @@ impl DurableState {
                     "wait key {wait_id} does not match its identity"
                 )));
             }
+        }
+        let mut activated_waits = BTreeSet::new();
+        for (activation_id, activation) in &self.wait_activations {
+            if &activation.activation_id != activation_id {
+                return Err(DurableError::Validation(format!(
+                    "wait activation key {activation_id} does not match its identity"
+                )));
+            }
+            activation.verify()?;
+            if machine.artifact(&activation.result).is_none() {
+                return Err(DurableError::Validation(format!(
+                    "wait activation {activation_id} result artifact is missing"
+                )));
+            }
+            let mut consume_once_targets = 0usize;
+            for wait_id in &activation.wait_ids {
+                if !activated_waits.insert(wait_id) {
+                    return Err(DurableError::Validation(format!(
+                        "wait {wait_id} is completed by more than one activation"
+                    )));
+                }
+                let wait = self.waits.get(wait_id).ok_or_else(|| {
+                    DurableError::Validation(format!(
+                        "wait activation {activation_id} references missing wait {wait_id}"
+                    ))
+                })?;
+                activation.source.ensure_matches(wait)?;
+                if wait.state != WaitState::Completed
+                    || wait.result.as_ref() != Some(&activation.result)
+                {
+                    return Err(DurableError::Validation(format!(
+                        "wait activation {activation_id} is not reflected by completed wait {wait_id}"
+                    )));
+                }
+                let continuation = self.continuations.get(&wait.run_id).ok_or_else(|| {
+                    DurableError::Validation(format!(
+                        "wait activation {activation_id} references missing continuation {}",
+                        wait.run_id
+                    ))
+                })?;
+                if continuation.wait_set.contains(wait_id) {
+                    return Err(DurableError::Validation(format!(
+                        "wait activation {activation_id} left completed wait {wait_id} pending on its Continuation"
+                    )));
+                }
+                if wait.consume_once {
+                    consume_once_targets += 1;
+                }
+            }
+            activation
+                .source
+                .validate_target_cardinality(activation.wait_ids.len(), consume_once_targets)?;
         }
         for (journal_id, records) in &self.application_journals {
             if journal_id.is_empty() {
@@ -303,6 +366,148 @@ pub enum WaitState {
     Completed,
     /// The wait was cancelled before completion.
     Cancelled,
+}
+
+/// One externally identified signal or timer delivery admitted by M1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitActivation {
+    /// Activation schema and semantic version.
+    pub activation_version: String,
+    /// Stable external delivery identity used for redelivery deduplication.
+    pub activation_id: String,
+    /// Expected signal or timer source.
+    pub source: WaitActivationSource,
+    /// Exact pending waits selected by a scheduler or parked-wait index.
+    pub wait_ids: BTreeSet<String>,
+    /// Immutable typed completion result shared by every selected wait.
+    pub result: ArtifactRef,
+}
+
+impl WaitActivation {
+    /// Construct and validate an identified wait activation.
+    pub fn new(
+        activation_id: impl Into<String>,
+        source: WaitActivationSource,
+        wait_ids: BTreeSet<String>,
+        result: ArtifactRef,
+    ) -> DurableResult<Self> {
+        let activation = Self {
+            activation_version: WAIT_ACTIVATION_VERSION.to_owned(),
+            activation_id: activation_id.into(),
+            source,
+            wait_ids,
+            result,
+        };
+        activation.verify()?;
+        Ok(activation)
+    }
+
+    /// Validate versioned shape independently of the referenced durable state.
+    pub fn verify(&self) -> DurableResult<()> {
+        if self.activation_version != WAIT_ACTIVATION_VERSION {
+            return Err(DurableError::Validation(format!(
+                "unsupported wait activation version {:?}",
+                self.activation_version
+            )));
+        }
+        if self.activation_id.is_empty() {
+            return Err(DurableError::Validation(
+                "wait activation identity must not be empty".to_owned(),
+            ));
+        }
+        if self.wait_ids.is_empty() {
+            return Err(DurableError::Validation(
+                "wait activation must target at least one wait".to_owned(),
+            ));
+        }
+        if self.wait_ids.iter().any(String::is_empty) {
+            return Err(DurableError::Validation(
+                "wait activation target identity must not be empty".to_owned(),
+            ));
+        }
+        let Some(digest) = self.result.artifact_id.strip_prefix("sha256:") else {
+            return Err(DurableError::Validation(
+                "wait activation result must use a sha256 Artifact identity".to_owned(),
+            ));
+        };
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || self.result.kind.is_empty()
+        {
+            return Err(DurableError::Validation(
+                "wait activation result Artifact is malformed".to_owned(),
+            ));
+        }
+        self.source.verify()
+    }
+}
+
+/// Provider-neutral source identity for one external wait activation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WaitActivationSource {
+    /// One durable signal delivery under a correlation key.
+    Signal {
+        /// Correlation key declared by the waiting Plan.
+        key: String,
+    },
+    /// One logical timer firing supplied by a clock plugin.
+    Timer {
+        /// Stable timer identity declared by the waiting Plan.
+        timer_id: String,
+    },
+}
+
+impl WaitActivationSource {
+    fn verify(&self) -> DurableResult<()> {
+        let identity = match self {
+            Self::Signal { key } => key,
+            Self::Timer { timer_id } => timer_id,
+        };
+        if identity.is_empty() {
+            return Err(DurableError::Validation(
+                "wait activation source identity must not be empty".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_matches(&self, wait: &WaitCondition) -> DurableResult<()> {
+        let matches = match (self, &wait.kind) {
+            (Self::Signal { key }, WaitKind::Signal { key: expected }) => key == expected,
+            (Self::Timer { timer_id }, WaitKind::Timer { timer_id: expected }) => {
+                timer_id == expected
+            }
+            _ => false,
+        };
+        if !matches {
+            return Err(DurableError::Validation(format!(
+                "activation source does not match wait {}",
+                wait.wait_id
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_target_cardinality(
+        &self,
+        target_count: usize,
+        consume_once_targets: usize,
+    ) -> DurableResult<()> {
+        match self {
+            Self::Signal { .. } if consume_once_targets <= 1 => Ok(()),
+            Self::Signal { .. } => Err(DurableError::Validation(
+                "one signal activation cannot consume more than one consume-once wait".to_owned(),
+            )),
+            Self::Timer { .. } if target_count == 1 => Ok(()),
+            Self::Timer { .. } => Err(DurableError::Validation(
+                "one timer activation must target exactly one wait".to_owned(),
+            )),
+        }
+    }
 }
 
 /// Fenced authority lease. Time values are supplied by a Clock substrate.

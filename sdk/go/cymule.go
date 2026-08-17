@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 )
 
 // Expression is one frozen IR expression.
@@ -127,6 +128,64 @@ type ResourceHandoff struct {
 	ToRun          string         `json:"to_run"`
 	Slot           string         `json:"slot"`
 	Resource       ResourceHandle `json:"resource"`
+}
+
+// ArtifactRef identifies immutable typed bytes in the semantic artifact store.
+type ArtifactRef struct {
+	ArtifactID string `json:"artifact_id"`
+	Kind       string `json:"kind"`
+}
+
+// WaitActivationSource identifies a signal key or logical timer.
+type WaitActivationSource struct {
+	Kind    string `json:"kind"`
+	Key     string `json:"key,omitempty"`
+	TimerID string `json:"timer_id,omitempty"`
+}
+
+// WaitActivation is one identified external signal or timer delivery.
+type WaitActivation struct {
+	ActivationVersion string               `json:"activation_version"`
+	ActivationID      string               `json:"activation_id"`
+	Source            WaitActivationSource `json:"source"`
+	WaitIDs           []string             `json:"wait_ids"`
+	Result            ArtifactRef          `json:"result"`
+}
+
+// SignalWaitActivation creates a deterministic signal delivery record.
+func SignalWaitActivation(activationID, key string, waitIDs []string, result ArtifactRef) WaitActivation {
+	targets := uniqueSorted(waitIDs)
+	return WaitActivation{
+		ActivationVersion: "cymule.wait-activation/1",
+		ActivationID:      activationID,
+		Source:            WaitActivationSource{Kind: "signal", Key: key},
+		WaitIDs:           targets,
+		Result:            result,
+	}
+}
+
+// TimerWaitActivation creates a single-target logical timer delivery record.
+func TimerWaitActivation(activationID, timerID, waitID string, result ArtifactRef) WaitActivation {
+	return WaitActivation{
+		ActivationVersion: "cymule.wait-activation/1",
+		ActivationID:      activationID,
+		Source:            WaitActivationSource{Kind: "timer", TimerID: timerID},
+		WaitIDs:           []string{waitID},
+		Result:            result,
+	}
+}
+
+func uniqueSorted(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		seen[value] = struct{}{}
+	}
+	result := make([]string, 0, len(seen))
+	for value := range seen {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // NewResourceHandoff creates one M1 Run-to-Run handoff record.
@@ -357,6 +416,21 @@ func (engine CliEngine) SealResource(candidate ResourceCandidate) (ResourceHandl
 		err = fmt.Errorf("unexpected engine response %q", response.Type)
 	}
 	return response.Resource, err
+}
+
+// VerifyWaitActivation validates a signal or timer delivery with the Rust engine.
+func (engine CliEngine) VerifyWaitActivation(activation WaitActivation) (WaitActivation, error) {
+	var response struct {
+		Type       string         `json:"type"`
+		Activation WaitActivation `json:"activation"`
+	}
+	err := engine.request(map[string]any{
+		"type": "verify_wait_activation", "activation": activation,
+	}, &response)
+	if err == nil && response.Type != "verified_wait_activation" {
+		err = fmt.Errorf("unexpected engine response %q", response.Type)
+	}
+	return response.Activation, err
 }
 
 // Run executes a sealed plan through one plugin realization.

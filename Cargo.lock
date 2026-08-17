@@ -138,6 +138,7 @@ name = "cymule-cli"
 version = "0.1.0"
 dependencies = [
  "cymule-core",
+ "cymule-durable",
  "cymule-resource",
  "cymule-runtime",
  "serde",
@@ -221,6 +222,7 @@ name = "cymule-sdk"
 version = "0.1.0"
 dependencies = [
  "cymule-core",
+ "cymule-durable",
  "cymule-resource",
  "cymule-runtime",
  "serde",

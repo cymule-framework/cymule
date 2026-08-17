@@ -19,6 +19,13 @@
       }
     },
     {
+      "type": "object", "additionalProperties": false, "required": ["type", "activation"],
+      "properties": {
+        "type": { "const": "verify_wait_activation" },
+        "activation": { "$ref": "wait-activation.schema.json" }
+      }
+    },
+    {
       "type": "object", "additionalProperties": false,
       "required": ["type", "plan", "input", "plugin", "run_id"],
       "properties": {

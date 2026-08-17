@@ -7,6 +7,9 @@
   from the checked-in shared fixture.
 - Export the Resource ID sealed from the checked-in Resource Candidate so every
   SDK verifies the same Rust-owned identity.
+- Every SDK submits the shared wait activation fixture to the Rust Engine. This
+  proves the closed wire boundary only; stateful source and consume-once cases
+  stay in the M1 fault suite.
 - Schema verification covers every `schemas/*.schema.json` file and must include
   positive and unknown-field rejection cases for each public protocol family.
 - Keep host-native verification reproducible and avoid container-only workflows.

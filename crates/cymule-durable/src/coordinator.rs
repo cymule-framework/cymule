@@ -3,7 +3,7 @@ use cymule_core::Machine;
 use crate::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableError,
     DurableResult, DurableState, DurableStore, EffectDispatch, JournalBatch, JournalRecord,
-    OutboxState, SnapshotRecord, StoredState, WaitCondition, WaitState,
+    OutboxState, SnapshotRecord, StoredState, WaitActivation, WaitCondition, WaitKind, WaitState,
 };
 
 /// Transactional coordinator over one provider-neutral durable store.
@@ -433,6 +433,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 .waits
                 .get_mut(wait_id)
                 .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
+            ensure_direct_wait_completion(wait)?;
             if wait.state == WaitState::Completed && wait.result.as_ref() == Some(&result) {
                 return Ok(());
             }
@@ -485,6 +486,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 .waits
                 .get_mut(wait_id)
                 .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
+            ensure_direct_wait_completion(wait)?;
             if wait.state == WaitState::Completed && wait.result.as_ref() == Some(&result) {
                 return Ok(());
             }
@@ -502,6 +504,93 @@ impl<S: DurableStore> DurableCoordinator<S> {
             if continuation.wait_set.is_empty() {
                 continuation.status = ContinuationStatus::Ready;
             }
+            Ok(())
+        })
+    }
+
+    /// Atomically admit one identified signal or timer delivery, complete all
+    /// selected waits, and ready their Continuations.
+    ///
+    /// Concrete clock and signal plugins select exact pending wait IDs through
+    /// their parked-wait indexes and may redeliver the same activation after a
+    /// lost receipt. Reusing an activation ID with identical semantics is
+    /// idempotent. Reusing it with different source, targets, or result fails.
+    /// One signal activation may wake any number of broadcast waits but at most
+    /// one consume-once wait; one timer activation targets exactly one wait.
+    pub fn activate_waits(
+        &mut self,
+        machine: &Machine,
+        activation: WaitActivation,
+    ) -> DurableResult<String> {
+        activation.verify()?;
+        let machine_snapshot = machine.snapshot();
+        self.mutate_checked(|state| {
+            match state.wait_activations.get(&activation.activation_id) {
+                Some(existing) if existing == &activation => return Ok(()),
+                Some(_) => {
+                    return Err(DurableError::IllegalTransition(format!(
+                        "wait activation {} already exists with different semantics",
+                        activation.activation_id
+                    )));
+                }
+                None => {}
+            }
+            if machine.artifact(&activation.result).is_none() {
+                return Err(DurableError::Validation(format!(
+                    "wait activation {} result artifact is missing",
+                    activation.activation_id
+                )));
+            }
+            ensure_activation_machine(
+                &state.machine,
+                &machine_snapshot,
+                &activation.result,
+                &activation.activation_id,
+            )?;
+
+            let mut consume_once_targets = 0usize;
+            let mut run_ids = std::collections::BTreeSet::new();
+            for wait_id in &activation.wait_ids {
+                let wait = state.waits.get(wait_id).ok_or_else(|| {
+                    DurableError::NotFound(format!("wait {wait_id} does not exist"))
+                })?;
+                activation.source.ensure_matches(wait)?;
+                if wait.state != WaitState::Pending {
+                    return Err(DurableError::IllegalTransition(format!(
+                        "wait {wait_id} is not pending"
+                    )));
+                }
+                if wait.consume_once {
+                    consume_once_targets += 1;
+                }
+                run_ids.insert(wait.run_id.clone());
+            }
+            activation
+                .source
+                .validate_target_cardinality(activation.wait_ids.len(), consume_once_targets)?;
+
+            state.machine = machine_snapshot;
+            for wait_id in &activation.wait_ids {
+                let wait = state.waits.get_mut(wait_id).ok_or_else(|| {
+                    DurableError::NotFound(format!("wait {wait_id} does not exist"))
+                })?;
+                wait.state = WaitState::Completed;
+                wait.result = Some(activation.result.clone());
+            }
+            for run_id in run_ids {
+                let continuation = state.continuations.get_mut(&run_id).ok_or_else(|| {
+                    DurableError::NotFound(format!("continuation {run_id} does not exist"))
+                })?;
+                for wait_id in &activation.wait_ids {
+                    continuation.wait_set.remove(wait_id);
+                }
+                if continuation.wait_set.is_empty() {
+                    continuation.status = ContinuationStatus::Ready;
+                }
+            }
+            state
+                .wait_activations
+                .insert(activation.activation_id.clone(), activation);
             Ok(())
         })
     }
@@ -783,6 +872,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 .waits
                 .get_mut(wait_id)
                 .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
+            ensure_direct_wait_completion(wait)?;
             if wait.state == WaitState::Completed && wait.result.as_ref() == Some(&result) {
                 return Ok(());
             }
@@ -835,6 +925,50 @@ impl<S: DurableStore> DurableCoordinator<S> {
         });
         Ok(revision)
     }
+}
+
+fn ensure_direct_wait_completion(wait: &WaitCondition) -> DurableResult<()> {
+    if !matches!(wait.kind, WaitKind::Input { .. }) {
+        return Err(DurableError::Validation(format!(
+            "wait {} requires an identified signal or timer activation",
+            wait.wait_id
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_activation_machine(
+    current: &cymule_core::MachineSnapshot,
+    next: &cymule_core::MachineSnapshot,
+    result: &cymule_core::ArtifactRef,
+    activation_id: &str,
+) -> DurableResult<()> {
+    let mut expected = current.clone();
+    if !expected
+        .artifacts
+        .iter()
+        .any(|record| record.reference == *result)
+    {
+        let record = next
+            .artifacts
+            .iter()
+            .find(|record| record.reference == *result)
+            .ok_or_else(|| {
+                DurableError::Validation(format!(
+                    "wait activation {activation_id} result Artifact bytes are missing"
+                ))
+            })?;
+        expected.artifacts.push(record.clone());
+        expected
+            .artifacts
+            .sort_by(|left, right| left.reference.artifact_id.cmp(&right.reference.artifact_id));
+    }
+    if &expected != next {
+        return Err(DurableError::Validation(format!(
+            "wait activation {activation_id} Machine snapshot contains unrelated changes"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_journal_batch(journal_id: &str, records: &[JournalRecord]) -> DurableResult<()> {

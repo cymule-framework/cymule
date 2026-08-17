@@ -36,6 +36,7 @@ The following domains evolve independently:
 | Plugin protocol | `cymule.plugin/1` | capability negotiation is explicit |
 | Resource descriptor | `cymule.resource/1` | identity excludes realization locations |
 | Resource handoff | `cymule.resource-handoff/1` | transfer IDs are idempotent per target Run |
+| Wait activation | `cymule.wait-activation/1` | external delivery ID fixes source, targets, and result |
 | Conformance profile | `cymule.conformance/1` | complete profile cases are required |
 
 Changing effect identity, scope isolation, authority, causal admission, replay,
@@ -133,6 +134,28 @@ application-journal boundary. The plugin owns its domain schema and transition
 rules. Framework conformance requires only that the shared CAS write is
 all-or-nothing, stale writers fail closed, and plugin records cannot widen
 authority or bypass Plan-declared effects.
+
+A signal or timer wait MUST complete through an identified
+`cymule.wait-activation/1` record. The activation fixes one external delivery
+ID, its declared signal key or timer ID, exact selected wait IDs, and one
+immutable result Artifact. The activation receipt, completed waits, result
+Artifact, and affected Continuation readiness MUST enter one M1 CAS revision.
+Activation admission MAY add its result Artifact but MUST reject a proposed
+Machine snapshot containing any other change. Direct uncorrelated completion of
+signal and timer waits is invalid.
+
+Repeating an identical activation ID is idempotent. Reusing it with a different
+source, target set, or result MUST fail. One signal activation MAY wake multiple
+non-consuming waits but MUST consume at most one wait whose signal policy is
+consume-once. One timer activation MUST target exactly one matching timer wait.
+Selection and eventual delivery belong to scheduler, signal, and clock
+substrates; those substrates propose activations and never mutate canonical
+state directly.
+
+When an activation or other wait completion makes a Continuation `Ready`, a
+resume after any process boundary MUST advance its epoch and commit a new fenced
+Attempt before interpretation. The yielded Attempt that parked the wait MUST
+NOT be reused.
 
 ## 8. Causal events
 

@@ -6,6 +6,9 @@
   canonicalization and sealing.
 - Keep Resource unions closed and dependency-free. Never normalize URLs or hash
   Resource Candidates in TypeScript; `CliEngine.sealResource` is authoritative.
+- Wait activation builders sort and deduplicate exact wait targets while
+  preserving delivery, source, and Artifact identities. Engine verification is
+  not stateful admission; consume-once remains a durable runtime CAS decision.
 - Use discriminated unions for IR and Engine protocol types.
 - The public npm package name is `cymule`. Changes to exports, files, engine
   requirements, or minimum Node versions require a package dry-run and release

@@ -28,8 +28,12 @@ Status: partial.
   reconcile rather than redispatch after crash ambiguity;
 - `unknown` outbox entries remain reconciliation-eligible across repeated
   process reopen and can later settle under the original claim;
-- nested scope and non-commit-gated effect resumption, timer/signal activation,
-  atomic event-plus-outbox, and remaining dispatch crash windows are proposed;
+- identified signal/timer activation receipts atomically match and complete
+  selected waits, enforce consume-once competition, survive redelivery/reopen,
+  and resume under a new fenced Attempt epoch;
+- nested scope and non-commit-gated effect resumption, bounded clock/signal
+  source drivers, parked-index integration, atomic event-plus-outbox, and
+  remaining dispatch crash windows are proposed;
 - process-level crash injection for every effect window;
 - snapshot compaction and suffix rehydration;
 - canonical component-call occurrences and exact execution replay without

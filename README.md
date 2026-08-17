@@ -40,6 +40,9 @@ than framework semantics.
   receipt; reusing its ID for different work fails.
 - **Stale-worker protection.** Attempts are fenced by an epoch, so an older
   worker cannot commit after ownership changes.
+- **Identified durable wake-ups.** Signal and timer deliveries carry stable
+  activation identities, so redelivery is idempotent and consume-once winners
+  are decided by durable CAS rather than worker timing.
 - **Honest external effects.** A timeout after dispatch becomes `unknown`, not
   an automatic duplicate operation.
 - **Explicit reconciliation.** An ambiguous effect is resolved through its
@@ -258,6 +261,7 @@ large object reads/writes are chunked rather than loaded into memory.
 | A command ID is reused for different work | The command is rejected. |
 | The Run changed after a UI or worker read it | The stale precondition returns a typed conflict and the current token. |
 | An old Attempt finishes after an epoch change | Its output is fenced and rejected. |
+| A signal or timer delivery is retried | The original activation receipt is retained; conflicting reuse fails. |
 | A scope aborts before effect release | Its unreleased mutating effects are cancelled. |
 | Dispatch starts but the response is lost | The effect becomes `unknown`. |
 | An unknown effect can be queried | The original effect is reconciled without creating a new intent. |
@@ -346,6 +350,7 @@ See [Architecture](docs/architecture.md) and the
 | Python SDK | Implemented | Dependency-light builder and engine client. |
 | Go SDK | Implemented | Builder and engine client. |
 | Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, M1 handoff journal. |
+| Durable wait activation | Implemented foundation | Identified signal/timer records, consume-once admission, reopen-safe epoch advance, and four SDK wire validation. |
 | Agent interaction plugin | Optional, partial | Rust plugin with Session, occurrence, input, workspace, and stream conformance tests. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
 | JSON Schema contracts | Implemented | Draft 2020-12 Plan and protocol schemas. |

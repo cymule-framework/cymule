@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { CliEngine, FlowBuilder, ResourceBuilder, type EffectProfile } from "../src/index.js";
+import {
+  CliEngine,
+  FlowBuilder,
+  ResourceBuilder,
+  WaitActivationBuilder,
+  type EffectProfile,
+} from "../src/index.js";
 
 const profile: EffectProfile = {
   mutation: "mutating",
@@ -52,4 +59,21 @@ test("TypeScript resource seals through the Rust engine", () => {
   );
   assert.equal(resource.resource_id, expectedResourceId);
   assert.equal(resource.integrity.kind, "inline");
+});
+
+test("TypeScript wait activation validates through the Rust engine", () => {
+  const enginePath = process.env.CYMULE_BIN;
+  const fixturePath = process.env.CYMULE_WAIT_ACTIVATION_FIXTURE;
+  if (enginePath === undefined || fixturePath === undefined) return;
+  const activation = WaitActivationBuilder.signal(
+    "activation:shared:1",
+    "signal:continue",
+    ["wait:shared:1"],
+    {
+      artifact_id: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      kind: "cymule.wait-activation-result/1",
+    },
+  );
+  assert.deepEqual(activation, JSON.parse(readFileSync(fixturePath, "utf8")));
+  assert.deepEqual(new CliEngine(enginePath).verifyWaitActivation(activation), activation);
 });

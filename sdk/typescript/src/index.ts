@@ -40,6 +40,23 @@ export interface ResourceHandoff {
   resource: ResourceHandle;
 }
 
+export interface ArtifactRef {
+  artifact_id: string;
+  kind: string;
+}
+
+export type WaitActivationSource =
+  | { kind: "signal"; key: string }
+  | { kind: "timer"; timer_id: string };
+
+export interface WaitActivation {
+  activation_version: "cymule.wait-activation/1";
+  activation_id: string;
+  source: WaitActivationSource;
+  wait_ids: string[];
+  result: ArtifactRef;
+}
+
 export type Expression =
   | { kind: "input" }
   | { kind: "literal"; value: Json }
@@ -200,6 +217,50 @@ export class FlowBuilder {
   }
 }
 
+export class WaitActivationBuilder {
+  static signal(
+    activationId: string,
+    key: string,
+    waitIds: string[],
+    result: ArtifactRef,
+  ): WaitActivation {
+    return WaitActivationBuilder.build(activationId, { kind: "signal", key }, waitIds, result);
+  }
+
+  static timer(
+    activationId: string,
+    timerId: string,
+    waitId: string,
+    result: ArtifactRef,
+  ): WaitActivation {
+    return WaitActivationBuilder.build(
+      activationId,
+      { kind: "timer", timer_id: timerId },
+      [waitId],
+      result,
+    );
+  }
+
+  private static build(
+    activationId: string,
+    source: WaitActivationSource,
+    waitIds: string[],
+    result: ArtifactRef,
+  ): WaitActivation {
+    const targets = [...new Set(waitIds)].sort();
+    if (activationId.length === 0 || targets.length === 0) {
+      throw new Error("wait activation requires an identity and at least one target");
+    }
+    return {
+      activation_version: "cymule.wait-activation/1",
+      activation_id: activationId,
+      source,
+      wait_ids: targets,
+      result,
+    };
+  }
+}
+
 export class ResourceBuilder {
   static text(text: string, annotations: Record<string, string> = {}): ResourceCandidate {
     return {
@@ -275,6 +336,14 @@ export class CliEngine {
     return response.resource;
   }
 
+  verifyWaitActivation(activation: WaitActivation): WaitActivation {
+    const response = this.request({ type: "verify_wait_activation", activation });
+    if (response.type !== "verified_wait_activation") {
+      throw new Error(`unexpected response ${response.type}`);
+    }
+    return response.activation;
+  }
+
   run(plan: SealedPlan, input: Json, plugin: string, runId: string): ExecutionResult {
     const response = this.request({ type: "run", plan, input, plugin, run_id: runId });
     if (response.type !== "executed") throw new Error(`unexpected response ${response.type}`);
@@ -296,10 +365,12 @@ export class CliEngine {
 type EngineRequest =
   | { type: "seal"; candidate: PlanCandidate }
   | { type: "seal_resource"; candidate: ResourceCandidate }
+  | { type: "verify_wait_activation"; activation: WaitActivation }
   | { type: "run"; plan: SealedPlan; input: Json; plugin: string; run_id: string };
 
 type EngineResponse =
   | { type: "sealed"; plan: SealedPlan }
   | { type: "sealed_resource"; resource: ResourceHandle }
+  | { type: "verified_wait_activation"; activation: WaitActivation }
   | { type: "executed"; result: ExecutionResult }
   | { type: "verified" };

@@ -1,0 +1,15 @@
+{
+  "activation_version": "cymule.wait-activation/1",
+  "activation_id": "activation:shared:1",
+  "source": {
+    "kind": "signal",
+    "key": "signal:continue"
+  },
+  "wait_ids": [
+    "wait:shared:1"
+  ],
+  "result": {
+    "artifact_id": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "kind": "cymule.wait-activation-result/1"
+  }
+}

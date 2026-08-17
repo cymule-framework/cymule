@@ -15,6 +15,12 @@ Status: partial.
 - complete typed Continuation fields for frame, state, waits, scopes,
   obligations, leases, budget, causal frontier, and epoch;
 - idempotent wait registration/completion;
+- identified `cymule.wait-activation/1` signal and timer receipts with declared
+  source matching, atomic result/wait/Continuation updates, broadcast delivery,
+  consume-once winner enforcement, redelivery idempotency, and stale-writer
+  rejection;
+- restart-safe `Ready` resumption that advances the epoch and commits a new
+  fenced Attempt after the wait-owning Attempt has yielded;
 - logical-clock authority leases and fencing epochs;
 - effect outbox enqueue, claim, settlement, and explicit `unknown`;
 - repeated reconciliation of an `unknown` outbox entry under its original
@@ -42,7 +48,7 @@ Status: partial.
 
 - resumable interpreter integration for nested scopes, observational eager
   effects, and explicit-release effects;
-- timer and signal activation workers;
+- bounded timer and signal source drivers plus parked-index selection;
 - atomic semantic event plus outbox publication;
 - crash injection at every prepare/commit/dispatch/receipt window;
 - snapshot compaction and suffix rehydration;
@@ -54,8 +60,12 @@ No concrete storage product is part of this profile. An adapter conforms only
 when it provides atomic whole-state CAS and passes the profile fault suite.
 
 Version decision: Resources introduce independent `cymule.resource/1` and
-`cymule.resource-handoff/1` domains. The additive `seal_resource` Engine RPC is
-returned only to callers that request it, so the Engine request domain and
-semantic kernel version do not change. `cymule-core`, `ArtifactRef`, Event, and
-Continuation wire shapes remain unchanged while the partial M1 profile stores
-handoffs through its existing typed application-journal seam.
+`cymule.resource-handoff/1` domains. Identified signal/timer admission introduces
+the independent `cymule.wait-activation/1` record inside partial M1 durable
+state. The additive activation map defaults empty when older M1 state is read.
+The additive `seal_resource` and `verify_wait_activation` Engine requests are
+returned only to callers that request them; activation verification lets every
+SDK validate the closed record without claiming stateful admission. These
+additions do not alter `cymule.semantic/1`, `cymule-core`, `ArtifactRef`, Event,
+or Continuation wire shapes; they implement the existing resource, durable-wait,
+consume-once, and epoch-fencing laws.

@@ -5,7 +5,7 @@ use std::env;
 
 use cymule_sdk::{
     CliEngine, DispatchPolicy, EffectProfile, Engine, Expression, FlowBuilder, MutationKind,
-    ReconciliationMode, ResourceCandidate,
+    ReconciliationMode, ResourceCandidate, WaitActivation,
 };
 use serde_json::json;
 
@@ -73,4 +73,18 @@ fn rust_resource_seals_through_the_cli() {
         .seal_resource(&candidate)
         .expect("Resource Candidate seals");
     assert_eq!(resource.resource_id, expected_resource_id);
+}
+
+#[test]
+fn rust_wait_activation_validates_through_the_cli() {
+    let Ok(engine_path) = env::var("CYMULE_BIN") else {
+        return;
+    };
+    let activation: WaitActivation =
+        serde_json::from_str(include_str!("../../../tests/fixtures/wait-activation.json"))
+            .expect("wait activation fixture deserializes");
+    let verified = CliEngine::new(engine_path)
+        .verify_wait_activation(&activation)
+        .expect("wait activation verifies");
+    assert_eq!(verified, activation);
 }
