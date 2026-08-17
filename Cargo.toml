@@ -6,6 +6,7 @@ members = [
   "crates/cymule-durable",
   "crates/cymule-runtime",
   "crates/cymule-sdk",
+  "crates/cymule-virtual",
   "crates/cymule-cli",
   "examples/hello-world",
   "plugins/directory-store",

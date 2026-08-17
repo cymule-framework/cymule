@@ -45,11 +45,16 @@ Status: partial.
 
 ## M3 - Large virtual work
 
-Status: proposed.
+Status: partial.
 
-- virtual regions, durable cursors, and parked indexes;
-- bounded active frontiers, backpressure, and fairness;
-- subtree compaction and partial rehydration.
+- virtual regions, opaque cursors, bounded materialization, parked indexes,
+  capability-aware claims, fencing, deterministic Run fairness, and portable
+  scheduler snapshots are implemented;
+- million-item tests prove bounded frontiers, fairness, park/wake, stale-owner
+  rejection, and restore behavior;
+- durable cursor integration, retry/failure records, weighted fairness,
+  partition migration, subtree compaction, and partial rehydration remain
+  proposed.
 
 ## M4 - Live evolution
 
