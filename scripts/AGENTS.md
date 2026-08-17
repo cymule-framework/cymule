@@ -42,3 +42,5 @@
   independent toolchain lanes, and uploads one JSON harness report per lane.
   A skipped lane means its risk was not selected, not that its test silently
   skipped.
+- If a force-push event's prior SHA is absent or has no merge base, CI must
+  select `full`. Never infer a narrow diff from an unreachable public history.

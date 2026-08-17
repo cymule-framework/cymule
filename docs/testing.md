@@ -94,9 +94,11 @@ Routing is a conservative union over every changed path:
   any unrecognized path escalate to the complete suite.
 
 The router includes committed, staged, unstaged, and untracked paths locally.
-CI uses the event's exact base/head range in a clean checkout. A missing route
-is therefore visible as extra work, not silent missing coverage. Unit tests pin
-both narrow routes and the unknown-path escalation behavior.
+CI uses the event's exact base/head range in a clean checkout when that base is
+reachable and has a merge base. A force-push whose prior head is no longer in
+the published history selects `full`; it never guesses a smaller range. A
+missing route is therefore visible as extra work, not silent missing coverage.
+Unit tests pin both narrow routes and the unknown-path escalation behavior.
 
 ## Fault-oriented semantic tests
 

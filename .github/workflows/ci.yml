@@ -38,6 +38,10 @@ jobs:
           elif [ "$EVENT_NAME" = push ] && [ -n "$EVENT_BEFORE" ] && ! printf '%s' "$EVENT_BEFORE" | grep -Eq '^0+$'; then
             base=$EVENT_BEFORE
           fi
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null || ! git merge-base "$base" HEAD >/dev/null 2>&1; then
+            echo "event base $base is not reachable from the published history; selecting full verification"
+            base=HEAD
+          fi
           matrix=$(python3 scripts/test_harness.py plan \
             --base "$base" \
             --head HEAD \
