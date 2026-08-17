@@ -83,3 +83,8 @@ does not treat a plugin catalog as authority, and does not claim external
 exactly-once when a provider cannot prove it. Its contribution is the closure of
 causal replay, scopes, obligations, binding evolution, and effect uncertainty on
 one small semantic kernel.
+
+General async execution, timers, channels, process supervision, encoding,
+protocol clients, file coordination, and history rewriting are not Cymule
+inventions. Runtime/profile crates adopt maintained libraries such as Tokio,
+Serde, protocol SDKs, and `git-filter-repo` behind the semantic interfaces.

@@ -17,54 +17,56 @@ jobs:
   sync:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          fetch-depth: 1
+      - name: Install deterministic history rewriter
+        run: python3 -m pip install git-filter-repo==2.47.0
 
-      - name: Read private source
+      - name: Read complete private source history
         env:
           SOURCE_URL: ${{ secrets.CYMULE_SOURCE_URL }}
           SOURCE_USERNAME: ${{ secrets.CYMULE_SOURCE_USERNAME }}
           SOURCE_TOKEN: ${{ secrets.CYMULE_SOURCE_TOKEN }}
         run: |
           authenticated_url="https://${SOURCE_USERNAME}:${SOURCE_TOKEN}@${SOURCE_URL#https://}"
-          git clone --quiet --depth=1 "$authenticated_url" "$RUNNER_TEMP/source"
+          git clone --quiet "$authenticated_url" "$RUNNER_TEMP/source"
 
-      - name: Build public snapshot
+      - name: Rewrite only private repository metadata
         env:
           SOURCE_URL: ${{ secrets.CYMULE_SOURCE_URL }}
         run: |
-          mkdir "$RUNNER_TEMP/snapshot"
-          git -C "$RUNNER_TEMP/source" archive --format=tar HEAD |
-            tar -xf - -C "$RUNNER_TEMP/snapshot"
-          rm -rf "$RUNNER_TEMP/snapshot/.gitlab"
-          rm -f "$RUNNER_TEMP/snapshot/.gitlab-ci.yml"
-          source_location=${SOURCE_URL#https://}
+          cd "$RUNNER_TEMP/source"
+          git log --reverse --format='%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B%x00' > "$RUNNER_TEMP/metadata.before"
+          source_without_suffix=${SOURCE_URL%.git}
+          source_location=${source_without_suffix#https://}
           source_host=${source_location%%/*}
           source_path=${source_location#*/}
-          if grep -R -n -F -e "$source_host" -e "$source_path" "$RUNNER_TEMP/snapshot"; then
-            echo "public snapshot contains a private repository reference" >&2
+          {
+            printf 'literal:%s==>https://github.com/cymule-framework/cymule.git\n' "$SOURCE_URL"
+            printf 'literal:%s==>https://github.com/cymule-framework/cymule\n' "$source_without_suffix"
+            printf 'literal:%s==>github.com/cymule-framework/cymule\n' "$source_location"
+            printf 'literal:%s==>github.com\n' "$source_host"
+            printf 'literal:%s==>cymule-framework/cymule\n' "$source_path"
+          } > "$RUNNER_TEMP/replacements.txt"
+          git filter-repo --force \
+            --path .gitlab-ci.yml \
+            --path .gitlab/ \
+            --invert-paths \
+            --replace-text "$RUNNER_TEMP/replacements.txt" \
+            --preserve-commit-hashes \
+            --prune-empty never \
+            --prune-degenerate never
+          git log --reverse --format='%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B%x00' > "$RUNNER_TEMP/metadata.after"
+          cmp "$RUNNER_TEMP/metadata.before" "$RUNNER_TEMP/metadata.after"
+          mapfile -t revisions < <(git rev-list --all)
+          if git grep -n -I -F -e "$source_host" -e "$source_path" "${revisions[@]}"; then
+            echo "rewritten history contains a private repository reference" >&2
             exit 2
           fi
-          rsync --archive --delete --exclude=.git/ "$RUNNER_TEMP/snapshot/" ./
 
-      - name: Publish changed snapshot
-        id: publish
-        run: |
-          git config user.name "Cymule Mirror"
-          git config user.email "cymule-framework@users.noreply.github.com"
-          git add --all
-          if git diff --cached --quiet; then
-            echo "public mirror is already current"
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git commit -m "Sync Cymule source"
-          git push origin main
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Trigger public CI
-        if: steps.publish.outputs.changed == 'true'
+      - name: Force-publish rewritten public history
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run ci.yml --ref main
+        run: |
+          cd "$RUNNER_TEMP/source"
+          git remote add public "https://x-access-token:${GH_TOKEN}@github.com/cymule-framework/cymule.git"
+          git push --force public main:main
+          gh workflow run ci.yml --repo cymule-framework/cymule --ref main

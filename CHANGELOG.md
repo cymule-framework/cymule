@@ -18,6 +18,13 @@ domains described in `docs/specification.md`.
 - Add the M2 agent interaction foundation with typed Session updates,
   context/model/tool/permission/elicitation/workspace interfaces, ordered
   projections, and a tested model-tool-model reference turn driver.
+- Add the M3 virtual-work foundation with opaque cursors, bounded frontiers,
+  deterministic Run fairness, capability claims, fencing, parked indexes, and
+  million-item snapshot/restore tests.
+- Publish the TypeScript SDK as the public `cymule` npm package through GitHub
+  Actions trusted publishing with provenance.
+- Adopt a project-wide build-versus-adopt policy and non-blocking lock boundary;
+  prefer Tokio and other maintained mechanisms below Cymule semantics.
 
 ## [0.1.0] - 2026-08-16
 

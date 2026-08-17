@@ -1,0 +1,55 @@
+name: Publish npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        package-name: [cymule, "@cymule/sdk"]
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: pnpm/action-setup@v6.0.10
+        with:
+          version: 11.17.0
+          run_install: false
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.7.0
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - name: Install frozen dependencies
+        run: pnpm --dir sdk/typescript install --frozen-lockfile
+
+      - name: Build and test package
+        run: |
+          pnpm --dir sdk/typescript run build
+          pnpm --dir sdk/typescript test
+
+      - name: Prepare package manifest
+        run: >-
+          node sdk/typescript/scripts/prepare-package.mjs
+          '${{ matrix.package-name }}'
+          "$RUNNER_TEMP/npm-package"
+
+      - name: Inspect package contents
+        run: npm pack --dry-run "$RUNNER_TEMP/npm-package"
+
+      - name: Publish with trusted provenance
+        run: npm publish "$RUNNER_TEMP/npm-package"

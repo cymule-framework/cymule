@@ -32,6 +32,11 @@ Use this precedence order when guidance conflicts:
   it into a fresh semantic intent or silently redispatch it.
 - Public mutation enters through typed commands with idempotent IDs and causal
   preconditions. Raw canonical event append is internal only.
+- Prefer optimistic CAS, immutable records, idempotency, fencing epochs, and
+  partitioned single-writer authority over locks. Core semantics must never
+  depend on a blocking lock. A concrete adapter may use narrowly scoped,
+  non-blocking writer exclusion only when required to implement its CAS contract
+  and must surface contention instead of waiting indefinitely.
 - Cross-language SDKs author the same frozen IR and use the same engine contract.
   They must not implement a second reducer or invent language-specific semantics.
 - New behavior is provider-neutral by default. Concrete persistence, activation,
