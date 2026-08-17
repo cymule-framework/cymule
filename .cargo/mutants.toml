@@ -1,0 +1,6 @@
+# `Machine` exposes no mutation path that can desynchronize its private live
+# projection from its admitted event set. `verify_replay` detects an internal
+# implementation defect, but mutating the checker itself is observationally
+# equivalent through every public API unless a test-only corruption hook is
+# added. Keep that defensive checker and exclude only its own implementation.
+exclude_re = ["Machine::verify_replay"]

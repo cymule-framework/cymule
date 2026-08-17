@@ -50,8 +50,8 @@ case "${1:-}" in
         "$@"
     }
     if [ -n "${CYMULE_MUTATION_SHARD:-}" ]; then
-      if ! printf '%s' "$CYMULE_MUTATION_SHARD" | grep -Eq '^[1-9][0-9]*/[1-9][0-9]*$'; then
-        echo "CYMULE_MUTATION_SHARD must use one-based N/M form" >&2
+      if ! printf '%s' "$CYMULE_MUTATION_SHARD" | grep -Eq '^[0-9]+/[1-9][0-9]*$'; then
+        echo "CYMULE_MUTATION_SHARD must use zero-based K/N form" >&2
         exit 2
       fi
       run_mutants --shard "$CYMULE_MUTATION_SHARD"

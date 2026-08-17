@@ -22,8 +22,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust coverage tools
         run: |
-          rustup toolchain install 1.97.0 --profile minimal --component llvm-tools-preview
-          rustup default 1.97.0
+          rustup toolchain install 1.97.1 --profile minimal --component llvm-tools-preview
+          rustup default 1.97.1
           cargo install cargo-llvm-cov --version 0.9.0 --locked
       - name: Run coverage witness
         run: >-
@@ -45,14 +45,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { id: 1-of-8, shard: 1/8 }
-          - { id: 2-of-8, shard: 2/8 }
-          - { id: 3-of-8, shard: 3/8 }
-          - { id: 4-of-8, shard: 4/8 }
-          - { id: 5-of-8, shard: 5/8 }
-          - { id: 6-of-8, shard: 6/8 }
-          - { id: 7-of-8, shard: 7/8 }
-          - { id: 8-of-8, shard: 8/8 }
+          - { id: 1-of-8, shard: 0/8 }
+          - { id: 2-of-8, shard: 1/8 }
+          - { id: 3-of-8, shard: 2/8 }
+          - { id: 4-of-8, shard: 3/8 }
+          - { id: 5-of-8, shard: 4/8 }
+          - { id: 6-of-8, shard: 5/8 }
+          - { id: 7-of-8, shard: 6/8 }
+          - { id: 8-of-8, shard: 7/8 }
     runs-on: ubuntu-24.04
     env:
       CYMULE_MUTATION_SHARD: ${{ matrix.shard }}
@@ -62,8 +62,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust mutation tools
         run: |
-          rustup toolchain install 1.97.0 --profile minimal
-          rustup default 1.97.0
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
           cargo install cargo-mutants --version 27.1.0 --locked
       - name: Run mutation witness
         run: >-

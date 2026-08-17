@@ -963,11 +963,7 @@ fn apply_effect_transition(
         }
         EffectTransition::Reconcile(resolution)
             if effect.phase == EffectPhase::DispatchStarted
-                && effect.outcome == WorldOutcome::Unknown
-                && matches!(
-                    effect.reconciliation,
-                    ReconciliationState::Pending | ReconciliationState::GovernanceRequired
-                ) =>
+                && effect.outcome == WorldOutcome::Unknown =>
         {
             match resolution {
                 ReconciliationResolution::ResolvedApplied => {

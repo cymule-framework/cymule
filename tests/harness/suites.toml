@@ -131,9 +131,9 @@ description = "Run portable core, durable, and directory-store witnesses."
 lane = "rust"
 tools = ["rust"]
 commands = [
-  ["./scripts/verify-rust.sh", "cymule-core"],
-  ["./scripts/verify-rust.sh", "cymule-durable"],
-  ["./scripts/verify-rust.sh", "cymule-directory-store"],
+  ["bash", "./scripts/verify-rust.sh", "cymule-core"],
+  ["bash", "./scripts/verify-rust.sh", "cymule-durable"],
+  ["bash", "./scripts/verify-rust.sh", "cymule-directory-store"],
 ]
 
 [suites.full]

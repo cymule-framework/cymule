@@ -3,13 +3,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cymule_core::{
-    COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus, ComponentContract, CoreError,
-    Definition, DispatchPolicy, EffectContract, EffectPhase, EffectProfile, EffectTransition,
-    Event, EventPayload, Expression, Machine, MutationKind, Operation, PlanCandidate,
-    ReconciliationMode, ReconciliationResolution, ReconciliationState, Region, ReplayAvailability,
-    ScopeStatus, Step, WorldOutcome,
+    ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus,
+    ComponentContract, CoreError, Definition, DispatchPolicy, EffectContract, EffectPhase,
+    EffectProfile, EffectTransition, Event, EventPayload, Expression, Machine, MutationKind,
+    Operation, PlanCandidate, ReconciliationMode, ReconciliationResolution, ReconciliationState,
+    Region, ReplayAvailability, ScopeStatus, Step, WorldOutcome, effect_intent_id,
+    effect_obligation_id,
 };
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
 use serde_json::json;
 
 fn candidate() -> PlanCandidate {
@@ -264,6 +266,229 @@ fn command_idempotency_and_stale_action_are_explicit() {
 }
 
 #[test]
+fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
+    let sealed = candidate().seal().expect("Plan seals");
+    let invalid = [
+        CommandEnvelope {
+            command_version: "cymule.command/invalid".to_owned(),
+            command_id: "command:invalid-version".to_owned(),
+            actor: "actor:test".to_owned(),
+            run_id: "run:invalid".to_owned(),
+            expected_precondition: None,
+            command: Command::StartRun {
+                plan_id: sealed.plan_id.clone(),
+                binding_context: "binding:test".to_owned(),
+            },
+        },
+        CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: String::new(),
+            actor: "actor:test".to_owned(),
+            run_id: "run:invalid".to_owned(),
+            expected_precondition: None,
+            command: Command::StartRun {
+                plan_id: sealed.plan_id.clone(),
+                binding_context: "binding:test".to_owned(),
+            },
+        },
+        CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: "c".repeat(201),
+            actor: "actor:test".to_owned(),
+            run_id: "run:invalid".to_owned(),
+            expected_precondition: None,
+            command: Command::StartRun {
+                plan_id: sealed.plan_id.clone(),
+                binding_context: "binding:test".to_owned(),
+            },
+        },
+        CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: "command:invalid-actor".to_owned(),
+            actor: String::new(),
+            run_id: "run:invalid".to_owned(),
+            expected_precondition: None,
+            command: Command::StartRun {
+                plan_id: sealed.plan_id.clone(),
+                binding_context: "binding:test".to_owned(),
+            },
+        },
+        CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: "command:invalid-run".to_owned(),
+            actor: "actor:test".to_owned(),
+            run_id: String::new(),
+            expected_precondition: None,
+            command: Command::StartRun {
+                plan_id: sealed.plan_id.clone(),
+                binding_context: "binding:test".to_owned(),
+            },
+        },
+    ];
+    for envelope in invalid {
+        let mut machine = Machine::new();
+        machine
+            .insert_plan(sealed.clone())
+            .expect("Plan inserts for invalid envelope test");
+        assert!(matches!(
+            machine.submit(envelope),
+            Err(CoreError::Validation(_))
+        ));
+        assert!(machine.projection().runs.is_empty());
+    }
+
+    let mut machine = Machine::new();
+    machine.insert_plan(sealed.clone()).expect("Plan inserts");
+    machine
+        .insert_plan(sealed.clone())
+        .expect("identical Plan insertion is idempotent");
+    assert_eq!(machine.plan(&sealed.plan_id), Some(&sealed));
+    let run_id = "run:invariants";
+    machine
+        .submit(envelope(
+            &machine,
+            1,
+            run_id,
+            Command::StartRun {
+                plan_id: sealed.plan_id,
+                binding_context: "binding:test".to_owned(),
+            },
+        ))
+        .expect("Run starts");
+    let start = machine.events().last().expect("start event");
+    assert_eq!(start.reads, BTreeSet::new());
+    assert_eq!(start.writes, BTreeSet::from([format!("run:{run_id}")]));
+    assert_eq!(start.coordination_key, Some(format!("run:{run_id}")));
+
+    let before_fact = machine.projection().digest().expect("projection hashes");
+    machine
+        .submit(envelope(
+            &machine,
+            2,
+            run_id,
+            Command::RecordFact {
+                key: "fact:stable".to_owned(),
+                value: "one".to_owned(),
+            },
+        ))
+        .expect("fact records");
+    let fact = machine.events().last().expect("fact event");
+    assert_eq!(fact.reads, BTreeSet::new());
+    assert_eq!(
+        fact.writes,
+        BTreeSet::from([format!("fact:{run_id}:fact:stable")])
+    );
+    assert_eq!(fact.coordination_key, None);
+    let after_fact = machine.projection().digest().expect("projection hashes");
+    assert_eq!(after_fact.len(), 64);
+    assert_ne!(before_fact, after_fact);
+    machine
+        .submit(envelope(
+            &machine,
+            3,
+            run_id,
+            Command::RecordFact {
+                key: "fact:stable".to_owned(),
+                value: "one".to_owned(),
+            },
+        ))
+        .expect("identical fact repeats");
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            4,
+            run_id,
+            Command::RecordFact {
+                key: "fact:stable".to_owned(),
+                value: "different".to_owned(),
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+
+    machine
+        .submit(envelope(
+            &machine,
+            5,
+            run_id,
+            Command::BeginAttempt {
+                attempt_id: "attempt:invariants".to_owned(),
+                continuation_id: "continuation:invariants".to_owned(),
+                occurrence_binding: "binding:worker".to_owned(),
+                epoch: 0,
+            },
+        ))
+        .expect("attempt starts");
+    machine
+        .submit(envelope(
+            &machine,
+            6,
+            run_id,
+            Command::YieldAttempt {
+                attempt_id: "attempt:invariants".to_owned(),
+                epoch: 0,
+            },
+        ))
+        .expect("active attempt yields");
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            7,
+            run_id,
+            Command::YieldAttempt {
+                attempt_id: "attempt:invariants".to_owned(),
+                epoch: 0,
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+    machine
+        .submit(envelope(
+            &machine,
+            8,
+            run_id,
+            Command::OpenScope {
+                scope_id: "scope:child".to_owned(),
+                parent_scope: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            },
+        ))
+        .expect("child scope opens");
+    machine
+        .submit(envelope(
+            &machine,
+            9,
+            run_id,
+            Command::CommitScope {
+                scope_id: "scope:child".to_owned(),
+            },
+        ))
+        .expect("child scope commits");
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            10,
+            run_id,
+            Command::OpenScope {
+                scope_id: "scope:grandchild".to_owned(),
+                parent_scope: "scope:child".to_owned(),
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            11,
+            run_id,
+            Command::AbortScope {
+                scope_id: "scope:child".to_owned(),
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+}
+
+#[test]
 fn machine_snapshot_restores_projection_artifacts_and_command_deduplication() {
     let mut machine = Machine::new();
     let plan = machine.seal_plan(candidate()).expect("plan seals");
@@ -319,6 +544,45 @@ fn machine_snapshot_restores_projection_artifacts_and_command_deduplication() {
             .expect("changed snapshot hashes"),
         snapshot_digest
     );
+}
+
+#[test]
+fn structural_effect_identifiers_are_content_sensitive() {
+    let args = ArtifactRef {
+        artifact_id: format!("sha256:{}", "a".repeat(64)),
+        kind: "cymule.effect-args/1".to_owned(),
+    };
+    let first = effect_intent_id(
+        "run:id",
+        "main",
+        "effect.capture",
+        cymule_core::ROOT_SCOPE_ID,
+        7,
+        "primary",
+        &args,
+        "cymule.effect-schema/1",
+    )
+    .expect("intent hashes");
+    let second = effect_intent_id(
+        "run:id",
+        "main",
+        "effect.capture",
+        cymule_core::ROOT_SCOPE_ID,
+        7,
+        "secondary",
+        &args,
+        "cymule.effect-schema/1",
+    )
+    .expect("changed intent hashes");
+    assert!(first.starts_with("sha256:"));
+    assert_eq!(first.len(), 71);
+    assert_ne!(first, second);
+
+    let obligation = effect_obligation_id(&first).expect("obligation hashes");
+    let other = effect_obligation_id(&second).expect("changed obligation hashes");
+    assert!(obligation.starts_with("sha256:"));
+    assert_eq!(obligation.len(), 71);
+    assert_ne!(obligation, other);
 }
 
 #[test]
@@ -387,23 +651,147 @@ fn binding_is_pinned_and_unknown_effect_must_reconcile() {
         )),
         Err(CoreError::IllegalTransition(_))
     ));
-    for (sequence, transition) in [
-        (4, EffectTransition::Prepare),
-        (5, EffectTransition::AuthorizeRelease),
-        (6, EffectTransition::StartDispatch),
-        (7, EffectTransition::Observe(WorldOutcome::Unknown)),
-    ] {
-        machine
-            .submit(envelope(
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            41,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::Observe(WorldOutcome::Applied),
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            42,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::Reconcile(ReconciliationResolution::ResolvedApplied,),
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            43,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::AuthorizeRelease,
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+    machine
+        .submit(envelope(
+            &machine,
+            4,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::Prepare,
+            },
+        ))
+        .expect("effect prepares");
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            44,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::Prepare,
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+    machine
+        .submit(envelope(
+            &machine,
+            5,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::AuthorizeRelease,
+            },
+        ))
+        .expect("release authorizes");
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            45,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::AuthorizeRelease,
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+    machine
+        .submit(envelope(
+            &machine,
+            6,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::StartDispatch,
+            },
+        ))
+        .expect("dispatch starts");
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            60,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::Observe(WorldOutcome::Unobserved),
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            61,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::Reconcile(ReconciliationResolution::ResolvedApplied,),
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+    machine
+        .submit(envelope(
+            &machine,
+            7,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::Observe(WorldOutcome::Unknown),
+            },
+        ))
+        .expect("unknown observation applies");
+    for (sequence, outcome) in [(70, WorldOutcome::Applied), (71, WorldOutcome::Unknown)] {
+        assert!(matches!(
+            machine.submit(envelope(
                 &machine,
                 sequence,
                 run_id,
                 Command::TransitionEffect {
                     intent_id: intent_id.clone(),
-                    transition,
+                    transition: EffectTransition::Observe(outcome),
                 },
-            ))
-            .expect("effect transition applies");
+            )),
+            Err(CoreError::IllegalTransition(_))
+        ));
     }
     machine
         .submit(envelope(
@@ -458,11 +846,23 @@ fn binding_is_pinned_and_unknown_effect_must_reconcile() {
             10,
             run_id,
             Command::TransitionEffect {
-                intent_id,
+                intent_id: intent_id.clone(),
                 transition: EffectTransition::Reconcile(ReconciliationResolution::ResolvedApplied),
             },
         ))
         .expect("unknown result reconciles");
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            100,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::Reconcile(ReconciliationResolution::ResolvedApplied,),
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
     machine
         .submit(envelope(
             &machine,
@@ -565,6 +965,17 @@ fn replay_orders_a_causal_set_and_reports_retention_loss() {
         },
     )
     .expect("event hashes");
+    let mut appended = Machine::new();
+    appended
+        .append_event(start.clone())
+        .expect("trusted start appends");
+    appended
+        .append_event(start.clone())
+        .expect("identical trusted event append is idempotent");
+    assert_eq!(appended.events().count(), 1);
+    let duplicate_replay =
+        Machine::replay([start.clone(), start.clone()]).expect("identical event set deduplicates");
+    assert_eq!(duplicate_replay.runs.len(), 1);
     let mut tampered = fact_a.clone();
     tampered.event_id = format!("sha256:{}", "0".repeat(64));
     assert!(matches!(
@@ -610,6 +1021,14 @@ fn replay_orders_a_causal_set_and_reports_retention_loss() {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/proptest-regressions/semantic_kernel.txt"
+        )))),
+        ..ProptestConfig::default()
+    })]
+
     #[test]
     fn independent_causal_facts_replay_to_one_digest(
         generated in prop::collection::vec((any::<u64>(), any::<u64>()), 1..32),
