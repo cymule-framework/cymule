@@ -16,3 +16,6 @@
 - `virtual-checkpoint.schema.json` owns `cymule.virtual-checkpoint/1` cursor and
   bounded-frontier journal payloads. The derived parked-reason index is omitted
   from wire state and rebuilt from the closed parked-work map on restore.
+  Its owned definitions also freeze `cymule.virtual-work-occurrence/1` and
+  `cymule.virtual-work-control/1`; disposition variants are closed and preserve
+  owner/epoch/binding preconditions.

@@ -3,6 +3,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use cymule_core::ArtifactRef;
 use serde::{Deserialize, Serialize};
 
+/// Binding-pinned virtual work occurrence version.
+pub const VIRTUAL_WORK_OCCURRENCE_VERSION: &str = "cymule.virtual-work-occurrence/1";
+/// Provider-neutral virtual work control command version.
+pub const VIRTUAL_WORK_CONTROL_VERSION: &str = "cymule.virtual-work-control/1";
+
 /// Opaque provider-neutral durable cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -111,6 +116,109 @@ pub struct ClaimedWork {
     pub owner: String,
     /// Monotone per-work fencing epoch.
     pub epoch: u64,
+    /// Stable identity of this exact work attempt occurrence.
+    pub occurrence_id: String,
+    /// Immutable implementation binding selected before claim admission.
+    pub occurrence_binding: String,
+}
+
+/// Lifecycle of one binding-pinned work attempt occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkOccurrenceState {
+    /// The fenced claim may still produce one disposition.
+    Running,
+    /// The work produced a terminal result.
+    Succeeded,
+    /// The attempt failed and the same logical work was scheduled again.
+    RetryScheduled,
+    /// The attempt yielded to an indexed parked condition.
+    Parked,
+    /// The logical work ended with a terminal failure.
+    Failed,
+    /// The active attempt was cancelled and fenced from later completion.
+    Cancelled,
+}
+
+/// One immutable-identity attempt and its current durable disposition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkOccurrence {
+    /// Occurrence schema and semantic version.
+    pub occurrence_version: String,
+    /// Stable identity derived from work ID and claim epoch.
+    pub occurrence_id: String,
+    /// Logical work identity shared by retries.
+    pub work_id: String,
+    /// Owning virtual region.
+    pub region_id: String,
+    /// Owning Run.
+    pub run_id: String,
+    /// Claim owner for this exact attempt.
+    pub owner: String,
+    /// Monotone per-work claim epoch.
+    pub epoch: u64,
+    /// Immutable execution binding selected before the claim was published.
+    pub occurrence_binding: String,
+    /// Current occurrence lifecycle.
+    pub state: WorkOccurrenceState,
+    /// Terminal output Artifact for success.
+    pub result: Option<ArtifactRef>,
+    /// Failure or cancellation evidence Artifact.
+    pub error: Option<ArtifactRef>,
+    /// Indexed condition used by retry or park, when present.
+    pub next_reason: Option<ParkReason>,
+}
+
+/// Fenced disposition proposed for one active work occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "resolution", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkResolution {
+    /// Publish one terminal result.
+    Succeeded {
+        /// Immutable typed output.
+        result: ArtifactRef,
+    },
+    /// Retain failure evidence and schedule another claim.
+    Retry {
+        /// Immutable failure evidence.
+        error: ArtifactRef,
+        /// Optional indexed condition; `None` requeues immediately.
+        next_reason: Option<ParkReason>,
+    },
+    /// Yield the work without classifying the attempt as failed.
+    Parked {
+        /// Exact indexed condition required to wake the work.
+        reason: ParkReason,
+    },
+    /// Publish one terminal failure.
+    Failed {
+        /// Immutable terminal failure evidence.
+        error: ArtifactRef,
+    },
+    /// Cancel the active occurrence.
+    Cancelled {
+        /// Immutable cancellation reason or evidence.
+        reason: ArtifactRef,
+    },
+}
+
+/// Idempotent control command resolving one fenced work occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkResolutionCommand {
+    /// Control command schema and semantic version.
+    pub control_version: String,
+    /// Stable caller-generated idempotency identity.
+    pub command_id: String,
+    /// Logical work identity.
+    pub work_id: String,
+    /// Expected current claim owner.
+    pub owner: String,
+    /// Expected current claim epoch.
+    pub epoch: u64,
+    /// Proposed terminal, retry, park, or cancellation disposition.
+    pub resolution: WorkResolution,
 }
 
 /// Materialization and active-work bounds.
@@ -151,4 +259,6 @@ pub struct VirtualSnapshot {
     pub last_run: Option<String>,
     /// Last claim epoch per work identity.
     pub claim_epochs: BTreeMap<String, u64>,
+    /// Binding-pinned attempt occurrences keyed by stable occurrence ID.
+    pub occurrences: BTreeMap<String, WorkOccurrence>,
 }

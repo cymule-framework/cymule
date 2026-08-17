@@ -8,4 +8,6 @@
   explicit. The Rust Engine is the only Resource ID authority.
 - Keep WaitActivation and source structs closed and provider-neutral. Builders
   sort/deduplicate targets; Rust verification is not durable CAS admission.
+- Virtual work query/control structs preserve binding, owner, epoch, command,
+  and disposition identity. Do not implement retry classification in the SDK.
 - Run `gofmt` and `go test ./...` for every change.

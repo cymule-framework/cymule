@@ -12,6 +12,7 @@ cymule-core = { path = "../cymule-core" }
 cymule-durable = { path = "../cymule-durable" }
 cymule-resource = { path = "../cymule-resource" }
 cymule-runtime = { path = "../cymule-runtime" }
+cymule-virtual = { path = "../cymule-virtual" }
 serde.workspace = true
 serde_json.workspace = true
 

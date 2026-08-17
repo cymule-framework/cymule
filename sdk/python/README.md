@@ -18,3 +18,7 @@ always validated and sealed by the Rust Engine.
 `WaitActivationBuilder` creates provider-neutral signal and timer delivery
 records. The Rust Engine verifies their closed wire shape; a durable runtime
 still performs source matching and consume-once admission through CAS.
+
+`VirtualWorkControl` describes occurrence queries and fenced resolution
+commands independently of transport. `VirtualWorkControlBuilder` provides
+success, retry, failure, and cancellation command helpers.

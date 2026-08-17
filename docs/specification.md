@@ -38,6 +38,8 @@ The following domains evolve independently:
 | Resource handoff | `cymule.resource-handoff/1` | transfer IDs are idempotent per target Run |
 | Wait activation | `cymule.wait-activation/1` | external delivery ID fixes source, targets, and result |
 | Virtual checkpoint | `cymule.virtual-checkpoint/1` | cursor and bounded frontier advance together |
+| Virtual work occurrence | `cymule.virtual-work-occurrence/1` | one immutable binding per claim epoch |
+| Virtual work control | `cymule.virtual-work-control/1` | stable command ID plus owner/epoch precondition |
 | Conformance profile | `cymule.conformance/1` | complete profile cases are required |
 
 Changing effect identity, scope isolation, authority, causal admission, replay,
@@ -178,6 +180,34 @@ checkpoint MUST be admitted by one CAS or not at all.
 An activation already committed without that M3 checkpoint MUST NOT later be
 relabeled as an atomic cross-profile transition; a retry succeeds only when the
 exact checkpoint record was committed with the activation.
+
+Every M3 work claim MUST resolve an immutable occurrence binding and create one
+`cymule.virtual-work-occurrence/1` record before worker execution. Occurrence
+identity is derived from logical work ID and monotonically increasing claim
+epoch. Owner, binding, region, and Run MUST be retained. A stale owner or epoch
+MUST NOT resolve the occurrence.
+
+One running occurrence may end exactly once as `succeeded`, `retry_scheduled`,
+`parked`, `failed`, or `cancelled`. Success stores one result Artifact. Retry and
+terminal failure store failure evidence; cancellation stores its reason.
+Parking stores an exact indexed condition. Repeating the same disposition is
+idempotent; a different disposition for that occurrence MUST fail.
+
+Retry does not mutate or erase the failed occurrence. It requeues or parks the
+same logical work, and the next claim creates a new epoch and may pin a new
+binding. Cancellation removes the active claim, so later worker output is stale
+and rejected. Retryability, limits, delay, and escalation are explicit policy
+decisions and MUST NOT be inferred from provider strings or transport status.
+
+Claim and disposition transitions MUST enter chained M1 virtual checkpoints.
+Result, failure, and cancellation Artifacts MUST commit with the occurrence and
+frontier in the same CAS; the Machine proposal may add only those exact
+Artifacts. Public control uses `cymule.virtual-work-control/1` with a stable
+command ID and exact work, owner, and epoch precondition.
+The checkpoint MUST retain the complete command and returned occurrence ID.
+Repeating that command after any number of later checkpoints MUST return the
+original occurrence receipt without reverting scheduler state. Reusing its ID
+with different semantics MUST fail.
 
 ## 8. Causal events
 

@@ -12,3 +12,6 @@
 - Wait activation builders sort and deduplicate exact targets while preserving
   delivery, source, and Artifact identities. Rust Engine verification is not a
   substitute for durable CAS admission against pending waits.
+- Virtual work query/control types preserve command, occurrence, binding,
+  owner, epoch, and disposition fields. SDK transports do not classify errors
+  or decide retry policy.

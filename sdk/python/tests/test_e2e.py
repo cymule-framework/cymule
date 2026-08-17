@@ -6,7 +6,13 @@ import json
 import os
 import unittest
 
-from cymule import CliEngine, FlowBuilder, ResourceBuilder, WaitActivationBuilder
+from cymule import (
+    CliEngine,
+    FlowBuilder,
+    ResourceBuilder,
+    VirtualWorkControlBuilder,
+    WaitActivationBuilder,
+)
 
 
 class EndToEndTest(unittest.TestCase):
@@ -84,6 +90,30 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(
             CliEngine(engine_path).verify_wait_activation(activation), activation
         )
+
+    def test_python_virtual_work_query_and_control_fixtures_stay_exact(self) -> None:
+        occurrence_path = os.environ.get("CYMULE_VIRTUAL_OCCURRENCE_FIXTURE")
+        control_path = os.environ.get("CYMULE_VIRTUAL_CONTROL_FIXTURE")
+        if occurrence_path is None or control_path is None:
+            self.skipTest("virtual work SDK conformance is not configured")
+        with open(occurrence_path, encoding="utf-8") as source:
+            occurrence = json.load(source)
+        self.assertEqual(occurrence["occurrence_binding"], "binding:worker/fixture@1")
+        command = VirtualWorkControlBuilder.succeed(
+            "command:virtual:fixture:success",
+            "work:fixture",
+            "worker:fixture",
+            1,
+            {
+                "artifact_id": (
+                    "sha256:abcdef0123456789abcdef0123456789"
+                    "abcdef0123456789abcdef0123456789"
+                ),
+                "kind": "example/result",
+            },
+        )
+        with open(control_path, encoding="utf-8") as source:
+            self.assertEqual(command, json.load(source))
 
 
 if __name__ == "__main__":

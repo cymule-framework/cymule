@@ -5,7 +5,7 @@ use std::env;
 
 use cymule_sdk::{
     CliEngine, DispatchPolicy, EffectProfile, Engine, Expression, FlowBuilder, MutationKind,
-    ReconciliationMode, ResourceCandidate, WaitActivation,
+    ReconciliationMode, ResourceCandidate, WaitActivation, WorkOccurrence, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -87,4 +87,19 @@ fn rust_wait_activation_validates_through_the_cli() {
         .verify_wait_activation(&activation)
         .expect("wait activation verifies");
     assert_eq!(verified, activation);
+}
+
+#[test]
+fn rust_virtual_work_query_and_control_fixtures_are_typed() {
+    let occurrence: WorkOccurrence = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/virtual-work-occurrence.json"
+    ))
+    .expect("virtual work occurrence deserializes");
+    assert_eq!(occurrence.work_id, "work:fixture");
+    let command: WorkResolutionCommand = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/virtual-work-control.json"
+    ))
+    .expect("virtual work control deserializes");
+    assert_eq!(command.work_id, occurrence.work_id);
+    assert_eq!(command.epoch, occurrence.epoch);
 }

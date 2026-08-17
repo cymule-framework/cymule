@@ -651,3 +651,74 @@ fn higher_profile_journal_is_cas_committed_and_replayed_in_order() {
     assert_eq!(records[0].record_id, "record:1");
     assert_eq!(records[1].record_id, "record:2");
 }
+
+#[test]
+fn artifact_journal_checkpoint_rejects_unlisted_machine_changes_atomically() {
+    let (machine, _) = machine_with_run();
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let mut proposed = coordinator.restore_machine().expect("Machine restores");
+    let result = proposed.put_artifact("example/result", b"result".to_vec());
+    proposed.put_artifact("example/unrelated", b"unrelated".to_vec());
+    let record = JournalRecord::new(
+        "record:artifact-result",
+        "example.result/1",
+        json!({"result": result.clone()}),
+    )
+    .expect("result record seals");
+    let before = coordinator.revision().expect("revision").to_owned();
+    assert!(matches!(
+        coordinator.checkpoint_artifact_journals(
+            &proposed,
+            &BTreeSet::from([result.clone()]),
+            &[JournalBatch {
+                journal_id: "journal:artifact-result".to_owned(),
+                records: vec![record.clone()],
+            }],
+        ),
+        Err(DurableError::Validation(_))
+    ));
+    assert_eq!(coordinator.revision(), Some(before.as_str()));
+    assert!(
+        coordinator
+            .journal_records("journal:artifact-result")
+            .expect("journal reads")
+            .is_empty()
+    );
+
+    let mut valid = coordinator.restore_machine().expect("Machine restores");
+    assert_eq!(
+        valid.put_artifact("example/result", b"result".to_vec()),
+        result
+    );
+    coordinator
+        .checkpoint_artifact_journals(
+            &valid,
+            &BTreeSet::from([result.clone()]),
+            &[JournalBatch {
+                journal_id: "journal:artifact-result".to_owned(),
+                records: vec![record],
+            }],
+        )
+        .expect("Artifact and journal commit atomically");
+    drop(coordinator);
+
+    let reopened = DurableCoordinator::open(store).expect("store reopens");
+    assert!(
+        reopened
+            .restore_machine()
+            .expect("Machine restores")
+            .artifact(&result)
+            .is_some()
+    );
+    assert_eq!(
+        reopened
+            .journal_records("journal:artifact-result")
+            .expect("journal reads")
+            .len(),
+        1
+    );
+}

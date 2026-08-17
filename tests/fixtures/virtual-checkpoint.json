@@ -21,6 +21,9 @@
     "parked": {},
     "known": [],
     "last_run": null,
-    "claim_epochs": {}
-  }
+    "claim_epochs": {},
+    "occurrences": {}
+  },
+  "control": null,
+  "receipt_occurrence_id": null
 }

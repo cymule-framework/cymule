@@ -153,6 +153,28 @@ def main() -> int:
         registry=registry,
     )
     virtual_validator.validate(virtual_checkpoint)
+    virtual_occurrence = load(root / "tests/fixtures/virtual-work-occurrence.json")
+    occurrence_validator = Draft202012Validator(
+        {
+            "$ref": (
+                "https://cymule.dev/schemas/virtual-checkpoint.schema.json"
+                "#/$defs/occurrence"
+            )
+        },
+        registry=registry,
+    )
+    occurrence_validator.validate(virtual_occurrence)
+    virtual_control = load(root / "tests/fixtures/virtual-work-control.json")
+    control_validator = Draft202012Validator(
+        {
+            "$ref": (
+                "https://cymule.dev/schemas/virtual-checkpoint.schema.json"
+                "#/$defs/controlCommand"
+            )
+        },
+        registry=registry,
+    )
+    control_validator.validate(virtual_control)
     malformed_virtual = dict(virtual_checkpoint)
     malformed_virtual["provider"] = "must-not-enter-virtual-checkpoint"
     try:
@@ -161,6 +183,22 @@ def main() -> int:
         pass
     else:
         raise AssertionError("virtual checkpoint schema accepted a provider field")
+    malformed_occurrence = dict(virtual_occurrence)
+    malformed_occurrence["provider"] = "must-not-enter-work-occurrence"
+    try:
+        occurrence_validator.validate(malformed_occurrence)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("virtual work occurrence accepted a provider field")
+    malformed_control = dict(virtual_control)
+    malformed_control["provider"] = "must-not-enter-work-control"
+    try:
+        control_validator.validate(malformed_control)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("virtual work control accepted a provider field")
 
     credential_url = {
         "resource_version": "cymule.resource/1",

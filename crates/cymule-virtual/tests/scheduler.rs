@@ -11,9 +11,10 @@ use cymule_durable::{
     WaitActivationSource, WaitCondition, WaitKind, WaitState,
 };
 use cymule_virtual::{
-    ClaimedWork, DurableVirtualController, FrontierLimits, MaterializedPage, ParkReason,
-    ParkedWork, RegionSource, VirtualCheckpoint, VirtualCursor, VirtualError, VirtualRegion,
-    VirtualResult, VirtualScheduler, WorkItem,
+    DurableVirtualController, FrontierLimits, MaterializedPage, ParkReason, ParkedWork,
+    RegionSource, VIRTUAL_WORK_CONTROL_VERSION, VirtualCheckpoint, VirtualCursor, VirtualError,
+    VirtualRegion, VirtualResult, VirtualScheduler, WorkItem, WorkOccurrenceState, WorkResolution,
+    WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -222,11 +223,11 @@ fn million_item_regions_keep_a_bounded_fair_frontier_across_restore() {
 
     let capabilities = BTreeSet::from(["cpu".to_owned()]);
     let first = scheduler
-        .claim("worker:1", &capabilities)
+        .claim("worker:1", "binding:worker/1", &capabilities)
         .expect("claim")
         .expect("work");
     let second = scheduler
-        .claim("worker:2", &capabilities)
+        .claim("worker:2", "binding:worker/2", &capabilities)
         .expect("claim")
         .expect("work");
     assert_ne!(first.item.run_id, second.item.run_id);
@@ -242,11 +243,27 @@ fn million_item_regions_keep_a_bounded_fair_frontier_across_restore() {
     );
 
     restored
-        .complete(&first.item.work_id, "worker:1", first.epoch)
+        .succeed(
+            &first.item.work_id,
+            "worker:1",
+            first.epoch,
+            ArtifactRef {
+                artifact_id: "artifact:result:1".to_owned(),
+                kind: "example/result".to_owned(),
+            },
+        )
         .expect("current owner completes");
     assert!(
         restored
-            .complete(&second.item.work_id, "worker:wrong", second.epoch)
+            .succeed(
+                &second.item.work_id,
+                "worker:wrong",
+                second.epoch,
+                ArtifactRef {
+                    artifact_id: "artifact:result:2".to_owned(),
+                    kind: "example/result".to_owned(),
+                },
+            )
             .is_err()
     );
 }
@@ -259,7 +276,11 @@ fn parked_work_wakes_by_exact_indexed_reason() {
         .expect("region registers");
     scheduler.fill(&mut MillionItemSource).expect("fills");
     let claim = scheduler
-        .claim("worker:1", &BTreeSet::from(["cpu".to_owned()]))
+        .claim(
+            "worker:1",
+            "binding:worker/1",
+            &BTreeSet::from(["cpu".to_owned()]),
+        )
         .expect("claim")
         .expect("work");
     let reason = ParkReason::Wait {
@@ -419,24 +440,24 @@ fn restore_rejects_duplicate_work_and_per_run_claim_overflow() {
         max_active_per_run: 1,
         ..limits()
     };
-    let mut overflow = scheduler.snapshot();
-    for epoch in 1..=2 {
-        let item = overflow
-            .ready
-            .get_mut("run:a")
-            .expect("queue")
-            .pop_front()
-            .expect("ready item");
-        overflow.claim_epochs.insert(item.work_id.clone(), epoch);
-        overflow.active.insert(
-            item.work_id.clone(),
-            ClaimedWork {
-                item,
-                owner: format!("worker:{epoch}"),
-                epoch,
-            },
-        );
-    }
+    let mut claimed = scheduler.clone();
+    claimed
+        .claim(
+            "worker:1",
+            "binding:worker/1",
+            &BTreeSet::from(["cpu".to_owned()]),
+        )
+        .expect("first claim")
+        .expect("first work");
+    claimed
+        .claim(
+            "worker:2",
+            "binding:worker/2",
+            &BTreeSet::from(["cpu".to_owned()]),
+        )
+        .expect("second claim")
+        .expect("second work");
+    let overflow = claimed.snapshot();
     assert!(matches!(
         VirtualScheduler::restore(strict_limits, overflow),
         Err(VirtualError::Validation(_))
@@ -463,7 +484,11 @@ fn wait_activation_and_indexed_virtual_wake_share_one_m1_cas() {
         .expect("region registers");
     scheduler.fill(&mut MillionItemSource).expect("fills");
     let claim = scheduler
-        .claim("worker:1", &BTreeSet::from(["cpu".to_owned()]))
+        .claim(
+            "worker:1",
+            "binding:worker/1",
+            &BTreeSet::from(["cpu".to_owned()]),
+        )
         .expect("claim")
         .expect("work");
     scheduler
@@ -551,7 +576,11 @@ fn parked_reason_index_rebuilds_from_a_durable_checkpoint() {
         .expect("region registers");
     scheduler.fill(&mut MillionItemSource).expect("fills");
     let claim = scheduler
-        .claim("worker:1", &BTreeSet::from(["cpu".to_owned()]))
+        .claim(
+            "worker:1",
+            "binding:worker/1",
+            &BTreeSet::from(["cpu".to_owned()]),
+        )
         .expect("claim")
         .expect("work");
     let reason = ParkReason::Wait {
@@ -577,4 +606,293 @@ fn parked_reason_index_rebuilds_from_a_durable_checkpoint() {
         BTreeSet::from([claim.item.work_id])
     );
     assert_eq!(restored.wake(&reason), 1);
+}
+
+#[test]
+fn work_occurrence_retry_success_and_stale_fencing_are_explicit() {
+    let single_limits = FrontierLimits {
+        max_materialized: 1,
+        max_active: 1,
+        max_active_per_run: 1,
+        materialize_batch: 1,
+    };
+    let mut scheduler = VirtualScheduler::new(single_limits).expect("scheduler creates");
+    scheduler
+        .register(region("region:a", "run:a"))
+        .expect("region registers");
+    scheduler.fill(&mut MillionItemSource).expect("fills");
+    let capabilities = BTreeSet::from(["cpu".to_owned()]);
+    let first = scheduler
+        .claim("worker:1", "binding:worker/1", &capabilities)
+        .expect("first claim")
+        .expect("first work");
+    assert_eq!(
+        scheduler.snapshot().occurrences[&first.occurrence_id].state,
+        WorkOccurrenceState::Running
+    );
+    let error = ArtifactRef {
+        artifact_id: "artifact:retry-error".to_owned(),
+        kind: "example/error".to_owned(),
+    };
+    let retry = WorkResolution::Retry {
+        error: error.clone(),
+        next_reason: None,
+    };
+    let retried = scheduler
+        .resolve(&first.item.work_id, "worker:1", first.epoch, &retry)
+        .expect("retry records");
+    assert_eq!(retried.state, WorkOccurrenceState::RetryScheduled);
+    assert_eq!(
+        scheduler
+            .resolve(&first.item.work_id, "worker:1", first.epoch, &retry)
+            .expect("retry receipt replays"),
+        retried
+    );
+    assert!(matches!(
+        scheduler.resolve(
+            &first.item.work_id,
+            "worker:1",
+            first.epoch,
+            &WorkResolution::Failed {
+                error: error.clone(),
+            },
+        ),
+        Err(VirtualError::Conflict(_))
+    ));
+
+    let second = scheduler
+        .claim("worker:2", "binding:worker/2", &capabilities)
+        .expect("retry claim")
+        .expect("retried work");
+    assert_eq!(second.item.work_id, first.item.work_id);
+    assert_eq!(second.epoch, first.epoch + 1);
+    assert_ne!(second.occurrence_id, first.occurrence_id);
+    let result = ArtifactRef {
+        artifact_id: "artifact:success".to_owned(),
+        kind: "example/result".to_owned(),
+    };
+    assert!(matches!(
+        scheduler.succeed(&first.item.work_id, "worker:1", first.epoch, result.clone(),),
+        Err(VirtualError::Conflict(_))
+    ));
+    let succeeded = scheduler
+        .succeed(
+            &second.item.work_id,
+            "worker:2",
+            second.epoch,
+            result.clone(),
+        )
+        .expect("current attempt succeeds");
+    assert_eq!(succeeded.state, WorkOccurrenceState::Succeeded);
+    assert_eq!(succeeded.result, Some(result));
+    assert_eq!(
+        scheduler.occurrence(&second.occurrence_id),
+        Some(&succeeded)
+    );
+    assert_eq!(scheduler.snapshot().occurrences.len(), 2);
+    VirtualScheduler::restore(single_limits, scheduler.snapshot()).expect("history restores");
+}
+
+#[test]
+fn retry_parking_failure_and_cancellation_have_distinct_terminal_records() {
+    let mut scheduler = VirtualScheduler::new(limits()).expect("scheduler creates");
+    scheduler
+        .register(region("region:a", "run:a"))
+        .expect("region registers");
+    scheduler.fill(&mut MillionItemSource).expect("fills");
+    let capabilities = BTreeSet::from(["cpu".to_owned()]);
+    let parked_claim = scheduler
+        .claim("worker:park", "binding:worker/park", &capabilities)
+        .expect("park claim")
+        .expect("park work");
+    let retry_reason = ParkReason::Backpressure {
+        domain: "retry:test".to_owned(),
+    };
+    let parked_retry = scheduler
+        .resolve(
+            &parked_claim.item.work_id,
+            "worker:park",
+            parked_claim.epoch,
+            &WorkResolution::Retry {
+                error: ArtifactRef {
+                    artifact_id: "artifact:retry".to_owned(),
+                    kind: "example/error".to_owned(),
+                },
+                next_reason: Some(retry_reason.clone()),
+            },
+        )
+        .expect("retry parks");
+    assert_eq!(parked_retry.state, WorkOccurrenceState::RetryScheduled);
+    assert_eq!(scheduler.wake(&retry_reason), 1);
+
+    let failed_claim = scheduler
+        .claim("worker:fail", "binding:worker/fail", &capabilities)
+        .expect("failure claim")
+        .expect("failure work");
+    let failure = scheduler
+        .resolve(
+            &failed_claim.item.work_id,
+            "worker:fail",
+            failed_claim.epoch,
+            &WorkResolution::Failed {
+                error: ArtifactRef {
+                    artifact_id: "artifact:terminal-error".to_owned(),
+                    kind: "example/error".to_owned(),
+                },
+            },
+        )
+        .expect("terminal failure records");
+    assert_eq!(failure.state, WorkOccurrenceState::Failed);
+
+    let cancelled_claim = scheduler
+        .claim("worker:cancel", "binding:worker/cancel", &capabilities)
+        .expect("cancellation claim")
+        .expect("cancellation work");
+    let cancelled = scheduler
+        .resolve(
+            &cancelled_claim.item.work_id,
+            "worker:cancel",
+            cancelled_claim.epoch,
+            &WorkResolution::Cancelled {
+                reason: ArtifactRef {
+                    artifact_id: "artifact:cancel-reason".to_owned(),
+                    kind: "example/cancellation".to_owned(),
+                },
+            },
+        )
+        .expect("cancellation records");
+    assert_eq!(cancelled.state, WorkOccurrenceState::Cancelled);
+    assert!(matches!(
+        scheduler.succeed(
+            &cancelled_claim.item.work_id,
+            "worker:cancel",
+            cancelled_claim.epoch,
+            ArtifactRef {
+                artifact_id: "artifact:late".to_owned(),
+                kind: "example/result".to_owned(),
+            },
+        ),
+        Err(VirtualError::Conflict(_))
+    ));
+}
+
+#[test]
+fn durable_claim_and_result_survive_reopen_and_stale_cas() {
+    let mut machine = Machine::new();
+    let store = MemoryStore::new();
+    let mut current = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let mut scheduler = VirtualScheduler::new(limits()).expect("scheduler creates");
+    scheduler
+        .register(region("region:a", "run:a"))
+        .expect("region registers");
+    DurableVirtualController::fill_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &mut MillionItemSource,
+        "journal:virtual",
+        "virtual:work:fill",
+    )
+    .expect("frontier checkpoints");
+    let claim = DurableVirtualController::claim_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        "worker:durable",
+        "binding:worker/durable",
+        &BTreeSet::from(["cpu".to_owned()]),
+        "journal:virtual",
+        "virtual:work:claim",
+    )
+    .expect("claim checkpoints")
+    .expect("work claims");
+    let mut stale = DurableCoordinator::open(store.clone()).expect("stale view opens");
+    let mut stale_scheduler = DurableVirtualController::load(&stale, "journal:virtual", limits())
+        .expect("stale scheduler restores");
+
+    let result = machine.put_artifact("example/result", b"durable result".to_vec());
+    let resolution = WorkResolution::Succeeded {
+        result: result.clone(),
+    };
+    let command = WorkResolutionCommand {
+        control_version: VIRTUAL_WORK_CONTROL_VERSION.to_owned(),
+        command_id: "virtual:work:result".to_owned(),
+        work_id: claim.item.work_id.clone(),
+        owner: "worker:durable".to_owned(),
+        epoch: claim.epoch,
+        resolution: resolution.clone(),
+    };
+    let succeeded = DurableVirtualController::resolve_command_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &machine,
+        &command,
+        "journal:virtual",
+    )
+    .expect("result checkpoints");
+    assert_eq!(succeeded.result, Some(result.clone()));
+
+    let stale_before = stale_scheduler.snapshot();
+    assert!(matches!(
+        DurableVirtualController::resolve_command_and_checkpoint(
+            &mut stale,
+            &mut stale_scheduler,
+            &machine,
+            &command,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Durable(_))
+    ));
+    assert_eq!(stale_scheduler.snapshot(), stale_before);
+
+    let mut reopened = DurableCoordinator::open(store).expect("store reopens");
+    let mut restored = DurableVirtualController::load(&reopened, "journal:virtual", limits())
+        .expect("scheduler restores");
+    assert_eq!(
+        restored.snapshot().occurrences[&claim.occurrence_id].state,
+        WorkOccurrenceState::Succeeded
+    );
+    assert!(
+        reopened
+            .restore_machine()
+            .expect("Machine restores")
+            .artifact(&result)
+            .is_some()
+    );
+    DurableVirtualController::claim_and_checkpoint(
+        &mut reopened,
+        &mut restored,
+        "worker:later",
+        "binding:worker/later",
+        &BTreeSet::from(["cpu".to_owned()]),
+        "journal:virtual",
+        "virtual:work:later-claim",
+    )
+    .expect("later claim checkpoints")
+    .expect("later work claims");
+    let before_replay = restored.snapshot();
+    let replayed = DurableVirtualController::resolve_command_and_checkpoint(
+        &mut reopened,
+        &mut restored,
+        &machine,
+        &command,
+        "journal:virtual",
+    )
+    .expect("lost result receipt replays idempotently");
+    assert_eq!(replayed, succeeded);
+    assert_eq!(restored.snapshot(), before_replay);
+    let mut conflicting = command;
+    conflicting.resolution = WorkResolution::Failed { error: result };
+    assert!(matches!(
+        DurableVirtualController::resolve_command_and_checkpoint(
+            &mut reopened,
+            &mut restored,
+            &machine,
+            &conflicting,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Conflict(_))
+    ));
+    assert_eq!(restored.snapshot(), before_replay);
 }

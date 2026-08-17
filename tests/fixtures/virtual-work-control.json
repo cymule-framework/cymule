@@ -1,0 +1,14 @@
+{
+  "control_version": "cymule.virtual-work-control/1",
+  "command_id": "command:virtual:fixture:success",
+  "work_id": "work:fixture",
+  "owner": "worker:fixture",
+  "epoch": 1,
+  "resolution": {
+    "resolution": "succeeded",
+    "result": {
+      "artifact_id": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+      "kind": "example/result"
+    }
+  }
+}

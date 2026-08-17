@@ -1,0 +1,17 @@
+{
+  "occurrence_version": "cymule.virtual-work-occurrence/1",
+  "occurrence_id": "sha256:e5195c71618aad53a091450520d0bbc02c559042a40a91215f3451324d89a941",
+  "work_id": "work:fixture",
+  "region_id": "region:fixture",
+  "run_id": "run:fixture",
+  "owner": "worker:fixture",
+  "epoch": 1,
+  "occurrence_binding": "binding:worker/fixture@1",
+  "state": "succeeded",
+  "result": {
+    "artifact_id": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    "kind": "example/result"
+  },
+  "error": null,
+  "next_reason": null
+}

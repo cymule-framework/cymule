@@ -225,6 +225,7 @@ dependencies = [
  "cymule-durable",
  "cymule-resource",
  "cymule-runtime",
+ "cymule-virtual",
  "serde",
  "serde_json",
 ]
