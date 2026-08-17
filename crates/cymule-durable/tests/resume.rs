@@ -48,6 +48,79 @@ struct StageReceiptLossStore {
     lost: Arc<AtomicBool>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CasFaultTiming {
+    BeforeCommit,
+    AfterCommit,
+}
+
+#[derive(Debug)]
+struct CasFaultControl {
+    calls: AtomicUsize,
+    fail_at: AtomicUsize,
+}
+
+#[derive(Clone)]
+struct CasFaultStore {
+    inner: MemoryStore,
+    timing: CasFaultTiming,
+    control: Arc<CasFaultControl>,
+}
+
+impl CasFaultStore {
+    fn new(timing: CasFaultTiming, fail_at: usize) -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            timing,
+            control: Arc::new(CasFaultControl {
+                calls: AtomicUsize::new(0),
+                fail_at: AtomicUsize::new(fail_at),
+            }),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.control.calls.load(Ordering::SeqCst)
+    }
+
+    fn disable_fault(&self) {
+        self.control.fail_at.store(0, Ordering::SeqCst);
+    }
+
+    fn should_fail(&self, call: usize) -> bool {
+        self.control
+            .fail_at
+            .compare_exchange(call, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+}
+
+impl DurableStore for CasFaultStore {
+    fn load(&mut self) -> DurableResult<Option<StoredState>> {
+        self.inner.load()
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        expected_revision: Option<&str>,
+        next: &DurableState,
+    ) -> DurableResult<StoreCommit> {
+        let call = self.control.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if matches!(self.timing, CasFaultTiming::BeforeCommit) && self.should_fail(call) {
+            return Err(DurableError::Substrate(format!(
+                "simulated I/O failure before CAS {call}"
+            )));
+        }
+        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        if matches!(self.timing, CasFaultTiming::AfterCommit) && self.should_fail(call) {
+            return Err(DurableError::Substrate(format!(
+                "simulated lost acknowledgement after CAS {call}"
+            )));
+        }
+        Ok(commit)
+    }
+}
+
 impl DurableStore for StageReceiptLossStore {
     fn load(&mut self) -> DurableResult<Option<StoredState>> {
         self.inner.load()
@@ -109,6 +182,55 @@ struct StagePlugin {
     dispatch_outcome: WorldOutcome,
     reconciliation: ReconciliationResolution,
     lose_first_prepare_response: bool,
+}
+
+struct SweepPlugin {
+    dispatches: Arc<AtomicUsize>,
+    reconciliations: Arc<AtomicUsize>,
+}
+
+impl PluginHost for SweepPlugin {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        match request {
+            PluginRequest::Describe => Ok(PluginResponse::Manifest {
+                manifest: PluginManifest {
+                    plugin_version: PLUGIN_VERSION.to_owned(),
+                    implementation_id: "cas-fault-sweep@1".to_owned(),
+                    components: BTreeMap::new(),
+                    effects: BTreeMap::from([(
+                        "test.capture".to_owned(),
+                        PluginEffect {
+                            implementation_revision: "1".to_owned(),
+                            can_reconcile: true,
+                        },
+                    )]),
+                },
+            }),
+            PluginRequest::PrepareEffect { .. } => Ok(PluginResponse::Prepared),
+            PluginRequest::DispatchEffect { input, .. } => {
+                self.dispatches.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::EffectResult {
+                    outcome: WorldOutcome::Applied,
+                    value: Some(input),
+                })
+            }
+            PluginRequest::ReconcileEffect { input, .. } => {
+                self.reconciliations.fetch_add(1, Ordering::SeqCst);
+                let applied = self.dispatches.load(Ordering::SeqCst) > 0;
+                Ok(PluginResponse::ReconciliationResult {
+                    resolution: if applied {
+                        ReconciliationResolution::ResolvedApplied
+                    } else {
+                        ReconciliationResolution::ResolvedNotApplied
+                    },
+                    value: applied.then_some(input),
+                })
+            }
+            request @ PluginRequest::Call { .. } => Err(RuntimeError::Plugin(format!(
+                "unsupported CAS sweep request: {request:?}"
+            ))),
+        }
+    }
 }
 
 impl PluginHost for StagePlugin {
@@ -552,6 +674,98 @@ fn nested_scope_wait_reopens_from_region_path_without_reinvoking_component() {
         restored.continuations["run:nested-resume"].scope_stack,
         vec![cymule_core::ROOT_SCOPE_ID.to_owned()]
     );
+}
+
+#[test]
+fn every_run_cas_boundary_recovers_from_io_failure_or_lost_acknowledgement() {
+    let baseline_store = CasFaultStore::new(CasFaultTiming::BeforeCommit, 0);
+    let baseline_probe = baseline_store.clone();
+    let mut baseline = ResumableRuntime::open(
+        baseline_store,
+        SweepPlugin {
+            dispatches: Arc::new(AtomicUsize::new(0)),
+            reconciliations: Arc::new(AtomicUsize::new(0)),
+        },
+    )
+    .expect("baseline runtime opens");
+    assert!(matches!(
+        baseline.start(
+            effect_candidate(),
+            &json!({"value": "baseline"}),
+            "run:cas-sweep-baseline",
+        ),
+        Ok(DriveOutcome::Completed(_))
+    ));
+    let boundary_count = baseline_probe.calls();
+    assert!(
+        boundary_count >= 5,
+        "effect Run should cross every durable stage"
+    );
+
+    for timing in [CasFaultTiming::BeforeCommit, CasFaultTiming::AfterCommit] {
+        for fail_at in 1..=boundary_count {
+            let store = CasFaultStore::new(timing, fail_at);
+            let store_probe = store.clone();
+            let dispatches = Arc::new(AtomicUsize::new(0));
+            let reconciliations = Arc::new(AtomicUsize::new(0));
+            let plugin = || SweepPlugin {
+                dispatches: dispatches.clone(),
+                reconciliations: reconciliations.clone(),
+            };
+            let run_id = format!("run:cas-sweep:{timing:?}:{fail_at}");
+            let input = json!({"failure": fail_at, "timing": format!("{timing:?}")});
+            let mut runtime = ResumableRuntime::open(store, plugin()).expect("fault runtime opens");
+            runtime
+                .start(effect_candidate(), &input, &run_id)
+                .expect_err("selected CAS boundary must fail once");
+            store_probe.disable_fault();
+
+            let mut durable_probe = store_probe.clone();
+            let persisted = durable_probe.load().expect("durable state loads");
+            if let Some(stored) = &persisted {
+                stored.verify().expect("stored revision remains valid");
+                assert!(
+                    stored.state.continuations.contains_key(&run_id),
+                    "a committed Run must never exist without its Continuation"
+                );
+            }
+
+            let mut reopened =
+                ResumableRuntime::open(store_probe, plugin()).expect("faulted store reopens");
+            let outcome = if persisted.is_some() {
+                reopened.resume(&run_id)
+            } else {
+                reopened.start(effect_candidate(), &input, &run_id)
+            }
+            .expect("recovery converges");
+            let DriveOutcome::Completed(result) = outcome else {
+                panic!("faulted Run should complete after recovery");
+            };
+            assert_eq!(result.value, input);
+            assert!(dispatches.load(Ordering::SeqCst) <= 1);
+            assert!(reconciliations.load(Ordering::SeqCst) <= 1);
+
+            let state = reopened
+                .coordinator()
+                .state()
+                .expect("state remains readable");
+            state
+                .validate()
+                .expect("recovered state passes integrity check");
+            assert_eq!(
+                state.continuations[&run_id].status,
+                cymule_durable::ContinuationStatus::Completed
+            );
+            assert!(state.outbox.values().all(|dispatch| matches!(
+                dispatch.state,
+                OutboxState::Applied | OutboxState::NotApplied
+            )));
+            reopened
+                .coordinator()
+                .restore_machine()
+                .expect("semantic projection replays after every fault");
+        }
+    }
 }
 
 #[test]

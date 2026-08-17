@@ -12,8 +12,9 @@ use serde_json::Value;
 
 use crate::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
-    DurableResult, DurableStore, EffectDispatch, FrameState, OutboxState, WaitActivation,
-    WaitActivationSource, WaitCondition, WaitKind, WaitState,
+    DurableResult, DurableStore, EffectDispatch, FrameState, MAX_WAIT_DELIVERY_TARGETS,
+    OutboxState, WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitSourceDriver,
+    WaitState,
 };
 
 /// Result of driving one Run until its next durable boundary.
@@ -107,8 +108,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             epoch: 0,
             status: ContinuationStatus::Running,
         };
-        self.coordinator.initialize_in_place(&machine)?;
-        self.coordinator.put_continuation(continuation)?;
+        self.coordinator.initialize_run(&machine, continuation)?;
         self.drive(&run_id)
     }
 
@@ -168,6 +168,50 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
         Ok(run_ids)
     }
 
+    /// Receive and atomically admit one bounded signal or timer delivery.
+    ///
+    /// Transport polling and acknowledgement remain in the driver. A lost
+    /// acknowledgement may cause redelivery, which replays the existing M1
+    /// activation before acknowledging it again.
+    pub fn drive_wait_source<D: WaitSourceDriver>(
+        &mut self,
+        driver: &mut D,
+        max_targets: usize,
+    ) -> DurableResult<Option<BTreeSet<String>>> {
+        if max_targets == 0 || max_targets > MAX_WAIT_DELIVERY_TARGETS {
+            return Err(DurableError::Validation(format!(
+                "wait source target limit must be between 1 and {MAX_WAIT_DELIVERY_TARGETS}"
+            )));
+        }
+        let index = self.coordinator.parked_wait_index()?;
+        let Some(delivery) = driver.receive(&index, max_targets)? else {
+            return Ok(None);
+        };
+        if delivery.wait_ids.len() > max_targets {
+            return Err(DurableError::Validation(format!(
+                "wait source returned {} targets above limit {max_targets}",
+                delivery.wait_ids.len()
+            )));
+        }
+        let replay = self
+            .coordinator
+            .state()?
+            .wait_activations
+            .contains_key(&delivery.activation_id);
+        if !replay {
+            index.validate_delivery(&delivery)?;
+        }
+        let activation_id = delivery.activation_id.clone();
+        let ready = self.admit_wait_activation(
+            delivery.activation_id,
+            delivery.source,
+            delivery.wait_ids,
+            &delivery.value,
+        )?;
+        driver.acknowledge(&activation_id)?;
+        Ok(Some(ready))
+    }
+
     /// Resume an existing ready/running Run after process reopen or a recoverable
     /// adapter failure.
     pub fn resume(&mut self, run_id: &str) -> DurableResult<DriveOutcome> {
@@ -201,9 +245,10 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 )));
             }
             ContinuationStatus::Completed => {
-                return Err(DurableError::IllegalTransition(format!(
-                    "continuation {run_id} is already completed"
-                )));
+                return Ok(DriveOutcome::Completed(completed_result(
+                    &self.coordinator.restore_machine()?,
+                    run_id,
+                )?));
             }
         }
         self.drive(run_id)

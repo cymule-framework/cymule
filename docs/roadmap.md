@@ -40,15 +40,17 @@ Status: partial.
 - identified signal/timer activation receipts atomically match and complete
   selected waits, enforce consume-once competition, survive redelivery/reopen,
   and resume under a new fenced Attempt epoch;
-- bounded clock/signal source drivers, parked-index integration, and their
-  additional crash windows remain proposed;
-- process-level crash injection for every effect window;
-- snapshot compaction and suffix rehydration;
-- canonical component-call occurrences and exact execution replay without
-  reinvoking plugins;
+- rebuilt parked indexes provide bounded deterministic signal/timer selection,
+  and the replaceable source-driver contract acknowledges only after CAS;
+  acknowledgement loss redelivers one retained activation across reopen;
+- Run creation commits the initial Machine and Continuation atomically; a
+  deterministic sweep faults every CAS before commit and after durable commit,
+  reopens authority, and verifies replay plus terminal outbox integrity;
 - provider-neutral cross-Run Resource descriptors, replay classification,
   bounded resolver/store interfaces, M1 handoff journals, and four SDK builders
-  are implemented; production adapters and interpreter activation remain.
+  are implemented; production adapters and interpreter activation remain;
+- production clock/signal source plugins, process-kill crash campaigns, and
+  snapshot compaction/suffix rehydration remain proposed.
 
 ## Optional plugin track - Agent interaction
 

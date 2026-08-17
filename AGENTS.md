@@ -47,6 +47,13 @@ Use this precedence order when guidance conflicts:
   direct worker wake-up. Match the Plan-declared source, commit the activation
   receipt with wait results and Continuation readiness, and advance the epoch
   before a reopened `Ready` Continuation resumes.
+- Durable Run creation publishes the initial Machine and first Continuation in
+  one CAS. Never create canonical work that cannot be resumed after a lost
+  acknowledgement.
+- Signal and timer transport belongs behind `WaitSourceDriver`. Drivers select
+  only from the rebuildable parked-wait index, obey the hard target bound, and
+  acknowledge only after the activation CAS; lost acknowledgement redelivers
+  the identical activation identity and targets.
 - Virtual-work cursors and bounded scheduler frontiers checkpoint through the M1
   application-journal CAS. Exact parked-wait indexes are rebuildable projections;
   activation and the corresponding indexed wake checkpoint commit atomically.
@@ -117,3 +124,7 @@ repository verification. The suite model and fault-test rules live in
 - JSON Schema validation fixtures;
 - TypeScript, Python, Rust, and Go SDK end-to-end tests against the Rust engine;
 - the MLIR workbench smoke test when the pinned host MLIR toolchain is available.
+
+Run `python3 scripts/test_harness.py run rust-soak` only for scheduled, release,
+or explicit anomaly-depth verification; keep it independent from focused local
+feedback.

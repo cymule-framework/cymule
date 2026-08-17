@@ -32,6 +32,31 @@ The harness is Python standard-library orchestration over Cargo, pnpm, uv, Go,
 and the MLIR smoke script. It does not replace their runners or put test meaning
 inside CI YAML.
 
+DeepSeek Harness's "everything is a plugin" boundary is also useful as a test
+ownership rule: a plugin proves its own domain vocabulary and lifecycle against
+published framework seams. Its tests do not make Session, stream, Agent Loop,
+ACP, model, editor, or provider behavior part of Cymule core conformance.
+
+## Evidence topology
+
+Cymule deliberately uses several independent witnesses instead of one giant
+runner:
+
+| Witness | Boundary under test | Runner |
+| --- | --- | --- |
+| Semantic reducer | closed Rust commands, events, identities, replay | Cargo unit, integration, and property tests |
+| Durable anomaly harness | CAS, reopen, receipt loss, unknown effects, fencing | deterministic Rust fault adapters |
+| Protocol verifier | frozen JSON and rejection of malformed/unknown fields | Rust CLI plus Python JSON Schema validation |
+| Cross-language differential | one Rust-sealed identity and execution result | native Rust, TypeScript, Python, and Go SDK tests |
+| Black-box user path | built engine plus a real process or embedded plugin | CLI and hello-world example scripts |
+| Plugin conformance | only the optional capability's public seam | one leaf suite per plugin |
+
+The suite inventory is a dependency graph, not a checklist that every edit must
+run. A leaf change runs its owner. A shared interface runs that owner and direct
+consumers. A frozen semantic or wire change runs all affected projections. An
+unknown path fails closed to `full`. Independent evidence can fail, run, and
+evolve without coupling unrelated toolchains.
+
 ## Evidence families
 
 | Family | Proves | Typical trigger |
@@ -74,6 +99,18 @@ Run the release- and profile-complete aggregate:
 ```sh
 ./scripts/verify.sh
 ```
+
+Run generated causal replay cases and repeat the highest-risk deterministic
+fault sweeps independently:
+
+```sh
+PROPTEST_CASES=16384 CYMULE_SOAK_REPETITIONS=5 \
+  python3 scripts/test_harness.py run rust-soak
+```
+
+The public GitHub repository also runs that leaf suite weekly. Soak is not part
+of a normal routed commit because repetition is a different kind of evidence,
+not a reason to delay feedback from a local SDK or documentation change.
 
 Every execution writes a JSON report under `.cache/test-harness/` with the
 exact HEAD, requested and expanded suites, command arguments, exit status, and
@@ -127,12 +164,25 @@ Unknown observation. They count prepare, dispatch, and reconciliation calls and
 verify the exact Machine/outbox pair after reopen; a successful Run alone is not
 proof that the provider was invoked once.
 
+The M1 Run sweep treats every whole-state CAS as two distinct anomaly points:
+failure before the write and lost acknowledgement after a successful write. It
+first discovers the boundary count from a successful execution, injects one
+fault at each position, disables the fault, reopens through the public durable
+interface, and runs the same integrity probe. This permanently regresses the
+split initialization window where a Run could previously become durable without
+its first Continuation.
+
 Run that matrix independently for nested commit-gated, eager observational, and
 explicit-release effects. Nested tests inspect the child scope on both sides of
 commit. Eager tests prove settlement can precede root commit and that the bound
 result survives reopen. Explicit tests prove ordinary resume cannot dispatch,
 then lose claim or settlement receipts after the caller release and replay the
 same terminal Result.
+
+Wait-source tests rebuild the parked index from durable authority, select
+within a deterministic hard bound, and reject targets under another source.
+Inject acknowledgement loss after activation CAS, reopen, redeliver the exact
+delivery, and assert one retained activation plus one later acknowledgement.
 
 Fault adapters belong in test support or behind existing substrate interfaces.
 Do not add test-only branches to the semantic reducer. Do not use wall-clock
@@ -155,8 +205,8 @@ Three depths serve different feedback loops:
    schemas shared by multiple SDKs, publication/release changes, harness or CI
    changes, and any unknown route.
 3. **Soak** repeats deterministic fault sweeps, seeded generators, and larger
-   configuration matrices. It is a release/nightly concern once those suites
-   exist; it must not make focused feedback unusable.
+   configuration matrices in the independent `rust-soak` suite. It is a
+   scheduled/release concern and must not make focused feedback unusable.
 
 Coverage percentage is supporting evidence, not the test taxonomy. Branch or
 mutation coverage is valuable for the small Rust semantic kernel, but a profile

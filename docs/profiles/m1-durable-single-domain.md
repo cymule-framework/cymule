@@ -19,6 +19,12 @@ Status: partial.
   source matching, atomic result/wait/Continuation updates, broadcast delivery,
   consume-once winner enforcement, redelivery idempotency, and stale-writer
   rejection;
+- rebuildable parked signal/timer indexes with deterministic bounded selection,
+  exact target validation, one-consumer signal selection, and timer occurrence
+  isolation;
+- replaceable `WaitSourceDriver` receive/acknowledge interface with a hard
+  target bound and restart test proving acknowledgement loss redelivers one
+  already committed activation;
 - restart-safe `Ready` resumption that advances the epoch and commits a new
   fenced Attempt after the wait-owning Attempt has yielded;
 - atomic wait-activation plus higher-profile journal checkpoints, used to keep
@@ -72,11 +78,10 @@ Status: partial.
 
 ## Remaining completion gates
 
-- bounded timer and signal source drivers plus parked-index selection;
 - snapshot compaction and suffix rehydration;
 - all SDK control/query surfaces and restart-level end-to-end tests;
-- production resolver/store plugins and durable activation from incoming
-  handoffs into interpreter Continuation state.
+- production resolver/store and wait-source plugins, plus durable activation
+  from incoming handoffs into interpreter Continuation state.
 
 No concrete storage product is part of this profile. An adapter conforms only
 when it provides atomic whole-state CAS and passes the profile fault suite.

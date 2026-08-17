@@ -9,6 +9,7 @@ use cymule_core::{
     ReconciliationMode, ReconciliationResolution, ReconciliationState, Region, ReplayAvailability,
     ScopeStatus, Step, WorldOutcome,
 };
+use proptest::prelude::*;
 use serde_json::json;
 
 fn candidate() -> PlanCandidate {
@@ -489,4 +490,67 @@ fn replay_orders_a_causal_set_and_reports_retention_loss() {
         machine.replay_availability(&[artifact]),
         ReplayAvailability::ProjectionOnly { .. }
     ));
+}
+
+proptest! {
+    #[test]
+    fn independent_causal_facts_replay_to_one_digest(
+        generated in prop::collection::vec((any::<u64>(), any::<u64>()), 1..32),
+        start_position in 0usize..64,
+    ) {
+        let run_id = "run:causal-property";
+        let mut machine = Machine::new();
+        let plan = machine.seal_plan(candidate()).expect("plan seals");
+        machine
+            .submit(envelope(
+                &machine,
+                1,
+                run_id,
+                Command::StartRun {
+                    plan_id: plan.plan_id,
+                    binding_context: "binding:property".to_owned(),
+                },
+            ))
+            .expect("run starts");
+        let start = machine.events().next().expect("start event").clone();
+        let mut facts = generated
+            .iter()
+            .enumerate()
+            .map(|(index, (priority, value))| {
+                let key = format!("property:{index}");
+                let event = Event::new(
+                    format!("command:property:{index}"),
+                    format!("hash:property:{index}:{value}"),
+                    run_id.to_owned(),
+                    vec![start.event_id.clone()],
+                    BTreeSet::new(),
+                    BTreeSet::from([format!("fact:{key}")]),
+                    None,
+                    EventPayload::FactRecorded {
+                        key,
+                        value: value.to_string(),
+                    },
+                )
+                .expect("fact hashes");
+                (*priority, index, event)
+            })
+            .collect::<Vec<_>>();
+
+        let mut canonical = vec![start.clone()];
+        canonical.extend(facts.iter().map(|(_, _, event)| event.clone()));
+        facts.sort_by_key(|(priority, index, _)| (*priority, *index));
+        let mut permuted = facts
+            .into_iter()
+            .map(|(_, _, event)| event)
+            .collect::<Vec<_>>();
+        permuted.insert(start_position.min(permuted.len()), start);
+
+        let expected = Machine::replay(canonical).expect("canonical order replays");
+        let actual = Machine::replay(permuted).expect("permuted order replays");
+        prop_assert_eq!(
+            actual.digest().expect("actual digest"),
+            expected.digest().expect("expected digest")
+        );
+        prop_assert_eq!(actual.facts.len(), generated.len());
+    }
 }

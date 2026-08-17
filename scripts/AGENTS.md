@@ -51,3 +51,6 @@
 - Keep CI lanes as statically declared jobs selected by planner outputs. GitHub
   resolves `uses:` actions before step-level conditions, so a conditional
   matrix would download unrelated toolchain actions and defeat lane isolation.
+- `verify-soak.sh` owns only repeatable high-risk Rust properties and anomaly
+  sweeps. Keep it out of `full`; scheduled soak complements, rather than
+  duplicates, change-routed verification.

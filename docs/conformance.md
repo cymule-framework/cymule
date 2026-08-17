@@ -8,7 +8,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | --- | --- | --- |
 | Semantic Interpreter M0 | Implemented | frozen IR, canonical stores, admission, reducer, exact state replay |
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
-| Durable Single Domain | Partial | snapshot/restore, CAS, nested Continuation frames, identified signal/timer activation, lease, commit-gated/eager/explicit outbox policy, occurrence replay, Resource handoff, directory-store reopen, and ambiguous-effect reconciliation; source drivers, compaction, and the full crash matrix remain |
+| Durable Single Domain | Partial | snapshot/restore, CAS, nested Continuation frames, identified and bounded signal/timer activation drivers, lease, commit-gated/eager/explicit outbox policy, occurrence replay, Resource handoff, directory-store reopen, and ambiguous-effect reconciliation; compaction, production plugins, and the full crash matrix remain |
 | Optional Agent Interaction plugin | Partial plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces; not a framework profile |
 | Large Virtual Graph M3 | Implemented | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker slot leases/recovery, four SDK controls, and restore |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
@@ -18,8 +18,8 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 The M0 rows do not claim persistence. The partial M1 implementation does prove
 single-domain durable wait and nested-scope resumption, exact replay of recorded
 component outputs, three dispatch policies, and reconciliation after an
-ambiguous dispatch. It does not yet claim durable source drivers, snapshot
-suffix recovery, or every crash window.
+ambiguous dispatch. It does not yet claim production source plugins, snapshot
+suffix recovery, or process-kill coverage of every crash window.
 
 ## Required semantic cases
 
@@ -46,9 +46,16 @@ The local suite verifies:
 - eager observations can bind a settled Artifact while their scope remains
   open, and explicit effects dispatch only after a stable caller release;
 - reconciliation retains the original occurrence binding;
+- Run creation atomically publishes its initial Machine and Continuation; a
+  generated boundary sweep injects one failure before every CAS and one lost
+  acknowledgement after every committed CAS, then reopens, validates the whole
+  durable state, replays the Machine, and proves at-most-once dispatch;
 - identical signal/timer activation redelivery returns the original durable
   decision, source mismatch and conflicting ID reuse fail, one signal token
   consumes at most one consume-once wait, and stale writers commit nothing;
+- parked indexes rebuild from pending waits, select within a hard bound, reject
+  cross-source targets, and replay one committed activation when source
+  acknowledgement is lost after CAS;
 - a process reopening after wait activation advances the Continuation epoch and
   begins a new fenced Attempt before interpretation;
 - virtual source cursors and bounded frontiers reopen from chained M1 journal
