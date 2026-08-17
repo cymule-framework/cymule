@@ -51,11 +51,14 @@ Status: partial.
   before durable suspension/completion writes, with external retrieval disabled;
 - ambiguous host calls reconcile through their original binding to typed
   `completed` or evidence-backed `not_applied` without redispatch;
+- a caller-driven durable interaction controller replays completed or
+  reconciled typed responses after reopen and blocks unresolved occurrences
+  without owning the caller's Agent/script loop;
 - a bounded reference turn driver passes context-model-tool-model end-to-end
   tests;
-- durable foreground turn control, workspace scope semantics, streaming
-  finalization, protocol adapters, debugger queries, and evidence views remain
-  proposed.
+- workspace scope semantics, streaming finalization, protocol adapters,
+  cross-language interaction clients, debugger queries, and evidence views
+  remain proposed.
 
 ## M3 - Large virtual work
 

@@ -175,16 +175,26 @@ A Plan changes semantic meaning. A Binding Context changes realization defaults
 for future occurrences. Every persisted occurrence must pin an immutable
 binding at admission. Embedded M0 persists this for Attempts and Effect Intents,
 including reconciliation. M1 defines canonical component occurrence records.
-The partial M2 reference driver automatically records context, model,
-permission, tool, elicitation, and workspace calls as request-digested,
-binding-pinned occurrences. Nested M1 runtime call paths and durable consumption
-of recovered M2 responses remain integration work.
+M2 records context, model, permission, tool, elicitation, and workspace calls as
+request-digested, binding-pinned occurrences.
+
+The caller or adapter owns its Agent/script loop, including ordering, strategy,
+program counter, and continuation decisions. M2 MUST NOT interpret a fixed
+model/tool loop or persist loop phases as framework semantics. For an individual
+interaction, the caller supplies a stable occurrence identity and typed request.
+Repeating a completed occurrence with the same request MUST return its retained
+typed response without binding or dispatching again. Reusing the identity with
+a different request MUST fail. A `prepared`, `started`, `unknown`, or
+`not_applied` occurrence MUST require explicit recovery, a separately admitted
+replacement identity, or caller-owned termination before execution can proceed.
 
 M2 host reconciliation MUST query the occurrence's pinned binding and MUST NOT
 redispatch its request. It may settle the occurrence as `completed` with a
 matching typed response or `not-applied` with explicit evidence. A `prepared`
 occurrence may enter `not-applied` only when dispatch is proven not to have
-started. A still-unknown result continues to block automatic turn resumption.
+started. A still-unknown result continues to block that occurrence. After
+reconciliation retains a matching typed response, repeating the same occurrence
+MUST return that response without redispatch.
 
 Changing a default MUST NOT rewrite an admitted occurrence. If its original
 binding is unavailable, the occurrence enters an explicit unavailable or

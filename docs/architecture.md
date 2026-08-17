@@ -73,6 +73,16 @@ interfaces outside the semantic kernel. Durable context, model, permission,
 tool, elicitation, and workspace calls pin their implementation binding before
 invocation and journal typed lifecycle snapshots under the M1 CAS revision.
 
+Cymule does not own an Agent or script loop. The caller decides how context,
+models, permissions, tools, user input, and workspace changes are ordered and
+when its own loop continues or terminates. For each external interaction the
+caller supplies a stable occurrence ID and typed request to
+`AgentInteractionController`. The controller owns only binding pinning,
+`prepared -> started -> completed | unknown` persistence, retained-response
+replay, and fail-closed recovery. Reopening a completed occurrence returns the
+recorded typed response without binding or dispatching again; conflicting reuse
+of an ID is rejected.
+
 Human or external input uses an M1 `WaitKind::Input`, not a blocked task or
 process-local channel. `AgentInputController` atomically couples the Session
 projection and Continuation wait, so a crash cannot expose `RequiresAction`
@@ -86,8 +96,11 @@ boundary. Concrete UI, transport, and identity integrations remain adapters.
 An ambiguous host call is recovered by querying its original pinned binding.
 The query may return the original typed response, prove `not_applied`, or remain
 `unknown`; it never dispatches a replacement request. A call that never left
-`prepared` may be cancelled only with explicit non-dispatch evidence. Durable
-foreground turn control that consumes recovered responses remains partial.
+`prepared` may be cancelled only with explicit non-dispatch evidence. Once a
+recovery records the original typed response, the caller can reopen the
+interaction controller and consume that response without redispatch. A
+`not_applied` result requires the caller to admit a separately identified
+replacement or terminate its own loop.
 
 ## Storage contracts
 

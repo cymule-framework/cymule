@@ -21,6 +21,10 @@ Status: partial.
   resolved before `prepared` is persisted;
 - `prepared -> started -> completed | unknown` persistence through both the
   in-memory journal and M1 whole-state CAS, including retained typed responses;
+- a caller-driven `AgentInteractionController` that accepts a stable occurrence
+  ID and one typed host request, replays completed responses after M1 reopen,
+  consumes reconciled responses, rejects conflicting ID reuse, and never owns
+  or advances an Agent loop;
 - restart rejection for unresolved occurrences and a receipt-loss fault test
   proving a completed provider call is not automatically redispatched;
 - non-blocking in-memory reference journal with conflicting update identity
@@ -39,15 +43,14 @@ Status: partial.
 - query-only `AgentRecoveryController` reconciliation against the original
   binding, typed `completed`/`not_applied` resolutions, and evidence-gated
   cancellation of calls that remained `prepared`;
-- fault tests proving reconciliation never redispatches the original tool call
-  and unresolved foreground turn control remains fail closed;
+- fault tests proving the interaction controller replays a retained response,
+  consumes a reconciled response, and never redispatches after an unresolved
+  call or a lost completion receipt;
 - deterministic fake-host end-to-end tests;
 - adapter boundaries for ACP, MCP, A2A, editors, and model providers.
 
 ## Remaining completion gates
 
-- durable foreground turn control and continuation from retained completed
-  responses;
 - workspace overlay commit/abort integration with scope obligations;
 - streaming chunk staging and finalized durable content;
 - ACP/MCP/A2A adapters and cross-language SDK interaction clients;
@@ -59,7 +62,13 @@ Capability advertisement, authentication, permission, credential access, and
 effect release remain separate decisions. A tool catalog entry never grants
 execution authority.
 
-Version decision: this enforcement completes behavior already represented by
-the frozen elicitation `schema` and response `value` fields. It changes neither
-their wire shape nor the `agent-protocol` schema version while M2 remains
-partial.
+Cymule deliberately does not define Agent/script loop phases, ordering,
+strategy, program counters, or model-tool continuation rules. Those belong to
+the caller or protocol adapter. The profile governs only individually identified
+interactions, their durable observations, and the boundary for resuming caller
+code with a retained response.
+
+Version decision: schema enforcement and the interaction controller complete
+behavior already represented by the frozen elicitation and host-occurrence
+fields. They change neither the wire shape nor the `agent-protocol` schema
+version while M2 remains partial.
