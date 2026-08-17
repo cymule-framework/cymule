@@ -9,10 +9,38 @@ use crate::{
     sha256_bytes,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CommandRecord {
     semantic_hash: String,
     receipt: CommandReceipt,
+}
+
+/// Portable, provider-neutral snapshot of all canonical machine inputs.
+/// Projections are deliberately excluded and rebuilt from Events on restore.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineSnapshot {
+    /// Snapshot schema version.
+    pub snapshot_version: String,
+    /// Sealed Plans in content-ID order.
+    pub plans: Vec<SealedPlan>,
+    /// Immutable Artifacts in content-ID order.
+    pub artifacts: Vec<ArtifactRecord>,
+    /// Canonical Events in admitted causal order.
+    pub events: Vec<Event>,
+    /// Command semantic hashes and receipts for idempotent recovery.
+    commands: BTreeMap<String, CommandRecord>,
+}
+
+impl MachineSnapshot {
+    /// Current snapshot schema version.
+    pub const VERSION: &'static str = "cymule.machine-snapshot/1";
+
+    /// Content digest used by conditional durable-store writes.
+    pub fn digest(&self) -> Result<String> {
+        canonical_digest(self)
+    }
 }
 
 /// In-memory reference machine for the Semantic Interpreter and Embedded
@@ -31,6 +59,60 @@ impl Machine {
     /// Create an empty semantic machine.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Export canonical inputs for durable persistence.
+    pub fn snapshot(&self) -> MachineSnapshot {
+        MachineSnapshot {
+            snapshot_version: MachineSnapshot::VERSION.to_owned(),
+            plans: self.plans.values().cloned().collect(),
+            artifacts: self.artifacts.values().cloned().collect(),
+            events: self.events().cloned().collect(),
+            commands: self.commands.clone(),
+        }
+    }
+
+    /// Restore a Machine and deterministically rebuild all projections.
+    pub fn restore(snapshot: MachineSnapshot) -> Result<Self> {
+        if snapshot.snapshot_version != MachineSnapshot::VERSION {
+            return Err(CoreError::Validation(format!(
+                "unsupported machine snapshot version {:?}",
+                snapshot.snapshot_version
+            )));
+        }
+        let mut machine = Self::new();
+        for plan in snapshot.plans {
+            machine.insert_plan(plan)?;
+        }
+        for artifact in snapshot.artifacts {
+            let restored = machine.put_artifact(artifact.reference.kind.clone(), artifact.bytes);
+            if restored != artifact.reference {
+                return Err(CoreError::IdentityMismatch(format!(
+                    "artifact ID {} does not match its bytes",
+                    artifact.reference.artifact_id
+                )));
+            }
+        }
+        for event in snapshot.events {
+            machine.append_event(event)?;
+        }
+        for (command_id, record) in &snapshot.commands {
+            if record.receipt.command_id != *command_id {
+                return Err(CoreError::IdentityMismatch(format!(
+                    "command snapshot key {command_id} does not match its receipt"
+                )));
+            }
+            if let Some(event_id) = &record.receipt.event_id
+                && !machine.events.contains_key(event_id)
+            {
+                return Err(CoreError::NotFound(format!(
+                    "command {command_id} references missing event {event_id}"
+                )));
+            }
+        }
+        machine.commands = snapshot.commands;
+        machine.verify_replay()?;
+        Ok(machine)
     }
 
     /// Validate, seal, and store a Plan Candidate.

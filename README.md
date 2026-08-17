@@ -310,6 +310,7 @@ See [Conformance](docs/conformance.md) for precise profile claims and
 
 ```text
 crates/cymule-core      trusted Rust semantic kernel
+crates/cymule-durable   provider-neutral M1 persistence and recovery contracts
 crates/cymule-runtime   embedded interpreter and plugin host
 crates/cymule-sdk       native Rust authoring and engine facade
 crates/cymule-cli       command-line and JSON engine boundary
@@ -320,6 +321,7 @@ schemas                 frozen JSON Schema contracts
 compiler/mlir           optional, partial MLIR workbench
 examples/hello-world    code-first Flow, Embedded runtime, and example plugin
 plugins/test-adapter    deterministic conformance plugin
+plugins/directory-store atomic local M1 DurableStore reference adapter
 tests                   shared fixtures and conformance assets
 docs                    specification, architecture, and decisions
 scripts                 complete repository verification
