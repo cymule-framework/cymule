@@ -5,6 +5,10 @@ mod client;
 
 pub use builder::FlowBuilder;
 pub use client::{CliEngine, Engine};
+pub use cymule_agent::{
+    AgentStreamChunk, AgentStreamProjection, AgentStreamRecord, AgentStreamState,
+    AgentStreamTarget, ContentBlock, MessageRole,
+};
 pub use cymule_core::{
     DispatchPolicy, EffectProfile, Expression, MutationKind, PlanCandidate, ReconciliationMode,
     ScopeMode, SealedPlan, WaitSpec,

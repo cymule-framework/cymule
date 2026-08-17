@@ -59,6 +59,10 @@ standards.
   status, permission requests, elicitation, plans, usage, and terminal state.
   Cymule M2 maps these to durable occurrences and projections instead of making
   a transport session canonical.
+- [ACP Message ID](https://agentclientprotocol.com/rfds/message-id) identifies
+  chunks by stable message identity instead of guessing boundaries from update
+  type or timing. Cymule requires a stream and target identity, then adds
+  durable sequence and explicit finalization semantics below the adapter.
 - [ACP additional workspace roots](https://agentclientprotocol.com/rfds/additional-directories)
   keeps client-mediated filesystem capability and boundary enforcement outside
   the Agent. Cymule likewise keeps concrete path and sandbox policy in adapters;
@@ -67,9 +71,16 @@ standards.
   resources, prompts, tools, user input, and asynchronous Tasks as capability
   surfaces. Cymule treats external protocol objects as adapter inputs and pins
   the selected context/tool occurrence before execution.
+- [MCP progress and Tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks)
+  separate optional progress notifications from durable terminal task results.
+  Cymule likewise treats progress/chunks as non-final staging and does not rely
+  on notification delivery as Session authority.
 - [A2A](https://a2a-protocol.org/dev/specification/) distinguishes Messages,
   Tasks, status updates, and Artifacts. Cymule uses the same communication versus
   durable-output distinction without adopting A2A transport bindings in core.
+- [A2A streamed artifact updates](https://a2a-protocol.org/v0.2.0/specification/)
+  expose append and `lastChunk` explicitly. Cymule adapters can map those fields
+  to contiguous chunks and finalization while the M1 CAS remains durable truth.
 - [Kubernetes finalizers](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)
   separate an accepted lifecycle decision from external cleanup obligations.
   Cymule scope commit similarly closes internal state while unresolved Effect

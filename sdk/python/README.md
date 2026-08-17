@@ -14,3 +14,7 @@ resource = CliEngine("./target/debug/cymule").seal_resource(
 `ResourceBuilder.external` describes objects, directories, collections,
 snapshots, and live references without choosing a provider. Resource IDs are
 always validated and sealed by the Rust Engine.
+
+`CliEngine.verify_agent_stream(records)` sends `cymule.agent-stream/1` records
+to the Rust reducer. Chunks are staging; only an explicit validated final record
+represents durable message or tool output.

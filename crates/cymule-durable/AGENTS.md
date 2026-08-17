@@ -22,6 +22,8 @@
 - Higher-profile host calls coupled to a semantic Effect must use the atomic
   journal-plus-effect checkpoints so Machine, Continuation, outbox, and typed
   lifecycle records cannot acknowledge different sides of one transition.
+- A logical transition spanning multiple higher-profile journals must use
+  `checkpoint_journals`; separate appends cannot claim atomic visibility.
 - Reference in-memory synchronization is adapter-local and non-blocking.
   Contention must surface as a CAS conflict rather than waiting on a mutex.
 - Concrete storage belongs under `plugins/` and must pass this crate's shared

@@ -127,6 +127,7 @@ version = "0.1.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",
+ "cymule-resource",
  "jsonschema",
  "serde",
  "serde_json",
@@ -136,6 +137,7 @@ dependencies = [
 name = "cymule-cli"
 version = "0.1.0"
 dependencies = [
+ "cymule-agent",
  "cymule-core",
  "cymule-resource",
  "cymule-runtime",
@@ -219,6 +221,7 @@ dependencies = [
 name = "cymule-sdk"
 version = "0.1.0"
 dependencies = [
+ "cymule-agent",
  "cymule-core",
  "cymule-resource",
  "cymule-runtime",

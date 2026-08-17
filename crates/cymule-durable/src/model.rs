@@ -117,6 +117,15 @@ pub struct JournalRecord {
     pub content_digest: String,
 }
 
+/// One journal and its records in an atomic multi-journal checkpoint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JournalBatch {
+    /// Stable higher-profile journal identity.
+    pub journal_id: String,
+    /// Ordered idempotent records to append.
+    pub records: Vec<JournalRecord>,
+}
+
 impl JournalRecord {
     /// Construct a record with a verified content digest.
     pub fn new(

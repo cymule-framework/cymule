@@ -196,6 +196,13 @@ class CliEngine:
             raise RuntimeError(f"unexpected engine response: {response!r}")
         return response["resource"]
 
+    def verify_agent_stream(self, records: list[dict[str, Any]]) -> dict[str, Any]:
+        """Validate and reduce Agent stream records with the Rust engine."""
+        response = self._request({"type": "verify_agent_stream", "records": records})
+        if response.get("type") != "verified_agent_stream":
+            raise RuntimeError(f"unexpected engine response: {response!r}")
+        return response["stream"]
+
     def run(
         self,
         plan: dict[str, Any],

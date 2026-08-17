@@ -84,6 +84,20 @@ def main() -> int:
             "stop_reason": None,
         }
     )
+    stream_records = load(root / "tests/fixtures/agent-stream-records.json")
+    for stream_record in stream_records:
+        agent_validator.validate(stream_record)
+    Draft202012Validator(
+        by_title["Cymule Engine Request"], registry=registry
+    ).validate({"type": "verify_agent_stream", "records": stream_records})
+    malformed_stream = dict(stream_records[0])
+    malformed_stream["provider"] = "must-not-enter-agent-stream-semantics"
+    try:
+        agent_validator.validate(malformed_stream)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("Agent schema accepted an unknown stream provider field")
     agent_validator.validate(
         {
             "resolution": "not_applied",
@@ -136,6 +150,19 @@ def main() -> int:
         ).stdout
     )
     resource_validator.validate(sealed_resource)
+    agent_validator.validate(
+        {
+            "record": "chunk",
+            "stream_id": "stream:resource-fixture",
+            "session_id": "session:fixture",
+            "chunk": {
+                "sequence": 0,
+                "content": [
+                    {"type": "resource_handle", "resource": sealed_resource}
+                ],
+            },
+        }
+    )
     Draft202012Validator(
         by_title["Cymule Engine Request"], registry=registry
     ).validate({"type": "seal_resource", "candidate": resource_candidate})

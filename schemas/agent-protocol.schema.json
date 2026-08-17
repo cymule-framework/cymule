@@ -5,7 +5,8 @@
   "oneOf": [
     { "$ref": "#/$defs/agentUpdate" },
     { "$ref": "#/$defs/hostOccurrence" },
-    { "$ref": "#/$defs/occurrenceResolution" }
+    { "$ref": "#/$defs/occurrenceResolution" },
+    { "$ref": "#/$defs/agentStreamRecord" }
   ],
   "$defs": {
     "nonEmpty": { "type": "string", "minLength": 1 },
@@ -57,6 +58,15 @@
             "mime_type": {
               "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
             }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "resource"],
+          "properties": {
+            "type": { "const": "resource_handle" },
+            "resource": { "$ref": "resource.schema.json#/$defs/resourceHandle" }
           }
         }
       ]
@@ -410,6 +420,84 @@
             "type": { "const": "elicitation" },
             "update_id": { "$ref": "#/$defs/nonEmpty" },
             "elicitation": { "$ref": "#/$defs/elicitationProjection" }
+          }
+        }
+      ]
+    },
+    "agentStreamTarget": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "message_id", "role"],
+          "properties": {
+            "kind": { "const": "message" },
+            "message_id": { "$ref": "#/$defs/nonEmpty" },
+            "role": { "enum": ["user", "agent", "tool", "system"] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "tool_call_id"],
+          "properties": {
+            "kind": { "const": "tool" },
+            "tool_call_id": { "$ref": "#/$defs/nonEmpty" }
+          }
+        }
+      ]
+    },
+    "agentStreamChunk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "content"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 0 },
+        "content": {
+          "type": "array", "minItems": 1,
+          "items": { "$ref": "#/$defs/contentBlock" }
+        }
+      }
+    },
+    "agentStreamRecord": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["record", "stream_id", "session_id", "target"],
+          "properties": {
+            "record": { "const": "opened" },
+            "stream_id": { "$ref": "#/$defs/nonEmpty" },
+            "session_id": { "$ref": "#/$defs/nonEmpty" },
+            "target": { "$ref": "#/$defs/agentStreamTarget" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["record", "stream_id", "session_id", "chunk"],
+          "properties": {
+            "record": { "const": "chunk" },
+            "stream_id": { "$ref": "#/$defs/nonEmpty" },
+            "session_id": { "$ref": "#/$defs/nonEmpty" },
+            "chunk": { "$ref": "#/$defs/agentStreamChunk" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["record", "stream_id", "session_id", "content_digest", "update"],
+          "properties": {
+            "record": { "const": "finalized" },
+            "stream_id": { "$ref": "#/$defs/nonEmpty" },
+            "session_id": { "$ref": "#/$defs/nonEmpty" },
+            "content_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "update": { "$ref": "#/$defs/agentUpdate" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["record", "stream_id", "session_id", "reason"],
+          "properties": {
+            "record": { "const": "aborted" },
+            "stream_id": { "$ref": "#/$defs/nonEmpty" },
+            "session_id": { "$ref": "#/$defs/nonEmpty" },
+            "reason": { "$ref": "#/$defs/nonEmpty" }
           }
         }
       ]

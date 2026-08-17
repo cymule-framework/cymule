@@ -129,6 +129,72 @@ type ResourceHandoff struct {
 	Resource       ResourceHandle `json:"resource"`
 }
 
+// AgentContentBlock is one protocol-neutral streamed or finalized content block.
+type AgentContentBlock map[string]any
+
+// AgentStreamTarget identifies one message or tool output finalized by a stream.
+type AgentStreamTarget struct {
+	Kind       string `json:"kind"`
+	MessageID  string `json:"message_id,omitempty"`
+	Role       string `json:"role,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+// AgentStreamChunk is one zero-based contiguous staging chunk.
+type AgentStreamChunk struct {
+	Sequence uint64              `json:"sequence"`
+	Content  []AgentContentBlock `json:"content"`
+}
+
+// AgentMessage is one finalized Session message.
+type AgentMessage struct {
+	MessageID string              `json:"message_id"`
+	Role      string              `json:"role"`
+	Content   []AgentContentBlock `json:"content"`
+}
+
+// AgentToolCall is one finalized tool projection used by a tool stream.
+type AgentToolCall struct {
+	ToolCallID string              `json:"tool_call_id"`
+	Operation  string              `json:"operation"`
+	Status     string              `json:"status"`
+	Input      any                 `json:"input"`
+	Output     []AgentContentBlock `json:"output"`
+	Locations  []string            `json:"locations"`
+}
+
+// AgentStreamFinalUpdate is the Session update published by finalization.
+type AgentStreamFinalUpdate struct {
+	Type     string         `json:"type"`
+	UpdateID string         `json:"update_id"`
+	Message  *AgentMessage  `json:"message,omitempty"`
+	Tool     *AgentToolCall `json:"tool,omitempty"`
+}
+
+// AgentStreamRecord is one durable open, chunk, finalized, or aborted record.
+type AgentStreamRecord struct {
+	Record        string                  `json:"record"`
+	StreamID      string                  `json:"stream_id"`
+	SessionID     string                  `json:"session_id"`
+	Target        *AgentStreamTarget      `json:"target,omitempty"`
+	Chunk         *AgentStreamChunk       `json:"chunk,omitempty"`
+	ContentDigest string                  `json:"content_digest,omitempty"`
+	Update        *AgentStreamFinalUpdate `json:"update,omitempty"`
+	Reason        string                  `json:"reason,omitempty"`
+}
+
+// AgentStreamProjection is the Rust-reduced durable stream state.
+type AgentStreamProjection struct {
+	StreamID      string                  `json:"stream_id"`
+	SessionID     string                  `json:"session_id"`
+	Target        AgentStreamTarget       `json:"target"`
+	Chunks        []AgentStreamChunk      `json:"chunks"`
+	State         string                  `json:"state"`
+	FinalUpdate   *AgentStreamFinalUpdate `json:"final_update"`
+	ContentDigest *string                 `json:"content_digest"`
+	AbortReason   *string                 `json:"abort_reason"`
+}
+
 // NewResourceHandoff creates one M1 Run-to-Run handoff record.
 func NewResourceHandoff(transferID, fromRun, toRun, slot string, resource ResourceHandle) ResourceHandoff {
 	return ResourceHandoff{
@@ -357,6 +423,19 @@ func (engine CliEngine) SealResource(candidate ResourceCandidate) (ResourceHandl
 		err = fmt.Errorf("unexpected engine response %q", response.Type)
 	}
 	return response.Resource, err
+}
+
+// VerifyAgentStream validates and reduces ordered stream records with the Rust engine.
+func (engine CliEngine) VerifyAgentStream(records []AgentStreamRecord) (AgentStreamProjection, error) {
+	var response struct {
+		Type   string                `json:"type"`
+		Stream AgentStreamProjection `json:"stream"`
+	}
+	err := engine.request(map[string]any{"type": "verify_agent_stream", "records": records}, &response)
+	if err == nil && response.Type != "verified_agent_stream" {
+		err = fmt.Errorf("unexpected engine response %q", response.Type)
+	}
+	return response.Stream, err
 }
 
 // Run executes a sealed plan through one plugin realization.

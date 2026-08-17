@@ -2,8 +2,8 @@ use cymule_core::Machine;
 
 use crate::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableError,
-    DurableResult, DurableState, DurableStore, EffectDispatch, JournalRecord, OutboxState,
-    SnapshotRecord, StoredState, WaitCondition, WaitState,
+    DurableResult, DurableState, DurableStore, EffectDispatch, JournalBatch, JournalRecord,
+    OutboxState, SnapshotRecord, StoredState, WaitCondition, WaitState,
 };
 
 /// Transactional coordinator over one provider-neutral durable store.
@@ -686,6 +686,44 @@ impl<S: DurableStore> DurableCoordinator<S> {
         }
         record.verify()?;
         self.mutate_checked(|state| append_journal_record(state, journal_id, record))
+    }
+
+    /// Atomically append records to multiple higher-profile journals.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty/duplicate journal, invalid or conflicting
+    /// records, stale CAS revision, or store failure.
+    pub fn checkpoint_journals(&mut self, batches: &[JournalBatch]) -> DurableResult<String> {
+        if batches.is_empty() {
+            return Err(DurableError::Validation(
+                "multi-journal checkpoint requires at least one journal".to_owned(),
+            ));
+        }
+        let mut journal_ids = std::collections::BTreeSet::new();
+        for batch in batches {
+            validate_journal_batch(&batch.journal_id, &batch.records)?;
+            if batch.records.is_empty() {
+                return Err(DurableError::Validation(format!(
+                    "application journal {} has no checkpoint records",
+                    batch.journal_id
+                )));
+            }
+            if !journal_ids.insert(&batch.journal_id) {
+                return Err(DurableError::Validation(format!(
+                    "application journal {} appears twice in one checkpoint",
+                    batch.journal_id
+                )));
+            }
+        }
+        self.mutate_checked(|state| {
+            for batch in batches {
+                for record in &batch.records {
+                    append_journal_record(state, &batch.journal_id, record.clone())?;
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Atomically append higher-profile records and register one durable wait.

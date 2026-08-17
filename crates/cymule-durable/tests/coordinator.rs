@@ -8,8 +8,8 @@ use cymule_core::{
 };
 use cymule_durable::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
-    EffectDispatch, FrameState, JournalRecord, MemoryStore, OutboxState, WaitCondition, WaitKind,
-    WaitState,
+    EffectDispatch, FrameState, JournalBatch, JournalRecord, MemoryStore, OutboxState,
+    WaitCondition, WaitKind, WaitState,
 };
 use serde_json::json;
 
@@ -259,6 +259,47 @@ fn higher_profile_journal_is_cas_committed_and_replayed_in_order() {
         ),
         Err(DurableError::IllegalTransition(_))
     ));
+
+    let first_atomic = JournalRecord::new("record:a1", "example.atomic/1", json!({"a": 1}))
+        .expect("first atomic record seals");
+    let second_atomic = JournalRecord::new("record:b1", "example.atomic/1", json!({"b": 1}))
+        .expect("second atomic record seals");
+    coordinator
+        .checkpoint_journals(&[
+            JournalBatch {
+                journal_id: "journal:a".to_owned(),
+                records: vec![first_atomic],
+            },
+            JournalBatch {
+                journal_id: "journal:b".to_owned(),
+                records: vec![second_atomic],
+            },
+        ])
+        .expect("two journals commit atomically");
+    let uncommitted = JournalRecord::new("record:a2", "example.atomic/1", json!({"a": 2}))
+        .expect("uncommitted record seals");
+    let conflicting = JournalRecord::new("record:b1", "example.atomic/1", json!({"b": 999}))
+        .expect("conflicting record seals");
+    assert!(matches!(
+        coordinator.checkpoint_journals(&[
+            JournalBatch {
+                journal_id: "journal:a".to_owned(),
+                records: vec![uncommitted],
+            },
+            JournalBatch {
+                journal_id: "journal:b".to_owned(),
+                records: vec![conflicting],
+            },
+        ]),
+        Err(DurableError::IllegalTransition(_))
+    ));
+    assert_eq!(
+        coordinator
+            .journal_records("journal:a")
+            .expect("journal reads")
+            .len(),
+        1
+    );
     drop(coordinator);
 
     let reopened = DurableCoordinator::open(store).expect("store reopens");

@@ -46,6 +46,8 @@ than framework semantics.
 - **Durable typed input.** Agent input schemas, waits, Session state, and
   Continuations advance under one optimistic CAS authority; invalid responses
   make no durable change.
+- **Explicit stream finalization.** Identified chunks may be durably staged, but
+  no message or tool output becomes Session truth until one atomic finalize.
 - **Portable resources between Runs.** Pass inline text/JSON/bytes, large
   objects, directories, collections, sandbox snapshots, remote-drive items, or
   public URLs through one versioned Resource Handle without choosing a storage
@@ -253,6 +255,7 @@ large object reads/writes are chunked rather than loaded into memory.
 | Dispatch starts but the response is lost | The effect becomes `unknown`. |
 | An unknown effect can be queried | The original effect is reconciled without creating a new intent. |
 | Required replay data has been removed | Replay availability is downgraded instead of silently regenerating data. |
+| A stream is interrupted before finalization | Staged chunks remain non-final; no partial message or tool output is published. |
 
 ## Effects are not ordinary retries
 
@@ -337,6 +340,7 @@ See [Architecture](docs/architecture.md) and the
 | Python SDK | Implemented | Dependency-light builder and engine client. |
 | Go SDK | Implemented | Builder and engine client. |
 | Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, M1 handoff journal. |
+| Agent streams | Implemented foundation | Durable staging, atomic Message/Tool finalization, Resource blocks, four SDK Rust-reducer clients. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
 | JSON Schema contracts | Implemented | Draft 2020-12 Plan and protocol schemas. |
 | MLIR workbench | Partial | Generic-operation syntax and MLIR 22 smoke validation. |
@@ -379,6 +383,8 @@ Implemented today:
   with typed completion or evidence-backed non-application and no redispatch;
 - durable workspace overlay commit/abort coupled to scope obligations and the
   M1 outbox, including receipt-loss recovery without provider redispatch;
+- durable Agent stream staging with contiguous chunk identity and atomic
+  Message/Tool finalization across separate M1 journals;
 - provider-neutral cross-Run Resource Handles for inline values, objects,
   directories, collections, snapshots, remote references, and public URLs;
 - bounded resolver/store interfaces and durable idempotent M1 handoffs, with
@@ -392,8 +398,8 @@ Not yet claimed:
 - complete nested-scope durable interpretation and every crash window;
 - production resource resolver/store plugins and automatic interpreter
   activation of incoming handoffs;
-- finalized streaming content, protocol adapters, and cross-language
-  agent-interaction clients;
+- ACP/MCP/A2A protocol adapters and remaining cross-language Session
+  control/query clients;
 - durable virtual-work partition migration and subtree rehydration;
 - automatic live-evolution diffing, shadow execution, observation gates, and
   mixed-version dispatch;

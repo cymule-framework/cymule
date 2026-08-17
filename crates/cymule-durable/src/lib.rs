@@ -11,7 +11,7 @@ pub use error::{DurableError, DurableResult};
 pub use executor::{DriveOutcome, ResumableRuntime};
 pub use model::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableState,
-    EffectDispatch, FrameState, JournalRecord, OutboxState, SnapshotRecord, StoredState,
-    WaitCondition, WaitKind, WaitState,
+    EffectDispatch, FrameState, JournalBatch, JournalRecord, OutboxState, SnapshotRecord,
+    StoredState, WaitCondition, WaitKind, WaitState,
 };
 pub use store::{DurableStore, MemoryStore, StoreCommit};

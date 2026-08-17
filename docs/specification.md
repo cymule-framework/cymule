@@ -36,6 +36,7 @@ The following domains evolve independently:
 | Plugin protocol | `cymule.plugin/1` | capability negotiation is explicit |
 | Resource descriptor | `cymule.resource/1` | identity excludes realization locations |
 | Resource handoff | `cymule.resource-handoff/1` | transfer IDs are idempotent per target Run |
+| Agent stream | `cymule.agent-stream/1` | chunks stage; explicit finalization publishes output |
 | Conformance profile | `cymule.conformance/1` | complete profile cases are required |
 
 Changing effect identity, scope isolation, authority, causal admission, replay,
@@ -142,6 +143,22 @@ a declined response MUST NOT carry a value. Schema compilation or value
 validation failure leaves the wait, Session projection, Continuation, and CAS
 revision unchanged. Draft 2020-12 `format` remains an annotation rather than an
 additional validation assertion.
+
+M2 streaming uses a stable stream ID, immutable Message or Tool target, and
+zero-based contiguous chunks. Open, chunk, and abort records MAY be durable,
+but they MUST NOT appear in the finalized Session message/tool projection.
+Repeating an identical chunk sequence is idempotent; reusing a sequence with
+different content or skipping a sequence MUST fail. One chunk MUST remain
+within the profile's bounded canonical-byte limit; large values use a Resource
+Handle instead of bypassing the bound.
+
+Finalization MUST atomically append one terminal stream record and the exact
+final Message/Tool `AgentUpdate` to their separate M1 journals. A crash or stale
+CAS cannot expose only one side. Final content is the ordered concatenation of
+retained blocks and carries a canonical digest. A finalized message ID cannot
+later acquire different content. Abort is terminal and publishes no Session
+output. Large output SHOULD finalize as a verified Resource Handle instead of
+embedding unbounded provider bytes in Session history.
 
 ## 8. Causal events
 

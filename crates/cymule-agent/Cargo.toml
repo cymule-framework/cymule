@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 cymule-core = { path = "../cymule-core" }
 cymule-durable = { path = "../cymule-durable" }
+cymule-resource = { path = "../cymule-resource" }
 jsonschema.workspace = true
 serde.workspace = true
 serde_json.workspace = true

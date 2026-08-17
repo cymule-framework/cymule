@@ -112,6 +112,15 @@ CAS. Abort has no commit Effect; the scope remains open until a retained receipt
 proves the overlay was not committed. Git repositories, local directories,
 sandboxes, and remote storage remain `AgentHost` adapters.
 
+Agent transport streaming is staging, not Session authority.
+`AgentStreamController` persists identified, contiguous chunks in a separate M1
+journal. Until explicit finalization, `AgentSession.messages` and tool output do
+not change. Finalization uses `checkpoint_journals` to append the terminal
+stream record and exact Session update under one CAS; receipt loss reopens to
+one finalized output, while stale writers commit neither side. Content blocks
+may carry `ResourceHandle` for large output. ACP/A2A/MCP transports map their
+chunk/progress forms to this boundary but do not define finality themselves.
+
 ## Storage contracts
 
 M1 defines a provider-neutral `DurableStore` as compare-and-swap over one

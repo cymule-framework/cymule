@@ -12,6 +12,7 @@ name = "cymule"
 path = "src/main.rs"
 
 [dependencies]
+cymule-agent = { path = "../cymule-agent" }
 cymule-core = { path = "../cymule-core" }
 cymule-resource = { path = "../cymule-resource" }
 cymule-runtime = { path = "../cymule-runtime" }
