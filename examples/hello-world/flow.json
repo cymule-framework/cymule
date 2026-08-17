@@ -1,0 +1,57 @@
+{
+  "ir_version": "cymule.ir/1",
+  "name": "hello_world",
+  "entry": "main",
+  "components": [
+    {
+      "id": "example.echo",
+      "input_schema": {},
+      "output_schema": {},
+      "requirements": {}
+    }
+  ],
+  "effects": [
+    {
+      "id": "example.capture",
+      "input_schema": {},
+      "output_schema": {},
+      "profile": {
+        "mutation": "mutating",
+        "dispatch": "on_scope_commit",
+        "reconciliation": "queryable",
+        "keyed_idempotency": true,
+        "irreversible": false
+      },
+      "requirements": {}
+    }
+  ],
+  "definitions": [
+    {
+      "id": "main",
+      "input_schema": {},
+      "output_schema": {},
+      "body": {
+        "steps": [
+          {
+            "id": "call.echo",
+            "op": "call",
+            "component": "example.echo",
+            "input": { "kind": "input" },
+            "bind": "echoed"
+          },
+          {
+            "id": "effect.capture",
+            "op": "effect",
+            "effect": "example.capture",
+            "input": { "kind": "binding", "name": "echoed" },
+            "occurrence": "primary"
+          }
+        ],
+        "result": { "kind": "binding", "name": "echoed" }
+      }
+    }
+  ],
+  "metadata": {
+    "example": "hello-world"
+  }
+}

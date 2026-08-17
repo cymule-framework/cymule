@@ -62,6 +62,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cymule-example-hello-plugin"
+version = "0.1.0"
+dependencies = [
+ "cymule-core",
+ "cymule-runtime",
+ "serde_json",
+]
+
+[[package]]
 name = "cymule-runtime"
 version = "0.1.0"
 dependencies = [

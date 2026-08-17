@@ -49,42 +49,23 @@ request/response handler with no durable state or external side effects.
 
 ## Five-minute quick start
 
-The complete repository verification requires Rust 1.97, Node.js 22 or newer,
-pnpm 11.17, Python 3.12 or newer with `uv`, and Go 1.26. MLIR is optional.
-
-Build the Rust engine and the included test plugin:
+The Hello World example is a complete Flow plus a real example plugin. It needs
+only Rust 1.97 and does not use test fixtures or temporary system paths.
 
 ```sh
-cargo build -p cymule-cli -p cymule-test-adapter
+git clone https://github.com/cymule-framework/cymule.git
+cd cymule
+./examples/hello-world/run.sh
 ```
 
-Seal the example Flow into an immutable Plan:
-
-```sh
-./target/debug/cymule seal \
-  --input tests/fixtures/cross-language-plan.json \
-  > /tmp/cymule-plan.json
-```
-
-Execute the Plan:
-
-```sh
-printf '{"message":"hello from Cymule"}\n' > /tmp/cymule-input.json
-
-./target/debug/cymule run \
-  --plan /tmp/cymule-plan.json \
-  --input /tmp/cymule-input.json \
-  --plugin ./target/debug/cymule-test-adapter \
-  --run-id run:readme-example
-```
-
-The result contains the Run and Plan identities, returned value, projection
-digest, current precondition token, and structurally identified effects:
+The script builds the engine and example plugin, seals
+`examples/hello-world/flow.json`, executes it with the checked-in input, and
+prints the Result:
 
 ```json
 {
-  "run_id": "run:readme-example",
-  "plan_id": "sha256:d29d444a5e4c3b703d4f186a8f463fe1d501d7245b9ad827656686a21b47be62",
+  "run_id": "run:hello-world",
+  "plan_id": "sha256:...",
   "value": { "message": "hello from Cymule" },
   "projection_digest": "...",
   "precondition_token": "pre:0:...",
@@ -92,7 +73,12 @@ digest, current precondition token, and structurally identified effects:
 }
 ```
 
-Run every language SDK and semantic conformance test:
+The sealed Plan and Result are written to
+`.cymule/examples/hello-world/`, a repository-local ignored state directory.
+Read [the example guide](examples/hello-world/README.md) to inspect each step or
+run the engine manually.
+
+Contributors can run every SDK and semantic conformance test with:
 
 ```sh
 ./scripts/verify.sh
@@ -320,6 +306,7 @@ sdk/python              Python SDK
 sdk/go                  Go SDK
 schemas                 frozen JSON Schema contracts
 compiler/mlir           optional, partial MLIR workbench
+examples/hello-world    self-contained user quick start and example plugin
 plugins/test-adapter    deterministic conformance plugin
 tests                   shared fixtures and conformance assets
 docs                    specification, architecture, and decisions

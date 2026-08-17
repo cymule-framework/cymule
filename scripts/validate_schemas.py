@@ -31,11 +31,17 @@ def main() -> int:
     )
     by_title = {schema["title"]: schema for schema in schemas}
 
-    candidate = load(root / "tests/fixtures/cross-language-plan.json")
     candidate_validator = Draft202012Validator(
         by_title["Cymule Plan Candidate cymule.ir/1"], registry=registry
     )
-    candidate_validator.validate(candidate)
+    candidate_paths = [
+        root / "tests/fixtures/cross-language-plan.json",
+        root / "examples/hello-world/flow.json",
+    ]
+    candidates = [load(path) for path in candidate_paths]
+    for candidate in candidates:
+        candidate_validator.validate(candidate)
+    candidate = candidates[0]
 
     sealed = json.loads(
         subprocess.run(
@@ -74,10 +80,12 @@ def main() -> int:
     else:
         raise AssertionError("Plan schema accepted an unknown provider field")
 
-    print(f"validated {len(schemas)} schemas and shared fixtures")
+    print(
+        f"validated {len(schemas)} schemas, {len(candidates)} public Plans, "
+        "and shared protocol fixtures"
+    )
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

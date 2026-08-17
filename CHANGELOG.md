@@ -6,6 +6,9 @@ domains described in `docs/specification.md`.
 
 ## [Unreleased]
 
+- Add a self-contained Hello World Flow and example plugin as the stable user
+  quick start.
+
 ## [0.1.0] - 2026-08-16
 
 - Initial Rust-first semantic kernel and embedded runtime.

@@ -1,4 +1,5 @@
 /target/
+/.cymule/
 /.cache/
 /.idea/
 /.vscode/
@@ -13,4 +14,3 @@ sdk/python/**/__pycache__/
 sdk/python/*.egg-info/
 
 compiler/mlir/build/
-
