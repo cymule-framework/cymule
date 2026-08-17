@@ -16,10 +16,16 @@ use cymule_agent::{
     ElicitationRequest, ElicitationResponse, MemoryAgentJournal, MessageRole, ModelRequest,
     ModelResponse, PermissionDecision, PermissionRequest, PermissionResponse, SessionStopReason,
     ToolCall, ToolCallStatus, ToolRequest, ToolResponse, Usage, WorkspaceChange, WorkspaceReceipt,
+    WorkspaceScopeController, WorkspaceScopeRequest,
 };
-use cymule_core::{ArtifactRef, Machine, ROOT_SCOPE_ID, canonical_digest};
+use cymule_core::{
+    ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, Definition, DispatchPolicy,
+    EffectContract, EffectProfile, Expression, Machine, MutationKind, PlanCandidate, ROOT_SCOPE_ID,
+    ReconciliationMode, Region, ScopeStatus, WorldOutcome, canonical_digest,
+};
 use cymule_durable::{
-    Continuation, ContinuationStatus, DurableCoordinator, FrameState, MemoryStore, WaitState,
+    Continuation, ContinuationStatus, DurableCoordinator, FrameState, JournalRecord, MemoryStore,
+    OutboxState, WaitState,
 };
 use serde_json::json;
 
@@ -117,6 +123,162 @@ impl AgentHost for FakeHost {
     }
 }
 
+struct WorkspaceTestHost {
+    applies: Arc<AtomicUsize>,
+    reconciliations: Arc<AtomicUsize>,
+    fail_apply: bool,
+    reconcile_not_applied: bool,
+}
+
+impl WorkspaceTestHost {
+    fn new(fail_apply: bool) -> Self {
+        Self {
+            applies: Arc::new(AtomicUsize::new(0)),
+            reconciliations: Arc::new(AtomicUsize::new(0)),
+            fail_apply,
+            reconcile_not_applied: false,
+        }
+    }
+
+    fn with_not_applied_reconciliation(mut self) -> Self {
+        self.reconcile_not_applied = true;
+        self
+    }
+}
+
+impl AgentHost for WorkspaceTestHost {
+    fn bind_occurrence(&mut self, request: &AgentHostRequest) -> AgentResult<String> {
+        if !matches!(request, AgentHostRequest::Workspace(_)) {
+            return Err(AgentError::Host(
+                "workspace host received another request".to_owned(),
+            ));
+        }
+        Ok("binding:workspace-scope/1".to_owned())
+    }
+
+    fn select_context(&mut self, _request: ContextRequest) -> AgentResult<ContextSnapshot> {
+        Err(AgentError::Host("not used".to_owned()))
+    }
+
+    fn invoke_model(&mut self, _request: ModelRequest) -> AgentResult<ModelResponse> {
+        Err(AgentError::Host("not used".to_owned()))
+    }
+
+    fn request_permission(
+        &mut self,
+        _request: PermissionRequest,
+    ) -> AgentResult<PermissionResponse> {
+        Err(AgentError::Host("not used".to_owned()))
+    }
+
+    fn invoke_tool(&mut self, _request: ToolRequest) -> AgentResult<ToolResponse> {
+        Err(AgentError::Host("not used".to_owned()))
+    }
+
+    fn elicit(&mut self, _request: ElicitationRequest) -> AgentResult<ElicitationResponse> {
+        Err(AgentError::Host("not used".to_owned()))
+    }
+
+    fn apply_workspace(&mut self, change: WorkspaceChange) -> AgentResult<WorkspaceReceipt> {
+        self.applies.fetch_add(1, Ordering::SeqCst);
+        if self.fail_apply {
+            return Err(AgentError::Host(
+                "simulated workspace failure after dispatch".to_owned(),
+            ));
+        }
+        Ok(WorkspaceReceipt {
+            change_id: change.change_id,
+            committed: change.commit,
+            evidence: change.overlay,
+            occurrence_binding: "binding:workspace-scope/1".to_owned(),
+        })
+    }
+
+    fn reconcile_occurrence(
+        &mut self,
+        occurrence: &cymule_agent::AgentHostOccurrence,
+    ) -> AgentResult<AgentOccurrenceResolution> {
+        self.reconciliations.fetch_add(1, Ordering::SeqCst);
+        let AgentHostRequest::Workspace(change) = &occurrence.request else {
+            return Err(AgentError::Host(
+                "workspace reconciliation received another request".to_owned(),
+            ));
+        };
+        if self.reconcile_not_applied {
+            return Ok(AgentOccurrenceResolution::NotApplied {
+                evidence: vec![ContentBlock::Text {
+                    text: "provider proved the workspace change did not apply".to_owned(),
+                }],
+            });
+        }
+        Ok(AgentOccurrenceResolution::Completed {
+            response: cymule_agent::AgentHostResponse::Workspace(WorkspaceReceipt {
+                change_id: change.change_id.clone(),
+                committed: change.commit,
+                evidence: change.overlay.clone(),
+                occurrence_binding: occurrence.occurrence_binding.clone(),
+            }),
+        })
+    }
+}
+
+struct RacingWorkspaceHost {
+    store: MemoryStore,
+    applies: Arc<AtomicUsize>,
+}
+
+impl AgentHost for RacingWorkspaceHost {
+    fn bind_occurrence(&mut self, _request: &AgentHostRequest) -> AgentResult<String> {
+        Ok("binding:workspace-scope/1".to_owned())
+    }
+
+    fn select_context(&mut self, _request: ContextRequest) -> AgentResult<ContextSnapshot> {
+        Err(AgentError::Host("not used".to_owned()))
+    }
+
+    fn invoke_model(&mut self, _request: ModelRequest) -> AgentResult<ModelResponse> {
+        Err(AgentError::Host("not used".to_owned()))
+    }
+
+    fn request_permission(
+        &mut self,
+        _request: PermissionRequest,
+    ) -> AgentResult<PermissionResponse> {
+        Err(AgentError::Host("not used".to_owned()))
+    }
+
+    fn invoke_tool(&mut self, _request: ToolRequest) -> AgentResult<ToolResponse> {
+        Err(AgentError::Host("not used".to_owned()))
+    }
+
+    fn elicit(&mut self, _request: ElicitationRequest) -> AgentResult<ElicitationResponse> {
+        Err(AgentError::Host("not used".to_owned()))
+    }
+
+    fn apply_workspace(&mut self, change: WorkspaceChange) -> AgentResult<WorkspaceReceipt> {
+        self.applies.fetch_add(1, Ordering::SeqCst);
+        let mut competing = DurableCoordinator::open(self.store.clone())
+            .map_err(|error| AgentError::Persistence(error.to_string()))?;
+        competing
+            .append_journal_record(
+                "fault:workspace-race",
+                JournalRecord::new(
+                    "fault:advance-revision",
+                    "fault.workspace-race/1",
+                    json!({"advanced": true}),
+                )
+                .map_err(|error| AgentError::Persistence(error.to_string()))?,
+            )
+            .map_err(|error| AgentError::Persistence(error.to_string()))?;
+        Ok(WorkspaceReceipt {
+            change_id: change.change_id,
+            committed: change.commit,
+            evidence: change.overlay,
+            occurrence_binding: "binding:workspace-scope/1".to_owned(),
+        })
+    }
+}
+
 fn message(id: &str, role: MessageRole, text: &str) -> AgentMessage {
     AgentMessage {
         message_id: id.to_owned(),
@@ -156,6 +318,100 @@ fn agent_continuation(run_id: &str) -> Continuation {
         epoch: 0,
         status: ContinuationStatus::Ready,
     }
+}
+
+fn workspace_machine(run_id: &str) -> (Machine, String, ArtifactRef) {
+    let mut machine = Machine::new();
+    let plan = machine
+        .seal_plan(PlanCandidate {
+            ir_version: cymule_core::IR_VERSION.to_owned(),
+            name: "agent_workspace_scope".to_owned(),
+            entry: "main".to_owned(),
+            components: Vec::new(),
+            effects: vec![EffectContract {
+                id: "workspace.commit".to_owned(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                profile: EffectProfile {
+                    mutation: MutationKind::Mutating,
+                    dispatch: DispatchPolicy::OnScopeCommit,
+                    reconciliation: ReconciliationMode::Queryable,
+                    keyed_idempotency: true,
+                    irreversible: false,
+                },
+                requirements: BTreeMap::new(),
+            }],
+            definitions: vec![Definition {
+                id: "main".to_owned(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                body: Region {
+                    steps: Vec::new(),
+                    result: Expression::Literal { value: json!(null) },
+                },
+            }],
+            metadata: BTreeMap::new(),
+        })
+        .expect("workspace Plan seals");
+    machine
+        .submit(CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: format!("command:start:{run_id}"),
+            actor: "actor:test".to_owned(),
+            run_id: run_id.to_owned(),
+            expected_precondition: None,
+            command: Command::StartRun {
+                plan_id: plan.plan_id.clone(),
+                binding_context: "binding:workspace-runtime/1".to_owned(),
+            },
+        })
+        .expect("workspace Run starts");
+    let overlay = machine.put_artifact("workspace/overlay", b"prepared overlay".to_vec());
+    (machine, plan.plan_id, overlay)
+}
+
+fn workspace_request(
+    run_id: &str,
+    session_id: &str,
+    occurrence_id: &str,
+    overlay: ArtifactRef,
+) -> WorkspaceScopeRequest {
+    WorkspaceScopeRequest {
+        session_id: session_id.to_owned(),
+        run_id: run_id.to_owned(),
+        scope_id: ROOT_SCOPE_ID.to_owned(),
+        occurrence_id: occurrence_id.to_owned(),
+        change_id: format!("change:{run_id}"),
+        overlay,
+        operation: "workspace.commit".to_owned(),
+        invocation_id: "main".to_owned(),
+        site_id: "workspace.finalize".to_owned(),
+        occurrence_key: "primary".to_owned(),
+    }
+}
+
+fn workspace_coordinator(
+    store: MemoryStore,
+    run_id: &str,
+) -> (DurableCoordinator<MemoryStore>, WorkspaceScopeRequest) {
+    let (machine, plan_id, overlay) = workspace_machine(run_id);
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("workspace store opens")
+        .initialize(&machine)
+        .expect("workspace store initializes");
+    let mut continuation = agent_continuation(run_id);
+    continuation.plan_id = plan_id;
+    "binding:workspace-runtime/1".clone_into(&mut continuation.binding_context);
+    coordinator
+        .put_continuation(continuation)
+        .expect("workspace Continuation persists");
+    let request = workspace_request(
+        run_id,
+        &format!("session:{run_id}"),
+        &format!("occurrence:{run_id}"),
+        overlay,
+    );
+    (coordinator, request)
 }
 
 #[test]
@@ -387,6 +643,224 @@ fn interaction_controller_replays_a_retained_response_through_m1_without_redispa
     ));
     let (replay_host, _) = replay.into_parts();
     assert_eq!(replay_host.tool_calls, 0);
+}
+
+#[test]
+fn workspace_commit_transfers_and_resolves_one_scope_obligation() {
+    let store = MemoryStore::new();
+    let (mut coordinator, request) = workspace_coordinator(store.clone(), "run:workspace-commit");
+    let mut host = WorkspaceTestHost::new(false);
+    let applies = host.applies.clone();
+    let checkpoint = WorkspaceScopeController::commit(&mut coordinator, &mut host, &request)
+        .expect("workspace commit completes");
+    assert!(
+        checkpoint
+            .receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.committed)
+    );
+    assert_eq!(applies.load(Ordering::SeqCst), 1);
+    let intent_id = checkpoint.effect_intent_id.expect("commit has an intent");
+    let obligation_id = checkpoint.obligation_id.expect("commit has an obligation");
+    let state = coordinator.state().expect("durable state");
+    let run = &state.machine.events.last().expect("events exist").run_id;
+    assert_eq!(run, "run:workspace-commit");
+    let machine = coordinator.restore_machine().expect("Machine restores");
+    let run = &machine.projection().runs["run:workspace-commit"];
+    assert_eq!(
+        run.scopes[ROOT_SCOPE_ID].status,
+        ScopeStatus::ClosedCommitted
+    );
+    assert_eq!(run.effects[&intent_id].outcome, WorldOutcome::Applied);
+    assert!(run.obligations[&obligation_id].resolved);
+    assert_eq!(state.outbox[&intent_id].state, OutboxState::Applied);
+    assert!(
+        state.continuations["run:workspace-commit"]
+            .scope_stack
+            .is_empty()
+    );
+    assert!(
+        state.continuations["run:workspace-commit"]
+            .effect_obligations
+            .is_empty()
+    );
+    drop(coordinator);
+
+    let mut reopened = DurableCoordinator::open(store).expect("workspace store reopens");
+    let mut replay_host = WorkspaceTestHost::new(false);
+    let replay_applies = replay_host.applies.clone();
+    let replay = WorkspaceScopeController::commit(&mut reopened, &mut replay_host, &request)
+        .expect("completed workspace commit replays");
+    assert_eq!(replay.receipt, checkpoint.receipt);
+    assert_eq!(replay_applies.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        WorkspaceScopeController::abort(&mut reopened, &mut replay_host, &request),
+        Err(AgentError::IllegalTransition(_))
+    ));
+}
+
+#[test]
+fn ambiguous_workspace_commit_reconciles_without_redispatch() {
+    let store = MemoryStore::new();
+    let (mut coordinator, request) =
+        workspace_coordinator(store.clone(), "run:workspace-reconcile");
+    let mut failing = WorkspaceTestHost::new(true);
+    let applies = failing.applies.clone();
+    assert!(matches!(
+        WorkspaceScopeController::commit(&mut coordinator, &mut failing, &request),
+        Err(AgentError::Host(_))
+    ));
+    assert_eq!(applies.load(Ordering::SeqCst), 1);
+    let state = coordinator.state().expect("durable state");
+    assert!(
+        state
+            .outbox
+            .values()
+            .any(|dispatch| dispatch.state == OutboxState::Unknown)
+    );
+    let machine = coordinator.restore_machine().expect("Machine restores");
+    let run = &machine.projection().runs["run:workspace-reconcile"];
+    assert!(
+        run.obligations
+            .values()
+            .any(|obligation| !obligation.resolved)
+    );
+    drop(coordinator);
+
+    let mut reopened = DurableCoordinator::open(store).expect("workspace store reopens");
+    let mut recovery = WorkspaceTestHost::new(false);
+    let recovered_applies = recovery.applies.clone();
+    let reconciliations = recovery.reconciliations.clone();
+    let checkpoint = WorkspaceScopeController::reconcile(&mut reopened, &mut recovery, &request)
+        .expect("workspace commit reconciles");
+    assert!(
+        checkpoint
+            .receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.committed)
+    );
+    assert_eq!(recovered_applies.load(Ordering::SeqCst), 0);
+    assert_eq!(reconciliations.load(Ordering::SeqCst), 1);
+    let state = reopened.state().expect("durable state");
+    assert!(
+        state
+            .outbox
+            .values()
+            .any(|dispatch| dispatch.state == OutboxState::Applied)
+    );
+    let machine = reopened.restore_machine().expect("Machine restores");
+    assert!(
+        machine.projection().runs["run:workspace-reconcile"]
+            .obligations
+            .values()
+            .all(|obligation| obligation.resolved)
+    );
+}
+
+#[test]
+fn workspace_commit_not_applied_evidence_resolves_without_claiming_a_receipt() {
+    let store = MemoryStore::new();
+    let (mut coordinator, request) =
+        workspace_coordinator(store.clone(), "run:workspace-not-applied");
+    let mut failing = WorkspaceTestHost::new(true);
+    assert!(WorkspaceScopeController::commit(&mut coordinator, &mut failing, &request).is_err());
+    drop(coordinator);
+
+    let mut reopened = DurableCoordinator::open(store).expect("workspace store reopens");
+    let mut recovery = WorkspaceTestHost::new(false).with_not_applied_reconciliation();
+    let checkpoint = WorkspaceScopeController::reconcile(&mut reopened, &mut recovery, &request)
+        .expect("not-applied evidence settles the original commit");
+    assert!(checkpoint.receipt.is_none());
+    assert_eq!(
+        checkpoint.occurrence.state,
+        AgentHostOccurrenceState::NotApplied
+    );
+    let intent_id = checkpoint.effect_intent_id.expect("commit has an intent");
+    assert_eq!(
+        reopened.state().expect("state").outbox[&intent_id].state,
+        OutboxState::NotApplied
+    );
+    let machine = reopened.restore_machine().expect("Machine restores");
+    assert_eq!(
+        machine.projection().runs["run:workspace-not-applied"].effects[&intent_id].outcome,
+        WorldOutcome::NotApplied
+    );
+    assert!(
+        machine.projection().runs["run:workspace-not-applied"]
+            .obligations
+            .values()
+            .all(|obligation| obligation.resolved)
+    );
+}
+
+#[test]
+fn workspace_abort_closes_scope_only_after_a_retained_non_commit_receipt() {
+    let store = MemoryStore::new();
+    let (mut coordinator, request) = workspace_coordinator(store.clone(), "run:workspace-abort");
+    let mut host = WorkspaceTestHost::new(false);
+    let applies = host.applies.clone();
+    let checkpoint = WorkspaceScopeController::abort(&mut coordinator, &mut host, &request)
+        .expect("workspace abort completes");
+    assert!(
+        checkpoint
+            .receipt
+            .as_ref()
+            .is_some_and(|receipt| !receipt.committed)
+    );
+    assert!(checkpoint.effect_intent_id.is_none());
+    assert_eq!(applies.load(Ordering::SeqCst), 1);
+    let machine = coordinator.restore_machine().expect("Machine restores");
+    let run = &machine.projection().runs["run:workspace-abort"];
+    assert_eq!(run.scopes[ROOT_SCOPE_ID].status, ScopeStatus::ClosedAborted);
+    assert!(run.obligations.is_empty());
+    assert!(coordinator.state().expect("state").outbox.is_empty());
+    drop(coordinator);
+
+    let mut reopened = DurableCoordinator::open(store).expect("workspace store reopens");
+    let mut replay_host = WorkspaceTestHost::new(false);
+    let replay_applies = replay_host.applies.clone();
+    WorkspaceScopeController::abort(&mut reopened, &mut replay_host, &request)
+        .expect("completed workspace abort replays");
+    assert_eq!(replay_applies.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn lost_workspace_completion_receipt_is_reconciled_from_the_started_claim() {
+    let store = MemoryStore::new();
+    let (mut coordinator, request) =
+        workspace_coordinator(store.clone(), "run:workspace-receipt-loss");
+    let applies = Arc::new(AtomicUsize::new(0));
+    let mut racing = RacingWorkspaceHost {
+        store: store.clone(),
+        applies: applies.clone(),
+    };
+    assert!(matches!(
+        WorkspaceScopeController::commit(&mut coordinator, &mut racing, &request),
+        Err(AgentError::Persistence(_))
+    ));
+    assert_eq!(applies.load(Ordering::SeqCst), 1);
+    drop(coordinator);
+
+    let mut reopened = DurableCoordinator::open(store).expect("workspace store reopens");
+    let occurrences =
+        AgentOccurrenceStore::load_occurrences(&mut reopened, "session:run:workspace-receipt-loss")
+            .expect("occurrence replays");
+    assert_eq!(occurrences[0].state, AgentHostOccurrenceState::Started);
+    let mut recovery = WorkspaceTestHost::new(false);
+    let recovery_applies = recovery.applies.clone();
+    WorkspaceScopeController::reconcile(&mut reopened, &mut recovery, &request)
+        .expect("lost completion receipt reconciles");
+    assert_eq!(recovery_applies.load(Ordering::SeqCst), 0);
+    assert!(
+        reopened
+            .restore_machine()
+            .expect("Machine restores")
+            .projection()
+            .runs["run:workspace-receipt-loss"]
+            .obligations
+            .values()
+            .all(|obligation| obligation.resolved)
+    );
 }
 
 #[test]

@@ -23,6 +23,7 @@ struct CrashAfterApplyPlugin {
     dispatches: Arc<AtomicUsize>,
     reconciliations: Arc<AtomicUsize>,
     crash_after_apply: bool,
+    unknown_reconciliations: usize,
 }
 
 impl PluginHost for CrashAfterApplyPlugin {
@@ -56,10 +57,14 @@ impl PluginHost for CrashAfterApplyPlugin {
                 }
             }
             PluginRequest::ReconcileEffect { input, .. } => {
-                self.reconciliations.fetch_add(1, Ordering::SeqCst);
+                let attempt = self.reconciliations.fetch_add(1, Ordering::SeqCst) + 1;
                 Ok(PluginResponse::ReconciliationResult {
-                    resolution: cymule_core::ReconciliationResolution::ResolvedApplied,
-                    value: Some(input),
+                    resolution: if attempt <= self.unknown_reconciliations {
+                        cymule_core::ReconciliationResolution::StillUnknown
+                    } else {
+                        cymule_core::ReconciliationResolution::ResolvedApplied
+                    },
+                    value: (attempt > self.unknown_reconciliations).then_some(input),
                 })
             }
             request @ PluginRequest::Call { .. } => Err(RuntimeError::Plugin(format!(
@@ -238,6 +243,7 @@ fn crash_after_provider_application_reconciles_without_redispatch() {
             dispatches: dispatches.clone(),
             reconciliations: reconciliations.clone(),
             crash_after_apply: true,
+            unknown_reconciliations: 0,
         },
     )
     .expect("runtime opens");
@@ -259,6 +265,7 @@ fn crash_after_provider_application_reconciles_without_redispatch() {
             dispatches: dispatches.clone(),
             reconciliations: reconciliations.clone(),
             crash_after_apply: false,
+            unknown_reconciliations: 0,
         },
     )
     .expect("runtime reopens");
@@ -271,4 +278,76 @@ fn crash_after_provider_application_reconciles_without_redispatch() {
     assert_eq!(result.value, json!({"value": 1}));
     assert_eq!(dispatches.load(Ordering::SeqCst), 1);
     assert_eq!(reconciliations.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn unknown_outbox_reconciles_after_another_process_reopen_without_redispatch() {
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let reconciliations = Arc::new(AtomicUsize::new(0));
+    let mut runtime = ResumableRuntime::open(
+        MemoryStore::new(),
+        CrashAfterApplyPlugin {
+            dispatches: dispatches.clone(),
+            reconciliations: reconciliations.clone(),
+            crash_after_apply: true,
+            unknown_reconciliations: 1,
+        },
+    )
+    .expect("runtime opens");
+    assert!(
+        runtime
+            .start(
+                effect_candidate(),
+                &json!({"value": 2}),
+                "run:repeated-effect-recovery",
+            )
+            .is_err()
+    );
+    let (store, _) = runtime.into_parts();
+    let mut first_recovery = ResumableRuntime::open(
+        store,
+        CrashAfterApplyPlugin {
+            dispatches: dispatches.clone(),
+            reconciliations: reconciliations.clone(),
+            crash_after_apply: false,
+            unknown_reconciliations: 1,
+        },
+    )
+    .expect("first recovery opens");
+    assert!(matches!(
+        first_recovery
+            .resume("run:repeated-effect-recovery")
+            .expect("first reconciliation is durable"),
+        DriveOutcome::ReconciliationRequired { .. }
+    ));
+    assert!(
+        first_recovery
+            .coordinator()
+            .state()
+            .expect("state")
+            .outbox
+            .values()
+            .any(|dispatch| dispatch.state == cymule_durable::OutboxState::Unknown)
+    );
+
+    let (store, _) = first_recovery.into_parts();
+    let mut second_recovery = ResumableRuntime::open(
+        store,
+        CrashAfterApplyPlugin {
+            dispatches: dispatches.clone(),
+            reconciliations: reconciliations.clone(),
+            crash_after_apply: false,
+            unknown_reconciliations: 1,
+        },
+    )
+    .expect("second recovery opens");
+    let DriveOutcome::Completed(result) = second_recovery
+        .resume("run:repeated-effect-recovery")
+        .expect("second reconciliation completes")
+    else {
+        panic!("reconciled Run should complete");
+    };
+    assert_eq!(result.value, json!({"value": 2}));
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(reconciliations.load(Ordering::SeqCst), 2);
 }

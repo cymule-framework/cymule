@@ -35,6 +35,12 @@
   occurrence as `completed` or evidence-backed `not_applied`. A prepared call
   may be cancelled only with proof that dispatch never started. Reconciliation
   is an idempotent observation and never creates a replacement intent.
+- A workspace overlay commit is a Plan-declared mutating Effect, not a special
+  filesystem shortcut. Atomically couple its host occurrence to scope closure,
+  the transferred obligation, outbox state, Machine snapshot, and Continuation.
+  Abort the scope only after a retained provider receipt proves the overlay was
+  not committed. Filesystems, VCS implementations, sandboxes, and object stores
+  remain adapters.
 - Login, capability advertisement, permission, policy, credential access, and
   effect release are separate decisions and must remain fail closed.
 - Add reducer and end-to-end tests for every new update or interaction state.

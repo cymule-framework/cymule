@@ -179,6 +179,19 @@ fn stale_coordinator_and_stale_dispatch_owner_fail_closed() {
         current.state().expect("state").outbox["intent:1"].state,
         OutboxState::Unknown
     );
+    current
+        .settle_effect(
+            "intent:1",
+            "worker:a",
+            lease.epoch,
+            OutboxState::Applied,
+            None,
+        )
+        .expect("the original unknown claim reconciles as applied");
+    assert_eq!(
+        current.state().expect("state").outbox["intent:1"].state,
+        OutboxState::Applied
+    );
 }
 
 #[test]

@@ -102,6 +102,16 @@ interaction controller and consume that response without redispatch. A
 `not_applied` result requires the caller to admit a separately identified
 replacement or terminate its own loop.
 
+A workspace overlay is an immutable Artifact prepared by an adapter. Commit is
+not a filesystem-specific primitive: `WorkspaceScopeController` admits it as a
+Plan-declared mutating Effect, commits the scope to transfer its obligation,
+then atomically records the host occurrence and outbox claim before provider
+dispatch. A terminal receipt or reconciliation observation updates the Effect,
+obligation, outbox, occurrence, Machine snapshot, and Continuation in one M1
+CAS. Abort has no commit Effect; the scope remains open until a retained receipt
+proves the overlay was not committed. Git repositories, local directories,
+sandboxes, and remote storage remain `AgentHost` adapters.
+
 ## Storage contracts
 
 M1 defines a provider-neutral `DurableStore` as compare-and-swap over one
@@ -116,3 +126,22 @@ atomic local directory adapter. Both surface writer contention as a conflict;
 neither a mutex nor a file lock is semantic authority. Production adapters use
 their substrate's native CAS and remain plugins. No database, queue, or object
 store name is part of the contract.
+
+## Cross-Run resources
+
+Status: proposed.
+
+Run state and outputs will accept a versioned resource descriptor rather than
+assuming every Artifact is a small inline blob. The descriptor separates
+logical shape and replay evidence from realization: inline text/JSON/bytes,
+immutable objects, directory or collection manifests, and sandbox/workspace
+snapshots share one contract. External URLs and storage locators are resolved by
+an `ArtifactResolver`; writes and materialization use an `ArtifactStore`.
+Concrete local, object-storage, remote-drive, WebDAV, sandbox, and HTTP
+implementations remain plugins.
+
+The design follows content-descriptor practice: media type, digest, and size
+prove bytes independently of where they are found. A locator or expiring access
+grant is never canonical identity, and credentials never enter durable state.
+Mutable references remain usable but cannot support exact replay until pinned by
+content digest or immutable version evidence.

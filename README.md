@@ -308,6 +308,8 @@ Implemented today:
   state and the owning Continuation wait in one CAS revision;
 - query-only recovery of ambiguous host calls through their original binding,
   with typed completion or evidence-backed non-application and no redispatch;
+- durable workspace overlay commit/abort coupled to scope obligations and the
+  M1 outbox, including receipt-loss recovery without provider redispatch;
 - bounded virtual work with deterministic fairness and portable snapshots;
 - immutable Plan evolution DAGs, impact cones, canaries, rollback pins,
   migration receipts, and shadow evidence.
@@ -315,8 +317,10 @@ Implemented today:
 Not yet claimed:
 
 - complete nested-scope durable interpretation and every crash window;
-- workspace scope integration, finalized streaming content, protocol adapters,
-  and cross-language agent-interaction clients;
+- provider-neutral cross-Run resource descriptors and resolver/store plugins
+  for large objects, directories, sandbox snapshots, remote drives, and URLs;
+- finalized streaming content, protocol adapters, and cross-language
+  agent-interaction clients;
 - durable virtual-work partition migration and subtree rehydration;
 - automatic live-evolution diffing, shadow execution, observation gates, and
   mixed-version dispatch;

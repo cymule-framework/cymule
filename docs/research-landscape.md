@@ -21,6 +21,15 @@ standards.
   stable building-block interfaces can support built-in and independently
   deployed implementations. Cymule similarly separates semantic operations from
   plugins, but plugin availability is not authority.
+- [OCI content descriptors](https://github.com/opencontainers/image-spec/blob/main/descriptor.md)
+  separate media type, digest, size, and optional retrieval URLs. Cymule's
+  proposed cross-Run resources adopt that content-proof separation without
+  adopting the container-image domain model.
+- [Apache OpenDAL](https://opendal.apache.org/) provides a maintained Rust data
+  access layer across object stores, filesystems, WebDAV, and other services.
+  Cymule can reuse it inside optional Artifact resolver/store plugins while the
+  framework contract remains provider-neutral and credentials stay outside
+  canonical state.
 
 ## Compiler and component boundaries
 
@@ -50,6 +59,10 @@ standards.
   status, permission requests, elicitation, plans, usage, and terminal state.
   Cymule M2 maps these to durable occurrences and projections instead of making
   a transport session canonical.
+- [ACP additional workspace roots](https://agentclientprotocol.com/rfds/additional-directories)
+  keeps client-mediated filesystem capability and boundary enforcement outside
+  the Agent. Cymule likewise keeps concrete path and sandbox policy in adapters;
+  the framework records only the identified overlay decision and evidence.
 - [Model Context Protocol](https://modelcontextprotocol.io/specification/) keeps
   resources, prompts, tools, user input, and asynchronous Tasks as capability
   surfaces. Cymule treats external protocol objects as adapter inputs and pins
@@ -57,6 +70,15 @@ standards.
 - [A2A](https://a2a-protocol.org/dev/specification/) distinguishes Messages,
   Tasks, status updates, and Artifacts. Cymule uses the same communication versus
   durable-output distinction without adopting A2A transport bindings in core.
+- [Kubernetes finalizers](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)
+  separate an accepted lifecycle decision from external cleanup obligations.
+  Cymule scope commit similarly closes internal state while unresolved Effect
+  obligations remain explicit and blocking rather than pretending the world
+  settled atomically.
+- [Temporal](https://docs.temporal.io/) demonstrates durable resumption around
+  external activities. Cymule uses a smaller provider-neutral occurrence and
+  outbox boundary, with explicit `unknown` reconciliation instead of assuming a
+  retry proves whether the original workspace mutation happened.
 
 ## State scale and live evolution
 

@@ -15,6 +15,9 @@ Status: partial.
 - idempotent wait registration/completion;
 - logical-clock authority leases and fencing epochs;
 - effect outbox enqueue, claim, settlement, and explicit `unknown`;
+- repeated reconciliation of an `unknown` outbox entry under its original
+  claim, including process reopen between `still_unknown` and terminal
+  resolution without a second dispatch;
 - canonical component occurrence inputs, outputs, binding, and revision;
 - portable snapshot metadata;
 - non-blocking shared-memory CAS reference and atomic directory-store adapter;
@@ -22,8 +25,8 @@ Status: partial.
   advance, and component-result replay without reinvocation;
 - commit-gated root effects with atomic outbox enqueue, fenced
   `DispatchStarted`, settlement, and reconciliation recovery;
-- crash-after-provider-application tests proving restart performs reconciliation
-  without a second dispatch;
+- crash-after-provider-application tests proving one or more restarts perform
+  reconciliation without a second dispatch;
 - reopen, interrupted-staging, stale-writer, stale-claim, and idempotency tests.
 
 ## Remaining completion gates

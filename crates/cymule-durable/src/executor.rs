@@ -446,7 +446,10 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             .values()
             .filter(|dispatch| {
                 dispatch.run_id == run_id
-                    && matches!(dispatch.state, OutboxState::Pending | OutboxState::Claimed)
+                    && matches!(
+                        dispatch.state,
+                        OutboxState::Pending | OutboxState::Claimed | OutboxState::Unknown
+                    )
             })
             .cloned()
             .collect();
@@ -546,7 +549,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 (owner.to_owned(), lease.epoch)
             } else {
                 let owner = entry.claim_owner.clone().ok_or_else(|| {
-                    DurableError::Validation("claimed effect has no owner".to_owned())
+                    DurableError::Validation("claimed or unknown effect has no owner".to_owned())
                 })?;
                 let effect = &machine.projection().runs[run_id].effects[&entry.intent_id];
                 if effect.outcome == WorldOutcome::Unobserved {
@@ -580,7 +583,11 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             submit(
                 &mut machine,
                 run_id,
-                format!("{run_id}:effect-reconcile:{}", entry.intent_id),
+                format!(
+                    "{run_id}:effect-reconcile:{}:{}",
+                    entry.intent_id,
+                    reconciliation_suffix(resolution)
+                ),
                 Command::TransitionEffect {
                     intent_id: entry.intent_id.clone(),
                     transition: EffectTransition::Reconcile(resolution),
@@ -613,6 +620,15 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             }
         }
         Ok(None)
+    }
+}
+
+const fn reconciliation_suffix(resolution: ReconciliationResolution) -> &'static str {
+    match resolution {
+        ReconciliationResolution::ResolvedApplied => "resolved-applied",
+        ReconciliationResolution::ResolvedNotApplied => "resolved-not-applied",
+        ReconciliationResolution::StillUnknown => "still-unknown",
+        ReconciliationResolution::GovernanceRequired => "governance-required",
     }
 }
 

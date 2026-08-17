@@ -26,12 +26,17 @@ Status: partial.
   recorded component outputs without reinvocation;
 - root commit-gated effects persist outbox claims before provider execution and
   reconcile rather than redispatch after crash ambiguity;
+- `unknown` outbox entries remain reconciliation-eligible across repeated
+  process reopen and can later settle under the original claim;
 - nested scope and non-commit-gated effect resumption, timer/signal activation,
   atomic event-plus-outbox, and remaining dispatch crash windows are proposed;
 - process-level crash injection for every effect window;
 - snapshot compaction and suffix rehydration;
 - canonical component-call occurrences and exact execution replay without
   reinvoking plugins;
+- provider-neutral cross-Run resource descriptors and resolver/store interfaces
+  for inline values, objects, directory manifests, sandbox snapshots, remote
+  resources, and URLs remain proposed;
 
 ## M2 - Agent and script integration
 
@@ -54,11 +59,13 @@ Status: partial.
 - a caller-driven durable interaction controller replays completed or
   reconciled typed responses after reopen and blocks unresolved occurrences
   without owning the caller's Agent/script loop;
+- workspace overlay commit/abort is coupled to scope closure, Effect
+  obligations, outbox state, typed occurrences, Machine, and Continuation under
+  the M1 CAS, with receipt-loss and reconciliation fault tests;
 - a bounded reference turn driver passes context-model-tool-model end-to-end
   tests;
-- workspace scope semantics, streaming finalization, protocol adapters,
-  cross-language interaction clients, debugger queries, and evidence views
-  remain proposed.
+- streaming finalization, protocol adapters, cross-language interaction
+  clients, debugger queries, and evidence views remain proposed.
 
 ## M3 - Large virtual work
 

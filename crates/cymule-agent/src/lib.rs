@@ -8,6 +8,7 @@ mod interaction;
 mod journal;
 mod model;
 mod recovery;
+mod workspace;
 
 pub use driver::AgentTurnDriver;
 pub use error::{AgentError, AgentResult};
@@ -25,3 +26,4 @@ pub use model::{
     WorkspaceReceipt,
 };
 pub use recovery::AgentRecoveryController;
+pub use workspace::{WorkspaceScopeCheckpoint, WorkspaceScopeController, WorkspaceScopeRequest};
