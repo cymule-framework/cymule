@@ -40,6 +40,9 @@ Use this precedence order when guidance conflicts:
   direct worker wake-up. Match the Plan-declared source, commit the activation
   receipt with wait results and Continuation readiness, and advance the epoch
   before a reopened `Ready` Continuation resumes.
+- Virtual-work cursors and bounded scheduler frontiers checkpoint through the M1
+  application-journal CAS. Exact parked-wait indexes are rebuildable projections;
+  activation and the corresponding indexed wake checkpoint commit atomically.
 - Public mutation enters through typed commands with idempotent IDs and causal
   preconditions. Raw canonical event append is internal only.
 - Prefer optimistic CAS, immutable records, idempotency, fencing epochs, and

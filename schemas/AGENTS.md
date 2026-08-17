@@ -13,3 +13,6 @@
   `cymule.wait-activation/1` delivery record. Source, targets, and result must
   stay closed and pass Rust plus four-SDK fixture conformance; concrete clock,
   signal, queue, and transport fields never enter this schema.
+- `virtual-checkpoint.schema.json` owns `cymule.virtual-checkpoint/1` cursor and
+  bounded-frontier journal payloads. The derived parked-reason index is omitted
+  from wire state and rebuilt from the closed parked-work map on restore.

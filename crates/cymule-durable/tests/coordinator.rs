@@ -208,6 +208,30 @@ fn identified_signal_activation_is_atomic_idempotent_and_reopenable() {
         coordinator.state().expect("state").continuations["run:durable"].status,
         ContinuationStatus::Ready
     );
+    assert!(matches!(
+        coordinator.checkpoint_wait_activation_journals(
+            &machine,
+            activation.clone(),
+            &[JournalBatch {
+                journal_id: "journal:late-projection".to_owned(),
+                records: vec![
+                    JournalRecord::new(
+                        "projection:late:1",
+                        "example.projection/1",
+                        json!({"late": true}),
+                    )
+                    .expect("late projection seals")
+                ],
+            }],
+        ),
+        Err(DurableError::IllegalTransition(_))
+    ));
+    assert!(
+        coordinator
+            .journal_records("journal:late-projection")
+            .expect("journal reads")
+            .is_empty()
+    );
 
     drop(coordinator);
     let mut reopened = DurableCoordinator::open(store).expect("store reopens");
@@ -353,6 +377,82 @@ fn timer_activation_is_exactly_identified_and_stale_writers_fail_closed() {
     assert_eq!(
         current.state().expect("state").waits["wait:timer:1"].state,
         WaitState::Completed
+    );
+}
+
+#[test]
+fn conflicting_projection_checkpoint_rejects_wait_activation_atomically() {
+    let (mut machine, plan_id) = machine_with_run();
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    coordinator
+        .put_continuation(continuation(plan_id))
+        .expect("continuation persists");
+    coordinator
+        .register_wait(WaitCondition {
+            wait_id: "wait:atomic-projection".to_owned(),
+            run_id: "run:durable".to_owned(),
+            kind: WaitKind::Signal {
+                key: "signal:atomic-projection".to_owned(),
+            },
+            consume_once: true,
+            state: WaitState::Pending,
+            result: None,
+        })
+        .expect("signal wait registers");
+    coordinator
+        .append_journal_record(
+            "journal:projection",
+            JournalRecord::new(
+                "projection:wake:1",
+                "example.projection/1",
+                json!({"state": "old"}),
+            )
+            .expect("existing record seals"),
+        )
+        .expect("existing record appends");
+    let before = coordinator.revision().expect("revision").to_owned();
+    let result = machine.put_artifact("example/signal", b"accepted".to_vec());
+    let activation = WaitActivation::new(
+        "activation:atomic-projection",
+        WaitActivationSource::Signal {
+            key: "signal:atomic-projection".to_owned(),
+        },
+        BTreeSet::from(["wait:atomic-projection".to_owned()]),
+        result,
+    )
+    .expect("activation validates");
+    let conflicting = JournalRecord::new(
+        "projection:wake:1",
+        "example.projection/1",
+        json!({"state": "new"}),
+    )
+    .expect("conflicting record seals");
+    assert!(matches!(
+        coordinator.checkpoint_wait_activation_journals(
+            &machine,
+            activation,
+            &[JournalBatch {
+                journal_id: "journal:projection".to_owned(),
+                records: vec![conflicting],
+            }],
+        ),
+        Err(DurableError::IllegalTransition(_))
+    ));
+    assert_eq!(coordinator.revision(), Some(before.as_str()));
+    assert_eq!(
+        coordinator.state().expect("state").waits["wait:atomic-projection"].state,
+        WaitState::Pending
+    );
+    assert!(
+        coordinator
+            .state()
+            .expect("state")
+            .wait_activations
+            .is_empty()
     );
 }
 

@@ -14,3 +14,5 @@
   identities. Stateful tests must cover redelivery, conflicting identity,
   source mismatch, consume-once competition, stale CAS, reopen, and epoch
   advance before resume.
+- Virtual checkpoint fixtures omit derived indexes and preserve opaque cursor,
+  bounded frontier, claim fencing, and explicit parent lineage wire shapes.

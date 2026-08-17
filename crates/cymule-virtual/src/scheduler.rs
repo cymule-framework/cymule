@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use cymule_durable::WaitActivation;
+
 use crate::{
     ClaimedWork, FrontierLimits, MaterializedPage, ParkReason, ParkedWork, VirtualError,
     VirtualRegion, VirtualResult, VirtualSnapshot, WorkItem,
@@ -16,6 +18,7 @@ pub trait RegionSource {
 }
 
 /// Deterministic bounded scheduler for virtual work.
+#[derive(Clone)]
 pub struct VirtualScheduler {
     limits: FrontierLimits,
     snapshot: VirtualSnapshot,
@@ -40,6 +43,7 @@ impl VirtualScheduler {
                 ready: BTreeMap::new(),
                 active: BTreeMap::new(),
                 parked: BTreeMap::new(),
+                parked_index: BTreeMap::new(),
                 known: BTreeSet::new(),
                 last_run: None,
                 claim_epochs: BTreeMap::new(),
@@ -48,7 +52,8 @@ impl VirtualScheduler {
     }
 
     /// Restore scheduler state under the same explicit limits.
-    pub fn restore(limits: FrontierLimits, snapshot: VirtualSnapshot) -> VirtualResult<Self> {
+    pub fn restore(limits: FrontierLimits, mut snapshot: VirtualSnapshot) -> VirtualResult<Self> {
+        snapshot.parked_index = build_parked_index(&snapshot.parked);
         let scheduler = Self { limits, snapshot };
         scheduler.validate_bounds()?;
         Ok(scheduler)
@@ -56,6 +61,7 @@ impl VirtualScheduler {
 
     /// Register an idempotent virtual region.
     pub fn register(&mut self, region: VirtualRegion) -> VirtualResult<()> {
+        validate_region(&region)?;
         match self.snapshot.regions.get(&region.region_id) {
             Some(existing) if existing == &region => Ok(()),
             Some(_) => Err(VirtualError::Conflict(format!(
@@ -73,6 +79,17 @@ impl VirtualScheduler {
 
     /// Fill the bounded ready frontier using deterministic region order.
     pub fn fill(&mut self, source: &mut impl RegionSource) -> VirtualResult<usize> {
+        let before = self.snapshot.clone();
+        match self.fill_inner(source) {
+            Ok(added) => Ok(added),
+            Err(error) => {
+                self.snapshot = before;
+                Err(error)
+            }
+        }
+    }
+
+    fn fill_inner(&mut self, source: &mut impl RegionSource) -> VirtualResult<usize> {
         let mut added = 0;
         let region_ids: Vec<String> = self.snapshot.regions.keys().cloned().collect();
         for region_id in region_ids {
@@ -96,19 +113,33 @@ impl VirtualScheduler {
                     page.items.len()
                 )));
             }
+            if page.next_cursor.version != region.cursor.version {
+                return Err(VirtualError::Source(format!(
+                    "source {} changed cursor version without migration",
+                    region.source
+                )));
+            }
+            if page.next_cursor == region.cursor && !page.next_cursor.exhausted {
+                return Err(VirtualError::Source(format!(
+                    "source {} returned a non-terminal stalled cursor",
+                    region.source
+                )));
+            }
             for item in page.items {
-                if item.region_id != region_id || item.run_id != region.run_id {
-                    return Err(VirtualError::Source(
-                        "materialized work escaped its region or Run".to_owned(),
-                    ));
+                validate_work_item(&item, &region).map_err(|error| {
+                    VirtualError::Source(format!("source {}: {error}", region.source))
+                })?;
+                if !self.snapshot.known.insert(item.work_id.clone()) {
+                    return Err(VirtualError::Source(format!(
+                        "source {} returned an empty or repeated work identity",
+                        region.source
+                    )));
                 }
-                if self.snapshot.known.insert(item.work_id.clone()) {
-                    insert_priority(
-                        self.snapshot.ready.entry(item.run_id.clone()).or_default(),
-                        item,
-                    );
-                    added += 1;
-                }
+                insert_priority(
+                    self.snapshot.ready.entry(item.run_id.clone()).or_default(),
+                    item,
+                );
+                added += 1;
             }
             self.snapshot
                 .regions
@@ -201,21 +232,28 @@ impl VirtualScheduler {
         reason: ParkReason,
     ) -> VirtualResult<()> {
         let item = self.complete(work_id, owner, epoch)?;
+        self.snapshot.parked.insert(
+            work_id.to_owned(),
+            ParkedWork {
+                item,
+                reason: reason.clone(),
+            },
+        );
         self.snapshot
-            .parked
-            .insert(work_id.to_owned(), ParkedWork { item, reason });
+            .parked_index
+            .entry(reason)
+            .or_default()
+            .insert(work_id.to_owned());
         Ok(())
     }
 
     /// Wake every item matching one exact reason.
     pub fn wake(&mut self, reason: &ParkReason) -> usize {
-        let ids: Vec<String> = self
+        let ids = self
             .snapshot
-            .parked
-            .iter()
-            .filter(|(_, parked)| &parked.reason == reason)
-            .map(|(id, _)| id.clone())
-            .collect();
+            .parked_index
+            .remove(reason)
+            .unwrap_or_default();
         for id in &ids {
             let parked = self.snapshot.parked.remove(id).expect("parked item exists");
             insert_priority(
@@ -227,6 +265,19 @@ impl VirtualScheduler {
             );
         }
         ids.len()
+    }
+
+    /// Wake work indexed by the exact waits completed by one M1 activation.
+    pub fn wake_activation(&mut self, activation: &WaitActivation) -> usize {
+        activation
+            .wait_ids
+            .iter()
+            .map(|wait_id| {
+                self.wake(&ParkReason::Wait {
+                    key: wait_id.clone(),
+                })
+            })
+            .sum()
     }
 
     /// Current materialized ready, active, and parked count.
@@ -272,8 +323,131 @@ impl VirtualScheduler {
                 "snapshot exceeds max_active".to_owned(),
             ));
         }
+        let mut materialized = BTreeSet::new();
+        let mut active_per_run = BTreeMap::<String, usize>::new();
+        for (run_id, queue) in &self.snapshot.ready {
+            for item in queue {
+                if &item.run_id != run_id {
+                    return Err(VirtualError::Validation(format!(
+                        "ready work {} is stored under the wrong Run",
+                        item.work_id
+                    )));
+                }
+                self.validate_snapshot_item(item, &mut materialized)?;
+            }
+        }
+        for (work_id, claim) in &self.snapshot.active {
+            if &claim.item.work_id != work_id || claim.owner.is_empty() || claim.epoch == 0 {
+                return Err(VirtualError::Validation(format!(
+                    "active claim {work_id} is malformed"
+                )));
+            }
+            if self
+                .snapshot
+                .claim_epochs
+                .get(work_id)
+                .is_none_or(|epoch| *epoch < claim.epoch)
+            {
+                return Err(VirtualError::Validation(format!(
+                    "active claim {work_id} is not covered by its fencing epoch"
+                )));
+            }
+            *active_per_run.entry(claim.item.run_id.clone()).or_default() += 1;
+            self.validate_snapshot_item(&claim.item, &mut materialized)?;
+        }
+        if active_per_run
+            .values()
+            .any(|count| *count > self.limits.max_active_per_run)
+        {
+            return Err(VirtualError::Validation(
+                "snapshot exceeds max_active_per_run".to_owned(),
+            ));
+        }
+        for (work_id, parked) in &self.snapshot.parked {
+            if &parked.item.work_id != work_id {
+                return Err(VirtualError::Validation(format!(
+                    "parked work {work_id} has a mismatched identity"
+                )));
+            }
+            self.validate_snapshot_item(&parked.item, &mut materialized)?;
+        }
+        if self.snapshot.parked_index != build_parked_index(&self.snapshot.parked) {
+            return Err(VirtualError::Validation(
+                "parked reason index does not match parked work".to_owned(),
+            ));
+        }
         Ok(())
     }
+
+    fn validate_snapshot_item(
+        &self,
+        item: &WorkItem,
+        materialized: &mut BTreeSet<String>,
+    ) -> VirtualResult<()> {
+        let region = self.snapshot.regions.get(&item.region_id).ok_or_else(|| {
+            VirtualError::Validation(format!("work {} references a missing region", item.work_id))
+        })?;
+        validate_work_item(item, region)?;
+        if !materialized.insert(item.work_id.clone()) {
+            return Err(VirtualError::Validation(format!(
+                "work {} appears in more than one scheduler state",
+                item.work_id
+            )));
+        }
+        if !self.snapshot.known.contains(&item.work_id) {
+            return Err(VirtualError::Validation(format!(
+                "materialized work {} is absent from the known set",
+                item.work_id
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn validate_region(region: &VirtualRegion) -> VirtualResult<()> {
+    if region.region_id.is_empty()
+        || region.run_id.is_empty()
+        || region.source.is_empty()
+        || region.cursor.version.is_empty()
+    {
+        return Err(VirtualError::Validation(
+            "virtual region identities and cursor version must not be empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_work_item(item: &WorkItem, region: &VirtualRegion) -> VirtualResult<()> {
+    if item.region_id != region.region_id || item.run_id != region.run_id {
+        return Err(VirtualError::Validation(
+            "materialized work escaped its region or Run".to_owned(),
+        ));
+    }
+    if item.work_id.is_empty()
+        || item.payload.artifact_id.is_empty()
+        || item.payload.kind.is_empty()
+        || item.cost == 0
+        || item.capability.as_ref().is_some_and(String::is_empty)
+    {
+        return Err(VirtualError::Validation(format!(
+            "work {} has an empty identity, capability, Artifact, or zero cost",
+            item.work_id
+        )));
+    }
+    Ok(())
+}
+
+fn build_parked_index(
+    parked: &BTreeMap<String, ParkedWork>,
+) -> BTreeMap<ParkReason, BTreeSet<String>> {
+    let mut index = BTreeMap::<ParkReason, BTreeSet<String>>::new();
+    for (work_id, parked) in parked {
+        index
+            .entry(parked.reason.clone())
+            .or_default()
+            .insert(work_id.clone());
+    }
+    index
 }
 
 fn insert_priority(queue: &mut VecDeque<WorkItem>, item: WorkItem) {

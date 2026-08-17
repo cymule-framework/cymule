@@ -351,6 +351,7 @@ See [Architecture](docs/architecture.md) and the
 | Go SDK | Implemented | Builder and engine client. |
 | Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, M1 handoff journal. |
 | Durable wait activation | Implemented foundation | Identified signal/timer records, consume-once admission, reopen-safe epoch advance, and four SDK wire validation. |
+| Large virtual work | Partial | Bounded materialization, M1 cursor/frontier checkpoints, exact parked index, fencing, and deterministic fairness. |
 | Agent interaction plugin | Optional, partial | Rust plugin with Session, occurrence, input, workspace, and stream conformance tests. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
 | JSON Schema contracts | Implemented | Draft 2020-12 Plan and protocol schemas. |
@@ -392,6 +393,7 @@ Implemented today:
 - bounded resolver/store interfaces and durable idempotent M1 handoffs, with
   one shared Resource ID sealed through all four SDKs;
 - bounded virtual work with deterministic fairness and portable snapshots;
+- durable M1 checkpoints for virtual cursors/frontiers and exact indexed wake-up;
 - immutable Plan evolution DAGs, impact cones, canaries, rollback pins,
   migration receipts, and shadow evidence.
 
