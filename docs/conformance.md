@@ -10,7 +10,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
 | Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, identified signal/timer activation, lease, outbox, occurrence replay, Resource handoff, directory-store reopen, and ambiguous-effect reconciliation; nested scopes and the full crash matrix remain |
 | Optional Agent Interaction plugin | Partial plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces; not a framework profile |
-| Large Virtual Graph | Partial | bounded virtual regions, cursors, fair capability claims, parked index, fencing, and snapshot restore; durable compaction remains |
+| Large Virtual Graph | Partial | bounded virtual regions, M1 cursor/frontier checkpoints, exact parked index, atomic activation wake, fair capability claims, fencing, and restore; durable compaction remains |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
 | Live Evolution | Partial | Plan DAG, impact, occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; runtime rollout automation remains |
@@ -40,6 +40,13 @@ The local suite verifies:
   consumes at most one consume-once wait, and stale writers commit nothing;
 - a process reopening after wait activation advances the Continuation epoch and
   begins a new fenced Attempt before interpretation;
+- virtual source cursors and bounded frontiers reopen from chained M1 journal
+  checkpoints, stale CAS rolls back the in-process scheduler, exact reason wake
+  avoids a parked scan, and activation plus M3 wake commit atomically;
+- cursor-version changes, stalled cursors, repeated work identities, and partial
+  source failures advance neither cursor nor materialized frontier;
+- restored virtual snapshots reject duplicate work placement, missing region or
+  known-set identity, malformed claim fencing, and per-Run frontier overflow;
 - a Binding Context update changes only future occurrences;
 - replay availability is not reported as exact when an artifact is missing;
 - TypeScript, Python, Rust, and Go author the same plan and execute through the

@@ -14,6 +14,8 @@ pub enum VirtualError {
     Conflict(String),
     /// A source adapter failed.
     Source(String),
+    /// M1 durable checkpoint or CAS failed.
+    Durable(String),
 }
 
 impl Display for VirtualError {
@@ -23,6 +25,7 @@ impl Display for VirtualError {
             Self::NotFound(message) => write!(formatter, "not_found: {message}"),
             Self::Conflict(message) => write!(formatter, "conflict: {message}"),
             Self::Source(message) => write!(formatter, "source_failed: {message}"),
+            Self::Durable(message) => write!(formatter, "durable_failed: {message}"),
         }
     }
 }

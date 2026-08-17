@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/virtual-checkpoint.schema.json",
+  "title": "Cymule Virtual Checkpoint cymule.virtual-checkpoint/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["checkpoint_version", "checkpoint_id", "parent_checkpoint", "snapshot"],
+  "properties": {
+    "checkpoint_version": { "const": "cymule.virtual-checkpoint/1" },
+    "checkpoint_id": { "$ref": "#/$defs/nonEmpty" },
+    "parent_checkpoint": {
+      "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }]
+    },
+    "snapshot": { "$ref": "#/$defs/snapshot" }
+  },
+  "$defs": {
+    "nonEmpty": { "type": "string", "minLength": 1 },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "kind"],
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/nonEmpty" },
+        "kind": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "position", "exhausted"],
+      "properties": {
+        "version": { "$ref": "#/$defs/nonEmpty" },
+        "position": { "type": "string" },
+        "exhausted": { "type": "boolean" }
+      }
+    },
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["region_id", "run_id", "source", "cursor", "estimated_total"],
+      "properties": {
+        "region_id": { "$ref": "#/$defs/nonEmpty" },
+        "run_id": { "$ref": "#/$defs/nonEmpty" },
+        "source": { "$ref": "#/$defs/nonEmpty" },
+        "cursor": { "$ref": "#/$defs/cursor" },
+        "estimated_total": {
+          "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+        }
+      }
+    },
+    "work": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["work_id", "region_id", "run_id", "payload", "capability", "priority", "cost"],
+      "properties": {
+        "work_id": { "$ref": "#/$defs/nonEmpty" },
+        "region_id": { "$ref": "#/$defs/nonEmpty" },
+        "run_id": { "$ref": "#/$defs/nonEmpty" },
+        "payload": { "$ref": "#/$defs/artifact" },
+        "capability": {
+          "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }]
+        },
+        "priority": { "type": "integer" },
+        "cost": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item", "owner", "epoch"],
+      "properties": {
+        "item": { "$ref": "#/$defs/work" },
+        "owner": { "$ref": "#/$defs/nonEmpty" },
+        "epoch": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "parkReason": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "key"],
+          "properties": { "kind": { "const": "wait" }, "key": { "$ref": "#/$defs/nonEmpty" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "work_id"],
+          "properties": { "kind": { "const": "dependency" }, "work_id": { "$ref": "#/$defs/nonEmpty" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "account"],
+          "properties": { "kind": { "const": "budget" }, "account": { "$ref": "#/$defs/nonEmpty" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "capability"],
+          "properties": { "kind": { "const": "capability" }, "capability": { "$ref": "#/$defs/nonEmpty" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "domain"],
+          "properties": { "kind": { "const": "backpressure" }, "domain": { "$ref": "#/$defs/nonEmpty" } }
+        }
+      ]
+    },
+    "parked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item", "reason"],
+      "properties": {
+        "item": { "$ref": "#/$defs/work" },
+        "reason": { "$ref": "#/$defs/parkReason" }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["regions", "ready", "active", "parked", "known", "last_run", "claim_epochs"],
+      "properties": {
+        "regions": { "type": "object", "additionalProperties": { "$ref": "#/$defs/region" } },
+        "ready": {
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/work" } }
+        },
+        "active": { "type": "object", "additionalProperties": { "$ref": "#/$defs/claim" } },
+        "parked": { "type": "object", "additionalProperties": { "$ref": "#/$defs/parked" } },
+        "known": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmpty" } },
+        "last_run": { "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }] },
+        "claim_epochs": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 1 }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "checkpoint_version": "cymule.virtual-checkpoint/1",
+  "checkpoint_id": "virtual:fixture:1",
+  "parent_checkpoint": null,
+  "snapshot": {
+    "regions": {
+      "region:fixture": {
+        "region_id": "region:fixture",
+        "run_id": "run:fixture",
+        "source": "fixture.range",
+        "cursor": {
+          "version": "fixture/1",
+          "position": "0",
+          "exhausted": false
+        },
+        "estimated_total": 1000000
+      }
+    },
+    "ready": {},
+    "active": {},
+    "parked": {},
+    "known": [],
+    "last_run": null,
+    "claim_epochs": {}
+  }
+}

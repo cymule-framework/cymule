@@ -37,6 +37,7 @@ The following domains evolve independently:
 | Resource descriptor | `cymule.resource/1` | identity excludes realization locations |
 | Resource handoff | `cymule.resource-handoff/1` | transfer IDs are idempotent per target Run |
 | Wait activation | `cymule.wait-activation/1` | external delivery ID fixes source, targets, and result |
+| Virtual checkpoint | `cymule.virtual-checkpoint/1` | cursor and bounded frontier advance together |
 | Conformance profile | `cymule.conformance/1` | complete profile cases are required |
 
 Changing effect identity, scope isolation, authority, causal admission, replay,
@@ -156,6 +157,27 @@ When an activation or other wait completion makes a Continuation `Ready`, a
 resume after any process boundary MUST advance its epoch and commit a new fenced
 Attempt before interpretation. The yielded Attempt that parked the wait MUST
 NOT be reused.
+
+M3 virtual materialization MUST checkpoint each source-owned successor cursor
+with the complete bounded ready, active, and parked frontier that it produced.
+The checkpoint is a typed M1 application-journal record with a stable ID and an
+explicit parent checkpoint. Reusing the ID with different state MUST fail. A
+failed or stale CAS MUST leave the in-process scheduler at its prior snapshot;
+after an unknown acknowledgement the caller reopens and reads the durable
+checkpoint before retrying the same immutable source cursor.
+For one cursor, a source MUST return a deterministic bounded page and successor.
+An undeclared cursor-version change, non-terminal stalled cursor, empty or
+repeated work identity, oversized page, or partial source failure MUST leave the
+entire scheduler snapshot unchanged.
+
+Parked work MUST have a rebuildable exact-reason index. Waking one reason MUST
+not require scanning unrelated parked work. Work parked on an M1 wait uses the
+exact wait ID as its reason key. When an identified wait activation wakes M3
+work, the activation receipt, M1 wait and Continuation updates, and M3 scheduler
+checkpoint MUST be admitted by one CAS or not at all.
+An activation already committed without that M3 checkpoint MUST NOT later be
+relabeled as an atomic cross-profile transition; a retry succeeds only when the
+exact checkpoint record was committed with the activation.
 
 ## 8. Causal events
 

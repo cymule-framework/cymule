@@ -136,3 +136,21 @@ target Run's M1 application journal. The caller supplies source Run, target Run,
 stable transfer ID, and target slot. Handoffs survive reopen, retry
 idempotently, and reject conflicting ID reuse without adding Resource semantics
 to M1 storage.
+
+## Large virtual work
+
+Status: implemented foundation.
+
+`cymule-virtual` materializes bounded pages from a provider-neutral
+`RegionSource`; an opaque cursor, not an offset interpreted by Cymule, names the
+next source position. `cymule.virtual-checkpoint/1` records commit that cursor
+with the complete bounded scheduler frontier and an explicit checkpoint parent
+through an M1 application journal. Stale CAS rolls the in-process scheduler back
+to its previous snapshot, and reopen restores the last committed checkpoint.
+
+Parked work maintains a rebuildable exact-reason index rather than scanning the
+parked population. A work item blocked on an M1 wait uses the exact wait ID as
+its index key. `DurableVirtualController` can therefore lower one identified
+activation and the resulting M3 wake snapshot into the same M1 CAS revision.
+Concrete databases, object listings, queues, clocks, and signal transports stay
+behind `RegionSource` or activation plugins.

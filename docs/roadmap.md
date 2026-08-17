@@ -69,11 +69,13 @@ Status: partial.
 - virtual regions, opaque cursors, bounded materialization, parked indexes,
   capability-aware claims, fencing, deterministic Run fairness, and portable
   scheduler snapshots are implemented;
+- M1-backed versioned checkpoints atomically persist source cursors and bounded
+  frontiers, exact reason indexes avoid parked-work scans, and wait activation
+  can commit its M3 indexed wake in the same CAS revision;
 - million-item tests prove bounded frontiers, fairness, park/wake, stale-owner
   rejection, and restore behavior;
-- durable cursor integration, retry/failure records, weighted fairness,
-  partition migration, subtree compaction, and partial rehydration remain
-  proposed.
+- retry/failure result records, weighted fairness, partition migration, subtree
+  compaction, and partial rehydration remain proposed.
 
 ## M4 - Live evolution
 

@@ -139,6 +139,12 @@ pub struct VirtualSnapshot {
     pub active: BTreeMap<String, ClaimedWork>,
     /// Parked work indexed by identity.
     pub parked: BTreeMap<String, ParkedWork>,
+    /// Derived exact reason-to-work index for bounded wake-up.
+    ///
+    /// The index is rebuilt from `parked` on restore and is not serialized as
+    /// canonical checkpoint data.
+    #[serde(skip)]
+    pub parked_index: BTreeMap<ParkReason, BTreeSet<String>>,
     /// Every identity already materialized from a source.
     pub known: BTreeSet<String>,
     /// Last Run selected by deterministic round-robin fairness.

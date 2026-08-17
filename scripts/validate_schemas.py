@@ -147,6 +147,21 @@ def main() -> int:
     else:
         raise AssertionError("wait activation schema accepted a provider field")
 
+    virtual_checkpoint = load(root / "tests/fixtures/virtual-checkpoint.json")
+    virtual_validator = Draft202012Validator(
+        by_title["Cymule Virtual Checkpoint cymule.virtual-checkpoint/1"],
+        registry=registry,
+    )
+    virtual_validator.validate(virtual_checkpoint)
+    malformed_virtual = dict(virtual_checkpoint)
+    malformed_virtual["provider"] = "must-not-enter-virtual-checkpoint"
+    try:
+        virtual_validator.validate(malformed_virtual)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("virtual checkpoint schema accepted a provider field")
+
     credential_url = {
         "resource_version": "cymule.resource/1",
         "shape": "object",

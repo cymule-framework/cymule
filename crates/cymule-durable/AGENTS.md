@@ -35,6 +35,11 @@
   lifecycle records cannot acknowledge different sides of one transition.
 - A logical transition spanning multiple higher-profile journals must use
   `checkpoint_journals`; separate appends cannot claim atomic visibility.
+- When wait activation also wakes a higher-profile parked/index projection, use
+  `checkpoint_wait_activation_journals` so the activation receipt, M1 waits,
+  Continuations, and typed projection checkpoint share one CAS revision.
+  Never attach a new projection record after that activation was committed;
+  redelivery is idempotent only when every requested record already exists.
 - Reference in-memory synchronization is adapter-local and non-blocking.
   Contention must surface as a CAS conflict rather than waiting on a mutex.
 - Concrete storage belongs under `plugins/` and must pass this crate's shared

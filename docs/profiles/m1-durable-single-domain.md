@@ -21,6 +21,8 @@ Status: partial.
   rejection;
 - restart-safe `Ready` resumption that advances the epoch and commits a new
   fenced Attempt after the wait-owning Attempt has yielded;
+- atomic wait-activation plus higher-profile journal checkpoints, used to keep
+  M1 Continuations and M3 indexed wake projections in one CAS revision;
 - logical-clock authority leases and fencing epochs;
 - effect outbox enqueue, claim, settlement, and explicit `unknown`;
 - repeated reconciliation of an `unknown` outbox entry under its original

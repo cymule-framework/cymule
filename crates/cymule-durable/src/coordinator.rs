@@ -522,18 +522,72 @@ impl<S: DurableStore> DurableCoordinator<S> {
         machine: &Machine,
         activation: WaitActivation,
     ) -> DurableResult<String> {
+        self.checkpoint_wait_activation_journals(machine, activation, &[])
+    }
+
+    /// Atomically admit one wait activation together with higher-profile
+    /// projection checkpoints.
+    ///
+    /// This is the cross-profile boundary used when an M1 activation wakes M3
+    /// parked work or updates another derived controller. Any invalid or
+    /// conflicting journal record rejects the activation and every wait update
+    /// before CAS.
+    pub fn checkpoint_wait_activation_journals(
+        &mut self,
+        machine: &Machine,
+        activation: WaitActivation,
+        batches: &[JournalBatch],
+    ) -> DurableResult<String> {
         activation.verify()?;
+        let mut journal_ids = std::collections::BTreeSet::new();
+        for batch in batches {
+            validate_journal_batch(&batch.journal_id, &batch.records)?;
+            if batch.records.is_empty() {
+                return Err(DurableError::Validation(format!(
+                    "application journal {} has no checkpoint records",
+                    batch.journal_id
+                )));
+            }
+            if !journal_ids.insert(&batch.journal_id) {
+                return Err(DurableError::Validation(format!(
+                    "application journal {} appears twice in one checkpoint",
+                    batch.journal_id
+                )));
+            }
+        }
         let machine_snapshot = machine.snapshot();
         self.mutate_checked(|state| {
-            match state.wait_activations.get(&activation.activation_id) {
-                Some(existing) if existing == &activation => return Ok(()),
+            let is_new = match state.wait_activations.get(&activation.activation_id) {
+                Some(existing) if existing == &activation => false,
                 Some(_) => {
                     return Err(DurableError::IllegalTransition(format!(
                         "wait activation {} already exists with different semantics",
                         activation.activation_id
                     )));
                 }
-                None => {}
+                None => true,
+            };
+            if !is_new {
+                for batch in batches {
+                    for record in &batch.records {
+                        let existing =
+                            state
+                                .application_journals
+                                .get(&batch.journal_id)
+                                .and_then(|records| {
+                                    records
+                                        .iter()
+                                        .find(|existing| existing.record_id == record.record_id)
+                                });
+                        if existing != Some(record) {
+                            return Err(DurableError::IllegalTransition(format!(
+                                "wait activation {} was committed without journal record {}",
+                                activation.activation_id, record.record_id
+                            )));
+                        }
+                    }
+                }
+                return Ok(());
             }
             if machine.artifact(&activation.result).is_none() {
                 return Err(DurableError::Validation(format!(
@@ -591,6 +645,11 @@ impl<S: DurableStore> DurableCoordinator<S> {
             state
                 .wait_activations
                 .insert(activation.activation_id.clone(), activation);
+            for batch in batches {
+                for record in &batch.records {
+                    append_journal_record(state, &batch.journal_id, record.clone())?;
+                }
+            }
             Ok(())
         })
     }
