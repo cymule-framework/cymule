@@ -26,6 +26,12 @@ Status: partial.
 - non-blocking in-memory reference journal with conflicting update identity
   rejection;
 - frozen Draft 2020-12 wire schema and a Rust-validated occurrence fixture;
+- durable elicitation projections and `AgentInputController` checkpoints that
+  atomically move Session state to `RequiresAction` with an M1 input wait, then
+  retain `RequiresAction` until the final input wait completes and only then
+  return the Session to `Running`;
+- reopen, idempotent retry, and stale-CAS tests proving input wait and Session
+  projection cannot commit independently;
 - deterministic fake-host end-to-end tests;
 - adapter boundaries for ACP, MCP, A2A, editors, and model providers.
 
@@ -33,7 +39,7 @@ Status: partial.
 
 - explicit reconciliation/cancellation commands for `started` and `unknown`
   host occurrences and continuation from retained completed responses;
-- explicit input-required suspension/resume through durable waits;
+- completed input value validation against its declared JSON Schema;
 - workspace overlay commit/abort integration with scope obligations;
 - streaming chunk staging and finalized durable content;
 - ACP/MCP/A2A adapters and cross-language SDK interaction clients;

@@ -12,6 +12,9 @@
 - Higher profiles may append typed, self-validating records through
   `application_journals` so they share the M1 CAS authority. M1 stores only the
   versioned envelope; the owning profile validates and reduces its payload.
+- A higher-profile state projection coupled to a wait must use the atomic
+  journal-plus-wait checkpoints. Separate CAS commits may not claim one logical
+  suspension or completion.
 - Reference in-memory synchronization is adapter-local and non-blocking.
   Contention must surface as a CAS conflict rather than waiting on a mutex.
 - Concrete storage belongs under `plugins/` and must pass this crate's shared

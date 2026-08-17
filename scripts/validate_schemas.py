@@ -84,6 +84,21 @@ def main() -> int:
             "stop_reason": None,
         }
     )
+    agent_validator.validate(
+        {
+            "type": "elicitation",
+            "update_id": "update:agent-input:fixture:pending",
+            "elicitation": {
+                "wait_id": "wait:agent-input:fixture",
+                "request": {
+                    "request_id": "elicitation:fixture",
+                    "schema": {"type": "string"},
+                    "prompt": [{"type": "text", "text": "Continue?"}],
+                },
+                "response": None,
+            },
+        }
+    )
     malformed_occurrence = dict(agent_occurrence)
     malformed_occurrence["provider"] = "must-not-enter-agent-occurrence"
     try:

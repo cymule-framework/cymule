@@ -95,6 +95,13 @@ Continuation field set through a provider-neutral CAS store. Automatic capture
 and resumable interpretation at every safe point remain partial and are not
 claimed by the Embedded profile.
 
+M2 durable input suspension is one M1 safe-point transition: the pending
+elicitation projection, Session `RequiresAction` state, typed input wait, and
+Continuation `Waiting` state MUST enter the same CAS revision. Completion MUST
+atomically store the wait result and resolved elicitation; the Session remains
+`RequiresAction` while any elicitation is unresolved and returns to `Running`
+only when the final input wait completes.
+
 ## 8. Causal events
 
 A causal cut is a causally closed down-set of admitted events. Implementations

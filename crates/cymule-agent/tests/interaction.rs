@@ -1,15 +1,19 @@
 //! End-to-end agent interaction and reducer tests.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use cymule_agent::{
-    AgentError, AgentHost, AgentHostOccurrenceState, AgentHostRequest, AgentJournal, AgentMessage,
-    AgentOccurrenceStore, AgentResult, AgentSession, AgentState, AgentTurnDriver, AgentUpdate,
-    ContentBlock, ContextRequest, ContextSnapshot, ElicitationRequest, ElicitationResponse,
-    MemoryAgentJournal, MessageRole, ModelRequest, ModelResponse, PermissionDecision,
-    PermissionRequest, PermissionResponse, SessionStopReason, ToolCall, ToolCallStatus,
-    ToolRequest, ToolResponse, Usage, WorkspaceChange, WorkspaceReceipt,
+    AgentError, AgentHost, AgentHostOccurrenceState, AgentHostRequest, AgentInputController,
+    AgentJournal, AgentMessage, AgentOccurrenceStore, AgentResult, AgentSession, AgentState,
+    AgentTurnDriver, AgentUpdate, ContentBlock, ContextRequest, ContextSnapshot,
+    ElicitationRequest, ElicitationResponse, MemoryAgentJournal, MessageRole, ModelRequest,
+    ModelResponse, PermissionDecision, PermissionRequest, PermissionResponse, SessionStopReason,
+    ToolCall, ToolCallStatus, ToolRequest, ToolResponse, Usage, WorkspaceChange, WorkspaceReceipt,
 };
-use cymule_core::{ArtifactRef, Machine, canonical_digest};
-use cymule_durable::{DurableCoordinator, MemoryStore};
+use cymule_core::{ArtifactRef, Machine, ROOT_SCOPE_ID, canonical_digest};
+use cymule_durable::{
+    Continuation, ContinuationStatus, DurableCoordinator, FrameState, MemoryStore, WaitState,
+};
 use serde_json::json;
 
 #[derive(Default)]
@@ -121,6 +125,29 @@ fn usage(used: u64) -> Usage {
         used,
         capacity: 100,
         cost: None,
+    }
+}
+
+fn agent_continuation(run_id: &str) -> Continuation {
+    Continuation {
+        run_id: run_id.to_owned(),
+        plan_id: "plan:agent-test".to_owned(),
+        binding_context: "binding:agent-test/1".to_owned(),
+        frames: vec![FrameState {
+            invocation_id: "agent-turn".to_owned(),
+            region_path: Vec::new(),
+            next_step: 0,
+            locals: BTreeMap::new(),
+        }],
+        state: None,
+        wait_set: BTreeSet::new(),
+        scope_stack: vec![ROOT_SCOPE_ID.to_owned()],
+        effect_obligations: BTreeSet::new(),
+        authority_leases: BTreeSet::new(),
+        budget: BTreeMap::new(),
+        causal_frontier: BTreeSet::new(),
+        epoch: 0,
+        status: ContinuationStatus::Ready,
     }
 }
 
@@ -308,6 +335,182 @@ fn m1_cas_journal_reopens_the_agent_projection() {
     let reopened = AgentTurnDriver::resume("session:m1", FakeHost::default(), coordinator)
         .expect("M1 journal replays");
     assert_eq!(reopened.session(), &expected);
+}
+
+#[test]
+fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
+    let mut machine = Machine::new();
+    let result = machine.put_artifact("agent/input", br#"{"answer":"yes"}"#.to_vec());
+    let second_result = machine.put_artifact("agent/input", br#"{"details":"ready"}"#.to_vec());
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    coordinator
+        .put_continuation(agent_continuation("run:agent-input"))
+        .expect("continuation persists");
+
+    let request = ElicitationRequest {
+        request_id: "elicitation:approval".to_owned(),
+        schema: json!({"type": "object", "required": ["answer"]}),
+        prompt: vec![ContentBlock::Text {
+            text: "Continue?".to_owned(),
+        }],
+    };
+    let suspended = AgentInputController::suspend(
+        &mut coordinator,
+        "session:agent-input",
+        "run:agent-input",
+        request.clone(),
+    )
+    .expect("input wait suspends");
+    assert_eq!(suspended.session.state, AgentState::RequiresAction);
+    assert!(
+        suspended.session.elicitations["elicitation:approval"]
+            .response
+            .is_none()
+    );
+    assert_eq!(
+        coordinator.state().expect("state").waits[&suspended.wait_id].state,
+        WaitState::Pending
+    );
+    assert_eq!(
+        coordinator.state().expect("state").continuations["run:agent-input"].status,
+        ContinuationStatus::Waiting
+    );
+    let retry = AgentInputController::suspend(
+        &mut coordinator,
+        "session:agent-input",
+        "run:agent-input",
+        request,
+    )
+    .expect("suspension retry is idempotent");
+    assert_eq!(retry.wait_id, suspended.wait_id);
+    let second = AgentInputController::suspend(
+        &mut coordinator,
+        "session:agent-input",
+        "run:agent-input",
+        ElicitationRequest {
+            request_id: "elicitation:details".to_owned(),
+            schema: json!({"type": "object", "required": ["details"]}),
+            prompt: vec![ContentBlock::Text {
+                text: "Provide details".to_owned(),
+            }],
+        },
+    )
+    .expect("second input wait suspends");
+    drop(coordinator);
+
+    let mut reopened = DurableCoordinator::open(store.clone()).expect("store reopens");
+    let response = ElicitationResponse {
+        request_id: "elicitation:approval".to_owned(),
+        accepted: true,
+        value: Some(json!({"answer": "yes"})),
+        occurrence_binding: "binding:human-input/1".to_owned(),
+    };
+    let completed = AgentInputController::complete(
+        &mut reopened,
+        "session:agent-input",
+        &suspended.wait_id,
+        result.clone(),
+        response.clone(),
+    )
+    .expect("input completion resumes");
+    assert_eq!(completed.session.state, AgentState::RequiresAction);
+    assert_eq!(
+        completed.session.elicitations["elicitation:approval"].response,
+        Some(response.clone())
+    );
+    assert_eq!(
+        reopened.state().expect("state").waits[&suspended.wait_id].state,
+        WaitState::Completed
+    );
+    assert_eq!(
+        reopened.state().expect("state").continuations["run:agent-input"].status,
+        ContinuationStatus::Waiting
+    );
+    let second_response = ElicitationResponse {
+        request_id: "elicitation:details".to_owned(),
+        accepted: true,
+        value: Some(json!({"details": "ready"})),
+        occurrence_binding: "binding:human-input/1".to_owned(),
+    };
+    let all_completed = AgentInputController::complete(
+        &mut reopened,
+        "session:agent-input",
+        &second.wait_id,
+        second_result.clone(),
+        second_response.clone(),
+    )
+    .expect("last input completion resumes");
+    assert_eq!(all_completed.session.state, AgentState::Running);
+    assert_eq!(
+        reopened.state().expect("state").continuations["run:agent-input"].status,
+        ContinuationStatus::Ready
+    );
+    AgentInputController::complete(
+        &mut reopened,
+        "session:agent-input",
+        &second.wait_id,
+        second_result,
+        second_response,
+    )
+    .expect("completion retry is idempotent");
+    let revision_before_old_retry = reopened.revision().expect("revision exists").to_owned();
+    let old_retry = AgentInputController::complete(
+        &mut reopened,
+        "session:agent-input",
+        &suspended.wait_id,
+        result,
+        response,
+    )
+    .expect("older completion retry is read-only and idempotent");
+    assert_eq!(old_retry.revision, revision_before_old_retry);
+    drop(reopened);
+
+    let coordinator = DurableCoordinator::open(store).expect("store reopens again");
+    let driver = AgentTurnDriver::resume("session:agent-input", FakeHost::default(), coordinator)
+        .expect("completed input Session replays");
+    assert_eq!(driver.session().state, AgentState::Running);
+}
+
+#[test]
+fn stale_input_checkpoint_writes_neither_wait_nor_agent_update() {
+    let machine = Machine::new();
+    let store = MemoryStore::new();
+    let mut current = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    current
+        .put_continuation(agent_continuation("run:stale-input"))
+        .expect("continuation persists");
+    let mut stale = DurableCoordinator::open(store.clone()).expect("stale view opens");
+    current
+        .acquire_lease("test:advance", "worker", 0, 10)
+        .expect("current revision advances");
+
+    assert!(matches!(
+        AgentInputController::suspend(
+            &mut stale,
+            "session:stale-input",
+            "run:stale-input",
+            ElicitationRequest {
+                request_id: "elicitation:stale".to_owned(),
+                schema: json!({"type": "string"}),
+                prompt: Vec::new(),
+            },
+        ),
+        Err(AgentError::Persistence(_))
+    ));
+    let mut reopened = DurableCoordinator::open(store).expect("store reopens");
+    assert!(reopened.state().expect("state").waits.is_empty());
+    assert!(
+        AgentJournal::load(&mut reopened, "session:stale-input")
+            .expect("journal loads")
+            .is_empty()
+    );
 }
 
 #[test]

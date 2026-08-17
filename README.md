@@ -298,6 +298,8 @@ Implemented today:
 - ambiguous mutating-effect recovery by reconciliation without redispatch;
 - typed agent interactions with M1-backed Session journal replay and
   binding-pinned host-call occurrences that block ambiguous redispatch;
+- atomic durable agent input waits that keep `RequiresAction`/`Running` Session
+  state and the owning Continuation wait in one CAS revision;
 - bounded virtual work with deterministic fairness and portable snapshots;
 - immutable Plan evolution DAGs, impact cones, canaries, rollback pins,
   migration receipts, and shadow evidence.

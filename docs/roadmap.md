@@ -45,11 +45,13 @@ Status: partial.
   application journal records;
 - all six replaceable agent host boundaries persist request-digested,
   binding-pinned occurrences and fail closed after ambiguous receipt loss;
+- typed input requests atomically couple `RequiresAction` and `Running` Session
+  projections to M1 wait registration and completion across process reopen;
 - a bounded reference turn driver passes context-model-tool-model end-to-end
   tests;
-- host-occurrence reconciliation, input suspension/resume, workspace scope
-  semantics, streaming finalization, protocol adapters, debugger queries, and
-  evidence views remain proposed.
+- host-occurrence reconciliation, completed-input schema enforcement, workspace
+  scope semantics, streaming finalization, protocol adapters, debugger queries,
+  and evidence views remain proposed.
 
 ## M3 - Large virtual work
 
