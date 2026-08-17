@@ -21,6 +21,10 @@
   Session state updates with the owning M1 wait transition. Never expose
   `RequiresAction` without a committed wait or ready a Continuation without the
   matching resolved Session projection.
+- Compile elicitation schemas as local Draft 2020-12 documents before suspension
+  and validate accepted values again from the persisted request before
+  completion. External schema retrieval stays disabled; schema or instance
+  failures must occur before the shared M1 CAS and leave no durable mutation.
 - Reconciliation queries the original binding and may settle only the original
   occurrence as `completed` or evidence-backed `not_applied`. A prepared call
   may be cancelled only with proof that dispatch never started. Reconciliation

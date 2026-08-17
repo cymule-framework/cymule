@@ -360,7 +360,13 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
 
     let request = ElicitationRequest {
         request_id: "elicitation:approval".to_owned(),
-        schema: json!({"type": "object", "required": ["answer"]}),
+        schema: json!({
+            "$defs": {"answer": {"type": "string"}},
+            "type": "object",
+            "properties": {"answer": {"$ref": "#/$defs/answer"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        }),
         prompt: vec![ContentBlock::Text {
             text: "Continue?".to_owned(),
         }],
@@ -480,6 +486,178 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
     let driver = AgentTurnDriver::resume("session:agent-input", FakeHost::default(), coordinator)
         .expect("completed input Session replays");
     assert_eq!(driver.session().state, AgentState::Running);
+}
+
+#[test]
+fn input_schema_and_external_references_fail_before_suspension() {
+    let machine = Machine::new();
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    coordinator
+        .put_continuation(agent_continuation("run:invalid-schema"))
+        .expect("continuation persists");
+    let revision = coordinator.revision().expect("revision exists").to_owned();
+
+    for (request_id, schema) in [
+        ("elicitation:invalid-schema", json!({"type": 42})),
+        (
+            "elicitation:external-schema",
+            json!({"$ref": "https://schemas.example.invalid/input.json"}),
+        ),
+    ] {
+        assert!(matches!(
+            AgentInputController::suspend(
+                &mut coordinator,
+                "session:invalid-schema",
+                "run:invalid-schema",
+                ElicitationRequest {
+                    request_id: request_id.to_owned(),
+                    schema,
+                    prompt: Vec::new(),
+                },
+            ),
+            Err(AgentError::Validation(_))
+        ));
+        assert_eq!(coordinator.revision(), Some(revision.as_str()));
+        assert!(coordinator.state().expect("state").waits.is_empty());
+        assert!(
+            AgentJournal::load(&mut coordinator, "session:invalid-schema")
+                .expect("journal loads")
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn invalid_completed_input_leaves_wait_and_session_pending() {
+    let mut machine = Machine::new();
+    let result = machine.put_artifact("agent/input", br#"{"answer":42}"#.to_vec());
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    coordinator
+        .put_continuation(agent_continuation("run:invalid-input"))
+        .expect("continuation persists");
+    let suspended = AgentInputController::suspend(
+        &mut coordinator,
+        "session:invalid-input",
+        "run:invalid-input",
+        ElicitationRequest {
+            request_id: "elicitation:invalid-input".to_owned(),
+            schema: json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": false
+            }),
+            prompt: Vec::new(),
+        },
+    )
+    .expect("input suspends");
+    let revision = coordinator.revision().expect("revision exists").to_owned();
+    let record_count = coordinator
+        .journal_records("session:invalid-input")
+        .expect("journal loads")
+        .len();
+
+    assert!(matches!(
+        AgentInputController::complete(
+            &mut coordinator,
+            "session:invalid-input",
+            &suspended.wait_id,
+            result,
+            ElicitationResponse {
+                request_id: "elicitation:invalid-input".to_owned(),
+                accepted: true,
+                value: Some(json!({"answer": 42})),
+                occurrence_binding: "binding:human-input/1".to_owned(),
+            },
+        ),
+        Err(AgentError::Validation(_))
+    ));
+    assert_eq!(coordinator.revision(), Some(revision.as_str()));
+    assert_eq!(
+        coordinator.state().expect("state").waits[&suspended.wait_id].state,
+        WaitState::Pending
+    );
+    assert_eq!(
+        coordinator.state().expect("state").continuations["run:invalid-input"].status,
+        ContinuationStatus::Waiting
+    );
+    assert_eq!(
+        coordinator
+            .journal_records("session:invalid-input")
+            .expect("journal loads")
+            .len(),
+        record_count
+    );
+    drop(coordinator);
+
+    let mut reopened = DurableCoordinator::open(store).expect("store reopens");
+    let session = AgentSession::replay(
+        "session:invalid-input",
+        AgentJournal::load(&mut reopened, "session:invalid-input").expect("journal replays"),
+    )
+    .expect("Session replays");
+    assert_eq!(session.state, AgentState::RequiresAction);
+    assert!(
+        session.elicitations["elicitation:invalid-input"]
+            .response
+            .is_none()
+    );
+}
+
+#[test]
+fn declined_input_completes_without_an_instance_value() {
+    let mut machine = Machine::new();
+    let result = machine.put_artifact("agent/input-declined", b"null".to_vec());
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    coordinator
+        .put_continuation(agent_continuation("run:declined-input"))
+        .expect("continuation persists");
+    let suspended = AgentInputController::suspend(
+        &mut coordinator,
+        "session:declined-input",
+        "run:declined-input",
+        ElicitationRequest {
+            request_id: "elicitation:declined-input".to_owned(),
+            schema: json!({"type": "string", "minLength": 1}),
+            prompt: Vec::new(),
+        },
+    )
+    .expect("input suspends");
+    let completed = AgentInputController::complete(
+        &mut coordinator,
+        "session:declined-input",
+        &suspended.wait_id,
+        result,
+        ElicitationResponse {
+            request_id: "elicitation:declined-input".to_owned(),
+            accepted: false,
+            value: None,
+            occurrence_binding: "binding:human-input/1".to_owned(),
+        },
+    )
+    .expect("decline completes without a value");
+
+    assert_eq!(completed.session.state, AgentState::Running);
+    assert_eq!(
+        coordinator.state().expect("state").waits[&suspended.wait_id].state,
+        WaitState::Completed
+    );
+    assert_eq!(
+        coordinator.state().expect("state").continuations["run:declined-input"].status,
+        ContinuationStatus::Ready
+    );
 }
 
 #[test]

@@ -29,6 +29,17 @@ Build a Cymule implementation only when at least one is true:
 
 Otherwise adopt a maintained mechanism and wrap it with a Cymule interface.
 
+The M2 input controller applies this decision with the maintained Rust
+`jsonschema` compiler outside `cymule-core`. Draft 2020-12 is selected
+explicitly and default filesystem/HTTP resolution features are disabled, so
+schema enforcement remains deterministic and local to the submitted contract.
+The current resolver library uses a per-registry read/write lock for its
+internal reference cache. Cymule does not share that registry across turns and
+does not use the lock for Session, wait, CAS, dispatch, or recovery authority;
+accepted schemas are recompiled at completion instead of introducing a shared
+framework cache. This bounded library mechanism is not a coordination primitive
+in Cymule's execution model.
+
 ## Lock policy
 
 Locks are never semantic authority. Prefer immutable records, optimistic CAS,

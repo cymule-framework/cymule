@@ -30,6 +30,10 @@ Status: partial.
   atomically move Session state to `RequiresAction` with an M1 input wait, then
   retain `RequiresAction` until the final input wait completes and only then
   return the Session to `Running`;
+- self-contained Draft 2020-12 elicitation schema compilation before suspension
+  and accepted-value validation before completion, with external retrieval
+  disabled and fault tests proving rejection leaves the Session, wait,
+  Continuation, journal, and CAS revision unchanged;
 - reopen, idempotent retry, and stale-CAS tests proving input wait and Session
   projection cannot commit independently;
 - query-only `AgentRecoveryController` reconciliation against the original
@@ -44,7 +48,6 @@ Status: partial.
 
 - durable foreground turn control and continuation from retained completed
   responses;
-- completed input value validation against its declared JSON Schema;
 - workspace overlay commit/abort integration with scope obligations;
 - streaming chunk staging and finalized durable content;
 - ACP/MCP/A2A adapters and cross-language SDK interaction clients;
@@ -55,3 +58,8 @@ Status: partial.
 Capability advertisement, authentication, permission, credential access, and
 effect release remain separate decisions. A tool catalog entry never grants
 execution authority.
+
+Version decision: this enforcement completes behavior already represented by
+the frozen elicitation `schema` and response `value` fields. It changes neither
+their wire shape nor the `agent-protocol` schema version while M2 remains
+partial.

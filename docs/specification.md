@@ -102,6 +102,15 @@ atomically store the wait result and resolved elicitation; the Session remains
 `RequiresAction` while any elicitation is unresolved and returns to `Running`
 only when the final input wait completes.
 
+An M2 elicitation schema MUST be a self-contained JSON Schema Draft 2020-12
+document that compiles without external resource retrieval. The schema MUST be
+accepted before suspension. An accepted response MUST carry a value that
+satisfies the persisted request schema before any completion record is written;
+a declined response MUST NOT carry a value. Schema compilation or value
+validation failure leaves the wait, Session projection, Continuation, and CAS
+revision unchanged. Draft 2020-12 `format` remains an annotation rather than an
+additional validation assertion.
+
 ## 8. Causal events
 
 A causal cut is a causally closed down-set of admitted events. Implementations

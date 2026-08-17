@@ -47,13 +47,15 @@ Status: partial.
   binding-pinned occurrences and fail closed after ambiguous receipt loss;
 - typed input requests atomically couple `RequiresAction` and `Running` Session
   projections to M1 wait registration and completion across process reopen;
+- self-contained Draft 2020-12 input schemas and accepted values are enforced
+  before durable suspension/completion writes, with external retrieval disabled;
 - ambiguous host calls reconcile through their original binding to typed
   `completed` or evidence-backed `not_applied` without redispatch;
 - a bounded reference turn driver passes context-model-tool-model end-to-end
   tests;
-- durable foreground turn control, completed-input schema enforcement,
-  workspace scope semantics, streaming finalization, protocol adapters,
-  debugger queries, and evidence views remain proposed.
+- durable foreground turn control, workspace scope semantics, streaming
+  finalization, protocol adapters, debugger queries, and evidence views remain
+  proposed.
 
 ## M3 - Large virtual work
 
