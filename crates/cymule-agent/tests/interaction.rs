@@ -19,6 +19,18 @@ struct FakeHost {
 }
 
 impl AgentHost for FakeHost {
+    fn bind_occurrence(&mut self, request: &AgentHostRequest) -> AgentResult<String> {
+        let kind = match request {
+            AgentHostRequest::Context(_) => "context",
+            AgentHostRequest::Model(_) => "model",
+            AgentHostRequest::Permission(_) => "permission",
+            AgentHostRequest::Tool(_) => "tool",
+            AgentHostRequest::Elicitation(_) => "elicitation",
+            AgentHostRequest::Workspace(_) => "workspace",
+        };
+        Ok(format!("binding:{kind}/1"))
+    }
+
     fn select_context(&mut self, request: ContextRequest) -> AgentResult<ContextSnapshot> {
         Ok(ContextSnapshot {
             snapshot_id: format!("context:{}", request.messages.len()),
@@ -138,6 +150,7 @@ fn host_occurrence_rejects_mismatched_response_identity() {
             operation: "workspace.read".to_owned(),
             input: json!({}),
         }),
+        "binding:tool/1",
     )
     .expect("occurrence prepares");
     let started = prepared.start().expect("occurrence starts");
@@ -146,6 +159,14 @@ fn host_occurrence_rejects_mismatched_response_identity() {
             tool_call_id: "tool:different".to_owned(),
             content: Vec::new(),
             occurrence_binding: "binding:tool/1".to_owned(),
+        })),
+        Err(AgentError::Validation(_))
+    ));
+    assert!(matches!(
+        started.complete(cymule_agent::AgentHostResponse::Tool(ToolResponse {
+            tool_call_id: "tool:expected".to_owned(),
+            content: Vec::new(),
+            occurrence_binding: "binding:tool/different".to_owned(),
         })),
         Err(AgentError::Validation(_))
     ));
@@ -251,7 +272,7 @@ fn durable_turn_reopens_to_the_same_projection() {
     assert!(
         occurrences
             .iter()
-            .all(|occurrence| occurrence.occurrence_binding.is_some())
+            .all(|occurrence| !occurrence.occurrence_binding.is_empty())
     );
 
     let reopened = AgentTurnDriver::resume("session:durable", FakeHost::default(), journal)
@@ -344,6 +365,18 @@ fn elicitation_and_workspace_calls_are_pinned_occurrences() {
 struct FailingToolHost;
 
 impl AgentHost for FailingToolHost {
+    fn bind_occurrence(&mut self, request: &AgentHostRequest) -> AgentResult<String> {
+        let kind = match request {
+            AgentHostRequest::Context(_) => "context",
+            AgentHostRequest::Model(_) => "model",
+            AgentHostRequest::Permission(_) => "permission",
+            AgentHostRequest::Tool(_) => "tool",
+            AgentHostRequest::Elicitation(_) => "elicitation",
+            AgentHostRequest::Workspace(_) => "workspace",
+        };
+        Ok(format!("binding:{kind}/1"))
+    }
+
     fn select_context(&mut self, _request: ContextRequest) -> AgentResult<ContextSnapshot> {
         Ok(ContextSnapshot {
             snapshot_id: "context:crash".to_owned(),
@@ -420,6 +453,7 @@ fn host_failure_preserves_the_last_accepted_interaction_state() {
     assert!(occurrences.iter().any(|occurrence| {
         occurrence.state == AgentHostOccurrenceState::Unknown
             && occurrence.occurrence_id.starts_with("occurrence:tool:")
+            && occurrence.occurrence_binding == "binding:tool/1"
     }));
     assert!(matches!(
         AgentTurnDriver::resume("session:crash", FailingToolHost, journal),

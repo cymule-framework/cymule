@@ -17,7 +17,8 @@ Status: partial.
 - an M1 `DurableCoordinator` journal integration that commits agent updates
   through the same whole-state CAS authority as Continuations and waits;
 - typed host occurrences for context, model, permission, tool, elicitation, and
-  workspace calls with immutable request digests and occurrence bindings;
+  workspace calls with immutable request digests and occurrence bindings
+  resolved before `prepared` is persisted;
 - `prepared -> started -> completed | unknown` persistence through both the
   in-memory journal and M1 whole-state CAS, including retained typed responses;
 - restart rejection for unresolved occurrences and a receipt-loss fault test

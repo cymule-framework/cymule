@@ -498,7 +498,7 @@ pub struct AgentHostOccurrence {
     pub request_digest: String,
     pub state: AgentHostOccurrenceState,
     pub response: Option<AgentHostResponse>,
-    pub occurrence_binding: Option<String>,
+    pub occurrence_binding: String,
     pub failure: Option<String>,
 }
 
@@ -508,6 +508,7 @@ impl AgentHostOccurrence {
         occurrence_id: impl Into<String>,
         session_id: impl Into<String>,
         request: AgentHostRequest,
+        occurrence_binding: impl Into<String>,
     ) -> AgentResult<Self> {
         let request_digest = canonical_digest(&request)
             .map_err(|error| AgentError::Validation(error.to_string()))?;
@@ -518,7 +519,7 @@ impl AgentHostOccurrence {
             request_digest,
             state: AgentHostOccurrenceState::Prepared,
             response: None,
-            occurrence_binding: None,
+            occurrence_binding: occurrence_binding.into(),
             failure: None,
         };
         occurrence.validate()?;
@@ -527,17 +528,12 @@ impl AgentHostOccurrence {
 
     /// Mark that the host invocation may now have happened.
     pub fn start(&self) -> AgentResult<Self> {
-        self.successor(AgentHostOccurrenceState::Started, None, None)
+        self.successor(AgentHostOccurrenceState::Started, None)
     }
 
     /// Commit a typed response and immutable occurrence binding.
     pub fn complete(&self, response: AgentHostResponse) -> AgentResult<Self> {
-        let binding = response.occurrence_binding().to_owned();
-        self.successor(
-            AgentHostOccurrenceState::Completed,
-            Some(response),
-            Some(binding),
-        )
+        self.successor(AgentHostOccurrenceState::Completed, Some(response))
     }
 
     /// Record an ambiguous host result without authorizing redispatch.
@@ -549,7 +545,7 @@ impl AgentHostOccurrence {
             request_digest: self.request_digest.clone(),
             state: AgentHostOccurrenceState::Unknown,
             response: None,
-            occurrence_binding: None,
+            occurrence_binding: self.occurrence_binding.clone(),
             failure: Some(failure.into()),
         };
         self.validate_successor(&next)?;
@@ -563,9 +559,12 @@ impl AgentHostOccurrence {
 
     /// Verify the complete occurrence snapshot.
     pub fn validate(&self) -> AgentResult<()> {
-        if self.occurrence_id.is_empty() || self.session_id.is_empty() {
+        if self.occurrence_id.is_empty()
+            || self.session_id.is_empty()
+            || self.occurrence_binding.is_empty()
+        {
             return Err(AgentError::Validation(
-                "host occurrence and Session identities must not be empty".to_owned(),
+                "host occurrence, Session, and binding identities must not be empty".to_owned(),
             ));
         }
         let expected = canonical_digest(&self.request)
@@ -578,10 +577,7 @@ impl AgentHostOccurrence {
         }
         match self.state {
             AgentHostOccurrenceState::Prepared | AgentHostOccurrenceState::Started => {
-                if self.response.is_some()
-                    || self.occurrence_binding.is_some()
-                    || self.failure.is_some()
-                {
+                if self.response.is_some() || self.failure.is_some() {
                     return Err(AgentError::Validation(
                         "prepared or started occurrence cannot contain an outcome".to_owned(),
                     ));
@@ -624,12 +620,7 @@ impl AgentHostOccurrence {
                     }
                     _ => {}
                 }
-                let binding = self.occurrence_binding.as_deref().ok_or_else(|| {
-                    AgentError::Validation(
-                        "completed occurrence requires an immutable binding".to_owned(),
-                    )
-                })?;
-                if binding.is_empty() || binding != response.occurrence_binding() {
+                if self.occurrence_binding != response.occurrence_binding() {
                     return Err(AgentError::Validation(
                         "host occurrence binding does not match its response".to_owned(),
                     ));
@@ -641,9 +632,9 @@ impl AgentHostOccurrence {
                 }
             }
             AgentHostOccurrenceState::Unknown => {
-                if self.response.is_some() || self.occurrence_binding.is_some() {
+                if self.response.is_some() {
                     return Err(AgentError::Validation(
-                        "unknown occurrence cannot claim a response or binding".to_owned(),
+                        "unknown occurrence cannot claim a response".to_owned(),
                     ));
                 }
                 if self.failure.as_deref().is_none_or(str::is_empty) {
@@ -667,6 +658,7 @@ impl AgentHostOccurrence {
             || self.session_id != next.session_id
             || self.request != next.request
             || self.request_digest != next.request_digest
+            || self.occurrence_binding != next.occurrence_binding
         {
             return Err(AgentError::IllegalTransition(
                 "host occurrence identity or request changed".to_owned(),
@@ -698,7 +690,6 @@ impl AgentHostOccurrence {
         &self,
         state: AgentHostOccurrenceState,
         response: Option<AgentHostResponse>,
-        occurrence_binding: Option<String>,
     ) -> AgentResult<Self> {
         let next = Self {
             occurrence_id: self.occurrence_id.clone(),
@@ -707,7 +698,7 @@ impl AgentHostOccurrence {
             request_digest: self.request_digest.clone(),
             state,
             response,
-            occurrence_binding,
+            occurrence_binding: self.occurrence_binding.clone(),
             failure: None,
         };
         self.validate_successor(&next)?;
