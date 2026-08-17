@@ -1,11 +1,14 @@
 use crate::{
-    AgentResult, ContextRequest, ContextSnapshot, ElicitationRequest, ElicitationResponse,
-    ModelRequest, ModelResponse, PermissionRequest, PermissionResponse, ToolRequest, ToolResponse,
-    WorkspaceChange, WorkspaceReceipt,
+    AgentHostRequest, AgentResult, ContextRequest, ContextSnapshot, ElicitationRequest,
+    ElicitationResponse, ModelRequest, ModelResponse, PermissionRequest, PermissionResponse,
+    ToolRequest, ToolResponse, WorkspaceChange, WorkspaceReceipt,
 };
 
 /// Replaceable host boundary for one agent interaction runtime.
 pub trait AgentHost {
+    /// Resolve and pin the implementation binding before an occurrence starts.
+    fn bind_occurrence(&mut self, request: &AgentHostRequest) -> AgentResult<String>;
+
     /// Select and pin the exact context visible to a model occurrence.
     fn select_context(&mut self, request: ContextRequest) -> AgentResult<ContextSnapshot>;
 

@@ -13,9 +13,10 @@
   durable authority. Adapter-local exclusion must be non-blocking and must
   surface contention instead of turning a lock into interaction semantics.
 - Every replaceable context, model, permission, tool, elicitation, and workspace
-  host call must persist `prepared` and `started` before invocation and a typed,
-  binding-pinned `completed` response afterward. A missing receipt or host error
-  is ambiguous and must block automatic redispatch until explicit recovery.
+  host call must resolve its implementation binding, persist that binding with
+  `prepared` and `started` before invocation, and retain it in a typed
+  `completed` or `unknown` outcome. A missing receipt or host error is ambiguous
+  and must block automatic redispatch until explicit recovery.
 - Login, capability advertisement, permission, policy, credential access, and
   effect release are separate decisions and must remain fail closed.
 - Add reducer and end-to-end tests for every new update or interaction state.

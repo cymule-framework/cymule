@@ -336,10 +336,12 @@ impl<H: AgentHost, J: AgentJournal + AgentOccurrenceStore> AgentTurnDriver<H, J>
         request: AgentHostRequest,
     ) -> AgentResult<AgentHostOccurrence> {
         self.occurrence_sequence += 1;
+        let occurrence_binding = self.host.bind_occurrence(&request)?;
         let prepared = AgentHostOccurrence::prepare(
             format!("occurrence:{kind}:{}", self.occurrence_sequence),
             self.session.session_id.clone(),
             request,
+            occurrence_binding,
         )?;
         self.journal.record_occurrence(&prepared)?;
         let started = prepared.start()?;

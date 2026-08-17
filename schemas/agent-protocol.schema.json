@@ -279,9 +279,7 @@
         "request_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "state": { "enum": ["prepared", "started", "completed", "unknown"] },
         "response": { "oneOf": [{ "$ref": "#/$defs/hostResponse" }, { "type": "null" }] },
-        "occurrence_binding": {
-          "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }]
-        },
+        "occurrence_binding": { "$ref": "#/$defs/nonEmpty" },
         "failure": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] }
       },
       "allOf": [
@@ -300,7 +298,7 @@
           "then": {
             "properties": {
               "response": { "type": "null" },
-              "occurrence_binding": { "type": "null" },
+              "occurrence_binding": { "$ref": "#/$defs/nonEmpty" },
               "failure": { "type": "string", "minLength": 1 }
             }
           }
