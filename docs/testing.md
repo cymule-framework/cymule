@@ -127,6 +127,13 @@ Unknown observation. They count prepare, dispatch, and reconciliation calls and
 verify the exact Machine/outbox pair after reopen; a successful Run alone is not
 proof that the provider was invoked once.
 
+Run that matrix independently for nested commit-gated, eager observational, and
+explicit-release effects. Nested tests inspect the child scope on both sides of
+commit. Eager tests prove settlement can precede root commit and that the bound
+result survives reopen. Explicit tests prove ordinary resume cannot dispatch,
+then lose claim or settlement receipts after the caller release and replay the
+same terminal Result.
+
 Fault adapters belong in test support or behind existing substrate interfaces.
 Do not add test-only branches to the semantic reducer. Do not use wall-clock
 races as correctness evidence when an explicit barrier, counter, epoch, or CAS

@@ -31,12 +31,17 @@ Status: partial.
   unrelated canonical deltas; prepare response loss reuses the same intent;
 - `unknown` outbox entries remain reconciliation-eligible across repeated
   process reopen and can later settle under the original claim;
+- nested Region frames and scope stacks resume from sealed-Plan paths; child
+  effects remain staged until child commit and survive lost enqueue/commit
+  receipts without duplicate dispatch;
+- observational eager effects bind durable results before scope commit, while
+  explicit effects remain prepared until an idempotent caller release after
+  commit; claim, `Unknown`, and settlement receipt loss are fault-tested;
 - identified signal/timer activation receipts atomically match and complete
   selected waits, enforce consume-once competition, survive redelivery/reopen,
   and resume under a new fenced Attempt epoch;
-- nested scope and non-commit-gated effect resumption, bounded clock/signal
-  source drivers, parked-index integration, and their additional crash windows
-  remain proposed;
+- bounded clock/signal source drivers, parked-index integration, and their
+  additional crash windows remain proposed;
 - process-level crash injection for every effect window;
 - snapshot compaction and suffix rehydration;
 - canonical component-call occurrences and exact execution replay without

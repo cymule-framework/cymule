@@ -1162,7 +1162,7 @@ fn ensure_effect_enqueue_machine(
             intent_id,
             scope_id,
             operation,
-            mutating: true,
+            mutating: _,
             args,
             occurrence_binding,
         } if proposed.run_id == dispatch.run_id

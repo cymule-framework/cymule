@@ -45,6 +45,16 @@ Status: partial.
 - non-blocking shared-memory CAS reference and atomic directory-store adapter;
 - resumable sequential `call`/`wait` interpretation with process reopen, epoch
   advance, and component-result replay without reinvocation;
+- nested Region interpretation with index-only persisted frame paths, durable
+  scope stacks, child-result binding, and restart-safe child commit;
+- nested commit-gated effects that remain staged while their child scope is
+  open and dispatch exactly once after a durable child commit, including lost
+  enqueue and child-commit receipt recovery;
+- observational eager effects that settle and durably bind their result before
+  scope commit, including claim, `Unknown`, and settlement receipt loss;
+- explicit-release effects that remain prepared after scope commit, expose a
+  stable release-required outcome, and replay a caller-authorized release and
+  completed Result without duplicate dispatch;
 - commit-gated root effects with atomic outbox enqueue, fenced
   `DispatchStarted`, settlement, and reconciliation recovery;
 - stage-specific canonical delta validation that permits only the exact effect
@@ -62,11 +72,7 @@ Status: partial.
 
 ## Remaining completion gates
 
-- resumable interpreter integration for nested scopes, observational eager
-  effects, and explicit-release effects;
 - bounded timer and signal source drivers plus parked-index selection;
-- nested/eager/explicit-release effect integration and its corresponding crash
-  windows;
 - snapshot compaction and suffix rehydration;
 - all SDK control/query surfaces and restart-level end-to-end tests;
 - production resolver/store plugins and durable activation from incoming

@@ -7,6 +7,9 @@
 - Continuations contain only typed canonical references and explicit logical
   positions. Never persist process memory, closures, host-language stacks, or
   ambient time.
+- Nested interpreter frames persist an index-only `region_path` into the sealed
+  Plan and a matching scope stack. Resume must re-resolve that path from the
+  immutable Plan; never serialize nested Region bodies into Continuations.
 - Wait completion, lease acquisition, outbox claims, occurrence recording, and
   snapshot publication must be idempotent and fenced.
 - Higher profiles that couple a logical lease to journal state must preview the
@@ -33,6 +36,10 @@
   the exact appended Machine Events, command receipts, and allowed Artifacts
   against the proposed outbox transition. Never use a generic Machine write for
   `Unknown`; its observation Event and outbox state share one CAS.
+- Eager observational effects keep their frame on the effect site until the
+  durable result Artifact can be bound. Explicit effects return a stable
+  release-required outcome and may claim only after their scope commits;
+  release retry after receipt loss returns the recorded Result.
 - Higher profiles may append typed, self-validating records through
   `application_journals` so they share the M1 CAS authority. M1 stores only the
   versioned envelope; the owning profile validates and reduces its payload.
