@@ -1,13 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use cymule_core::content_id;
+use cymule_core::{ReplayAvailability, canonical_digest, content_id};
 use cymule_durable::WaitActivation;
 
 use crate::{
-    ClaimedWork, FrontierLimits, MaterializedPage, ParkReason, ParkedWork, RegionMigrationKind,
-    RegionMigrationPlan, RegionMigrationReceipt, RegionMigrationRequest, SchedulingPolicy,
-    VIRTUAL_REGION_MIGRATION_VERSION, VIRTUAL_WORK_OCCURRENCE_VERSION, VirtualError, VirtualRegion,
-    VirtualResult, VirtualSnapshot, WorkItem, WorkOccurrence, WorkOccurrenceState, WorkResolution,
+    ArchivedWorkIndex, ClaimedWork, CompactedWorkIndex, FrontierLimits, MaterializedPage,
+    ParkReason, ParkedWork, RegionMigrationKind, RegionMigrationPlan, RegionMigrationReceipt,
+    RegionMigrationRequest, SchedulingPolicy, VIRTUAL_ARCHIVE_MANIFEST_VERSION,
+    VIRTUAL_COMPACTION_CERTIFICATE_VERSION, VIRTUAL_COMPACTION_CONTROL_VERSION,
+    VIRTUAL_REGION_MIGRATION_VERSION, VIRTUAL_REHYDRATION_CONTROL_VERSION,
+    VIRTUAL_WORK_OCCURRENCE_VERSION, VirtualArchive, VirtualArchiveManifest,
+    VirtualCompactionCertificate, VirtualCompactionCommand, VirtualCompactionReceipt,
+    VirtualCompletionSummary, VirtualError, VirtualRegion, VirtualRehydrationCommand,
+    VirtualRehydrationReceipt, VirtualResult, VirtualSnapshot, WorkItem, WorkOccurrence,
+    WorkOccurrenceState, WorkResolution, virtual_archive_record,
 };
 
 /// Replaceable source of bounded pages for one virtual region.
@@ -85,6 +91,11 @@ impl VirtualScheduler {
                 ready_since: BTreeMap::new(),
                 retired_regions: BTreeMap::new(),
                 migrations: BTreeMap::new(),
+                compactions: BTreeMap::new(),
+                compaction_receipts: BTreeMap::new(),
+                compacted_work: BTreeMap::new(),
+                compacted_regions: BTreeMap::new(),
+                rehydration_receipts: BTreeMap::new(),
             },
         })
     }
@@ -742,6 +753,273 @@ impl VirtualScheduler {
         self.snapshot.occurrences.get(occurrence_id)
     }
 
+    /// Move one completed region's exact occurrence history into a replaceable
+    /// immutable archive and retain a verified bounded certificate.
+    pub fn compact(
+        &mut self,
+        archive: &mut impl VirtualArchive,
+        command: &VirtualCompactionCommand,
+    ) -> VirtualResult<VirtualCompactionReceipt> {
+        let before = self.snapshot.clone();
+        match self.compact_inner(archive, command) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                self.snapshot = before;
+                Err(error)
+            }
+        }
+    }
+
+    fn compact_inner(
+        &mut self,
+        archive: &mut impl VirtualArchive,
+        command: &VirtualCompactionCommand,
+    ) -> VirtualResult<VirtualCompactionReceipt> {
+        validate_compaction_command(command)?;
+        if let Some(existing) = self.snapshot.compaction_receipts.get(&command.command_id) {
+            if existing.command == *command {
+                return Ok(existing.clone());
+            }
+            return Err(VirtualError::Conflict(format!(
+                "virtual compaction command {} was reused with different semantics",
+                command.command_id
+            )));
+        }
+        if archive.binding() != command.compactor_binding {
+            return Err(VirtualError::Source(
+                "selected archive does not match the pinned compactor binding".to_owned(),
+            ));
+        }
+        if self
+            .snapshot
+            .compacted_regions
+            .contains_key(&command.region_id)
+        {
+            return Err(VirtualError::Conflict(format!(
+                "region {} is already compacted",
+                command.region_id
+            )));
+        }
+        let region = self
+            .snapshot
+            .regions
+            .get(&command.region_id)
+            .ok_or_else(|| {
+                VirtualError::NotFound(format!("region {} is missing", command.region_id))
+            })?
+            .clone();
+        if !region.cursor.exhausted
+            && !self
+                .snapshot
+                .retired_regions
+                .contains_key(&command.region_id)
+        {
+            return Err(VirtualError::Conflict(format!(
+                "region {} is neither exhausted nor retired",
+                command.region_id
+            )));
+        }
+        if self.region_is_materialized(&command.region_id) {
+            return Err(VirtualError::Conflict(format!(
+                "region {} still has ready, active, or parked work",
+                command.region_id
+            )));
+        }
+        let occurrences: BTreeMap<String, WorkOccurrence> = self
+            .snapshot
+            .occurrences
+            .iter()
+            .filter(|(_, occurrence)| occurrence.region_id == command.region_id)
+            .map(|(id, occurrence)| (id.clone(), occurrence.clone()))
+            .collect();
+        if occurrences.is_empty() {
+            return Err(VirtualError::Conflict(format!(
+                "region {} has no occurrence history to compact",
+                command.region_id
+            )));
+        }
+        let work_index = archived_work_index(&occurrences)?;
+        let manifest = VirtualArchiveManifest {
+            manifest_version: VIRTUAL_ARCHIVE_MANIFEST_VERSION.to_owned(),
+            region_id: region.region_id.clone(),
+            run_id: region.run_id.clone(),
+            source_causal_cut: command.source_causal_cut.clone(),
+            occurrences,
+            work_index,
+        };
+        let record = virtual_archive_record(&manifest)?;
+        archive.put(&record.reference, &record.bytes)?;
+        if archive.get(&record.reference)? != record.bytes {
+            return Err(VirtualError::Source(
+                "archive readback does not match the stored manifest".to_owned(),
+            ));
+        }
+        let summary = completion_summary(&manifest)?;
+        let retained_occurrence_bindings = manifest
+            .occurrences
+            .values()
+            .map(|occurrence| occurrence.occurrence_binding.clone())
+            .collect();
+        let mut certificate = VirtualCompactionCertificate {
+            certificate_version: VIRTUAL_COMPACTION_CERTIFICATE_VERSION.to_owned(),
+            certificate_id: String::new(),
+            source_causal_cut: command.source_causal_cut.clone(),
+            summary,
+            summary_state_digest: canonical_digest(&manifest)
+                .map_err(|error| VirtualError::Validation(error.to_string()))?,
+            unresolved_obligations: BTreeSet::new(),
+            retained_occurrence_bindings,
+            replay_availability: ReplayAvailability::Exact,
+            rehydration_manifest: record.reference,
+            compactor_binding: command.compactor_binding.clone(),
+            compactor_revision: command.compactor_revision.clone(),
+        };
+        certificate.certificate_id = virtual_certificate_id(&certificate)?;
+        validate_manifest_certificate(&manifest, &certificate)?;
+
+        for occurrence_id in manifest.occurrences.keys() {
+            self.snapshot.occurrences.remove(occurrence_id);
+        }
+        for archived in manifest.work_index.values() {
+            self.snapshot.compacted_work.insert(
+                archived.work_id.clone(),
+                CompactedWorkIndex {
+                    work_id: archived.work_id.clone(),
+                    region_id: archived.region_id.clone(),
+                    run_id: archived.run_id.clone(),
+                    max_epoch: archived.max_epoch,
+                    terminal_state: archived.terminal_state,
+                    certificate_id: certificate.certificate_id.clone(),
+                },
+            );
+        }
+        let receipt = VirtualCompactionReceipt {
+            command: command.clone(),
+            certificate: certificate.clone(),
+        };
+        self.snapshot.compacted_regions.insert(
+            command.region_id.clone(),
+            certificate.certificate_id.clone(),
+        );
+        self.snapshot
+            .compactions
+            .insert(certificate.certificate_id.clone(), certificate);
+        self.snapshot
+            .compaction_receipts
+            .insert(command.command_id.clone(), receipt.clone());
+        self.validate_bounds()?;
+        Ok(receipt)
+    }
+
+    /// Restore selected exact occurrence records from one verified cold archive.
+    pub fn rehydrate(
+        &mut self,
+        archive: &mut impl VirtualArchive,
+        command: &VirtualRehydrationCommand,
+    ) -> VirtualResult<VirtualRehydrationReceipt> {
+        let before = self.snapshot.clone();
+        match self.rehydrate_inner(archive, command) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                self.snapshot = before;
+                Err(error)
+            }
+        }
+    }
+
+    fn rehydrate_inner(
+        &mut self,
+        archive: &mut impl VirtualArchive,
+        command: &VirtualRehydrationCommand,
+    ) -> VirtualResult<VirtualRehydrationReceipt> {
+        validate_rehydration_command(command)?;
+        if let Some(existing) = self.snapshot.rehydration_receipts.get(&command.command_id) {
+            if existing.command == *command {
+                return Ok(existing.clone());
+            }
+            return Err(VirtualError::Conflict(format!(
+                "virtual rehydration command {} was reused with different semantics",
+                command.command_id
+            )));
+        }
+        let certificate = self
+            .snapshot
+            .compactions
+            .get(&command.certificate_id)
+            .ok_or_else(|| {
+                VirtualError::NotFound(format!(
+                    "compaction certificate {} is missing",
+                    command.certificate_id
+                ))
+            })?
+            .clone();
+        if archive.binding() != certificate.compactor_binding {
+            return Err(VirtualError::Source(
+                "selected archive does not match the certificate binding".to_owned(),
+            ));
+        }
+        let bytes = archive.get(&certificate.rehydration_manifest)?;
+        let manifest: VirtualArchiveManifest = serde_json::from_slice(&bytes)
+            .map_err(|error| VirtualError::Source(error.to_string()))?;
+        let record = virtual_archive_record(&manifest)?;
+        if record.reference != certificate.rehydration_manifest || record.bytes != bytes {
+            return Err(VirtualError::Source(
+                "archive manifest bytes do not match their content reference".to_owned(),
+            ));
+        }
+        validate_manifest_certificate(&manifest, &certificate)?;
+        let mut restored = BTreeSet::new();
+        for occurrence_id in &command.occurrence_ids {
+            let occurrence = manifest.occurrences.get(occurrence_id).ok_or_else(|| {
+                VirtualError::NotFound(format!(
+                    "occurrence {occurrence_id} is absent from certificate {}",
+                    certificate.certificate_id
+                ))
+            })?;
+            match self.snapshot.occurrences.get(occurrence_id) {
+                Some(existing) if existing == occurrence => {}
+                Some(_) => {
+                    return Err(VirtualError::Conflict(format!(
+                        "rehydrated occurrence {occurrence_id} conflicts with hot history"
+                    )));
+                }
+                None => {
+                    self.snapshot
+                        .occurrences
+                        .insert(occurrence_id.clone(), occurrence.clone());
+                }
+            }
+            restored.insert(occurrence_id.clone());
+        }
+        let receipt = VirtualRehydrationReceipt {
+            command: command.clone(),
+            restored_occurrence_ids: restored,
+        };
+        self.snapshot
+            .rehydration_receipts
+            .insert(command.command_id.clone(), receipt.clone());
+        self.validate_bounds()?;
+        Ok(receipt)
+    }
+
+    fn region_is_materialized(&self, region_id: &str) -> bool {
+        self.snapshot
+            .ready
+            .values()
+            .flatten()
+            .any(|item| item.region_id == region_id)
+            || self
+                .snapshot
+                .active
+                .values()
+                .any(|claim| claim.item.region_id == region_id)
+            || self
+                .snapshot
+                .parked
+                .values()
+                .any(|parked| parked.item.region_id == region_id)
+    }
+
     fn eligible_runs(&self) -> Vec<String> {
         let mut runs: Vec<String> = self
             .snapshot
@@ -914,6 +1192,7 @@ impl VirtualScheduler {
                 }
             }
         }
+        self.validate_compaction_state()?;
         if self.materialized_count() > self.limits.max_materialized {
             return Err(VirtualError::Validation(
                 "snapshot exceeds max_materialized".to_owned(),
@@ -1060,7 +1339,18 @@ impl VirtualScheduler {
             }
         }
         for (work_id, epoch) in &self.snapshot.claim_epochs {
-            if max_occurrence_epochs.get(work_id) != Some(epoch) {
+            let archived_epoch = self
+                .snapshot
+                .compacted_work
+                .get(work_id)
+                .map(|index| index.max_epoch);
+            let observed_epoch = max_occurrence_epochs
+                .get(work_id)
+                .copied()
+                .into_iter()
+                .chain(archived_epoch)
+                .max();
+            if observed_epoch != Some(*epoch) {
                 return Err(VirtualError::Validation(format!(
                     "work {work_id} claim epoch does not match its occurrence history"
                 )));
@@ -1092,6 +1382,118 @@ impl VirtualScheduler {
                         "terminal work {work_id} remains materialized"
                     )));
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_compaction_state(&self) -> VirtualResult<()> {
+        for (certificate_id, certificate) in &self.snapshot.compactions {
+            validate_virtual_certificate(certificate)?;
+            if certificate.certificate_id != *certificate_id {
+                return Err(VirtualError::Validation(format!(
+                    "compaction certificate {certificate_id} is stored under the wrong identity"
+                )));
+            }
+            let region = self
+                .snapshot
+                .regions
+                .get(&certificate.summary.region_id)
+                .ok_or_else(|| {
+                    VirtualError::Validation(format!(
+                        "compaction certificate {certificate_id} references a missing region"
+                    ))
+                })?;
+            if region.run_id != certificate.summary.run_id
+                || self.snapshot.compacted_regions.get(&region.region_id) != Some(certificate_id)
+            {
+                return Err(VirtualError::Validation(format!(
+                    "compaction certificate {certificate_id} escaped its region or Run"
+                )));
+            }
+            let indexed_work = self
+                .snapshot
+                .compacted_work
+                .values()
+                .filter(|index| index.certificate_id == *certificate_id)
+                .count();
+            if u64::try_from(indexed_work).ok() != Some(certificate.summary.work_count) {
+                return Err(VirtualError::Validation(format!(
+                    "compaction certificate {certificate_id} work count disagrees with its retained index"
+                )));
+            }
+        }
+        for (region_id, certificate_id) in &self.snapshot.compacted_regions {
+            if !self.snapshot.regions.contains_key(region_id)
+                || !self.snapshot.compactions.contains_key(certificate_id)
+            {
+                return Err(VirtualError::Validation(format!(
+                    "compacted region {region_id} has no region or certificate"
+                )));
+            }
+        }
+        for (work_id, index) in &self.snapshot.compacted_work {
+            if index.work_id != *work_id
+                || index.max_epoch == 0
+                || !is_terminal_work_state(index.terminal_state)
+                || !self.snapshot.known.contains(work_id)
+                || !self
+                    .snapshot
+                    .compactions
+                    .contains_key(&index.certificate_id)
+            {
+                return Err(VirtualError::Validation(format!(
+                    "compacted work index {work_id} is malformed"
+                )));
+            }
+            let region = self.snapshot.regions.get(&index.region_id).ok_or_else(|| {
+                VirtualError::Validation(format!(
+                    "compacted work index {work_id} references a missing region"
+                ))
+            })?;
+            if region.run_id != index.run_id
+                || self.snapshot.compacted_regions.get(&index.region_id)
+                    != Some(&index.certificate_id)
+            {
+                return Err(VirtualError::Validation(format!(
+                    "compacted work index {work_id} escaped its certificate authority"
+                )));
+            }
+        }
+        for (command_id, receipt) in &self.snapshot.compaction_receipts {
+            if receipt.command.command_id != *command_id
+                || receipt.command.control_version != VIRTUAL_COMPACTION_CONTROL_VERSION
+                || receipt.command.region_id != receipt.certificate.summary.region_id
+                || receipt.command.source_causal_cut != receipt.certificate.source_causal_cut
+                || receipt.command.compactor_binding != receipt.certificate.compactor_binding
+                || receipt.command.compactor_revision != receipt.certificate.compactor_revision
+                || self
+                    .snapshot
+                    .compactions
+                    .get(&receipt.certificate.certificate_id)
+                    != Some(&receipt.certificate)
+            {
+                return Err(VirtualError::Validation(format!(
+                    "compaction receipt {command_id} is inconsistent"
+                )));
+            }
+        }
+        for (command_id, receipt) in &self.snapshot.rehydration_receipts {
+            if receipt.command.command_id != *command_id
+                || receipt.command.control_version != VIRTUAL_REHYDRATION_CONTROL_VERSION
+                || receipt.restored_occurrence_ids != receipt.command.occurrence_ids
+                || !self
+                    .snapshot
+                    .compactions
+                    .contains_key(&receipt.command.certificate_id)
+                || receipt
+                    .restored_occurrence_ids
+                    .iter()
+                    .any(|id| !self.snapshot.occurrences.contains_key(id))
+            {
+                return Err(VirtualError::Validation(format!(
+                    "rehydration receipt {command_id} is inconsistent"
+                )));
             }
         }
         Ok(())
@@ -1143,6 +1545,207 @@ fn validate_scheduling_policy(policy: SchedulingPolicy) -> VirtualResult<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_compaction_command(command: &VirtualCompactionCommand) -> VirtualResult<()> {
+    if command.control_version != VIRTUAL_COMPACTION_CONTROL_VERSION
+        || command.command_id.is_empty()
+        || command.region_id.is_empty()
+        || command.source_causal_cut.is_empty()
+        || command.source_causal_cut.iter().any(String::is_empty)
+        || command.compactor_binding.is_empty()
+        || command.compactor_revision.is_empty()
+    {
+        return Err(VirtualError::Validation(
+            "compaction command version, identities, causal cut, binding, and revision are required"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rehydration_command(command: &VirtualRehydrationCommand) -> VirtualResult<()> {
+    if command.control_version != VIRTUAL_REHYDRATION_CONTROL_VERSION
+        || command.command_id.is_empty()
+        || command.certificate_id.is_empty()
+        || command.occurrence_ids.is_empty()
+        || command.occurrence_ids.iter().any(String::is_empty)
+    {
+        return Err(VirtualError::Validation(
+            "rehydration command version, identities, and occurrence selection are required"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn archived_work_index(
+    occurrences: &BTreeMap<String, WorkOccurrence>,
+) -> VirtualResult<BTreeMap<String, ArchivedWorkIndex>> {
+    let mut latest = BTreeMap::<String, &WorkOccurrence>::new();
+    for occurrence in occurrences.values() {
+        validate_occurrence(&occurrence.occurrence_id, occurrence)?;
+        latest
+            .entry(occurrence.work_id.clone())
+            .and_modify(|current| {
+                if occurrence.epoch > current.epoch {
+                    *current = occurrence;
+                }
+            })
+            .or_insert(occurrence);
+    }
+    let mut result = BTreeMap::new();
+    for (work_id, occurrence) in latest {
+        if !is_terminal_work_state(occurrence.state) {
+            return Err(VirtualError::Conflict(format!(
+                "work {work_id} has no terminal greatest occurrence"
+            )));
+        }
+        result.insert(
+            work_id.clone(),
+            ArchivedWorkIndex {
+                work_id,
+                region_id: occurrence.region_id.clone(),
+                run_id: occurrence.run_id.clone(),
+                max_epoch: occurrence.epoch,
+                terminal_state: occurrence.state,
+            },
+        );
+    }
+    Ok(result)
+}
+
+fn completion_summary(
+    manifest: &VirtualArchiveManifest,
+) -> VirtualResult<VirtualCompletionSummary> {
+    let mut outputs = BTreeSet::new();
+    let mut evidence = BTreeSet::new();
+    for occurrence in manifest.occurrences.values() {
+        if let Some(result) = &occurrence.result {
+            outputs.insert(result.clone());
+        }
+        if let Some(error) = &occurrence.error {
+            evidence.insert(error.clone());
+        }
+    }
+    let succeeded_count = manifest
+        .work_index
+        .values()
+        .filter(|index| index.terminal_state == WorkOccurrenceState::Succeeded)
+        .count();
+    let failed_count = manifest
+        .work_index
+        .values()
+        .filter(|index| index.terminal_state == WorkOccurrenceState::Failed)
+        .count();
+    let cancelled_count = manifest
+        .work_index
+        .values()
+        .filter(|index| index.terminal_state == WorkOccurrenceState::Cancelled)
+        .count();
+    Ok(VirtualCompletionSummary {
+        region_id: manifest.region_id.clone(),
+        run_id: manifest.run_id.clone(),
+        occurrence_count: u64::try_from(manifest.occurrences.len()).map_err(|_| {
+            VirtualError::Validation("archive occurrence count exceeds u64".to_owned())
+        })?,
+        work_count: u64::try_from(manifest.work_index.len())
+            .map_err(|_| VirtualError::Validation("archive work count exceeds u64".to_owned()))?,
+        succeeded_count: u64::try_from(succeeded_count)
+            .map_err(|_| VirtualError::Validation("success count exceeds u64".to_owned()))?,
+        failed_count: u64::try_from(failed_count)
+            .map_err(|_| VirtualError::Validation("failure count exceeds u64".to_owned()))?,
+        cancelled_count: u64::try_from(cancelled_count)
+            .map_err(|_| VirtualError::Validation("cancellation count exceeds u64".to_owned()))?,
+        output_digest: canonical_digest(&outputs)
+            .map_err(|error| VirtualError::Validation(error.to_string()))?,
+        evidence_digest: canonical_digest(&evidence)
+            .map_err(|error| VirtualError::Validation(error.to_string()))?,
+        retained_debug_index_digest: canonical_digest(&manifest.work_index)
+            .map_err(|error| VirtualError::Validation(error.to_string()))?,
+    })
+}
+
+fn virtual_certificate_id(certificate: &VirtualCompactionCertificate) -> VirtualResult<String> {
+    let mut identity = certificate.clone();
+    identity.certificate_id.clear();
+    content_id(VIRTUAL_COMPACTION_CERTIFICATE_VERSION, &identity)
+        .map_err(|error| VirtualError::Validation(error.to_string()))
+}
+
+fn validate_virtual_certificate(certificate: &VirtualCompactionCertificate) -> VirtualResult<()> {
+    if certificate.certificate_version != VIRTUAL_COMPACTION_CERTIFICATE_VERSION
+        || certificate.certificate_id != virtual_certificate_id(certificate)?
+        || certificate.source_causal_cut.is_empty()
+        || certificate.source_causal_cut.iter().any(String::is_empty)
+        || certificate.summary.region_id.is_empty()
+        || certificate.summary.run_id.is_empty()
+        || certificate.summary_state_digest.is_empty()
+        || certificate.compactor_binding.is_empty()
+        || certificate.compactor_revision.is_empty()
+        || certificate.rehydration_manifest.artifact_id.is_empty()
+        || certificate.rehydration_manifest.kind != crate::VIRTUAL_ARCHIVE_MANIFEST_KIND
+        || !certificate.unresolved_obligations.is_empty()
+        || certificate
+            .retained_occurrence_bindings
+            .iter()
+            .any(String::is_empty)
+        || certificate.replay_availability != ReplayAvailability::Exact
+        || certificate.summary.work_count
+            != certificate
+                .summary
+                .succeeded_count
+                .saturating_add(certificate.summary.failed_count)
+                .saturating_add(certificate.summary.cancelled_count)
+    {
+        return Err(VirtualError::Validation(format!(
+            "compaction certificate {} is malformed",
+            certificate.certificate_id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_manifest_certificate(
+    manifest: &VirtualArchiveManifest,
+    certificate: &VirtualCompactionCertificate,
+) -> VirtualResult<()> {
+    validate_virtual_certificate(certificate)?;
+    if manifest.manifest_version != VIRTUAL_ARCHIVE_MANIFEST_VERSION
+        || manifest.region_id != certificate.summary.region_id
+        || manifest.run_id != certificate.summary.run_id
+        || manifest.source_causal_cut != certificate.source_causal_cut
+        || completion_summary(manifest)? != certificate.summary
+        || canonical_digest(manifest)
+            .map_err(|error| VirtualError::Validation(error.to_string()))?
+            != certificate.summary_state_digest
+        || virtual_archive_record(manifest)?.reference != certificate.rehydration_manifest
+        || archived_work_index(&manifest.occurrences)? != manifest.work_index
+        || manifest.occurrences.values().any(|occurrence| {
+            occurrence.region_id != manifest.region_id || occurrence.run_id != manifest.run_id
+        })
+        || manifest
+            .occurrences
+            .values()
+            .map(|occurrence| occurrence.occurrence_binding.clone())
+            .collect::<BTreeSet<_>>()
+            != certificate.retained_occurrence_bindings
+    {
+        return Err(VirtualError::Validation(format!(
+            "archive manifest does not match compaction certificate {}",
+            certificate.certificate_id
+        )));
+    }
+    Ok(())
+}
+
+fn is_terminal_work_state(state: WorkOccurrenceState) -> bool {
+    matches!(
+        state,
+        WorkOccurrenceState::Succeeded
+            | WorkOccurrenceState::Failed
+            | WorkOccurrenceState::Cancelled
+    )
 }
 
 fn validate_migration_request(request: &RegionMigrationRequest) -> VirtualResult<()> {

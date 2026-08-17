@@ -182,3 +182,19 @@ plan again at admission. One M1 checkpoint then retires sources, activates
 targets, retains evidence and receipt, and leaves all already materialized work
 on its historical region identity. No database partition, Kafka offset, object
 prefix, or range syntax enters framework state.
+
+Completed regions use a separate `VirtualArchive` byte seam. Cymule serializes
+the exact occurrence manifest, derives its Artifact reference, and asks the
+adapter to idempotently store those bytes. The adapter may realize any immutable
+storage substrate, but it cannot author the `VirtualCompactionCertificate`.
+After manifest readback, one M1 Artifact-plus-journal CAS replaces hot
+occurrence payloads with a bounded summary, certificate, and small per-work
+terminal fence index. A failed CAS leaves at most an unreferenced immutable
+manifest in the adapter.
+
+Partial rehydration is explicit rather than an implicit cache miss. A typed
+command fixes the certificate and exact occurrence IDs. The controller reads
+the manifest through its pinned binding, verifies content identity and every
+certificate digest, then checkpoints only those records. This keeps archive
+latency and provider behavior outside scheduling authority while preserving old
+control receipt and debugging paths on demand.

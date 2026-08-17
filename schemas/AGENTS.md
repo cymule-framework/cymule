@@ -25,3 +25,7 @@
   Region migration definitions preserve opaque source cursors, split/merge
   cardinality, pinned adapter binding, coverage evidence, retirement lineage,
   and command receipts.
+  Compaction definitions preserve a causal cut, bounded summary, content
+  manifest, replay classification, retained binding/debug indexes, pinned
+  compactor, and exact partial-rehydration selection. Concrete archive locators
+  and credentials never enter this schema.

@@ -83,10 +83,16 @@ Status: partial.
 - opaque cursor split/merge uses pinned adapter verification and coverage
   evidence, atomically retires sources/activates targets, preserves historical
   work identity, and exposes four-language control contracts;
+- completed regions compact through a pinned immutable byte archive into
+  authenticated summaries/certificates, retain terminal fence and binding
+  evidence, checkpoint the manifest Artifact atomically, and partially
+  rehydrate exact selected occurrences after full content verification;
+- archive write/read failure, tamper, stale CAS, reopen, and old receipt replay
+  are fault-tested; four SDKs expose the same compact/rehydrate controls without
+  provider semantics;
 - million-item tests prove bounded frontiers, fairness, park/wake, stale-owner
   rejection, and restore behavior;
-- subtree compaction, partial rehydration, scheduling control clients, and
-  multi-worker crash matrices remain proposed.
+- scheduling control clients and multi-worker crash matrices remain proposed.
 
 ## M4 - Live evolution
 

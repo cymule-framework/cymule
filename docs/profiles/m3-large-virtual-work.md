@@ -53,13 +53,25 @@ Status: partial.
   stale CAS, reopen, and historical command-replay tests;
 - shared Rust, TypeScript, Python, and Go migration plan/control contracts that
   never interpret cursor positions;
+- provider-neutral immutable `VirtualArchive` bytes with framework-computed
+  manifest Artifact identity and pinned compactor binding;
+- completed-region eligibility that rejects non-exhausted/non-retired regions,
+  any hot work, or a non-terminal greatest occurrence;
+- authenticated completion summaries and compaction certificates retaining the
+  causal cut, manifest/summary/index digests, terminal work fences, occurrence
+  bindings, replay availability, and compactor revision;
+- exact occurrence-selection partial rehydration with full manifest/certificate
+  readback validation and no implicit widening;
+- M1 Artifact-plus-journal checkpoints for compaction and journal checkpoints
+  for rehydration, including reopen, idempotent receipt replay, stale CAS
+  rollback, injected archive read/write failure, and tamper rejection;
+- shared Rust, TypeScript, Python, and Go compaction/rehydration commands and
+  transport-neutral archive/control interfaces;
 - million-item source tests proving an eight-item bounded frontier, fairness,
   parking, waking, fencing, and restart behavior.
 
 ## Remaining completion gates
 
-- subtree completion summaries, compaction certificates, and partial
-  rehydration;
 - multi-worker crash tests and scheduling/partition SDK control interfaces.
 
 `RegionSource` implementations may enumerate a database, object store, API, or
@@ -77,3 +89,10 @@ inside the partial `cymule.virtual-checkpoint/1` domain. Region topology adds
 independent `cymule.virtual-region-migration/1` and
 `cymule.virtual-region-migration-control/1` domains; receipts and retired lineage
 remain in the same M3 checkpoint.
+Cold history adds independent `cymule.virtual-archive-manifest/1`,
+`cymule.virtual-compaction-certificate/1`,
+`cymule.virtual-compaction-control/1`, and
+`cymule.virtual-rehydration-control/1` domains. Their receipts, bounded summary,
+and terminal fence index remain in the additive partial
+`cymule.virtual-checkpoint/1` payload; exact occurrence bytes remain an ordinary
+content-addressed Artifact behind `VirtualArchive`.

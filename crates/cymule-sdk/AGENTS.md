@@ -16,3 +16,6 @@
 - Region migration clients preserve opaque cursors, exact source preconditions,
   pinned migration binding, and coverage evidence. SDKs never split cursor
   strings or infer partition coverage.
+- Re-export the provider-neutral archive and typed compaction/rehydration
+  controls without adding a second validator. `VirtualWorkControl` transports
+  commands; the M1-backed Rust controller remains admission authority.

@@ -14,6 +14,9 @@
   command IDs; transports never apply retry policy locally.
 - Region migrator/control types preserve opaque cursors and coverage evidence.
   Never parse cursor positions or synthesize split/merge coverage in the SDK.
+- Compaction and rehydration builders sort/deduplicate causal cuts and occurrence
+  selections. Archive adapters store exact bytes under a framework reference;
+  they never create or validate certificates in TypeScript.
 - Use discriminated unions for IR and Engine protocol types.
 - The public npm package name is `cymule`. Changes to exports, files, engine
   requirements, or minimum Node versions require a package dry-run and release

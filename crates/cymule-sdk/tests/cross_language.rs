@@ -5,8 +5,8 @@ use std::env;
 
 use cymule_sdk::{
     CliEngine, DispatchPolicy, EffectProfile, Engine, Expression, FlowBuilder, MutationKind,
-    ReconciliationMode, RegionMigrationCommand, ResourceCandidate, WaitActivation, WorkOccurrence,
-    WorkResolutionCommand,
+    ReconciliationMode, RegionMigrationCommand, ResourceCandidate, VirtualCompactionCommand,
+    VirtualRehydrationCommand, WaitActivation, WorkOccurrence, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -109,4 +109,18 @@ fn rust_virtual_work_query_and_control_fixtures_are_typed() {
     .expect("virtual region migration control deserializes");
     assert_eq!(migration.plan.expected_sources.len(), 1);
     assert_eq!(migration.plan.targets.len(), 2);
+    let compaction: VirtualCompactionCommand = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/virtual-compaction-control.json"
+    ))
+    .expect("virtual compaction control deserializes");
+    assert_eq!(compaction.region_id, occurrence.region_id);
+    let rehydration: VirtualRehydrationCommand = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/virtual-rehydration-control.json"
+    ))
+    .expect("virtual rehydration control deserializes");
+    assert!(
+        rehydration
+            .occurrence_ids
+            .contains(&occurrence.occurrence_id)
+    );
 }

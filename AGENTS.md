@@ -52,6 +52,11 @@ Use this precedence order when guidance conflicts:
 - Region split/merge treats cursors as opaque. A pinned migration adapter must
   verify coverage evidence before one CAS retires sources and activates targets;
   old regions and already materialized work remain historical authority.
+- Completed virtual history may move cold only behind an immutable byte archive
+  interface. Rust computes and verifies manifest Artifact identity, causal-cut
+  certificate, summary digests, retained terminal fences/bindings, and replay
+  availability; partial rehydration restores only explicitly selected exact
+  occurrences. Archive products, locators, and credentials are plugin concerns.
 - Public mutation enters through typed commands with idempotent IDs and causal
   preconditions. Raw canonical event append is internal only.
 - Prefer optimistic CAS, immutable records, idempotency, fencing epochs, and
@@ -88,7 +93,12 @@ Use this precedence order when guidance conflicts:
 
 ## Required verification
 
-Run `./scripts/verify.sh` before committing. At minimum, changes must preserve:
+Use `python3 scripts/test_harness.py plan --base <trusted-ref>` and run its
+selected suites before an ordinary scoped commit. Run `./scripts/verify.sh` for
+semantic version changes, profile claims, shared schemas, release/publication
+changes, harness or CI changes, unknown routes, and before claiming complete
+repository verification. The suite model and fault-test rules live in
+`docs/testing.md`. At minimum, applicable changes must preserve:
 
 - Rust formatting, Clippy, unit tests, and documentation build;
 - deterministic canonical IDs and replay digests;

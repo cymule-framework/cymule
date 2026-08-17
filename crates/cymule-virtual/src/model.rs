@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use cymule_core::ArtifactRef;
+use cymule_core::{ArtifactRef, ReplayAvailability};
 use serde::{Deserialize, Serialize};
 
 /// Binding-pinned virtual work occurrence version.
@@ -12,6 +12,14 @@ pub const VIRTUAL_REGION_MIGRATION_VERSION: &str = "cymule.virtual-region-migrat
 /// Provider-neutral virtual region migration control version.
 pub const VIRTUAL_REGION_MIGRATION_CONTROL_VERSION: &str =
     "cymule.virtual-region-migration-control/1";
+/// Immutable cold-archive manifest version.
+pub const VIRTUAL_ARCHIVE_MANIFEST_VERSION: &str = "cymule.virtual-archive-manifest/1";
+/// Verified virtual subtree compaction certificate version.
+pub const VIRTUAL_COMPACTION_CERTIFICATE_VERSION: &str = "cymule.virtual-compaction-certificate/1";
+/// Idempotent virtual compaction command version.
+pub const VIRTUAL_COMPACTION_CONTROL_VERSION: &str = "cymule.virtual-compaction-control/1";
+/// Idempotent partial rehydration command version.
+pub const VIRTUAL_REHYDRATION_CONTROL_VERSION: &str = "cymule.virtual-rehydration-control/1";
 
 /// Opaque provider-neutral durable cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +304,164 @@ pub struct RegionMigrationCommand {
     pub plan: RegionMigrationPlan,
 }
 
+/// Terminal logical-work index retained when occurrence payloads move cold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchivedWorkIndex {
+    /// Stable logical work identity.
+    pub work_id: String,
+    /// Owning virtual region.
+    pub region_id: String,
+    /// Owning Run.
+    pub run_id: String,
+    /// Greatest fenced occurrence epoch represented by the manifest.
+    pub max_epoch: u64,
+    /// Terminal state of the greatest epoch.
+    pub terminal_state: WorkOccurrenceState,
+}
+
+/// Hot retained index pointing one logical work identity at its certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactedWorkIndex {
+    /// Stable logical work identity.
+    pub work_id: String,
+    /// Owning virtual region.
+    pub region_id: String,
+    /// Owning Run.
+    pub run_id: String,
+    /// Greatest fenced occurrence epoch represented by the archive.
+    pub max_epoch: u64,
+    /// Terminal state of the greatest epoch.
+    pub terminal_state: WorkOccurrenceState,
+    /// Certificate that authenticates the cold history.
+    pub certificate_id: String,
+}
+
+/// Immutable archive payload containing exact occurrence history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualArchiveManifest {
+    /// Archive schema and semantic version.
+    pub manifest_version: String,
+    /// Region whose completed history is represented.
+    pub region_id: String,
+    /// Owning Run.
+    pub run_id: String,
+    /// Causally closed durable checkpoints covered by this archive.
+    pub source_causal_cut: BTreeSet<String>,
+    /// Exact immutable occurrence records keyed by occurrence identity.
+    pub occurrences: BTreeMap<String, WorkOccurrence>,
+    /// Final logical-work fence and terminal state index.
+    pub work_index: BTreeMap<String, ArchivedWorkIndex>,
+}
+
+/// Bounded completion projection authenticated by a compaction certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualCompletionSummary {
+    /// Region summarized by this projection.
+    pub region_id: String,
+    /// Owning Run.
+    pub run_id: String,
+    /// Exact archived occurrence count.
+    pub occurrence_count: u64,
+    /// Exact completed logical-work count.
+    pub work_count: u64,
+    /// Logical work ending successfully.
+    pub succeeded_count: u64,
+    /// Logical work ending in terminal failure.
+    pub failed_count: u64,
+    /// Logical work ending by cancellation.
+    pub cancelled_count: u64,
+    /// Digest of terminal result Artifact references.
+    pub output_digest: String,
+    /// Digest of failure and cancellation evidence references.
+    pub evidence_digest: String,
+    /// Digest of the retained logical-work debug index.
+    pub retained_debug_index_digest: String,
+}
+
+/// Verified witness that exact completed occurrence history moved to an archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualCompactionCertificate {
+    /// Certificate schema and semantic version.
+    pub certificate_version: String,
+    /// Content identity of every certificate field except this identity.
+    pub certificate_id: String,
+    /// Causally closed checkpoint cut represented by the summary.
+    pub source_causal_cut: BTreeSet<String>,
+    /// Bounded completed-state projection.
+    pub summary: VirtualCompletionSummary,
+    /// Digest of the complete archive manifest.
+    pub summary_state_digest: String,
+    /// Unresolved external obligations retained outside this completed subtree.
+    pub unresolved_obligations: BTreeSet<String>,
+    /// Immutable occurrence bindings required to interpret archived history.
+    pub retained_occurrence_bindings: BTreeSet<String>,
+    /// Replay capability after this retention decision.
+    pub replay_availability: ReplayAvailability,
+    /// Content-addressed exact history used for partial rehydration.
+    pub rehydration_manifest: ArtifactRef,
+    /// Pinned archive/compactor implementation binding.
+    pub compactor_binding: String,
+    /// Immutable implementation or policy revision.
+    pub compactor_revision: String,
+}
+
+/// Idempotent request to compact one completed virtual region.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualCompactionCommand {
+    /// Control schema and semantic version.
+    pub control_version: String,
+    /// Stable caller-generated command identity.
+    pub command_id: String,
+    /// Completed region to move cold.
+    pub region_id: String,
+    /// Causally closed durable checkpoint cut covered by the archive.
+    pub source_causal_cut: BTreeSet<String>,
+    /// Pinned archive/compactor binding.
+    pub compactor_binding: String,
+    /// Immutable implementation or policy revision.
+    pub compactor_revision: String,
+}
+
+/// Durable receipt for one compacted region.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualCompactionReceipt {
+    /// Exact admitted command.
+    pub command: VirtualCompactionCommand,
+    /// Verified resulting certificate.
+    pub certificate: VirtualCompactionCertificate,
+}
+
+/// Idempotent request to restore selected exact occurrence records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualRehydrationCommand {
+    /// Control schema and semantic version.
+    pub control_version: String,
+    /// Stable caller-generated command identity.
+    pub command_id: String,
+    /// Certificate whose manifest is authoritative.
+    pub certificate_id: String,
+    /// Exact occurrence identities to restore into the hot projection.
+    pub occurrence_ids: BTreeSet<String>,
+}
+
+/// Durable partial rehydration receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualRehydrationReceipt {
+    /// Exact admitted command.
+    pub command: VirtualRehydrationCommand,
+    /// Occurrence identities restored or already present identically.
+    pub restored_occurrence_ids: BTreeSet<String>,
+}
+
 /// Materialization and active-work bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -379,4 +545,19 @@ pub struct VirtualSnapshot {
     /// Applied migration receipts keyed by stable migration ID.
     #[serde(default)]
     pub migrations: BTreeMap<String, RegionMigrationReceipt>,
+    /// Verified cold-history certificates keyed by certificate identity.
+    #[serde(default)]
+    pub compactions: BTreeMap<String, VirtualCompactionCertificate>,
+    /// Compaction command receipts keyed by idempotency identity.
+    #[serde(default)]
+    pub compaction_receipts: BTreeMap<String, VirtualCompactionReceipt>,
+    /// One retained terminal fence/index per compacted logical work identity.
+    #[serde(default)]
+    pub compacted_work: BTreeMap<String, CompactedWorkIndex>,
+    /// Region to its one accepted cold-history certificate.
+    #[serde(default)]
+    pub compacted_regions: BTreeMap<String, String>,
+    /// Partial rehydration command receipts keyed by idempotency identity.
+    #[serde(default)]
+    pub rehydration_receipts: BTreeMap<String, VirtualRehydrationReceipt>,
 }

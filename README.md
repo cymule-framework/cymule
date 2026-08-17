@@ -351,7 +351,7 @@ See [Architecture](docs/architecture.md) and the
 | Go SDK | Implemented | Builder and engine client. |
 | Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, M1 handoff journal. |
 | Durable wait activation | Implemented foundation | Identified signal/timer records, consume-once admission, reopen-safe epoch advance, and four SDK wire validation. |
-| Large virtual work | Partial | Bounded materialization, weighted fairness, priority aging, verified cursor split/merge, M1 checkpoints, and fencing. |
+| Large virtual work | Partial | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, M1 checkpoints, and fencing. |
 | Virtual work control | Implemented foundation | Binding-pinned attempts, closed retry/failure/cancel dispositions, and four SDK transport interfaces. |
 | Agent interaction plugin | Optional, partial | Rust plugin with Session, occurrence, input, workspace, and stream conformance tests. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
@@ -401,6 +401,8 @@ Implemented today:
   floating-point scheduler state;
 - adapter-verified opaque cursor split/merge with durable retirement lineage and
   coverage evidence;
+- certified cold-history compaction through a provider-neutral immutable byte
+  archive, plus exact occurrence-selection rehydration with tamper/fault tests;
 - immutable Plan evolution DAGs, impact cones, canaries, rollback pins,
   migration receipts, and shadow evidence.
 
@@ -409,7 +411,7 @@ Not yet claimed:
 - complete nested-scope durable interpretation and every crash window;
 - production resource resolver/store plugins and automatic interpreter
   activation of incoming handoffs;
-- durable virtual-work partition migration and subtree rehydration;
+- multi-worker virtual-work crash matrices and scheduling control clients;
 - automatic live-evolution diffing, shadow execution, observation gates, and
   mixed-version dispatch;
 - distributed ownership, consensus, scheduling, and failover;

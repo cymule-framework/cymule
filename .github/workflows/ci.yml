@@ -14,37 +14,97 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  plan:
+    name: Select verification lanes
     runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve the exact change and select suites
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          base=HEAD
+          if [ "$EVENT_NAME" = pull_request ]; then
+            base=$PULL_REQUEST_BASE
+          elif [ "$EVENT_NAME" = push ] && [ -n "$EVENT_BEFORE" ] && ! printf '%s' "$EVENT_BEFORE" | grep -Eq '^0+$'; then
+            base=$EVENT_BEFORE
+          fi
+          matrix=$(python3 scripts/test_harness.py plan \
+            --base "$base" \
+            --head HEAD \
+            --no-worktree \
+            --full-if-empty \
+            --format github-matrix)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          python3 scripts/test_harness.py plan \
+            --base "$base" \
+            --head HEAD \
+            --no-worktree \
+            --full-if-empty
+
+  verify:
+    name: Verify / ${{ matrix.lane }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
+        if: matrix.rust
         run: |
           rustup toolchain install 1.97.0 --profile minimal --component rustfmt,clippy
           rustup default 1.97.0
 
       - uses: pnpm/action-setup@v6.0.10
+        if: matrix.node
         with:
           version: 11.17.0
           run_install: false
 
       - uses: actions/setup-node@v7.0.0
+        if: matrix.node
         with:
           node-version: 26.7.0
           cache: pnpm
           cache-dependency-path: sdk/typescript/pnpm-lock.yaml
 
       - uses: actions/setup-go@v7.0.0
+        if: matrix.go
         with:
           go-version: 1.26.5
           cache-dependency-path: sdk/go/go.mod
 
       - uses: astral-sh/setup-uv@v10.0.1
+        if: matrix.uv
         with:
           version: 0.7.2
           enable-cache: true
           cache-dependency-glob: sdk/python/uv.lock
 
-      - name: Verify Cymule
-        run: ./scripts/verify.sh
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ matrix.suite_args }}
+          --keep-going
+          --report .cache/test-harness/${{ matrix.lane }}.json
+
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-${{ matrix.lane }}
+          path: .cache/test-harness/${{ matrix.lane }}.json
+          if-no-files-found: error

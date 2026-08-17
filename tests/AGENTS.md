@@ -1,5 +1,12 @@
 # Conformance Asset Guidance
 
+- Follow `docs/testing.md`: every durable fault test names the injected
+  operation boundary, sweeps deterministic failure positions where practical,
+  reopens authority after the fault, and runs an integrity probe. Compound
+  recovery faults and soak matrices remain separate suites from focused tests.
+- A seeded property/fuzz failure must print its seed and be minimized into a
+  permanent regression fixture. Do not rely on wall-clock races when a CAS
+  revision, epoch, counter, or explicit barrier can identify the interleaving.
 - Fixtures are shared across language SDKs and must stay language-neutral.
 - The expected Plan ID is always computed by the Rust kernel from the checked-in
   candidate; never duplicate canonicalization in a test script.
@@ -28,3 +35,7 @@
   Stateful tests cover adapter verification, stale cursor/CAS, target conflict,
   split-then-merge lineage, existing-work preservation, reopen, and historical
   command replay.
+- Compaction fixtures preserve a non-empty causal cut, pinned archive binding
+  and revision, certificate identity, and exact rehydration occurrence set.
+  Stateful tests sweep archive put/get failures, tamper bytes, stale CAS, reopen,
+  and receipt replay; an archive adapter never validates its own certificate.
