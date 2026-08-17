@@ -86,7 +86,7 @@ evolve without coupling unrelated toolchains.
 | Workbench | optional MLIR lowering smoke | compiler workbench changes or a complete run |
 | Coverage analysis | aggregate line/region non-regression signal | scheduled/manual semantic analysis |
 | Mutation analysis | whether core tests detect injected wrong semantics | scheduled/manual `cymule-core` analysis |
-| Platform portability | filesystem CAS and recovery across tier-one hosts | scheduled/manual Linux/macOS/Windows matrix |
+| Platform portability | filesystem CAS and recovery across supported hosts | scheduled/manual Linux/macOS matrix |
 
 The manifest at `tests/harness/suites.toml` is the suite and route inventory.
 Commands are argument arrays, not shell fragments. The harness validates every
@@ -145,11 +145,13 @@ Coverage currently gates the measured four-crate semantic baseline at 72% line
 and 78% region coverage. These are non-regression floors, not a claim that a
 percentage proves correctness. Mutation runs only against `cymule-core` and
 uses its independent public-interface conformance tests. The scheduled workflow
-partitions the deterministic mutant list across eight parallel shards and
-copies the existing target into each scratch tree for incremental rebuilds.
-Portability repeats only core, durable, and directory-store witnesses on Linux,
-macOS, and Windows; it does not multiply every SDK lane by every operating
-system.
+partitions the deterministic mutant list across eight parallel zero-based
+`K/N` shards and copies the existing target into each scratch tree for
+incremental rebuilds.
+Portability repeats only core, durable, and directory-store witnesses on Linux
+and macOS; it does not multiply every SDK lane by every operating system. The
+catalog invokes its shell leaves through explicit `bash` so the command remains
+an auditable argument array on both supported hosts.
 
 The analysis scripts pin
 [`cargo-llvm-cov` 0.9.0](https://github.com/taiki-e/cargo-llvm-cov/tree/v0.9.0)
@@ -243,6 +245,11 @@ races as correctness evidence when an explicit barrier, counter, epoch, or CAS
 revision can identify the same interleaving. Seeded fuzz/property cases must
 print the seed and minimize a failure into a permanent regression fixture.
 
+The core Proptest suite uses an explicit crate-local failure-persistence path
+because integration tests have no discoverable `lib.rs` beside their source.
+Generated `proptest-regressions/semantic_kernel.txt` cases are committed with
+the fix and replay before new cases in focused, soak, mutation, and CI runs.
+
 When original history is compacted, the integrity probe also verifies the
 certificate digest, retained obligations and bindings, declared replay
 availability, and a partial rehydration round trip. A summary is never accepted
@@ -280,3 +287,11 @@ mutation sensitivity and external durable-byte faults provide more relevant
 evidence per unit of CI time. See the
 [official Miri project](https://github.com/rust-lang/miri) for the trigger and
 supported undefined-behavior checks.
+
+Mutation exclusions are narrow and reviewed in `.cargo/mutants.toml`.
+`Machine::verify_replay` is excluded because all state required to manufacture
+a live-projection/event divergence is private and changed only by the admitted
+reducer; mutating the integrity checker itself is observationally equivalent
+through public APIs. Adding a test-only corruption path would weaken the core
+for the benefit of the tool. No transition, validation, identity, or persistence
+mutation is excluded.

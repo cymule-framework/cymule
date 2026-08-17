@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
+        os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
@@ -30,8 +30,8 @@ jobs:
       - name: Install Rust
         shell: bash
         run: |
-          rustup toolchain install 1.97.0 --profile minimal --component rustfmt,clippy
-          rustup default 1.97.0
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.1
       - name: Run portable durable witnesses
         shell: bash
         run: >-

@@ -13,4 +13,6 @@
 - `MachineSnapshot::command_digests` exposes only stable validation evidence for
   durable exact-delta checks. Keep the private command-record representation and
   reduction semantics inside this core.
+- Property failures persist under `proptest-regressions/`. Commit the minimized
+  corpus file with its fix; never depend on an ephemeral CI seed alone.
 - Changes here require specification, schema, conformance, and SDK review.
