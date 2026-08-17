@@ -15,6 +15,16 @@ Status: partial.
   Run;
 - capability-aware claims with monotonically increasing fencing epochs;
 - stale-completion rejection;
+- binding-pinned work occurrences created with every claim and retained across
+  running, success, retry, park, terminal failure, and cancellation;
+- idempotent disposition replay, conflicting-disposition rejection, retry under
+  a new epoch/binding, and cancellation fencing of late output;
+- historical command receipts that remain replayable after later checkpoints,
+  without rolling the scheduler back to the command's snapshot;
+- M1-backed claim and resolution checkpoints that atomically retain result,
+  failure, or cancellation Artifacts with occurrence/frontier state;
+- provider-neutral `VirtualWorkControl` interfaces and shared typed occurrence
+  plus control fixtures in Rust, TypeScript, Python, and Go;
 - indexed park/wake reasons for waits, dependencies, budgets, capabilities, and
   backpressure;
 - portable scheduler snapshots and restore-time bound validation;
@@ -33,7 +43,6 @@ Status: partial.
 
 ## Remaining completion gates
 
-- active-work retry, cancellation, failure, and result occurrence records;
 - weighted cost budgets, priority aging, and starvation proofs;
 - partition split/merge and cursor migration;
 - subtree completion summaries, compaction certificates, and partial
@@ -47,4 +56,6 @@ Version decision: durable scheduler integration introduces the independent
 `cymule.virtual-checkpoint/1` journal payload. `VirtualSnapshot` adds a derived
 parked-reason index that restore always rebuilds from parked work. Neither change
 alters `cymule.semantic/1`, the Plan IR, or M1's generic application-journal
-envelope.
+envelope. Work lifecycle adds independent `cymule.virtual-work-occurrence/1`
+and `cymule.virtual-work-control/1` domains; SDKs expose their closed wire types
+and transport interfaces but do not reduce scheduler state.

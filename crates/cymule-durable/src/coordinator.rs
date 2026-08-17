@@ -874,6 +874,57 @@ impl<S: DurableStore> DurableCoordinator<S> {
         })
     }
 
+    /// Atomically persist exact new Artifacts and higher-profile journal
+    /// checkpoints without exposing a raw Machine mutation surface.
+    ///
+    /// The proposed Machine may differ from the current snapshot only by the
+    /// listed immutable Artifacts. Plans, Events, commands, and unrelated
+    /// Artifacts must remain byte-for-byte unchanged.
+    pub fn checkpoint_artifact_journals(
+        &mut self,
+        machine: &Machine,
+        artifacts: &std::collections::BTreeSet<cymule_core::ArtifactRef>,
+        batches: &[JournalBatch],
+    ) -> DurableResult<String> {
+        if batches.is_empty() {
+            return Err(DurableError::Validation(
+                "Artifact journal checkpoint requires at least one journal".to_owned(),
+            ));
+        }
+        let mut journal_ids = std::collections::BTreeSet::new();
+        for batch in batches {
+            validate_journal_batch(&batch.journal_id, &batch.records)?;
+            if batch.records.is_empty() {
+                return Err(DurableError::Validation(format!(
+                    "application journal {} has no checkpoint records",
+                    batch.journal_id
+                )));
+            }
+            if !journal_ids.insert(&batch.journal_id) {
+                return Err(DurableError::Validation(format!(
+                    "application journal {} appears twice in one checkpoint",
+                    batch.journal_id
+                )));
+            }
+        }
+        let machine_snapshot = machine.snapshot();
+        self.mutate_checked(|state| {
+            ensure_artifact_machine(
+                &state.machine,
+                &machine_snapshot,
+                artifacts,
+                "Artifact journal checkpoint",
+            )?;
+            for batch in batches {
+                for record in &batch.records {
+                    append_journal_record(state, &batch.journal_id, record.clone())?;
+                }
+            }
+            state.machine = machine_snapshot;
+            Ok(())
+        })
+    }
+
     /// Atomically append higher-profile records and register one durable wait.
     pub fn checkpoint_journal_wait(
         &mut self,
@@ -1002,29 +1053,47 @@ fn ensure_activation_machine(
     result: &cymule_core::ArtifactRef,
     activation_id: &str,
 ) -> DurableResult<()> {
+    ensure_artifact_machine(
+        current,
+        next,
+        &std::collections::BTreeSet::from([result.clone()]),
+        &format!("wait activation {activation_id}"),
+    )
+}
+
+fn ensure_artifact_machine(
+    current: &cymule_core::MachineSnapshot,
+    next: &cymule_core::MachineSnapshot,
+    artifacts: &std::collections::BTreeSet<cymule_core::ArtifactRef>,
+    operation: &str,
+) -> DurableResult<()> {
     let mut expected = current.clone();
-    if !expected
-        .artifacts
-        .iter()
-        .any(|record| record.reference == *result)
-    {
+    for artifact in artifacts {
+        if expected
+            .artifacts
+            .iter()
+            .any(|record| record.reference == *artifact)
+        {
+            continue;
+        }
         let record = next
             .artifacts
             .iter()
-            .find(|record| record.reference == *result)
+            .find(|record| record.reference == *artifact)
             .ok_or_else(|| {
                 DurableError::Validation(format!(
-                    "wait activation {activation_id} result Artifact bytes are missing"
+                    "{operation} Artifact {} bytes are missing",
+                    artifact.artifact_id
                 ))
             })?;
         expected.artifacts.push(record.clone());
-        expected
-            .artifacts
-            .sort_by(|left, right| left.reference.artifact_id.cmp(&right.reference.artifact_id));
     }
+    expected
+        .artifacts
+        .sort_by(|left, right| left.reference.artifact_id.cmp(&right.reference.artifact_id));
     if &expected != next {
         return Err(DurableError::Validation(format!(
-            "wait activation {activation_id} Machine snapshot contains unrelated changes"
+            "{operation} Machine snapshot contains unrelated changes"
         )));
     }
     Ok(())

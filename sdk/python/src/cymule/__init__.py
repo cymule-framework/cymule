@@ -6,9 +6,48 @@ import copy
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, TypedDict
 
 Json = None | bool | int | float | str | list["Json"] | dict[str, "Json"]
+ArtifactRef = dict[str, str]
+ParkReason = dict[str, str]
+WorkResolution = dict[str, Any]
+
+
+class WorkOccurrence(TypedDict):
+    """Binding-pinned M3 work attempt returned by a control transport."""
+
+    occurrence_version: str
+    occurrence_id: str
+    work_id: str
+    region_id: str
+    run_id: str
+    owner: str
+    epoch: int
+    occurrence_binding: str
+    state: str
+    result: ArtifactRef | None
+    error: ArtifactRef | None
+    next_reason: ParkReason | None
+
+
+class WorkResolutionCommand(TypedDict):
+    """Idempotent owner/epoch-fenced M3 resolution command."""
+
+    control_version: str
+    command_id: str
+    work_id: str
+    owner: str
+    epoch: int
+    resolution: WorkResolution
+
+
+class VirtualWorkControl(Protocol):
+    """Transport-neutral M3 occurrence query and control interface."""
+
+    def occurrence(self, occurrence_id: str) -> WorkOccurrence | None: ...
+
+    def resolve(self, command: WorkResolutionCommand) -> WorkOccurrence: ...
 
 
 class FlowBuilder:
@@ -227,6 +266,116 @@ class WaitActivationBuilder:
         }
 
 
+class VirtualWorkControlBuilder:
+    """Build owner/epoch-fenced virtual work resolution commands."""
+
+    @staticmethod
+    def succeed(
+        command_id: str,
+        work_id: str,
+        owner: str,
+        epoch: int,
+        result: ArtifactRef,
+    ) -> WorkResolutionCommand:
+        return VirtualWorkControlBuilder._build(
+            command_id,
+            work_id,
+            owner,
+            epoch,
+            {"resolution": "succeeded", "result": dict(result)},
+        )
+
+    @staticmethod
+    def retry(
+        command_id: str,
+        work_id: str,
+        owner: str,
+        epoch: int,
+        error: ArtifactRef,
+        next_reason: ParkReason | None = None,
+    ) -> WorkResolutionCommand:
+        return VirtualWorkControlBuilder._build(
+            command_id,
+            work_id,
+            owner,
+            epoch,
+            {
+                "resolution": "retry",
+                "error": dict(error),
+                "next_reason": dict(next_reason) if next_reason is not None else None,
+            },
+        )
+
+    @staticmethod
+    def fail(
+        command_id: str,
+        work_id: str,
+        owner: str,
+        epoch: int,
+        error: ArtifactRef,
+    ) -> WorkResolutionCommand:
+        return VirtualWorkControlBuilder._build(
+            command_id,
+            work_id,
+            owner,
+            epoch,
+            {"resolution": "failed", "error": dict(error)},
+        )
+
+    @staticmethod
+    def park(
+        command_id: str,
+        work_id: str,
+        owner: str,
+        epoch: int,
+        reason: ParkReason,
+    ) -> WorkResolutionCommand:
+        return VirtualWorkControlBuilder._build(
+            command_id,
+            work_id,
+            owner,
+            epoch,
+            {"resolution": "parked", "reason": dict(reason)},
+        )
+
+    @staticmethod
+    def cancel(
+        command_id: str,
+        work_id: str,
+        owner: str,
+        epoch: int,
+        reason: ArtifactRef,
+    ) -> WorkResolutionCommand:
+        return VirtualWorkControlBuilder._build(
+            command_id,
+            work_id,
+            owner,
+            epoch,
+            {"resolution": "cancelled", "reason": dict(reason)},
+        )
+
+    @staticmethod
+    def _build(
+        command_id: str,
+        work_id: str,
+        owner: str,
+        epoch: int,
+        resolution: WorkResolution,
+    ) -> WorkResolutionCommand:
+        if not command_id or not work_id or not owner or epoch < 1:
+            raise ValueError(
+                "virtual work control requires command, work, owner, and positive epoch"
+            )
+        return {
+            "control_version": "cymule.virtual-work-control/1",
+            "command_id": command_id,
+            "work_id": work_id,
+            "owner": owner,
+            "epoch": epoch,
+            "resolution": resolution,
+        }
+
+
 class CliEngine:
     """CLI-backed Engine transport."""
 
@@ -290,9 +439,16 @@ class CliEngine:
 
 
 __all__ = [
+    "ArtifactRef",
     "CliEngine",
     "FlowBuilder",
     "Json",
+    "ParkReason",
     "ResourceBuilder",
+    "VirtualWorkControl",
+    "VirtualWorkControlBuilder",
+    "WorkOccurrence",
+    "WorkResolution",
+    "WorkResolutionCommand",
     "WaitActivationBuilder",
 ]

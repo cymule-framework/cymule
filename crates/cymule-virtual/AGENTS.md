@@ -23,6 +23,20 @@
   reason directly rather than scan all parked work. A wait park reason uses the
   exact M1 wait ID so one identified activation can wake only its selected work.
 - Claims use monotonically increasing epochs and reject stale completion.
+- Resolve the immutable execution binding before claim admission. Each claim
+  creates one `cymule.virtual-work-occurrence/1` record keyed by work and epoch;
+  owner and binding are evidence, not mutable scheduler hints.
+- Attempt dispositions are closed: success, retry, park, terminal failure, or
+  cancellation. Retry preserves failure evidence and requeues or parks the same
+  logical work; its next claim gets a new epoch and may select a new binding.
+  Cancellation fences late worker output.
+- Retry classification and limits belong to explicit policy/control callers.
+  Never infer retryability from provider error strings or worker exit codes.
+- Claim and disposition checkpoints use stable command IDs. Result, failure, or
+  cancellation Artifacts commit atomically with the occurrence and frontier.
+- Control checkpoints retain the exact command and occurrence receipt. Replaying
+  an old command after later scheduler checkpoints returns that original receipt;
+  command ID reuse with different semantics fails.
 - Tests must use logical cardinalities much larger than active frontiers and
   prove snapshot/restore, fairness, parking, waking, and bounded memory.
 - Cross-profile tests must prove M1 wait activation and M3 exact-index wake are

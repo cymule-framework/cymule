@@ -40,6 +40,9 @@
   Continuations, and typed projection checkpoint share one CAS revision.
   Never attach a new projection record after that activation was committed;
   redelivery is idempotent only when every requested record already exists.
+- Higher-profile result/evidence Artifacts use `checkpoint_artifact_journals`.
+  The proposed Machine may add only the explicitly listed Artifacts; reject
+  Plans, Events, commands, or unrelated Artifact changes before CAS.
 - Reference in-memory synchronization is adapter-local and non-blocking.
   Contention must surface as a CAS conflict rather than waiting on a mutex.
 - Concrete storage belongs under `plugins/` and must pass this crate's shared

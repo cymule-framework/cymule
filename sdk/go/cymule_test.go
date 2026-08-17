@@ -116,3 +116,58 @@ func TestWaitActivationValidatesThroughRustEngine(t *testing.T) {
 		t.Fatalf("unexpected activation: %#v", verified)
 	}
 }
+
+func TestVirtualWorkQueryAndControlFixturesStayExact(t *testing.T) {
+	occurrencePath := os.Getenv("CYMULE_VIRTUAL_OCCURRENCE_FIXTURE")
+	controlPath := os.Getenv("CYMULE_VIRTUAL_CONTROL_FIXTURE")
+	if occurrencePath == "" || controlPath == "" {
+		t.Skip("virtual work SDK conformance is not configured")
+	}
+	occurrenceBytes, err := os.ReadFile(occurrencePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var occurrence WorkOccurrence
+	if err := json.Unmarshal(occurrenceBytes, &occurrence); err != nil {
+		t.Fatal(err)
+	}
+	if occurrence.OccurrenceBinding != "binding:worker/fixture@1" {
+		t.Fatalf("unexpected occurrence: %#v", occurrence)
+	}
+	command := SucceedWork(
+		"command:virtual:fixture:success",
+		"work:fixture",
+		"worker:fixture",
+		1,
+		ArtifactRef{
+			ArtifactID: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+			Kind:       "example/result",
+		},
+	)
+	encoded, err := json.Marshal(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlBytes, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded WorkResolutionCommand
+	if err := json.Unmarshal(controlBytes, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Resolution.Kind != "succeeded" || decoded.Resolution.Result == nil {
+		t.Fatalf("unexpected decoded control: %#v", decoded)
+	}
+	var expected any
+	var actual any
+	if err := json.Unmarshal(controlBytes, &expected); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &actual); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("control differs from shared fixture: %#v", actual)
+	}
+}

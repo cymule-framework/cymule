@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use cymule_core::content_id;
 use cymule_durable::WaitActivation;
 
 use crate::{
-    ClaimedWork, FrontierLimits, MaterializedPage, ParkReason, ParkedWork, VirtualError,
-    VirtualRegion, VirtualResult, VirtualSnapshot, WorkItem,
+    ClaimedWork, FrontierLimits, MaterializedPage, ParkReason, ParkedWork,
+    VIRTUAL_WORK_OCCURRENCE_VERSION, VirtualError, VirtualRegion, VirtualResult, VirtualSnapshot,
+    WorkItem, WorkOccurrence, WorkOccurrenceState, WorkResolution,
 };
 
 /// Replaceable source of bounded pages for one virtual region.
@@ -47,6 +49,7 @@ impl VirtualScheduler {
                 known: BTreeSet::new(),
                 last_run: None,
                 claim_epochs: BTreeMap::new(),
+                occurrences: BTreeMap::new(),
             },
         })
     }
@@ -155,8 +158,30 @@ impl VirtualScheduler {
     pub fn claim(
         &mut self,
         owner: &str,
+        occurrence_binding: &str,
         capabilities: &BTreeSet<String>,
     ) -> VirtualResult<Option<ClaimedWork>> {
+        let before = self.snapshot.clone();
+        match self.claim_inner(owner, occurrence_binding, capabilities) {
+            Ok(claim) => Ok(claim),
+            Err(error) => {
+                self.snapshot = before;
+                Err(error)
+            }
+        }
+    }
+
+    fn claim_inner(
+        &mut self,
+        owner: &str,
+        occurrence_binding: &str,
+        capabilities: &BTreeSet<String>,
+    ) -> VirtualResult<Option<ClaimedWork>> {
+        if owner.is_empty() || occurrence_binding.is_empty() {
+            return Err(VirtualError::Validation(
+                "claim owner and occurrence binding must not be empty".to_owned(),
+            ));
+        }
         if self.snapshot.active.len() >= self.limits.max_active {
             return Ok(None);
         }
@@ -190,11 +215,39 @@ impl VirtualScheduler {
                 .entry(item.work_id.clone())
                 .and_modify(|epoch| *epoch += 1)
                 .or_insert(1);
+            let occurrence_id = work_occurrence_id(&item.work_id, *epoch)?;
             let claim = ClaimedWork {
-                item,
+                item: item.clone(),
                 owner: owner.to_owned(),
                 epoch: *epoch,
+                occurrence_id: occurrence_id.clone(),
+                occurrence_binding: occurrence_binding.to_owned(),
             };
+            let occurrence = WorkOccurrence {
+                occurrence_version: VIRTUAL_WORK_OCCURRENCE_VERSION.to_owned(),
+                occurrence_id: occurrence_id.clone(),
+                work_id: item.work_id,
+                region_id: item.region_id,
+                run_id: item.run_id,
+                owner: owner.to_owned(),
+                epoch: *epoch,
+                occurrence_binding: occurrence_binding.to_owned(),
+                state: WorkOccurrenceState::Running,
+                result: None,
+                error: None,
+                next_reason: None,
+            };
+            if self
+                .snapshot
+                .occurrences
+                .insert(occurrence_id, occurrence)
+                .is_some()
+            {
+                return Err(VirtualError::Conflict(format!(
+                    "work {} claim epoch {} already exists",
+                    claim.item.work_id, claim.epoch
+                )));
+            }
             self.snapshot
                 .active
                 .insert(claim.item.work_id.clone(), claim.clone());
@@ -204,23 +257,33 @@ impl VirtualScheduler {
         Ok(None)
     }
 
-    /// Complete exactly the current fenced claim.
-    pub fn complete(&mut self, work_id: &str, owner: &str, epoch: u64) -> VirtualResult<WorkItem> {
-        let claim =
-            self.snapshot.active.get(work_id).ok_or_else(|| {
-                VirtualError::NotFound(format!("active work {work_id} is missing"))
-            })?;
-        if claim.owner != owner || claim.epoch != epoch {
-            return Err(VirtualError::Conflict(format!(
-                "stale completion for {work_id}"
-            )));
+    /// Resolve exactly one fenced active occurrence.
+    pub fn resolve(
+        &mut self,
+        work_id: &str,
+        owner: &str,
+        epoch: u64,
+        resolution: &WorkResolution,
+    ) -> VirtualResult<WorkOccurrence> {
+        let before = self.snapshot.clone();
+        match self.resolve_inner(work_id, owner, epoch, resolution) {
+            Ok(occurrence) => Ok(occurrence),
+            Err(error) => {
+                self.snapshot = before;
+                Err(error)
+            }
         }
-        Ok(self
-            .snapshot
-            .active
-            .remove(work_id)
-            .expect("claim exists")
-            .item)
+    }
+
+    /// Publish one terminal success for the current fenced claim.
+    pub fn succeed(
+        &mut self,
+        work_id: &str,
+        owner: &str,
+        epoch: u64,
+        result: cymule_core::ArtifactRef,
+    ) -> VirtualResult<WorkOccurrence> {
+        self.resolve(work_id, owner, epoch, &WorkResolution::Succeeded { result })
     }
 
     /// Park a currently active claim under an indexed reason.
@@ -230,21 +293,102 @@ impl VirtualScheduler {
         owner: &str,
         epoch: u64,
         reason: ParkReason,
-    ) -> VirtualResult<()> {
-        let item = self.complete(work_id, owner, epoch)?;
-        self.snapshot.parked.insert(
-            work_id.to_owned(),
-            ParkedWork {
-                item,
-                reason: reason.clone(),
-            },
-        );
+    ) -> VirtualResult<WorkOccurrence> {
+        self.resolve(work_id, owner, epoch, &WorkResolution::Parked { reason })
+    }
+
+    fn resolve_inner(
+        &mut self,
+        work_id: &str,
+        owner: &str,
+        epoch: u64,
+        resolution: &WorkResolution,
+    ) -> VirtualResult<WorkOccurrence> {
+        validate_resolution(resolution)?;
+        let occurrence_id = work_occurrence_id(work_id, epoch)?;
+        let existing = self
+            .snapshot
+            .occurrences
+            .get(&occurrence_id)
+            .ok_or_else(|| {
+                VirtualError::NotFound(format!("work occurrence {occurrence_id} is missing"))
+            })?
+            .clone();
+        if existing.owner != owner || existing.work_id != work_id || existing.epoch != epoch {
+            return Err(VirtualError::Conflict(format!(
+                "stale resolution for {work_id}"
+            )));
+        }
+        if existing.state != WorkOccurrenceState::Running {
+            if occurrence_matches_resolution(&existing, resolution) {
+                return Ok(existing);
+            }
+            return Err(VirtualError::Conflict(format!(
+                "work occurrence {occurrence_id} already has a different disposition"
+            )));
+        }
+        let claim =
+            self.snapshot.active.get(work_id).ok_or_else(|| {
+                VirtualError::NotFound(format!("active work {work_id} is missing"))
+            })?;
+        if claim.owner != owner
+            || claim.epoch != epoch
+            || claim.occurrence_id != occurrence_id
+            || claim.occurrence_binding != existing.occurrence_binding
+        {
+            return Err(VirtualError::Conflict(format!(
+                "stale resolution for {work_id}"
+            )));
+        }
+        let item = claim.item.clone();
+        let mut resolved = existing;
+        match resolution {
+            WorkResolution::Succeeded { result } => {
+                resolved.state = WorkOccurrenceState::Succeeded;
+                resolved.result = Some(result.clone());
+            }
+            WorkResolution::Retry { error, next_reason } => {
+                resolved.state = WorkOccurrenceState::RetryScheduled;
+                resolved.error = Some(error.clone());
+                resolved.next_reason.clone_from(next_reason);
+            }
+            WorkResolution::Parked { reason } => {
+                resolved.state = WorkOccurrenceState::Parked;
+                resolved.next_reason = Some(reason.clone());
+            }
+            WorkResolution::Failed { error } => {
+                resolved.state = WorkOccurrenceState::Failed;
+                resolved.error = Some(error.clone());
+            }
+            WorkResolution::Cancelled { reason } => {
+                resolved.state = WorkOccurrenceState::Cancelled;
+                resolved.error = Some(reason.clone());
+            }
+        }
+        self.snapshot.active.remove(work_id);
         self.snapshot
-            .parked_index
-            .entry(reason)
-            .or_default()
-            .insert(work_id.to_owned());
-        Ok(())
+            .occurrences
+            .insert(occurrence_id, resolved.clone());
+        match resolution {
+            WorkResolution::Retry {
+                next_reason: Some(reason),
+                ..
+            }
+            | WorkResolution::Parked { reason } => {
+                insert_parked(&mut self.snapshot, item, reason.clone())?;
+            }
+            WorkResolution::Retry {
+                next_reason: None, ..
+            } => insert_priority(
+                self.snapshot.ready.entry(item.run_id.clone()).or_default(),
+                item,
+            ),
+            WorkResolution::Succeeded { .. }
+            | WorkResolution::Failed { .. }
+            | WorkResolution::Cancelled { .. } => {}
+        }
+        self.validate_bounds()?;
+        Ok(resolved)
     }
 
     /// Wake every item matching one exact reason.
@@ -296,6 +440,11 @@ impl VirtualScheduler {
         self.snapshot.clone()
     }
 
+    /// Query one binding-pinned attempt occurrence by stable identity.
+    pub fn occurrence(&self, occurrence_id: &str) -> Option<&WorkOccurrence> {
+        self.snapshot.occurrences.get(occurrence_id)
+    }
+
     fn eligible_runs(&self) -> Vec<String> {
         let mut runs: Vec<String> = self
             .snapshot
@@ -337,7 +486,12 @@ impl VirtualScheduler {
             }
         }
         for (work_id, claim) in &self.snapshot.active {
-            if &claim.item.work_id != work_id || claim.owner.is_empty() || claim.epoch == 0 {
+            if &claim.item.work_id != work_id
+                || claim.owner.is_empty()
+                || claim.epoch == 0
+                || claim.occurrence_id.is_empty()
+                || claim.occurrence_binding.is_empty()
+            {
                 return Err(VirtualError::Validation(format!(
                     "active claim {work_id} is malformed"
                 )));
@@ -350,6 +504,23 @@ impl VirtualScheduler {
             {
                 return Err(VirtualError::Validation(format!(
                     "active claim {work_id} is not covered by its fencing epoch"
+                )));
+            }
+            let occurrence = self
+                .snapshot
+                .occurrences
+                .get(&claim.occurrence_id)
+                .ok_or_else(|| {
+                    VirtualError::Validation(format!("active claim {work_id} has no occurrence"))
+                })?;
+            if occurrence.state != WorkOccurrenceState::Running
+                || occurrence.work_id != *work_id
+                || occurrence.owner != claim.owner
+                || occurrence.epoch != claim.epoch
+                || occurrence.occurrence_binding != claim.occurrence_binding
+            {
+                return Err(VirtualError::Validation(format!(
+                    "active claim {work_id} disagrees with its occurrence"
                 )));
             }
             *active_per_run.entry(claim.item.run_id.clone()).or_default() += 1;
@@ -375,6 +546,82 @@ impl VirtualScheduler {
             return Err(VirtualError::Validation(
                 "parked reason index does not match parked work".to_owned(),
             ));
+        }
+        let mut max_occurrence_epochs = BTreeMap::<String, u64>::new();
+        for (occurrence_id, occurrence) in &self.snapshot.occurrences {
+            validate_occurrence(occurrence_id, occurrence)?;
+            if !self.snapshot.known.contains(&occurrence.work_id) {
+                return Err(VirtualError::Validation(format!(
+                    "work occurrence {occurrence_id} references unknown work"
+                )));
+            }
+            let region = self
+                .snapshot
+                .regions
+                .get(&occurrence.region_id)
+                .ok_or_else(|| {
+                    VirtualError::Validation(format!(
+                        "work occurrence {occurrence_id} references a missing region"
+                    ))
+                })?;
+            if occurrence.run_id != region.run_id {
+                return Err(VirtualError::Validation(format!(
+                    "work occurrence {occurrence_id} escaped its Run"
+                )));
+            }
+            max_occurrence_epochs
+                .entry(occurrence.work_id.clone())
+                .and_modify(|epoch| *epoch = (*epoch).max(occurrence.epoch))
+                .or_insert(occurrence.epoch);
+            match occurrence.state {
+                WorkOccurrenceState::Running => {
+                    if !self.snapshot.active.contains_key(&occurrence.work_id) {
+                        return Err(VirtualError::Validation(format!(
+                            "running work occurrence {occurrence_id} has no active claim"
+                        )));
+                    }
+                }
+                WorkOccurrenceState::RetryScheduled
+                | WorkOccurrenceState::Parked
+                | WorkOccurrenceState::Succeeded
+                | WorkOccurrenceState::Failed
+                | WorkOccurrenceState::Cancelled => {}
+            }
+        }
+        for (work_id, epoch) in &self.snapshot.claim_epochs {
+            if max_occurrence_epochs.get(work_id) != Some(epoch) {
+                return Err(VirtualError::Validation(format!(
+                    "work {work_id} claim epoch does not match its occurrence history"
+                )));
+            }
+            if let Some(occurrence) = self
+                .snapshot
+                .occurrences
+                .values()
+                .find(|occurrence| occurrence.work_id == *work_id && occurrence.epoch == *epoch)
+            {
+                let is_materialized = materialized.contains(work_id);
+                if matches!(
+                    occurrence.state,
+                    WorkOccurrenceState::RetryScheduled | WorkOccurrenceState::Parked
+                ) && !is_materialized
+                {
+                    return Err(VirtualError::Validation(format!(
+                        "rescheduled work {work_id} is not materialized"
+                    )));
+                }
+                if matches!(
+                    occurrence.state,
+                    WorkOccurrenceState::Succeeded
+                        | WorkOccurrenceState::Failed
+                        | WorkOccurrenceState::Cancelled
+                ) && is_materialized
+                {
+                    return Err(VirtualError::Validation(format!(
+                        "terminal work {work_id} remains materialized"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -434,6 +681,181 @@ fn validate_work_item(item: &WorkItem, region: &VirtualRegion) -> VirtualResult<
             item.work_id
         )));
     }
+    Ok(())
+}
+
+fn validate_occurrence(occurrence_id: &str, occurrence: &WorkOccurrence) -> VirtualResult<()> {
+    if occurrence.occurrence_version != VIRTUAL_WORK_OCCURRENCE_VERSION
+        || occurrence.occurrence_id != occurrence_id
+        || occurrence.occurrence_id != work_occurrence_id(&occurrence.work_id, occurrence.epoch)?
+        || occurrence.work_id.is_empty()
+        || occurrence.region_id.is_empty()
+        || occurrence.run_id.is_empty()
+        || occurrence.owner.is_empty()
+        || occurrence.epoch == 0
+        || occurrence.occurrence_binding.is_empty()
+    {
+        return Err(VirtualError::Validation(format!(
+            "work occurrence {occurrence_id} has invalid identity or binding"
+        )));
+    }
+    let shape_is_valid = match occurrence.state {
+        WorkOccurrenceState::Running => {
+            occurrence.result.is_none()
+                && occurrence.error.is_none()
+                && occurrence.next_reason.is_none()
+        }
+        WorkOccurrenceState::Succeeded => {
+            occurrence
+                .result
+                .as_ref()
+                .is_some_and(|result| validate_artifact(result).is_ok())
+                && occurrence.error.is_none()
+                && occurrence.next_reason.is_none()
+        }
+        WorkOccurrenceState::RetryScheduled => {
+            occurrence.result.is_none()
+                && occurrence
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| validate_artifact(error).is_ok())
+                && occurrence
+                    .next_reason
+                    .as_ref()
+                    .is_none_or(|reason| validate_park_reason(reason).is_ok())
+        }
+        WorkOccurrenceState::Parked => {
+            occurrence.result.is_none()
+                && occurrence.error.is_none()
+                && occurrence
+                    .next_reason
+                    .as_ref()
+                    .is_some_and(|reason| validate_park_reason(reason).is_ok())
+        }
+        WorkOccurrenceState::Failed | WorkOccurrenceState::Cancelled => {
+            occurrence.result.is_none()
+                && occurrence
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| validate_artifact(error).is_ok())
+                && occurrence.next_reason.is_none()
+        }
+    };
+    if !shape_is_valid {
+        return Err(VirtualError::Validation(format!(
+            "work occurrence {occurrence_id} has fields inconsistent with its state"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_resolution(resolution: &WorkResolution) -> VirtualResult<()> {
+    match resolution {
+        WorkResolution::Succeeded { result } => validate_artifact(result),
+        WorkResolution::Retry { error, next_reason } => {
+            validate_artifact(error)?;
+            if let Some(reason) = next_reason {
+                validate_park_reason(reason)?;
+            }
+            Ok(())
+        }
+        WorkResolution::Parked { reason } => validate_park_reason(reason),
+        WorkResolution::Failed { error } => validate_artifact(error),
+        WorkResolution::Cancelled { reason } => validate_artifact(reason),
+    }
+}
+
+fn validate_artifact(artifact: &cymule_core::ArtifactRef) -> VirtualResult<()> {
+    if artifact.artifact_id.is_empty() || artifact.kind.is_empty() {
+        return Err(VirtualError::Validation(
+            "work disposition Artifact identity and kind must not be empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_park_reason(reason: &ParkReason) -> VirtualResult<()> {
+    let identity = match reason {
+        ParkReason::Wait { key } => key,
+        ParkReason::Dependency { work_id } => work_id,
+        ParkReason::Budget { account } => account,
+        ParkReason::Capability { capability } => capability,
+        ParkReason::Backpressure { domain } => domain,
+    };
+    if identity.is_empty() {
+        return Err(VirtualError::Validation(
+            "park reason identity must not be empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn occurrence_matches_resolution(occurrence: &WorkOccurrence, resolution: &WorkResolution) -> bool {
+    match resolution {
+        WorkResolution::Succeeded { result } => {
+            occurrence.state == WorkOccurrenceState::Succeeded
+                && occurrence.result.as_ref() == Some(result)
+                && occurrence.error.is_none()
+                && occurrence.next_reason.is_none()
+        }
+        WorkResolution::Retry { error, next_reason } => {
+            occurrence.state == WorkOccurrenceState::RetryScheduled
+                && occurrence.result.is_none()
+                && occurrence.error.as_ref() == Some(error)
+                && occurrence.next_reason == *next_reason
+        }
+        WorkResolution::Parked { reason } => {
+            occurrence.state == WorkOccurrenceState::Parked
+                && occurrence.result.is_none()
+                && occurrence.error.is_none()
+                && occurrence.next_reason.as_ref() == Some(reason)
+        }
+        WorkResolution::Failed { error } => {
+            occurrence.state == WorkOccurrenceState::Failed
+                && occurrence.result.is_none()
+                && occurrence.error.as_ref() == Some(error)
+                && occurrence.next_reason.is_none()
+        }
+        WorkResolution::Cancelled { reason } => {
+            occurrence.state == WorkOccurrenceState::Cancelled
+                && occurrence.result.is_none()
+                && occurrence.error.as_ref() == Some(reason)
+                && occurrence.next_reason.is_none()
+        }
+    }
+}
+
+fn work_occurrence_id(work_id: &str, epoch: u64) -> VirtualResult<String> {
+    content_id(VIRTUAL_WORK_OCCURRENCE_VERSION, &(work_id, epoch))
+        .map_err(|error| VirtualError::Validation(error.to_string()))
+}
+
+fn insert_parked(
+    snapshot: &mut VirtualSnapshot,
+    item: WorkItem,
+    reason: ParkReason,
+) -> VirtualResult<()> {
+    let work_id = item.work_id.clone();
+    if snapshot
+        .parked
+        .insert(
+            work_id.clone(),
+            ParkedWork {
+                item,
+                reason: reason.clone(),
+            },
+        )
+        .is_some()
+    {
+        return Err(VirtualError::Conflict(format!(
+            "work {work_id} is already parked"
+        )));
+    }
+    snapshot
+        .parked_index
+        .entry(reason)
+        .or_default()
+        .insert(work_id);
     Ok(())
 }
 

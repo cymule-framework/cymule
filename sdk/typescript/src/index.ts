@@ -57,6 +57,57 @@ export interface WaitActivation {
   result: ArtifactRef;
 }
 
+export type ParkReason =
+  | { kind: "wait"; key: string }
+  | { kind: "dependency"; work_id: string }
+  | { kind: "budget"; account: string }
+  | { kind: "capability"; capability: string }
+  | { kind: "backpressure"; domain: string };
+
+export type WorkOccurrenceState =
+  | "running"
+  | "succeeded"
+  | "retry_scheduled"
+  | "parked"
+  | "failed"
+  | "cancelled";
+
+export interface WorkOccurrence {
+  occurrence_version: "cymule.virtual-work-occurrence/1";
+  occurrence_id: string;
+  work_id: string;
+  region_id: string;
+  run_id: string;
+  owner: string;
+  epoch: number;
+  occurrence_binding: string;
+  state: WorkOccurrenceState;
+  result: ArtifactRef | null;
+  error: ArtifactRef | null;
+  next_reason: ParkReason | null;
+}
+
+export type WorkResolution =
+  | { resolution: "succeeded"; result: ArtifactRef }
+  | { resolution: "retry"; error: ArtifactRef; next_reason: ParkReason | null }
+  | { resolution: "parked"; reason: ParkReason }
+  | { resolution: "failed"; error: ArtifactRef }
+  | { resolution: "cancelled"; reason: ArtifactRef };
+
+export interface WorkResolutionCommand {
+  control_version: "cymule.virtual-work-control/1";
+  command_id: string;
+  work_id: string;
+  owner: string;
+  epoch: number;
+  resolution: WorkResolution;
+}
+
+export interface VirtualWorkControl {
+  occurrence(occurrenceId: string): Promise<WorkOccurrence | null>;
+  resolve(command: WorkResolutionCommand): Promise<WorkOccurrence>;
+}
+
 export type Expression =
   | { kind: "input" }
   | { kind: "literal"; value: Json }
@@ -257,6 +308,95 @@ export class WaitActivationBuilder {
       source,
       wait_ids: targets,
       result,
+    };
+  }
+}
+
+export class VirtualWorkControlBuilder {
+  static succeed(
+    commandId: string,
+    workId: string,
+    owner: string,
+    epoch: number,
+    result: ArtifactRef,
+  ): WorkResolutionCommand {
+    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, {
+      resolution: "succeeded",
+      result,
+    });
+  }
+
+  static retry(
+    commandId: string,
+    workId: string,
+    owner: string,
+    epoch: number,
+    error: ArtifactRef,
+    nextReason: ParkReason | null = null,
+  ): WorkResolutionCommand {
+    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, {
+      resolution: "retry",
+      error,
+      next_reason: nextReason,
+    });
+  }
+
+  static park(
+    commandId: string,
+    workId: string,
+    owner: string,
+    epoch: number,
+    reason: ParkReason,
+  ): WorkResolutionCommand {
+    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, {
+      resolution: "parked",
+      reason,
+    });
+  }
+
+  static fail(
+    commandId: string,
+    workId: string,
+    owner: string,
+    epoch: number,
+    error: ArtifactRef,
+  ): WorkResolutionCommand {
+    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, {
+      resolution: "failed",
+      error,
+    });
+  }
+
+  static cancel(
+    commandId: string,
+    workId: string,
+    owner: string,
+    epoch: number,
+    reason: ArtifactRef,
+  ): WorkResolutionCommand {
+    return VirtualWorkControlBuilder.build(commandId, workId, owner, epoch, {
+      resolution: "cancelled",
+      reason,
+    });
+  }
+
+  private static build(
+    commandId: string,
+    workId: string,
+    owner: string,
+    epoch: number,
+    resolution: WorkResolution,
+  ): WorkResolutionCommand {
+    if (commandId.length === 0 || workId.length === 0 || owner.length === 0 || epoch < 1) {
+      throw new Error("virtual work control requires command, work, owner, and positive epoch");
+    }
+    return {
+      control_version: "cymule.virtual-work-control/1",
+      command_id: commandId,
+      work_id: workId,
+      owner,
+      epoch,
+      resolution,
     };
   }
 }

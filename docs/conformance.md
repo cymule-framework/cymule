@@ -10,7 +10,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
 | Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, identified signal/timer activation, lease, outbox, occurrence replay, Resource handoff, directory-store reopen, and ambiguous-effect reconciliation; nested scopes and the full crash matrix remain |
 | Optional Agent Interaction plugin | Partial plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces; not a framework profile |
-| Large Virtual Graph | Partial | bounded virtual regions, M1 cursor/frontier checkpoints, exact parked index, atomic activation wake, fair capability claims, fencing, and restore; durable compaction remains |
+| Large Virtual Graph | Partial | bounded virtual regions, M1 cursor/frontier checkpoints, exact parked index, atomic activation wake, binding-pinned work occurrences, closed dispositions, four SDK control contracts, fencing, and restore; durable compaction remains |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
 | Live Evolution | Partial | Plan DAG, impact, occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; runtime rollout automation remains |
@@ -47,6 +47,15 @@ The local suite verifies:
   source failures advance neither cursor nor materialized frontier;
 - restored virtual snapshots reject duplicate work placement, missing region or
   known-set identity, malformed claim fencing, and per-Run frontier overflow;
+- work claims pin binding and epoch before execution; identical disposition
+  replay is idempotent, conflicts and stale owners fail, retry creates a later
+  occurrence, and cancellation rejects late success;
+- a resolution command replayed after later claims returns its original
+  occurrence receipt, while semantic command-ID reuse fails without state change;
+- M3 claim/result checkpoints survive reopen, stale CAS rolls back scheduler
+  state, and result/evidence Artifacts commit with occurrence state;
+- TypeScript, Python, Rust, and Go parse one occurrence fixture and construct one
+  idempotent owner/epoch-fenced control command;
 - a Binding Context update changes only future occurrences;
 - replay availability is not reported as exact when an artifact is missing;
 - TypeScript, Python, Rust, and Go author the same plan and execute through the

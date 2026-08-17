@@ -152,6 +152,196 @@ type WaitActivation struct {
 	Result            ArtifactRef          `json:"result"`
 }
 
+// ParkReason identifies one exact indexed condition for virtual work.
+type ParkReason struct {
+	Kind       string `json:"kind"`
+	Key        string `json:"key,omitempty"`
+	WorkID     string `json:"work_id,omitempty"`
+	Account    string `json:"account,omitempty"`
+	Capability string `json:"capability,omitempty"`
+	Domain     string `json:"domain,omitempty"`
+}
+
+// WorkOccurrence is one binding-pinned M3 work attempt.
+type WorkOccurrence struct {
+	OccurrenceVersion string       `json:"occurrence_version"`
+	OccurrenceID      string       `json:"occurrence_id"`
+	WorkID            string       `json:"work_id"`
+	RegionID          string       `json:"region_id"`
+	RunID             string       `json:"run_id"`
+	Owner             string       `json:"owner"`
+	Epoch             uint64       `json:"epoch"`
+	OccurrenceBinding string       `json:"occurrence_binding"`
+	State             string       `json:"state"`
+	Result            *ArtifactRef `json:"result"`
+	Error             *ArtifactRef `json:"error"`
+	NextReason        *ParkReason  `json:"next_reason"`
+}
+
+// WorkResolution is one success, retry, park, failure, or cancellation proposal.
+type WorkResolution struct {
+	Kind         string
+	Result       *ArtifactRef
+	Error        *ArtifactRef
+	ParkReason   *ParkReason
+	CancelReason *ArtifactRef
+	NextReason   *ParkReason
+}
+
+// MarshalJSON emits one closed disposition-specific wire shape.
+func (resolution WorkResolution) MarshalJSON() ([]byte, error) {
+	switch resolution.Kind {
+	case "succeeded":
+		return json.Marshal(struct {
+			Resolution string       `json:"resolution"`
+			Result     *ArtifactRef `json:"result"`
+		}{resolution.Kind, resolution.Result})
+	case "retry":
+		return json.Marshal(struct {
+			Resolution string       `json:"resolution"`
+			Error      *ArtifactRef `json:"error"`
+			NextReason *ParkReason  `json:"next_reason"`
+		}{resolution.Kind, resolution.Error, resolution.NextReason})
+	case "parked":
+		return json.Marshal(struct {
+			Resolution string      `json:"resolution"`
+			Reason     *ParkReason `json:"reason"`
+		}{resolution.Kind, resolution.ParkReason})
+	case "failed":
+		return json.Marshal(struct {
+			Resolution string       `json:"resolution"`
+			Error      *ArtifactRef `json:"error"`
+		}{resolution.Kind, resolution.Error})
+	case "cancelled":
+		return json.Marshal(struct {
+			Resolution string       `json:"resolution"`
+			Reason     *ArtifactRef `json:"reason"`
+		}{resolution.Kind, resolution.CancelReason})
+	default:
+		return nil, fmt.Errorf("unsupported work resolution %q", resolution.Kind)
+	}
+}
+
+// UnmarshalJSON reads one disposition-specific wire shape.
+func (resolution *WorkResolution) UnmarshalJSON(input []byte) error {
+	var tagged struct {
+		Resolution string `json:"resolution"`
+	}
+	if err := json.Unmarshal(input, &tagged); err != nil {
+		return err
+	}
+	switch tagged.Resolution {
+	case "succeeded":
+		var value struct {
+			Result ArtifactRef `json:"result"`
+		}
+		if err := json.Unmarshal(input, &value); err != nil {
+			return err
+		}
+		*resolution = WorkResolution{Kind: tagged.Resolution, Result: &value.Result}
+	case "retry":
+		var value struct {
+			Error      ArtifactRef `json:"error"`
+			NextReason *ParkReason `json:"next_reason"`
+		}
+		if err := json.Unmarshal(input, &value); err != nil {
+			return err
+		}
+		*resolution = WorkResolution{
+			Kind: tagged.Resolution, Error: &value.Error, NextReason: value.NextReason,
+		}
+	case "parked":
+		var value struct {
+			Reason ParkReason `json:"reason"`
+		}
+		if err := json.Unmarshal(input, &value); err != nil {
+			return err
+		}
+		*resolution = WorkResolution{Kind: tagged.Resolution, ParkReason: &value.Reason}
+	case "failed":
+		var value struct {
+			Error ArtifactRef `json:"error"`
+		}
+		if err := json.Unmarshal(input, &value); err != nil {
+			return err
+		}
+		*resolution = WorkResolution{Kind: tagged.Resolution, Error: &value.Error}
+	case "cancelled":
+		var value struct {
+			Reason ArtifactRef `json:"reason"`
+		}
+		if err := json.Unmarshal(input, &value); err != nil {
+			return err
+		}
+		*resolution = WorkResolution{Kind: tagged.Resolution, CancelReason: &value.Reason}
+	default:
+		return fmt.Errorf("unsupported work resolution %q", tagged.Resolution)
+	}
+	return nil
+}
+
+// WorkResolutionCommand preconditions one idempotent M3 control mutation.
+type WorkResolutionCommand struct {
+	ControlVersion string         `json:"control_version"`
+	CommandID      string         `json:"command_id"`
+	WorkID         string         `json:"work_id"`
+	Owner          string         `json:"owner"`
+	Epoch          uint64         `json:"epoch"`
+	Resolution     WorkResolution `json:"resolution"`
+}
+
+// VirtualWorkControl is a transport-neutral occurrence query/control boundary.
+type VirtualWorkControl interface {
+	Occurrence(occurrenceID string) (*WorkOccurrence, error)
+	Resolve(command WorkResolutionCommand) (WorkOccurrence, error)
+}
+
+// SucceedWork creates a terminal-success control command.
+func SucceedWork(commandID, workID, owner string, epoch uint64, result ArtifactRef) WorkResolutionCommand {
+	return workResolutionCommand(commandID, workID, owner, epoch, WorkResolution{
+		Kind: "succeeded", Result: &result,
+	})
+}
+
+// RetryWork creates a retry control command with an optional indexed condition.
+func RetryWork(commandID, workID, owner string, epoch uint64, failure ArtifactRef, nextReason *ParkReason) WorkResolutionCommand {
+	return workResolutionCommand(commandID, workID, owner, epoch, WorkResolution{
+		Kind: "retry", Error: &failure, NextReason: nextReason,
+	})
+}
+
+// ParkWork creates a non-failure parked disposition command.
+func ParkWork(commandID, workID, owner string, epoch uint64, reason ParkReason) WorkResolutionCommand {
+	return workResolutionCommand(commandID, workID, owner, epoch, WorkResolution{
+		Kind: "parked", ParkReason: &reason,
+	})
+}
+
+// FailWork creates a terminal-failure control command.
+func FailWork(commandID, workID, owner string, epoch uint64, failure ArtifactRef) WorkResolutionCommand {
+	return workResolutionCommand(commandID, workID, owner, epoch, WorkResolution{
+		Kind: "failed", Error: &failure,
+	})
+}
+
+// CancelWork creates an active-occurrence cancellation command.
+func CancelWork(commandID, workID, owner string, epoch uint64, reason ArtifactRef) WorkResolutionCommand {
+	return workResolutionCommand(commandID, workID, owner, epoch, WorkResolution{
+		Kind: "cancelled", CancelReason: &reason,
+	})
+}
+
+func workResolutionCommand(commandID, workID, owner string, epoch uint64, resolution WorkResolution) WorkResolutionCommand {
+	return WorkResolutionCommand{
+		ControlVersion: "cymule.virtual-work-control/1",
+		CommandID:      commandID,
+		WorkID:         workID,
+		Owner:          owner,
+		Epoch:          epoch,
+		Resolution:     resolution,
+	}
+}
+
 // SignalWaitActivation creates a deterministic signal delivery record.
 func SignalWaitActivation(activationID, key string, waitIDs []string, result ArtifactRef) WaitActivation {
 	targets := uniqueSorted(waitIDs)

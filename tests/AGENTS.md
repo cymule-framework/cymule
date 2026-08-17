@@ -16,3 +16,7 @@
   advance before resume.
 - Virtual checkpoint fixtures omit derived indexes and preserve opaque cursor,
   bounded frontier, claim fencing, and explicit parent lineage wire shapes.
+- Virtual work occurrence fixtures preserve logical work identity separately
+  from attempt epoch, owner, immutable binding, and exactly one disposition.
+- Virtual work control fixtures carry a stable command ID and exact owner/epoch
+  precondition; SDKs do not infer retry or cancellation policy from strings.

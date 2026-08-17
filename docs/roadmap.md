@@ -72,10 +72,15 @@ Status: partial.
 - M1-backed versioned checkpoints atomically persist source cursors and bounded
   frontiers, exact reason indexes avoid parked-work scans, and wait activation
   can commit its M3 indexed wake in the same CAS revision;
+- every claim creates a binding-pinned occurrence; retry, park, success,
+  terminal failure, and cancellation are durably recorded with owner/epoch
+  fencing and atomic result/evidence Artifacts;
+- Rust, TypeScript, Python, and Go expose the same occurrence and idempotent
+  control-command contracts through transport-neutral interfaces;
 - million-item tests prove bounded frontiers, fairness, park/wake, stale-owner
   rejection, and restore behavior;
-- retry/failure result records, weighted fairness, partition migration, subtree
-  compaction, and partial rehydration remain proposed.
+- weighted fairness, priority aging, partition migration, subtree compaction,
+  partial rehydration, and multi-worker crash matrices remain proposed.
 
 ## M4 - Live evolution
 

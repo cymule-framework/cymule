@@ -11,4 +11,7 @@
 - Wait activation clients must preserve `cymule.wait-activation/1` delivery,
   source, exact targets, and Artifact identity. All SDKs submit the shared
   fixture to the Rust Engine; only a durable runtime admits it against state.
+- Virtual work SDK contracts preserve stable control command and occurrence
+  identities, owner/epoch fencing, immutable binding, and closed disposition
+  variants. SDKs expose transport interfaces but no local state reducer.
 - Avoid runtime dependencies unless they materially improve correctness.

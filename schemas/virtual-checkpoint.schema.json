@@ -4,14 +4,23 @@
   "title": "Cymule Virtual Checkpoint cymule.virtual-checkpoint/1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["checkpoint_version", "checkpoint_id", "parent_checkpoint", "snapshot"],
+  "required": [
+    "checkpoint_version", "checkpoint_id", "parent_checkpoint", "snapshot",
+    "control", "receipt_occurrence_id"
+  ],
   "properties": {
     "checkpoint_version": { "const": "cymule.virtual-checkpoint/1" },
     "checkpoint_id": { "$ref": "#/$defs/nonEmpty" },
     "parent_checkpoint": {
       "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }]
     },
-    "snapshot": { "$ref": "#/$defs/snapshot" }
+    "snapshot": { "$ref": "#/$defs/snapshot" },
+    "control": {
+      "oneOf": [{ "$ref": "#/$defs/controlCommand" }, { "type": "null" }]
+    },
+    "receipt_occurrence_id": {
+      "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }]
+    }
   },
   "$defs": {
     "nonEmpty": { "type": "string", "minLength": 1 },
@@ -67,11 +76,13 @@
     "claim": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["item", "owner", "epoch"],
+      "required": ["item", "owner", "epoch", "occurrence_id", "occurrence_binding"],
       "properties": {
         "item": { "$ref": "#/$defs/work" },
         "owner": { "$ref": "#/$defs/nonEmpty" },
-        "epoch": { "type": "integer", "minimum": 1 }
+        "epoch": { "type": "integer", "minimum": 1 },
+        "occurrence_id": { "$ref": "#/$defs/nonEmpty" },
+        "occurrence_binding": { "$ref": "#/$defs/nonEmpty" }
       }
     },
     "parkReason": {
@@ -107,10 +118,132 @@
         "reason": { "$ref": "#/$defs/parkReason" }
       }
     },
+    "occurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "occurrence_version", "occurrence_id", "work_id", "region_id", "run_id",
+        "owner", "epoch", "occurrence_binding", "state", "result", "error", "next_reason"
+      ],
+      "properties": {
+        "occurrence_version": { "const": "cymule.virtual-work-occurrence/1" },
+        "occurrence_id": { "$ref": "#/$defs/nonEmpty" },
+        "work_id": { "$ref": "#/$defs/nonEmpty" },
+        "region_id": { "$ref": "#/$defs/nonEmpty" },
+        "run_id": { "$ref": "#/$defs/nonEmpty" },
+        "owner": { "$ref": "#/$defs/nonEmpty" },
+        "epoch": { "type": "integer", "minimum": 1 },
+        "occurrence_binding": { "$ref": "#/$defs/nonEmpty" },
+        "state": {
+          "enum": ["running", "succeeded", "retry_scheduled", "parked", "failed", "cancelled"]
+        },
+        "result": { "oneOf": [{ "$ref": "#/$defs/artifact" }, { "type": "null" }] },
+        "error": { "oneOf": [{ "$ref": "#/$defs/artifact" }, { "type": "null" }] },
+        "next_reason": { "oneOf": [{ "$ref": "#/$defs/parkReason" }, { "type": "null" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "running" } } },
+          "then": {
+            "properties": {
+              "result": { "type": "null" }, "error": { "type": "null" },
+              "next_reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "state": { "const": "succeeded" } } },
+          "then": {
+            "properties": {
+              "result": { "$ref": "#/$defs/artifact" }, "error": { "type": "null" },
+              "next_reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "state": { "const": "retry_scheduled" } } },
+          "then": {
+            "properties": {
+              "result": { "type": "null" }, "error": { "$ref": "#/$defs/artifact" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "state": { "const": "parked" } } },
+          "then": {
+            "properties": {
+              "result": { "type": "null" }, "error": { "type": "null" },
+              "next_reason": { "$ref": "#/$defs/parkReason" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "state": { "enum": ["failed", "cancelled"] } } },
+          "then": {
+            "properties": {
+              "result": { "type": "null" }, "error": { "$ref": "#/$defs/artifact" },
+              "next_reason": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "resolution": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["resolution", "result"],
+          "properties": {
+            "resolution": { "const": "succeeded" }, "result": { "$ref": "#/$defs/artifact" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["resolution", "error", "next_reason"],
+          "properties": {
+            "resolution": { "const": "retry" },
+            "error": { "$ref": "#/$defs/artifact" },
+            "next_reason": { "oneOf": [{ "$ref": "#/$defs/parkReason" }, { "type": "null" }] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["resolution", "reason"],
+          "properties": {
+            "resolution": { "const": "parked" }, "reason": { "$ref": "#/$defs/parkReason" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["resolution", "error"],
+          "properties": {
+            "resolution": { "const": "failed" }, "error": { "$ref": "#/$defs/artifact" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["resolution", "reason"],
+          "properties": {
+            "resolution": { "const": "cancelled" }, "reason": { "$ref": "#/$defs/artifact" }
+          }
+        }
+      ]
+    },
+    "controlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control_version", "command_id", "work_id", "owner", "epoch", "resolution"],
+      "properties": {
+        "control_version": { "const": "cymule.virtual-work-control/1" },
+        "command_id": { "$ref": "#/$defs/nonEmpty" },
+        "work_id": { "$ref": "#/$defs/nonEmpty" },
+        "owner": { "$ref": "#/$defs/nonEmpty" },
+        "epoch": { "type": "integer", "minimum": 1 },
+        "resolution": { "$ref": "#/$defs/resolution" }
+      }
+    },
     "snapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["regions", "ready", "active", "parked", "known", "last_run", "claim_epochs"],
+      "required": [
+        "regions", "ready", "active", "parked", "known", "last_run", "claim_epochs", "occurrences"
+      ],
       "properties": {
         "regions": { "type": "object", "additionalProperties": { "$ref": "#/$defs/region" } },
         "ready": {
@@ -124,6 +257,10 @@
         "claim_epochs": {
           "type": "object",
           "additionalProperties": { "type": "integer", "minimum": 1 }
+        },
+        "occurrences": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/occurrence" }
         }
       }
     }

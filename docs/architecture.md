@@ -154,3 +154,15 @@ its index key. `DurableVirtualController` can therefore lower one identified
 activation and the resulting M3 wake snapshot into the same M1 CAS revision.
 Concrete databases, object listings, queues, clocks, and signal transports stay
 behind `RegionSource` or activation plugins.
+
+Claims are also checkpoints. Before dispatch, the scheduler pins a concrete
+implementation binding and records a running `cymule.virtual-work-occurrence/1`
+under the new claim epoch. Worker output enters through a closed disposition:
+success, retry, park, terminal failure, or cancellation. `DurableVirtualController`
+atomically checkpoints result/evidence Artifacts and the updated frontier; a
+stale owner, epoch, or CAS changes neither side. Retry policy remains a caller or
+policy-plugin decision and produces a new occurrence rather than rewriting the
+failed attempt.
+Control checkpoints retain the full resolution command and its occurrence ID,
+so historical command replay reads the original receipt even after unrelated
+later claims; it never restores the older scheduler snapshot.

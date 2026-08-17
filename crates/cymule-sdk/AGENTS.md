@@ -10,3 +10,6 @@
 - Wait activation DTOs preserve stable delivery, source, target, and Artifact
   identities. CLI verification covers the closed record; only a durable runtime
   CAS can admit it against pending waits and enforce consume-once semantics.
+- `VirtualWorkControl` is transport-neutral. Preserve stable command and
+  occurrence IDs, immutable binding, owner, and epoch; SDK transports never
+  implement retry/failure reduction locally.

@@ -9,6 +9,9 @@
 - Wait activation builders sort and deduplicate exact wait targets while
   preserving delivery, source, and Artifact identities. Engine verification is
   not stateful admission; consume-once remains a durable runtime CAS decision.
+- Virtual work query/control types keep logical work, attempt occurrence,
+  binding, owner, epoch, and disposition separate. Builders require stable
+  command IDs; transports never apply retry policy locally.
 - Use discriminated unions for IR and Engine protocol types.
 - The public npm package name is `cymule`. Changes to exports, files, engine
   requirements, or minimum Node versions require a package dry-run and release

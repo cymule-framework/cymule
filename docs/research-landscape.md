@@ -26,6 +26,16 @@ standards.
   persists topic messages and exposes idempotency keys for external senders.
   This reinforces separating a durable delivery identity from the provider or
   transport that redelivers it.
+- [Temporal retry policies](https://github.com/temporalio/documentation/blob/main/docs/encyclopedia/retry-policies.mdx)
+  treat Activity attempts as re-executable under bounded policy and require
+  idempotent Activity code. [Restate error handling](https://docs.restate.dev/guides/error-handling)
+  separates retryable, terminal, and cancellation outcomes. Cymule records that
+  distinction as occurrence facts while leaving retry policy replaceable.
+- [Kubernetes Job failure policy](https://kubernetes.io/docs/tasks/job/pod-failure-policy/)
+  demonstrates explicit Count, Ignore, FailIndex, and FailJob decisions instead
+  of inferring all failures as equivalent. Cymule adopts only the principle that
+  failure classification is explicit; container and cluster concepts remain
+  outside framework semantics.
 - [Dapr components](https://docs.dapr.io/concepts/components-concept/) show how
   stable building-block interfaces can support built-in and independently
   deployed implementations. Cymule similarly separates semantic operations from

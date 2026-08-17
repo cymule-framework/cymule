@@ -43,6 +43,9 @@ Use this precedence order when guidance conflicts:
 - Virtual-work cursors and bounded scheduler frontiers checkpoint through the M1
   application-journal CAS. Exact parked-wait indexes are rebuildable projections;
   activation and the corresponding indexed wake checkpoint commit atomically.
+- Every virtual-work claim creates a binding-pinned, epoch-fenced occurrence
+  before execution. Success, retry, park, failure, and cancellation are closed
+  dispositions; a retry creates a later occurrence and never rewrites history.
 - Public mutation enters through typed commands with idempotent IDs and causal
   preconditions. Raw canonical event append is internal only.
 - Prefer optimistic CAS, immutable records, idempotency, fencing epochs, and

@@ -28,5 +28,10 @@ records. `CliEngine.verifyWaitActivation` validates the closed wire contract;
 the durable runtime remains responsible for matching pending waits and admitting
 the activation through CAS.
 
+`VirtualWorkControl` is a transport-neutral interface for querying identified
+M3 attempt occurrences and submitting owner/epoch-fenced resolution commands.
+`VirtualWorkControlBuilder` creates success, retry, failure, and cancellation
+commands without choosing a scheduler or worker transport.
+
 The package is published from GitHub Actions with npm trusted publishing and
 provenance. The Rust Engine remains the semantic authority.

@@ -6,6 +6,7 @@ import {
   CliEngine,
   FlowBuilder,
   ResourceBuilder,
+  VirtualWorkControlBuilder,
   WaitActivationBuilder,
   type EffectProfile,
 } from "../src/index.js";
@@ -76,4 +77,23 @@ test("TypeScript wait activation validates through the Rust engine", () => {
   );
   assert.deepEqual(activation, JSON.parse(readFileSync(fixturePath, "utf8")));
   assert.deepEqual(new CliEngine(enginePath).verifyWaitActivation(activation), activation);
+});
+
+test("TypeScript virtual work query and control fixtures stay exact", () => {
+  const occurrencePath = process.env.CYMULE_VIRTUAL_OCCURRENCE_FIXTURE;
+  const controlPath = process.env.CYMULE_VIRTUAL_CONTROL_FIXTURE;
+  if (occurrencePath === undefined || controlPath === undefined) return;
+  const occurrence = JSON.parse(readFileSync(occurrencePath, "utf8"));
+  assert.equal(occurrence.occurrence_binding, "binding:worker/fixture@1");
+  const command = VirtualWorkControlBuilder.succeed(
+    "command:virtual:fixture:success",
+    "work:fixture",
+    "worker:fixture",
+    1,
+    {
+      artifact_id: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+      kind: "example/result",
+    },
+  );
+  assert.deepEqual(command, JSON.parse(readFileSync(controlPath, "utf8")));
 });
