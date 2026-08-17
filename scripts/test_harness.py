@@ -19,40 +19,16 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "tests" / "harness" / "suites.toml"
 
-SDK_SUITES = {"protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go"}
-
-ROUTES: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
-    (("README.md", "docs/**", "**/AGENTS.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "LICENSE*"), frozenset({"docs"})),
-    (("crates/cymule-core/tests/**",), frozenset({"rust-core"})),
-    (("crates/cymule-core/src/**", "crates/cymule-core/Cargo.toml", "crates/cymule-runtime/**", "crates/cymule-cli/**"), frozenset({"rust-workspace", *SDK_SUITES, "example"})),
-    (("crates/cymule-durable/tests/**", "crates/cymule-durable/src/executor.rs", "crates/cymule-durable/src/error.rs", "crates/cymule-durable/src/wait_source.rs"), frozenset({"rust-durable"})),
-    (("crates/cymule-durable/src/coordinator.rs", "crates/cymule-durable/src/store.rs"), frozenset({"rust-durable", "rust-directory-plugin", "rust-virtual", "rust-resource", "rust-agent-plugin"})),
-    (("crates/cymule-durable/src/model.rs", "crates/cymule-durable/src/lib.rs", "crates/cymule-durable/Cargo.toml"), frozenset({"rust-durable", "rust-directory-plugin", "rust-virtual", "rust-resource", "rust-agent-plugin", *SDK_SUITES})),
-    (("crates/cymule-virtual/**",), frozenset({"rust-virtual", *SDK_SUITES})),
-    (("crates/cymule-evolution/**",), frozenset({"rust-evolution"})),
-    (("crates/cymule-resource/**",), frozenset({"rust-resource", *SDK_SUITES})),
-    (("crates/cymule-sdk/**",), frozenset({"sdk-rust", "protocol"})),
-    (("plugins/agent-interaction/**",), frozenset({"rust-agent-plugin"})),
-    (("plugins/directory-store/**",), frozenset({"rust-directory-plugin", "rust-durable"})),
-    (("plugins/test-adapter/**",), frozenset(SDK_SUITES)),
-    (("sdk/typescript/**",), frozenset({"sdk-typescript", "package-typescript"})),
-    (("sdk/python/**",), frozenset({"sdk-python"})),
-    (("sdk/go/**",), frozenset({"sdk-go"})),
-    (("schemas/**", "tests/fixtures/**", "scripts/validate_schemas.py"), frozenset(SDK_SUITES)),
-    (("examples/**",), frozenset({"example"})),
-    (("compiler/**",), frozenset({"mlir"})),
-    (("tests/harness/**", "scripts/test_harness.py", "scripts/validate_docs.py"), frozenset({"harness", "docs"})),
-    (("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"), frozenset({"rust-workspace", *SDK_SUITES, "example"})),
-    (("sdk/typescript/package.json", "sdk/typescript/pnpm-lock.yaml"), frozenset({"sdk-typescript", "package-typescript"})),
-    ((".gitignore",), frozenset({"docs"})),
-    (("scripts/verify*.sh", ".github/workflows/**"), frozenset({"full"})),
-)
-
 
 def load_manifest(path: Path = MANIFEST) -> dict[str, Any]:
     """Load and validate the suite manifest."""
     with path.open("rb") as stream:
         manifest = tomllib.load(stream)
+    return validate_manifest(manifest)
+
+
+def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Validate one already decoded suite and routing catalog."""
     if manifest.get("schema_version") != 1:
         raise ValueError("unsupported test harness manifest version")
     suites = manifest.get("suites")
@@ -66,6 +42,27 @@ def load_manifest(path: Path = MANIFEST) -> dict[str, Any]:
                 raise ValueError(f"abstract suite {name} has no requirements")
         elif not suite.get("commands"):
             raise ValueError(f"suite {name} has no commands")
+    routes = manifest.get("routes")
+    if not isinstance(routes, list) or not routes:
+        raise ValueError("test harness manifest must define routes")
+    for index, route in enumerate(routes):
+        patterns = route.get("patterns") if isinstance(route, dict) else None
+        selected = route.get("suites") if isinstance(route, dict) else None
+        if (
+            not isinstance(patterns, list)
+            or not patterns
+            or not all(isinstance(value, str) and value for value in patterns)
+        ):
+            raise ValueError(f"route {index} has invalid patterns")
+        if (
+            not isinstance(selected, list)
+            or not selected
+            or not all(isinstance(value, str) for value in selected)
+        ):
+            raise ValueError(f"route {index} has invalid suites")
+        unknown = sorted(set(selected) - suites.keys())
+        if unknown:
+            raise ValueError(f"route {index} references unknown suites: {', '.join(unknown)}")
     return manifest
 
 
@@ -74,16 +71,20 @@ def matches(path: str, pattern: str) -> bool:
     return path == pattern or fnmatch.fnmatchcase(path, pattern)
 
 
-def select_suites(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
+def select_suites(
+    paths: list[str], manifest: dict[str, Any] | None = None
+) -> tuple[list[str], dict[str, list[str]]]:
     """Return the conservative suite union and path evidence for a change set."""
+    if manifest is None:
+        manifest = load_manifest()
     selected: set[str] = set()
     evidence: dict[str, list[str]] = {}
     for raw_path in sorted(set(paths)):
         path = raw_path.replace(os.sep, "/")
         path_suites: set[str] = set()
-        for patterns, suites in ROUTES:
-            if any(matches(path, pattern) for pattern in patterns):
-                path_suites.update(suites)
+        for route in manifest["routes"]:
+            if any(matches(path, pattern) for pattern in route["patterns"]):
+                path_suites.update(route["suites"])
         if not path_suites:
             path_suites.add("full")
         for suite in path_suites:
@@ -252,6 +253,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     plan.add_argument("--no-worktree", action="store_true")
     plan.add_argument("--full-if-empty", action="store_true")
     plan.add_argument("--format", choices=("text", "json", "github-matrix"), default="text")
+    plan.add_argument("--report", type=Path)
 
     run = subparsers.add_parser("run", help="run one or more named suites")
     run.add_argument("suites", nargs="+")
@@ -270,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if arguments.command == "plan":
         paths, revisions = changed_paths(arguments.base, arguments.head, not arguments.no_worktree)
-        names, evidence = select_suites(paths)
+        names, evidence = select_suites(paths, manifest)
         if not names and arguments.full_if_empty:
             names, evidence = ["full"], {"full": []}
         payload = {
@@ -281,6 +283,8 @@ def main(argv: list[str] | None = None) -> int:
             "expanded_suites": expand_suites(names, manifest) if names else [],
             "evidence": evidence,
         }
+        if arguments.report is not None:
+            write_report(payload, arguments.report)
         if arguments.format == "json":
             print(json.dumps(payload, indent=2, sort_keys=True))
         elif arguments.format == "github-matrix":

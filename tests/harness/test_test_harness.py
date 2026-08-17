@@ -79,6 +79,12 @@ class ChangeRoutingTests(unittest.TestCase):
         self.assertIn("sdk-go", lanes)
         self.assertIn("meta", lanes)
 
+    def test_route_catalog_rejects_unknown_suite(self) -> None:
+        manifest = HARNESS.load_manifest()
+        manifest["routes"][0]["suites"] = ["missing-suite"]
+        with self.assertRaisesRegex(ValueError, "unknown suites"):
+            HARNESS.validate_manifest(manifest)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -124,7 +124,15 @@ outcome as `unknown` and reconciles the original intent instead of creating a
 duplicate effect. The [example guide](examples/hello-world/README.md) explains
 the execution and suggests useful first modifications.
 
-Contributors can run every SDK and semantic conformance test with:
+Contributors should first select the smallest conservative suite for their
+change:
+
+```sh
+python3 scripts/test_harness.py plan --base origin/main
+```
+
+Profile claims and release changes run every required SDK and semantic
+conformance family with:
 
 ```sh
 ./scripts/verify.sh

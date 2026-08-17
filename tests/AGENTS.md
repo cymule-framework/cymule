@@ -24,6 +24,9 @@
   scope commit, dispatch-start claim, provider application, Applied settlement,
   and Unknown observation. Assert exact provider call counts and reject
   unrelated Machine deltas at every outbox stage.
+- Compound recovery tests stack a second durable or acknowledgement failure on
+  an already ambiguous effect. Reopen between faults and prove the original
+  intent is reconciled once without provider redispatch.
 - Nested-scope restart tests must fault both before and after the child commit,
   prove no staged effect dispatches while its scope is open, and reopen from the
   persisted region path without repeating completed component occurrences.

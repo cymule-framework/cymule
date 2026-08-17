@@ -22,10 +22,25 @@ checks that match the changed behavior, and lets CI own exhaustive coverage and
 platform matrices. Its CI separates static, coverage, consumer/artifact,
 compatibility, SDK, and platform lanes, while one gate registry owns their exact
 commands and prerequisites. See its
-[repository guidance](https://github.com/deepseek-ai/deepseek-harness/blob/master/AGENTS.md),
-[development guide](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/development.md),
+[repository guidance](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/AGENTS.md),
+[testing policy](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/docs/testing.md),
 and
-[gate registry](https://github.com/deepseek-ai/deepseek-harness/blob/master/scripts/run-gates.ts).
+[gate registry](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/scripts/run-gates.ts).
+
+The SQLite lesson is independence, not raw test count. Its development subset,
+public-interface harness, differential SQL Logic Test, fuzzers, anomaly VFS,
+coverage/mutation runs, and release soak can disagree independently. Cymule
+therefore keeps semantic reduction, durable anomalies, frozen protocols,
+language projections, built user paths, coverage, mutation, and platform
+portability as separate witnesses. A green aggregate cannot erase a failure in
+one witness.
+
+The DeepSeek Harness lesson is ownership and dependency-aware scheduling. Its
+package tests stay with the capability they exercise, local hooks remain small,
+the checked-in gate graph owns prerequisites, and CI owns exhaustive/platform
+work. Cymule keeps both suite definitions and path ownership in
+`tests/harness/suites.toml`; CI YAML only installs the tools selected by that
+catalog and runs the reported leaf suites.
 
 Cymule adopts those testing properties, not either project's implementation.
 The harness is Python standard-library orchestration over Cargo, pnpm, uv, Go,
@@ -69,10 +84,15 @@ evolve without coupling unrelated toolchains.
 | Packaging | exact public package contents without publication | TypeScript packaging or release metadata |
 | Documentation | repository-local references resolve | authored Markdown or handbook changes |
 | Workbench | optional MLIR lowering smoke | compiler workbench changes or a complete run |
+| Coverage analysis | aggregate line/region non-regression signal | scheduled/manual semantic analysis |
+| Mutation analysis | whether core tests detect injected wrong semantics | scheduled/manual `cymule-core` analysis |
+| Platform portability | filesystem CAS and recovery across tier-one hosts | scheduled/manual Linux/macOS/Windows matrix |
 
-The manifest at `tests/harness/suites.toml` is the suite inventory. Commands are
-argument arrays, not shell fragments. This keeps their execution auditable and
-prevents a changed path from becoming an executable command.
+The manifest at `tests/harness/suites.toml` is the suite and route inventory.
+Commands are argument arrays, not shell fragments. The harness validates every
+route target against that catalog before selection. This keeps execution
+auditable, removes a second hard-coded routing authority, and prevents a changed
+path from becoming an executable command.
 
 ## Daily workflow
 
@@ -112,9 +132,36 @@ The public GitHub repository also runs that leaf suite weekly. Soak is not part
 of a normal routed commit because repetition is a different kind of evidence,
 not a reason to delay feedback from a local SDK or documentation change.
 
+Coverage, mutation, and platform portability are independent scheduled/manual
+workflows:
+
+```sh
+python3 scripts/test_harness.py run rust-coverage
+python3 scripts/test_harness.py run rust-mutation
+python3 scripts/test_harness.py run rust-portability
+```
+
+Coverage currently gates the measured four-crate semantic baseline at 72% line
+and 78% region coverage. These are non-regression floors, not a claim that a
+percentage proves correctness. Mutation runs only against `cymule-core` and
+uses its independent public-interface conformance tests. The scheduled workflow
+partitions the deterministic mutant list across eight parallel shards and
+copies the existing target into each scratch tree for incremental rebuilds.
+Portability repeats only core, durable, and directory-store witnesses on Linux,
+macOS, and Windows; it does not multiply every SDK lane by every operating
+system.
+
+The analysis scripts pin
+[`cargo-llvm-cov` 0.9.0](https://github.com/taiki-e/cargo-llvm-cov/tree/v0.9.0)
+and
+[`cargo-mutants` 27.1.0](https://github.com/sourcefrog/cargo-mutants/tree/v27.1.0).
+Tool absence or version drift is a visible failure; analysis never silently
+skips.
+
 Every execution writes a JSON report under `.cache/test-harness/` with the
 exact HEAD, requested and expanded suites, command arguments, exit status, and
-duration. CI uploads one report per lane.
+duration. CI also uploads the exact base/head/path/evidence routing plan before
+any lane starts, then uploads one execution report per selected lane.
 
 CI lanes are static jobs selected by planner outputs, not one matrix job with
 conditional setup steps. Each job therefore downloads only the toolchain actions
@@ -164,6 +211,12 @@ Unknown observation. They count prepare, dispatch, and reconciliation calls and
 verify the exact Machine/outbox pair after reopen; a successful Run alone is not
 proof that the provider was invoked once.
 
+Compound anomaly tests inject a second failure during recovery from the first.
+The current effect case loses the provider response after application, commits
+`Unknown` during reopen, loses that durable acknowledgement, reopens again, and
+proves one dispatch plus one reconciliation. This is separate from repeating a
+single fault window.
+
 The M1 Run sweep treats every whole-state CAS as two distinct anomaly points:
 failure before the write and lost acknowledgement after a successful write. It
 first discovers the boundary count from a successful execution, injects one
@@ -195,6 +248,11 @@ certificate digest, retained obligations and bindings, declared replay
 availability, and a partial rehydration round trip. A summary is never accepted
 as a replacement source of canonical truth merely because it deserializes.
 
+Concrete durable adapters also test the bytes outside their normal write path.
+The directory store is reopened after truncated JSON and after a valid envelope
+whose revision digest was replaced; both must fail closed before exposing a
+partial `DurableState`.
+
 ## Test depth
 
 Three depths serve different feedback loops:
@@ -207,8 +265,18 @@ Three depths serve different feedback loops:
 3. **Soak** repeats deterministic fault sweeps, seeded generators, and larger
    configuration matrices in the independent `rust-soak` suite. It is a
    scheduled/release concern and must not make focused feedback unusable.
+4. **Analysis** measures coverage, mutation sensitivity, and tier-one platform
+   portability on independent schedules. It is neither a pre-commit hook nor a
+   reason to run unrelated SDKs after every Rust edit.
 
 Coverage percentage is supporting evidence, not the test taxonomy. Branch or
 mutation coverage is valuable for the small Rust semantic kernel, but a profile
 is complete only when its stated fault family, cross-language contract, reopen,
 and replay properties pass.
+
+Miri is not a current default witness because the trusted Rust crates contain no
+`unsafe` code. Add it when unsafe implementation enters scope; until then,
+mutation sensitivity and external durable-byte faults provide more relevant
+evidence per unit of CI time. See the
+[official Miri project](https://github.com/rust-lang/miri) for the trigger and
+supported undefined-behavior checks.

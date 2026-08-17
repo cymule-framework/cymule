@@ -107,6 +107,105 @@ fn plan_identity_is_canonical_and_tamper_evident() {
 }
 
 #[test]
+fn public_validation_errors_and_effect_policy_boundaries_are_stable() {
+    let cases = [
+        (
+            CoreError::Validation("v".to_owned()),
+            "validation_failed: v",
+        ),
+        (CoreError::NotFound("n".to_owned()), "not_found: n"),
+        (
+            CoreError::IdentityMismatch("i".to_owned()),
+            "identity_mismatch: i",
+        ),
+        (
+            CoreError::IllegalTransition("t".to_owned()),
+            "illegal_transition: t",
+        ),
+        (
+            CoreError::CommandReuse("r".to_owned()),
+            "command_id_reused: r",
+        ),
+        (CoreError::Causal("c".to_owned()), "causal_error: c"),
+        (CoreError::Encoding("e".to_owned()), "encoding_failed: e"),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(error.code(), expected.split(':').next().expect("code"));
+    }
+
+    let mut invalid_id = candidate();
+    invalid_id.name.clear();
+    assert!(matches!(
+        invalid_id.validate(),
+        Err(CoreError::Validation(message)) if message.contains("plan name")
+    ));
+
+    let mut mutating_eager = candidate();
+    mutating_eager.effects[0].profile.dispatch = DispatchPolicy::Eager;
+    assert!(matches!(
+        mutating_eager.validate(),
+        Err(CoreError::Validation(message)) if message.contains("cannot use eager")
+    ));
+
+    let mut observational_eager = candidate();
+    observational_eager.effects[0].profile.mutation = MutationKind::Observational;
+    observational_eager.effects[0].profile.dispatch = DispatchPolicy::Eager;
+    observational_eager
+        .validate()
+        .expect("observational eager effect is legal");
+    candidate()
+        .validate()
+        .expect("mutating commit-gated effect is legal");
+
+    let mut unknown_effect = candidate();
+    unknown_effect.definitions[0].body.steps.push(Step {
+        id: "effect.unknown".to_owned(),
+        operation: Operation::Effect {
+            effect: "missing.effect".to_owned(),
+            input: Expression::Input,
+            occurrence: "first".to_owned(),
+            bind: None,
+        },
+    });
+    assert!(matches!(
+        unknown_effect.validate(),
+        Err(CoreError::Validation(message)) if message.contains("unknown effect")
+    ));
+
+    let mut invalid_wait = candidate();
+    invalid_wait.definitions[0].body.steps.push(Step {
+        id: "wait.invalid".to_owned(),
+        operation: Operation::Wait {
+            wait: cymule_core::WaitSpec::Signal {
+                key: String::new(),
+                consume_once: true,
+            },
+        },
+    });
+    assert!(matches!(
+        invalid_wait.validate(),
+        Err(CoreError::Validation(message)) if message.contains("signal key")
+    ));
+
+    let mut undefined_binding = candidate();
+    undefined_binding.definitions[0].body.result = Expression::Binding {
+        name: "missing".to_owned(),
+    };
+    assert!(matches!(
+        undefined_binding.validate(),
+        Err(CoreError::Validation(message)) if message.contains("undefined binding")
+    ));
+
+    let mut invalid_schema = candidate();
+    invalid_schema.definitions[0].input_schema = json!(42);
+    assert!(matches!(
+        invalid_schema.validate(),
+        Err(CoreError::Validation(message)) if message.contains("schema must")
+    ));
+}
+
+#[test]
 fn command_idempotency_and_stale_action_are_explicit() {
     let mut machine = Machine::new();
     let plan = machine.seal_plan(candidate()).expect("plan seals");
@@ -181,6 +280,9 @@ fn machine_snapshot_restores_projection_artifacts_and_command_deduplication() {
     let artifact = machine.put_artifact("example/state", b"durable".to_vec());
     let snapshot = machine.snapshot();
     let snapshot_digest = snapshot.digest().expect("snapshot hashes");
+    let command_digests = snapshot.command_digests().expect("commands hash");
+    assert_eq!(command_digests.len(), 1);
+    assert!(command_digests.contains_key("command:1"));
 
     let mut restored = Machine::restore(snapshot).expect("snapshot restores");
     assert_eq!(
@@ -200,6 +302,21 @@ fn machine_snapshot_restores_projection_artifacts_and_command_deduplication() {
     );
     assert_eq!(
         restored.snapshot().digest().expect("snapshot hashes"),
+        snapshot_digest
+    );
+    assert_eq!(
+        restored
+            .snapshot()
+            .command_digests()
+            .expect("restored commands hash"),
+        command_digests
+    );
+    restored.put_artifact("example/state", b"changed".to_vec());
+    assert_ne!(
+        restored
+            .snapshot()
+            .digest()
+            .expect("changed snapshot hashes"),
         snapshot_digest
     );
 }

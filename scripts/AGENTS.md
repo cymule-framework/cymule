@@ -3,6 +3,8 @@
 - `tests/harness/suites.toml` is the suite inventory. Keep leaf commands
   independently runnable and let `scripts/test_harness.py` own dependency
   expansion, risk routing, lane grouping, and machine-readable reports.
+- The same manifest owns path routes. Do not reintroduce a hard-coded route
+  table in Python or workflow YAML; catalog validation rejects unknown suites.
 - A narrow path route must select the smallest sufficient evidence family. A
   shared semantic/wire change selects every affected SDK; an unknown path,
   validation-infrastructure change, or incomplete route escalates to `full`.
@@ -54,3 +56,6 @@
 - `verify-soak.sh` owns only repeatable high-risk Rust properties and anomaly
   sweeps. Keep it out of `full`; scheduled soak complements, rather than
   duplicates, change-routed verification.
+- `verify-analysis.sh` owns scheduled/manual coverage and mutation witnesses.
+  Keep their exact tool versions in `analysis.yml`, their measured floors in the
+  script, and their artifacts separate from normal lane reports.
