@@ -39,13 +39,17 @@ The following domains evolve independently:
 | Wait activation | `cymule.wait-activation/1` | external delivery ID fixes source, targets, and result |
 | Virtual checkpoint | `cymule.virtual-checkpoint/1` | cursor and bounded frontier advance together |
 | Virtual work occurrence | `cymule.virtual-work-occurrence/1` | one immutable binding per claim epoch |
-| Virtual work control | `cymule.virtual-work-control/1` | stable command ID plus owner/epoch precondition |
+| Virtual work control | `cymule.virtual-work-control/1` | stable command ID plus owner/work/lease/time precondition |
 | Virtual region migration | `cymule.virtual-region-migration/1` | opaque cursor coverage and retirement lineage |
 | Virtual migration control | `cymule.virtual-region-migration-control/1` | stable command ID plus verified plan |
 | Virtual archive manifest | `cymule.virtual-archive-manifest/1` | exact content-addressed occurrence history |
 | Virtual compaction certificate | `cymule.virtual-compaction-certificate/1` | causal cut, summary, retention, and rehydration evidence |
 | Virtual compaction control | `cymule.virtual-compaction-control/1` | stable command ID plus pinned archive binding |
 | Virtual rehydration control | `cymule.virtual-rehydration-control/1` | stable command ID plus exact occurrence selection |
+| Virtual claim control | `cymule.virtual-claim-control/1` | stable command ID plus capacity-slot lease proposal |
+| Virtual lease renewal control | `cymule.virtual-lease-renewal-control/1` | exact work and slot lease fences |
+| Virtual recovery control | `cymule.virtual-recovery-control/1` | expired lease plus explicit retry/fail/cancel decision |
+| Virtual Run weight control | `cymule.virtual-run-weight-control/1` | stable command ID plus positive future share |
 | Conformance profile | `cymule.conformance/1` | complete profile cases are required |
 
 Changing effect identity, scope isolation, authority, causal admission, replay,
@@ -190,8 +194,28 @@ exact checkpoint record was committed with the activation.
 Every M3 work claim MUST resolve an immutable occurrence binding and create one
 `cymule.virtual-work-occurrence/1` record before worker execution. Occurrence
 identity is derived from logical work ID and monotonically increasing claim
-epoch. Owner, binding, region, and Run MUST be retained. A stale owner or epoch
-MUST NOT resolve the occurrence.
+epoch. Owner, binding, region, Run, and current capacity-slot lease epoch MUST
+be retained. A stale owner, work epoch, or lease epoch MUST NOT resolve the
+occurrence.
+
+Durable multi-worker admission uses `cymule.virtual-claim-control/1`. A command
+fixes a stable worker identity, abstract capacity-slot ID, occurrence binding,
+capability set, Clock-supplied logical time, and positive lease TTL. A slot is a
+capacity/fencing token only; it MUST NOT encode a queue provider, network
+address, process, container, cluster node, or Agent Loop. One slot may own at
+most one active claim, while different slots may claim independently.
+
+The exact next M1 `AuthorityLease` and the M3 claim receipt MUST enter one CAS
+revision. A failed or stale CAS changes neither. If no work is eligible, the
+command MUST checkpoint a replayable empty receipt and MUST NOT acquire the
+slot lease. Repeating an admitted command returns its original claimed item or
+empty receipt even after unrelated scheduler progress.
+
+`cymule.virtual-lease-renewal-control/1` fixes work ID, owner, work epoch,
+expected current lease epoch, logical time, and TTL. Renewal atomically advances
+the M1 lease epoch and the active claim and occurrence lease fence. It does not
+create a new work attempt or change the occurrence binding. Receipt loss is
+resolved by reopening and replaying the same command.
 
 One running occurrence may end exactly once as `succeeded`, `retry_scheduled`,
 `parked`, `failed`, or `cancelled`. Success stores one result Artifact. Retry and
@@ -209,11 +233,23 @@ Claim and disposition transitions MUST enter chained M1 virtual checkpoints.
 Result, failure, and cancellation Artifacts MUST commit with the occurrence and
 frontier in the same CAS; the Machine proposal may add only those exact
 Artifacts. Public control uses `cymule.virtual-work-control/1` with a stable
-command ID and exact work, owner, and epoch precondition.
+command ID and exact work, owner, work epoch, lease epoch, and Clock-supplied
+observation-time precondition. A normal worker result MUST be observed strictly
+before the current lease expiry.
 The checkpoint MUST retain the complete command and returned occurrence ID.
 Repeating that command after any number of later checkpoints MUST return the
 original occurrence receipt without reverting scheduler state. Reusing its ID
 with different semantics MUST fail.
+
+Lease expiry is not an automatic state mutation. After expiry,
+`cymule.virtual-recovery-control/1` must name the exact work, owner, work epoch,
+lease epoch, logical observation time, and an explicit `retry`, terminal
+`failed`, or `cancelled` disposition. The durable M1 lease must still equal that
+expired fence. Recovery evidence Artifact and scheduler disposition commit in
+one CAS. A concurrent renewal, worker result, or recovery has one winner; stale
+proposals change nothing. Retry returns the logical item to ready or parked
+state, and its next claim creates a greater work epoch, so output from the
+failed worker remains fenced.
 
 For continuously backlogged, materialized, capability-compatible Runs, M3
 weighted selection uses positive integer Run weights and exact positive
@@ -223,6 +259,9 @@ accounting and deterministic Run order; floating point, wall time, worker
 latency, and queue-provider order are not scheduling authority.
 A Run weight change resets that Run's accumulated deficit before future
 selection so credit earned under an older policy cannot leak into the new share.
+Public weight changes use `cymule.virtual-run-weight-control/1`, retain previous
+and current positive weights, and checkpoint an idempotent receipt. The command
+affects future selection only and does not rewrite historical claims.
 
 Priority is local to one Run. Effective priority is base priority plus
 `floor((dispatch_sequence - ready_since) / aging_interval)`. Both sequences and

@@ -17,6 +17,9 @@
 - Compaction and rehydration builders sort/deduplicate causal cuts and occurrence
   selections. Archive adapters store exact bytes under a framework reference;
   they never create or validate certificates in TypeScript.
+- Scheduling builders sort/deduplicate capabilities and require explicit slot,
+  work/lease fences, logical times, TTL, and recovery disposition. They never
+  read `Date.now()`, manage workers, or infer retryability.
 - Use discriminated unions for IR and Engine protocol types.
 - The public npm package name is `cymule`. Changes to exports, files, engine
   requirements, or minimum Node versions require a package dry-run and release

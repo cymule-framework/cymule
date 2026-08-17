@@ -664,35 +664,75 @@ impl<S: DurableStore> DurableCoordinator<S> {
     ) -> DurableResult<AuthorityLease> {
         let mut acquired = None;
         self.mutate_checked(|state| {
-            if ttl == 0 {
-                return Err(DurableError::Validation(
-                    "lease TTL must be positive".to_owned(),
-                ));
-            }
-            if let Some(current) = state.leases.get(resource)
-                && current.owner != owner
-                && current.expires_at > now
-            {
-                return Err(DurableError::Conflict {
-                    expected: Some(owner.to_owned()),
-                    current: Some(current.owner.clone()),
-                });
-            }
-            let epoch = state
-                .leases
-                .get(resource)
-                .map_or(1, |lease| lease.epoch + 1);
-            let lease = AuthorityLease {
-                resource: resource.to_owned(),
-                owner: owner.to_owned(),
-                epoch,
-                expires_at: now.saturating_add(ttl),
-            };
+            let lease = proposed_lease(state, resource, owner, now, ttl)?;
             state.leases.insert(resource.to_owned(), lease.clone());
             acquired = Some(lease);
             Ok(())
         })?;
         acquired.ok_or_else(|| DurableError::Encoding("lease result disappeared".to_owned()))
+    }
+
+    /// Preview the exact lease a successful CAS would acquire without mutating
+    /// durable state.
+    pub fn preview_lease(
+        &self,
+        resource: &str,
+        owner: &str,
+        now: u64,
+        ttl: u64,
+    ) -> DurableResult<AuthorityLease> {
+        proposed_lease(self.state()?, resource, owner, now, ttl)
+    }
+
+    /// Atomically acquire one exact previewed lease and append higher-profile
+    /// journal records in the same durable CAS revision.
+    pub fn checkpoint_lease_journals(
+        &mut self,
+        lease: &AuthorityLease,
+        now: u64,
+        ttl: u64,
+        batches: &[JournalBatch],
+    ) -> DurableResult<String> {
+        if batches.is_empty() {
+            return Err(DurableError::Validation(
+                "lease journal checkpoint requires at least one journal".to_owned(),
+            ));
+        }
+        let mut journal_ids = std::collections::BTreeSet::new();
+        for batch in batches {
+            validate_journal_batch(&batch.journal_id, &batch.records)?;
+            if batch.records.is_empty() {
+                return Err(DurableError::Validation(format!(
+                    "application journal {} has no checkpoint records",
+                    batch.journal_id
+                )));
+            }
+            if !journal_ids.insert(&batch.journal_id) {
+                return Err(DurableError::Validation(format!(
+                    "application journal {} appears twice in one lease checkpoint",
+                    batch.journal_id
+                )));
+            }
+        }
+        self.mutate_checked(|state| {
+            let expected = proposed_lease(state, &lease.resource, &lease.owner, now, ttl)?;
+            if expected != *lease {
+                return Err(DurableError::Conflict {
+                    expected: Some(format!("{}:{}", lease.owner, lease.epoch)),
+                    current: state
+                        .leases
+                        .get(&lease.resource)
+                        .map(|current| format!("{}:{}", current.owner, current.epoch)),
+                });
+            }
+            for batch in batches {
+                for record in &batch.records {
+                    append_journal_record(state, &batch.journal_id, record.clone())?;
+                }
+            }
+            state.leases.insert(lease.resource.clone(), lease.clone());
+            Ok(())
+        })
     }
 
     /// Enqueue an effect dispatch exactly once by structural intent ID.
@@ -1097,6 +1137,46 @@ fn ensure_artifact_machine(
         )));
     }
     Ok(())
+}
+
+fn proposed_lease(
+    state: &DurableState,
+    resource: &str,
+    owner: &str,
+    now: u64,
+    ttl: u64,
+) -> DurableResult<AuthorityLease> {
+    if resource.is_empty() || owner.is_empty() || ttl == 0 {
+        return Err(DurableError::Validation(
+            "lease resource, owner, and positive TTL are required".to_owned(),
+        ));
+    }
+    if let Some(current) = state.leases.get(resource)
+        && current.owner != owner
+        && current.expires_at > now
+    {
+        return Err(DurableError::Conflict {
+            expected: Some(owner.to_owned()),
+            current: Some(current.owner.clone()),
+        });
+    }
+    let epoch = match state.leases.get(resource) {
+        Some(lease) => lease.epoch.checked_add(1).ok_or_else(|| {
+            DurableError::Validation(format!("lease {resource} exhausted its fencing epoch"))
+        })?,
+        None => 1,
+    };
+    let expires_at = now.checked_add(ttl).ok_or_else(|| {
+        DurableError::Validation(format!(
+            "lease {resource} expiry exceeds logical time range"
+        ))
+    })?;
+    Ok(AuthorityLease {
+        resource: resource.to_owned(),
+        owner: owner.to_owned(),
+        epoch,
+        expires_at,
+    })
 }
 
 fn validate_journal_batch(journal_id: &str, records: &[JournalRecord]) -> DurableResult<()> {

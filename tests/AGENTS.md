@@ -25,8 +25,9 @@
   bounded frontier, claim fencing, and explicit parent lineage wire shapes.
 - Virtual work occurrence fixtures preserve logical work identity separately
   from attempt epoch, owner, immutable binding, and exactly one disposition.
-- Virtual work control fixtures carry a stable command ID and exact owner/epoch
-  precondition; SDKs do not infer retry or cancellation policy from strings.
+- Virtual work control fixtures carry a stable command ID and exact owner, work
+  epoch, lease epoch, and logical observation-time precondition; SDKs do not
+  infer retry or cancellation policy from strings.
 - Fairness tests distinguish materialization visibility from weighted dispatch,
   debit exact item cost, restore scheduler accounting, and use continuous
   high-priority arrivals to prove finite priority-aging progress.
@@ -39,3 +40,7 @@
   and revision, certificate identity, and exact rehydration occurrence set.
   Stateful tests sweep archive put/get failures, tamper bytes, stale CAS, reopen,
   and receipt replay; an archive adapter never validates its own certificate.
+- Multi-worker tests inject stale CAS and lost receipts at claim, renewal, and
+  recovery; prove distinct slots can progress, one slot cannot overclaim,
+  expiry rejects normal output, explicit takeover increments work epoch, and
+  Run-weight commands replay without leaking old deficit.

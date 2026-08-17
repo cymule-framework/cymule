@@ -26,6 +26,9 @@ Status: partial.
 - exact-Artifact plus higher-profile journal checkpoints that reject unrelated
   Machine mutations, used for M3 terminal and failure evidence;
 - logical-clock authority leases and fencing epochs;
+- previewed authority leases atomically committed with higher-profile journal
+  records, including stale-CAS rollback and lost-receipt reopen, used by M3
+  worker capacity-slot claims and renewals;
 - effect outbox enqueue, claim, settlement, and explicit `unknown`;
 - repeated reconciliation of an `unknown` outbox entry under its original
   claim, including process reopen between `still_unknown` and terminal

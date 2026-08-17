@@ -14,6 +14,38 @@ ParkReason = dict[str, str]
 WorkResolution = dict[str, Any]
 
 
+class WorkItem(TypedDict):
+    """One materialized provider-neutral virtual work item."""
+
+    work_id: str
+    region_id: str
+    run_id: str
+    payload: ArtifactRef
+    capability: str | None
+    priority: int
+    cost: int
+
+
+class VirtualClaimLease(TypedDict):
+    """Fenced worker capacity-slot lease."""
+
+    resource: str
+    owner: str
+    epoch: int
+    expires_at: int
+
+
+class ClaimedWork(TypedDict):
+    """One active work occurrence and its current capacity-slot lease."""
+
+    item: WorkItem
+    owner: str
+    epoch: int
+    occurrence_id: str
+    occurrence_binding: str
+    lease: VirtualClaimLease
+
+
 class WorkOccurrence(TypedDict):
     """Binding-pinned M3 work attempt returned by a control transport."""
 
@@ -24,6 +56,7 @@ class WorkOccurrence(TypedDict):
     run_id: str
     owner: str
     epoch: int
+    lease_epoch: int
     occurrence_binding: str
     state: str
     result: ArtifactRef | None
@@ -39,6 +72,8 @@ class WorkResolutionCommand(TypedDict):
     work_id: str
     owner: str
     epoch: int
+    expected_lease_epoch: int
+    observed_at: int
     resolution: WorkResolution
 
 
@@ -163,6 +198,83 @@ class VirtualRehydrationReceipt(TypedDict):
     restored_occurrence_ids: list[str]
 
 
+class VirtualClaimCommand(TypedDict):
+    """Idempotent worker capacity-slot claim request."""
+
+    control_version: str
+    command_id: str
+    owner: str
+    slot_id: str
+    occurrence_binding: str
+    capabilities: list[str]
+    logical_now: int
+    lease_ttl: int
+
+
+class VirtualClaimReceipt(TypedDict):
+    """Claimed work or a durable empty eligibility observation."""
+
+    command: VirtualClaimCommand
+    claim: ClaimedWork | None
+
+
+class VirtualLeaseRenewalCommand(TypedDict):
+    """Idempotent active-claim lease renewal request."""
+
+    control_version: str
+    command_id: str
+    work_id: str
+    owner: str
+    epoch: int
+    expected_lease_epoch: int
+    logical_now: int
+    lease_ttl: int
+
+
+class VirtualLeaseRenewalReceipt(TypedDict):
+    """New lease fence committed for one active claim."""
+
+    command: VirtualLeaseRenewalCommand
+    lease: VirtualClaimLease
+
+
+class VirtualRecoveryCommand(TypedDict):
+    """Explicit retry, fail, or cancel decision for an expired claim."""
+
+    control_version: str
+    command_id: str
+    work_id: str
+    expected_owner: str
+    expected_epoch: int
+    expected_lease_epoch: int
+    observed_at: int
+    resolution: WorkResolution
+
+
+class VirtualRecoveryReceipt(TypedDict):
+    """Expired occurrence after its admitted recovery disposition."""
+
+    command: VirtualRecoveryCommand
+    occurrence: WorkOccurrence
+
+
+class VirtualRunWeightCommand(TypedDict):
+    """Idempotent future Run scheduling-share update."""
+
+    control_version: str
+    command_id: str
+    run_id: str
+    weight: int
+
+
+class VirtualRunWeightReceipt(TypedDict):
+    """Previous and current Run scheduling weights."""
+
+    command: VirtualRunWeightCommand
+    previous_weight: int
+    current_weight: int
+
+
 class VirtualArchive(Protocol):
     """Replaceable immutable byte archive for completed virtual history."""
 
@@ -199,6 +311,18 @@ class VirtualWorkControl(Protocol):
     def compact(self, command: VirtualCompactionCommand) -> VirtualCompactionReceipt: ...
 
     def rehydrate(self, command: VirtualRehydrationCommand) -> VirtualRehydrationReceipt: ...
+
+
+class VirtualSchedulingControl(Protocol):
+    """Transport-neutral M3 worker-slot scheduling commands."""
+
+    def claim(self, command: VirtualClaimCommand) -> VirtualClaimReceipt: ...
+
+    def renew(self, command: VirtualLeaseRenewalCommand) -> VirtualLeaseRenewalReceipt: ...
+
+    def recover(self, command: VirtualRecoveryCommand) -> VirtualRecoveryReceipt: ...
+
+    def set_run_weight(self, command: VirtualRunWeightCommand) -> VirtualRunWeightReceipt: ...
 
 
 class FlowBuilder:
@@ -426,6 +550,8 @@ class VirtualWorkControlBuilder:
         work_id: str,
         owner: str,
         epoch: int,
+        expected_lease_epoch: int,
+        observed_at: int,
         result: ArtifactRef,
     ) -> WorkResolutionCommand:
         return VirtualWorkControlBuilder._build(
@@ -433,6 +559,8 @@ class VirtualWorkControlBuilder:
             work_id,
             owner,
             epoch,
+            expected_lease_epoch,
+            observed_at,
             {"resolution": "succeeded", "result": dict(result)},
         )
 
@@ -442,6 +570,8 @@ class VirtualWorkControlBuilder:
         work_id: str,
         owner: str,
         epoch: int,
+        expected_lease_epoch: int,
+        observed_at: int,
         error: ArtifactRef,
         next_reason: ParkReason | None = None,
     ) -> WorkResolutionCommand:
@@ -450,6 +580,8 @@ class VirtualWorkControlBuilder:
             work_id,
             owner,
             epoch,
+            expected_lease_epoch,
+            observed_at,
             {
                 "resolution": "retry",
                 "error": dict(error),
@@ -463,6 +595,8 @@ class VirtualWorkControlBuilder:
         work_id: str,
         owner: str,
         epoch: int,
+        expected_lease_epoch: int,
+        observed_at: int,
         error: ArtifactRef,
     ) -> WorkResolutionCommand:
         return VirtualWorkControlBuilder._build(
@@ -470,6 +604,8 @@ class VirtualWorkControlBuilder:
             work_id,
             owner,
             epoch,
+            expected_lease_epoch,
+            observed_at,
             {"resolution": "failed", "error": dict(error)},
         )
 
@@ -479,6 +615,8 @@ class VirtualWorkControlBuilder:
         work_id: str,
         owner: str,
         epoch: int,
+        expected_lease_epoch: int,
+        observed_at: int,
         reason: ParkReason,
     ) -> WorkResolutionCommand:
         return VirtualWorkControlBuilder._build(
@@ -486,6 +624,8 @@ class VirtualWorkControlBuilder:
             work_id,
             owner,
             epoch,
+            expected_lease_epoch,
+            observed_at,
             {"resolution": "parked", "reason": dict(reason)},
         )
 
@@ -495,6 +635,8 @@ class VirtualWorkControlBuilder:
         work_id: str,
         owner: str,
         epoch: int,
+        expected_lease_epoch: int,
+        observed_at: int,
         reason: ArtifactRef,
     ) -> WorkResolutionCommand:
         return VirtualWorkControlBuilder._build(
@@ -502,6 +644,8 @@ class VirtualWorkControlBuilder:
             work_id,
             owner,
             epoch,
+            expected_lease_epoch,
+            observed_at,
             {"resolution": "cancelled", "reason": dict(reason)},
         )
 
@@ -572,11 +716,20 @@ class VirtualWorkControlBuilder:
         work_id: str,
         owner: str,
         epoch: int,
+        expected_lease_epoch: int,
+        observed_at: int,
         resolution: WorkResolution,
     ) -> WorkResolutionCommand:
-        if not command_id or not work_id or not owner or epoch < 1:
+        if (
+            not command_id
+            or not work_id
+            or not owner
+            or epoch < 1
+            or expected_lease_epoch < 1
+            or observed_at < 0
+        ):
             raise ValueError(
-                "virtual work control requires command, work, owner, and positive epoch"
+                "virtual work control requires identities, work and lease fences, and logical time"
             )
         return {
             "control_version": "cymule.virtual-work-control/1",
@@ -584,7 +737,130 @@ class VirtualWorkControlBuilder:
             "work_id": work_id,
             "owner": owner,
             "epoch": epoch,
+            "expected_lease_epoch": expected_lease_epoch,
+            "observed_at": observed_at,
             "resolution": resolution,
+        }
+
+
+class VirtualSchedulingControlBuilder:
+    """Build fenced worker-slot claim, renewal, and recovery commands."""
+
+    @staticmethod
+    def claim(
+        command_id: str,
+        owner: str,
+        slot_id: str,
+        occurrence_binding: str,
+        capabilities: list[str],
+        logical_now: int,
+        lease_ttl: int,
+    ) -> VirtualClaimCommand:
+        """Build one idempotent capacity-slot claim command."""
+        normalized = sorted(set(capabilities))
+        if (
+            not command_id
+            or not owner
+            or not slot_id
+            or not occurrence_binding
+            or any(not capability for capability in normalized)
+            or logical_now < 0
+            or lease_ttl < 1
+        ):
+            raise ValueError(
+                "virtual claim requires identities, binding, logical time, and positive TTL"
+            )
+        return {
+            "control_version": "cymule.virtual-claim-control/1",
+            "command_id": command_id,
+            "owner": owner,
+            "slot_id": slot_id,
+            "occurrence_binding": occurrence_binding,
+            "capabilities": normalized,
+            "logical_now": logical_now,
+            "lease_ttl": lease_ttl,
+        }
+
+    @staticmethod
+    def renew(
+        command_id: str,
+        work_id: str,
+        owner: str,
+        epoch: int,
+        expected_lease_epoch: int,
+        logical_now: int,
+        lease_ttl: int,
+    ) -> VirtualLeaseRenewalCommand:
+        """Build one active-claim lease renewal command."""
+        if (
+            not command_id
+            or not work_id
+            or not owner
+            or epoch < 1
+            or expected_lease_epoch < 1
+            or logical_now < 0
+            or lease_ttl < 1
+        ):
+            raise ValueError(
+                "virtual renewal requires identities, fences, logical time, and positive TTL"
+            )
+        return {
+            "control_version": "cymule.virtual-lease-renewal-control/1",
+            "command_id": command_id,
+            "work_id": work_id,
+            "owner": owner,
+            "epoch": epoch,
+            "expected_lease_epoch": expected_lease_epoch,
+            "logical_now": logical_now,
+            "lease_ttl": lease_ttl,
+        }
+
+    @staticmethod
+    def recovery(
+        command_id: str,
+        work_id: str,
+        expected_owner: str,
+        expected_epoch: int,
+        expected_lease_epoch: int,
+        observed_at: int,
+        resolution: WorkResolution,
+    ) -> VirtualRecoveryCommand:
+        """Build one explicit expired-claim recovery command."""
+        if (
+            not command_id
+            or not work_id
+            or not expected_owner
+            or expected_epoch < 1
+            or expected_lease_epoch < 1
+            or observed_at < 0
+            or resolution.get("resolution") not in {"retry", "failed", "cancelled"}
+        ):
+            raise ValueError(
+                "virtual recovery requires identities, fences, time, and retry/fail/cancel"
+            )
+        return {
+            "control_version": "cymule.virtual-recovery-control/1",
+            "command_id": command_id,
+            "work_id": work_id,
+            "expected_owner": expected_owner,
+            "expected_epoch": expected_epoch,
+            "expected_lease_epoch": expected_lease_epoch,
+            "observed_at": observed_at,
+            "resolution": copy.deepcopy(resolution),
+        }
+
+    @staticmethod
+    def run_weight(command_id: str, run_id: str, weight: int) -> VirtualRunWeightCommand:
+        """Build one future Run scheduling-share update."""
+        if not command_id or not run_id or weight < 1:
+            raise ValueError(
+                "virtual Run weight requires command, Run, and positive weight"
+            )
+        return {
+            "control_version": "cymule.virtual-run-weight-control/1",
+            "command_id": command_id,
+            "run_id": run_id,
+            "weight": weight,
         }
 
 

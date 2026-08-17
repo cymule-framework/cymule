@@ -139,6 +139,8 @@ func TestVirtualWorkQueryAndControlFixturesStayExact(t *testing.T) {
 		"work:fixture",
 		"worker:fixture",
 		1,
+		1,
+		101,
 		ArtifactRef{
 			ArtifactID: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
 			Kind:       "example/result",
@@ -227,5 +229,99 @@ func TestVirtualWorkQueryAndControlFixturesStayExact(t *testing.T) {
 	)
 	if !reflect.DeepEqual(rehydration, rehydrationFixture) {
 		t.Fatalf("rehydration differs from shared fixture: %#v", rehydration)
+	}
+	claimPath := os.Getenv("CYMULE_VIRTUAL_CLAIM_FIXTURE")
+	renewalPath := os.Getenv("CYMULE_VIRTUAL_LEASE_RENEWAL_FIXTURE")
+	recoveryPath := os.Getenv("CYMULE_VIRTUAL_RECOVERY_FIXTURE")
+	if claimPath == "" || renewalPath == "" || recoveryPath == "" {
+		t.Skip("virtual scheduling SDK conformance is not configured")
+	}
+	claimBytes, err := os.ReadFile(claimPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claimFixture VirtualClaimCommand
+	if err := json.Unmarshal(claimBytes, &claimFixture); err != nil {
+		t.Fatal(err)
+	}
+	claim := ClaimVirtualWork(
+		"command:claim:fixture",
+		"worker:fixture",
+		"slot:worker-fixture:0",
+		"binding:worker/fixture@1",
+		[]string{"sandbox", "cpu", "cpu"},
+		100,
+		30,
+	)
+	if !reflect.DeepEqual(claim, claimFixture) {
+		t.Fatalf("claim differs from shared fixture: %#v", claim)
+	}
+	renewalBytes, err := os.ReadFile(renewalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var renewalFixture VirtualLeaseRenewalCommand
+	if err := json.Unmarshal(renewalBytes, &renewalFixture); err != nil {
+		t.Fatal(err)
+	}
+	renewal := RenewVirtualClaim(
+		"command:renew:fixture",
+		"work:fixture",
+		"worker:fixture",
+		1,
+		1,
+		120,
+		30,
+	)
+	if !reflect.DeepEqual(renewal, renewalFixture) {
+		t.Fatalf("renewal differs from shared fixture: %#v", renewal)
+	}
+	recoveryBytes, err := os.ReadFile(recoveryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recoveryFixture VirtualRecoveryCommand
+	if err := json.Unmarshal(recoveryBytes, &recoveryFixture); err != nil {
+		t.Fatal(err)
+	}
+	recovery := RecoverVirtualClaim(
+		"command:recovery:fixture",
+		"work:fixture",
+		"worker:fixture",
+		1,
+		2,
+		150,
+		recoveryFixture.Resolution,
+	)
+	recoveryBytesActual, err := json.Marshal(recovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recoveryActual any
+	var recoveryExpected any
+	if err := json.Unmarshal(recoveryBytesActual, &recoveryActual); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(recoveryBytes, &recoveryExpected); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(recoveryActual, recoveryExpected) {
+		t.Fatalf("recovery differs from shared fixture: %#v", recoveryActual)
+	}
+	runWeightPath := os.Getenv("CYMULE_VIRTUAL_RUN_WEIGHT_FIXTURE")
+	if runWeightPath == "" {
+		t.Skip("virtual Run weight SDK conformance is not configured")
+	}
+	runWeightBytes, err := os.ReadFile(runWeightPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runWeightFixture VirtualRunWeightCommand
+	if err := json.Unmarshal(runWeightBytes, &runWeightFixture); err != nil {
+		t.Fatal(err)
+	}
+	runWeight := SetVirtualRunWeight("command:run-weight:fixture", "run:fixture", 3)
+	if !reflect.DeepEqual(runWeight, runWeightFixture) {
+		t.Fatalf("Run weight differs from shared fixture: %#v", runWeight)
 	}
 }

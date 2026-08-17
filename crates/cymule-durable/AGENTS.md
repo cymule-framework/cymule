@@ -9,6 +9,11 @@
   ambient time.
 - Wait completion, lease acquisition, outbox claims, occurrence recording, and
   snapshot publication must be idempotent and fenced.
+- Higher profiles that couple a logical lease to journal state must preview the
+  exact next lease and use `checkpoint_lease_journals`; acquiring a lease and
+  appending its claim/renewal in separate CAS revisions is invalid. Receipt loss
+  may leave the transition committed, so reopen and stable command replay are
+  required before proposing another lease epoch.
 - Signal and timer waits complete only through an identified
   `cymule.wait-activation/1` record. Match the declared source, atomically store
   its result and ready every selected Continuation, and allow one signal token

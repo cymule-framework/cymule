@@ -6,6 +6,7 @@ import {
   CliEngine,
   FlowBuilder,
   ResourceBuilder,
+  VirtualSchedulingControlBuilder,
   VirtualWorkControlBuilder,
   WaitActivationBuilder,
   type EffectProfile,
@@ -90,6 +91,8 @@ test("TypeScript virtual work query and control fixtures stay exact", () => {
     "work:fixture",
     "worker:fixture",
     1,
+    1,
+    101,
     {
       artifact_id: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
       kind: "example/result",
@@ -126,5 +129,54 @@ test("TypeScript virtual work query and control fixtures stay exact", () => {
       [occurrence.occurrence_id],
     ),
     JSON.parse(readFileSync(rehydrationPath, "utf8")),
+  );
+  const claimPath = process.env.CYMULE_VIRTUAL_CLAIM_FIXTURE;
+  const renewalPath = process.env.CYMULE_VIRTUAL_LEASE_RENEWAL_FIXTURE;
+  const recoveryPath = process.env.CYMULE_VIRTUAL_RECOVERY_FIXTURE;
+  const runWeightPath = process.env.CYMULE_VIRTUAL_RUN_WEIGHT_FIXTURE;
+  if (
+    claimPath === undefined || renewalPath === undefined || recoveryPath === undefined ||
+    runWeightPath === undefined
+  ) return;
+  assert.deepEqual(
+    VirtualSchedulingControlBuilder.claim(
+      "command:claim:fixture",
+      "worker:fixture",
+      "slot:worker-fixture:0",
+      "binding:worker/fixture@1",
+      ["sandbox", "cpu", "cpu"],
+      100,
+      30,
+    ),
+    JSON.parse(readFileSync(claimPath, "utf8")),
+  );
+  assert.deepEqual(
+    VirtualSchedulingControlBuilder.renew(
+      "command:renew:fixture",
+      "work:fixture",
+      "worker:fixture",
+      1,
+      1,
+      120,
+      30,
+    ),
+    JSON.parse(readFileSync(renewalPath, "utf8")),
+  );
+  const recoveryFixture = JSON.parse(readFileSync(recoveryPath, "utf8"));
+  assert.deepEqual(
+    VirtualSchedulingControlBuilder.recovery(
+      "command:recovery:fixture",
+      "work:fixture",
+      "worker:fixture",
+      1,
+      2,
+      150,
+      recoveryFixture.resolution,
+    ),
+    recoveryFixture,
+  );
+  assert.deepEqual(
+    VirtualSchedulingControlBuilder.runWeight("command:run-weight:fixture", "run:fixture", 3),
+    JSON.parse(readFileSync(runWeightPath, "utf8")),
   );
 });

@@ -57,6 +57,11 @@ Use this precedence order when guidance conflicts:
   certificate, summary digests, retained terminal fences/bindings, and replay
   availability; partial rehydration restores only explicitly selected exact
   occurrences. Archive products, locators, and credentials are plugin concerns.
+- Multi-worker M3 execution uses abstract capacity-slot leases, not worker-pool
+  topology. Claim and lease admission share one M1 CAS; renewal advances the
+  slot fence; normal resolution carries work/lease epochs and logical time;
+  expired recovery is an explicit retry/fail/cancel command. Lease expiry alone
+  never mutates state, and old worker output loses after expiry or takeover.
 - Public mutation enters through typed commands with idempotent IDs and causal
   preconditions. Raw canonical event append is internal only.
 - Prefer optimistic CAS, immutable records, idempotency, fencing epochs, and

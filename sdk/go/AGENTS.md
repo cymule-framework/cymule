@@ -15,4 +15,7 @@
 - Archive and compaction structs retain exact wire fields. Go adapters store
   immutable bytes only; they do not recompute certificate or manifest identity,
   and rehydration never widens the requested occurrence set.
+- Scheduling structs retain slot, logical time, work/lease fences, capabilities,
+  Run weight, and explicit recovery disposition. Do not use goroutine/process
+  identity, `time.Now`, or local maps as durable worker authority.
 - Run `gofmt` and `go test ./...` for every change.

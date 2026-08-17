@@ -1,0 +1,10 @@
+{
+  "control_version": "cymule.virtual-lease-renewal-control/1",
+  "command_id": "command:renew:fixture",
+  "work_id": "work:fixture",
+  "owner": "worker:fixture",
+  "epoch": 1,
+  "expected_lease_epoch": 1,
+  "logical_now": 120,
+  "lease_ttl": 30
+}

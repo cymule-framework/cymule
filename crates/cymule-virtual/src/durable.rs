@@ -2,17 +2,22 @@ use std::collections::BTreeSet;
 
 use cymule_core::Machine;
 use cymule_durable::{
-    DurableCoordinator, DurableStore, JournalBatch, JournalRecord, WaitActivation,
+    AuthorityLease, DurableCoordinator, DurableStore, JournalBatch, JournalRecord, WaitActivation,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     ClaimedWork, FrontierLimits, RegionMigrationCommand, RegionMigrationReceipt, RegionMigrator,
-    RegionSource, VIRTUAL_COMPACTION_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_CONTROL_VERSION,
-    VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive,
-    VirtualCompactionCommand, VirtualCompactionReceipt, VirtualError, VirtualRehydrationCommand,
-    VirtualRehydrationReceipt, VirtualResult, VirtualScheduler, VirtualSnapshot, WorkOccurrence,
-    WorkResolution, WorkResolutionCommand, virtual_archive_record,
+    RegionSource, VIRTUAL_CLAIM_CONTROL_VERSION, VIRTUAL_COMPACTION_CONTROL_VERSION,
+    VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION, VIRTUAL_RECOVERY_CONTROL_VERSION,
+    VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_REHYDRATION_CONTROL_VERSION,
+    VIRTUAL_RUN_WEIGHT_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive,
+    VirtualClaimCommand, VirtualClaimLease, VirtualClaimReceipt, VirtualCompactionCommand,
+    VirtualCompactionReceipt, VirtualError, VirtualLeaseRenewalCommand, VirtualLeaseRenewalReceipt,
+    VirtualRecoveryCommand, VirtualRecoveryReceipt, VirtualRehydrationCommand,
+    VirtualRehydrationReceipt, VirtualResult, VirtualRunWeightCommand, VirtualRunWeightReceipt,
+    VirtualScheduler, VirtualSnapshot, WorkOccurrence, WorkResolution, WorkResolutionCommand,
+    virtual_archive_record,
 };
 
 /// Versioned M3 scheduler checkpoint stored in an M1 application journal.
@@ -54,6 +59,30 @@ pub struct VirtualCheckpoint {
     /// Rehydration command receipt identity.
     #[serde(default)]
     pub receipt_rehydration_id: Option<String>,
+    /// Worker-slot claim command committed by this checkpoint, when any.
+    #[serde(default)]
+    pub claim_control: Option<VirtualClaimCommand>,
+    /// Claim command receipt identity.
+    #[serde(default)]
+    pub receipt_claim_id: Option<String>,
+    /// Active-claim lease renewal command, when any.
+    #[serde(default)]
+    pub lease_renewal_control: Option<VirtualLeaseRenewalCommand>,
+    /// Lease renewal receipt identity.
+    #[serde(default)]
+    pub receipt_lease_renewal_id: Option<String>,
+    /// Expired-claim recovery command, when any.
+    #[serde(default)]
+    pub recovery_control: Option<VirtualRecoveryCommand>,
+    /// Recovery receipt identity.
+    #[serde(default)]
+    pub receipt_recovery_id: Option<String>,
+    /// Future Run scheduling-weight update command, when any.
+    #[serde(default)]
+    pub run_weight_control: Option<VirtualRunWeightCommand>,
+    /// Run weight update receipt identity.
+    #[serde(default)]
+    pub receipt_run_weight_id: Option<String>,
 }
 
 /// M1 journal integration for the M3 virtual scheduler.
@@ -154,6 +183,206 @@ impl DurableVirtualController {
         Ok(Some(claim))
     }
 
+    /// Claim at most one item through a fenced worker capacity slot and commit
+    /// the lease plus scheduler receipt in one M1 CAS revision.
+    pub fn claim_command_and_checkpoint<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        scheduler: &mut VirtualScheduler,
+        command: &VirtualClaimCommand,
+        journal_id: &str,
+    ) -> VirtualResult<VirtualClaimReceipt> {
+        if let Some(receipt) = replay_claim_receipt(coordinator, scheduler, journal_id, command)? {
+            return Ok(receipt);
+        }
+        let authority = coordinator
+            .preview_lease(
+                &command.slot_id,
+                &command.owner,
+                command.logical_now,
+                command.lease_ttl,
+            )
+            .map_err(durable_error)?;
+        let lease = virtual_lease(&authority);
+        let before = scheduler.clone();
+        let receipt = scheduler.claim_command(command, &lease)?;
+        let record = match claim_checkpoint_record(coordinator, scheduler, journal_id, command) {
+            Ok(record) => record,
+            Err(error) => {
+                *scheduler = before;
+                return Err(error);
+            }
+        };
+        let result = if receipt.claim.is_some() {
+            coordinator.checkpoint_lease_journals(
+                &authority,
+                command.logical_now,
+                command.lease_ttl,
+                &[JournalBatch {
+                    journal_id: journal_id.to_owned(),
+                    records: vec![record],
+                }],
+            )
+        } else {
+            coordinator.append_journal_record(journal_id, record)
+        };
+        if let Err(error) = result {
+            *scheduler = before;
+            return Err(durable_error(error));
+        }
+        Ok(receipt)
+    }
+
+    /// Renew one active claim and its worker capacity slot in the same M1 CAS
+    /// revision.
+    pub fn renew_claim_command_and_checkpoint<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        scheduler: &mut VirtualScheduler,
+        command: &VirtualLeaseRenewalCommand,
+        journal_id: &str,
+    ) -> VirtualResult<VirtualLeaseRenewalReceipt> {
+        if let Some(receipt) =
+            replay_lease_renewal_receipt(coordinator, scheduler, journal_id, command)?
+        {
+            return Ok(receipt);
+        }
+        let active = scheduler
+            .active_claim(&command.work_id)
+            .ok_or_else(|| {
+                VirtualError::NotFound(format!("active work {} is missing", command.work_id))
+            })?
+            .clone();
+        if active.owner != command.owner
+            || active.epoch != command.epoch
+            || active.lease.epoch != command.expected_lease_epoch
+        {
+            return Err(VirtualError::Conflict(format!(
+                "stale lease renewal for {}",
+                command.work_id
+            )));
+        }
+        let authority = coordinator
+            .preview_lease(
+                &active.lease.resource,
+                &command.owner,
+                command.logical_now,
+                command.lease_ttl,
+            )
+            .map_err(durable_error)?;
+        let lease = virtual_lease(&authority);
+        let before = scheduler.clone();
+        let receipt = scheduler.renew_claim(command, &lease)?;
+        let record =
+            match lease_renewal_checkpoint_record(coordinator, scheduler, journal_id, command) {
+                Ok(record) => record,
+                Err(error) => {
+                    *scheduler = before;
+                    return Err(error);
+                }
+            };
+        if let Err(error) = coordinator.checkpoint_lease_journals(
+            &authority,
+            command.logical_now,
+            command.lease_ttl,
+            &[JournalBatch {
+                journal_id: journal_id.to_owned(),
+                records: vec![record],
+            }],
+        ) {
+            *scheduler = before;
+            return Err(durable_error(error));
+        }
+        Ok(receipt)
+    }
+
+    /// Apply one explicit disposition after the active capacity-slot lease has
+    /// expired, then checkpoint the fence before another worker may claim it.
+    pub fn recover_expired_command_and_checkpoint<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        scheduler: &mut VirtualScheduler,
+        machine: &Machine,
+        command: &VirtualRecoveryCommand,
+        journal_id: &str,
+    ) -> VirtualResult<VirtualRecoveryReceipt> {
+        if let Some(receipt) = replay_recovery_receipt(coordinator, scheduler, journal_id, command)?
+        {
+            return Ok(receipt);
+        }
+        let active = scheduler
+            .active_claim(&command.work_id)
+            .ok_or_else(|| {
+                VirtualError::NotFound(format!("active work {} is missing", command.work_id))
+            })?
+            .clone();
+        let authority = coordinator
+            .state()
+            .map_err(durable_error)?
+            .leases
+            .get(&active.lease.resource)
+            .ok_or_else(|| {
+                VirtualError::Conflict(format!(
+                    "active work {} has no durable capacity-slot lease",
+                    command.work_id
+                ))
+            })?;
+        if virtual_lease(authority) != active.lease || authority.expires_at > command.observed_at {
+            return Err(VirtualError::Conflict(format!(
+                "active work {} lease is not expired under the durable fence",
+                command.work_id
+            )));
+        }
+        let before = scheduler.clone();
+        let receipt = scheduler.recover_expired(command)?;
+        let record = match recovery_checkpoint_record(coordinator, scheduler, journal_id, command) {
+            Ok(record) => record,
+            Err(error) => {
+                *scheduler = before;
+                return Err(error);
+            }
+        };
+        if let Err(error) = coordinator.checkpoint_artifact_journals(
+            machine,
+            &resolution_artifacts(&command.resolution),
+            &[JournalBatch {
+                journal_id: journal_id.to_owned(),
+                records: vec![record],
+            }],
+        ) {
+            *scheduler = before;
+            return Err(durable_error(error));
+        }
+        Ok(receipt)
+    }
+
+    /// Update one Run's future weighted scheduling share and retain an
+    /// idempotent receipt in the M1 virtual journal.
+    pub fn set_run_weight_command_and_checkpoint<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        scheduler: &mut VirtualScheduler,
+        command: &VirtualRunWeightCommand,
+        journal_id: &str,
+    ) -> VirtualResult<VirtualRunWeightReceipt> {
+        if let Some(receipt) =
+            replay_run_weight_receipt(coordinator, scheduler, journal_id, command)?
+        {
+            return Ok(receipt);
+        }
+        let before = scheduler.clone();
+        let receipt = scheduler.set_run_weight_command(command)?;
+        let record = match run_weight_checkpoint_record(coordinator, scheduler, journal_id, command)
+        {
+            Ok(record) => record,
+            Err(error) => {
+                *scheduler = before;
+                return Err(error);
+            }
+        };
+        if let Err(error) = coordinator.append_journal_record(journal_id, record) {
+            *scheduler = before;
+            return Err(durable_error(error));
+        }
+        Ok(receipt)
+    }
+
     /// Apply one provider-neutral idempotent work-resolution command and
     /// atomically checkpoint its output or evidence Artifacts.
     pub fn resolve_command_and_checkpoint<S: DurableStore>(
@@ -168,6 +397,7 @@ impl DurableVirtualController {
             || command.work_id.is_empty()
             || command.owner.is_empty()
             || command.epoch == 0
+            || command.expected_lease_epoch == 0
         {
             return Err(VirtualError::Validation(
                 "virtual work control command is malformed".to_owned(),
@@ -178,10 +408,12 @@ impl DurableVirtualController {
             return Ok(receipt);
         }
         let before = scheduler.clone();
-        let occurrence = scheduler.resolve(
+        let occurrence = scheduler.resolve_fenced(
             &command.work_id,
             &command.owner,
             command.epoch,
+            command.expected_lease_epoch,
+            command.observed_at,
             &command.resolution,
         )?;
         let record = match control_checkpoint_record(
@@ -450,6 +682,10 @@ fn checkpoint_record<S: DurableStore>(
             || checkpoint.migration_control.is_some()
             || checkpoint.compaction_control.is_some()
             || checkpoint.rehydration_control.is_some()
+            || checkpoint.claim_control.is_some()
+            || checkpoint.lease_renewal_control.is_some()
+            || checkpoint.recovery_control.is_some()
+            || checkpoint.run_weight_control.is_some()
             || checkpoint.snapshot != scheduler.snapshot()
         {
             return Err(VirtualError::Conflict(format!(
@@ -471,6 +707,14 @@ fn checkpoint_record<S: DurableStore>(
         receipt_compaction_id: None,
         rehydration_control: None,
         receipt_rehydration_id: None,
+        claim_control: None,
+        receipt_claim_id: None,
+        lease_renewal_control: None,
+        receipt_lease_renewal_id: None,
+        recovery_control: None,
+        receipt_recovery_id: None,
+        run_weight_control: None,
+        receipt_run_weight_id: None,
     };
     let payload = serde_json::to_value(checkpoint)
         .map_err(|error| VirtualError::Validation(error.to_string()))?;
@@ -509,6 +753,14 @@ fn control_checkpoint_record<S: DurableStore>(
         receipt_compaction_id: None,
         rehydration_control: None,
         receipt_rehydration_id: None,
+        claim_control: None,
+        receipt_claim_id: None,
+        lease_renewal_control: None,
+        receipt_lease_renewal_id: None,
+        recovery_control: None,
+        receipt_recovery_id: None,
+        run_weight_control: None,
+        receipt_run_weight_id: None,
     };
     let payload = serde_json::to_value(checkpoint)
         .map_err(|error| VirtualError::Validation(error.to_string()))?;
@@ -584,6 +836,14 @@ fn migration_checkpoint_record<S: DurableStore>(
         receipt_compaction_id: None,
         rehydration_control: None,
         receipt_rehydration_id: None,
+        claim_control: None,
+        receipt_claim_id: None,
+        lease_renewal_control: None,
+        receipt_lease_renewal_id: None,
+        recovery_control: None,
+        receipt_recovery_id: None,
+        run_weight_control: None,
+        receipt_run_weight_id: None,
     };
     let payload = serde_json::to_value(checkpoint)
         .map_err(|error| VirtualError::Validation(error.to_string()))?;
@@ -660,6 +920,14 @@ fn compaction_checkpoint_record<S: DurableStore>(
         receipt_compaction_id: Some(certificate_id.to_owned()),
         rehydration_control: None,
         receipt_rehydration_id: None,
+        claim_control: None,
+        receipt_claim_id: None,
+        lease_renewal_control: None,
+        receipt_lease_renewal_id: None,
+        recovery_control: None,
+        receipt_recovery_id: None,
+        run_weight_control: None,
+        receipt_run_weight_id: None,
     };
     let payload = serde_json::to_value(checkpoint)
         .map_err(|error| VirtualError::Validation(error.to_string()))?;
@@ -741,6 +1009,14 @@ fn rehydration_checkpoint_record<S: DurableStore>(
         receipt_compaction_id: None,
         rehydration_control: Some(command.clone()),
         receipt_rehydration_id: Some(command.command_id.clone()),
+        claim_control: None,
+        receipt_claim_id: None,
+        lease_renewal_control: None,
+        receipt_lease_renewal_id: None,
+        recovery_control: None,
+        receipt_recovery_id: None,
+        run_weight_control: None,
+        receipt_run_weight_id: None,
     };
     let payload = serde_json::to_value(checkpoint)
         .map_err(|error| VirtualError::Validation(error.to_string()))?;
@@ -786,6 +1062,315 @@ fn replay_rehydration_receipt<S: DurableStore>(
     Ok(Some(receipt))
 }
 
+fn claim_checkpoint_record<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &VirtualClaimCommand,
+) -> VirtualResult<JournalRecord> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    reject_existing_control_record(records, &command.command_id, "virtual claim")?;
+    scheduling_checkpoint_record(
+        records.last().map(|record| record.record_id.clone()),
+        scheduler,
+        &command.command_id,
+        Some(command.clone()),
+        None,
+        None,
+    )
+}
+
+fn replay_claim_receipt<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &VirtualClaimCommand,
+) -> VirtualResult<Option<VirtualClaimReceipt>> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    let Some(record) = records
+        .iter()
+        .find(|record| record.record_id == command.command_id)
+    else {
+        return Ok(None);
+    };
+    let checkpoint = decode_checkpoint(record)?;
+    if checkpoint.claim_control.as_ref() != Some(command)
+        || checkpoint.receipt_claim_id.as_deref() != Some(command.command_id.as_str())
+    {
+        return Err(VirtualError::Conflict(format!(
+            "virtual claim command {} was reused with different semantics",
+            command.command_id
+        )));
+    }
+    let receipt = scheduler
+        .snapshot()
+        .claim_receipts
+        .get(&command.command_id)
+        .cloned()
+        .ok_or_else(|| {
+            VirtualError::Validation(format!(
+                "virtual claim command {} receipt is unavailable",
+                command.command_id
+            ))
+        })?;
+    Ok(Some(receipt))
+}
+
+fn lease_renewal_checkpoint_record<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &VirtualLeaseRenewalCommand,
+) -> VirtualResult<JournalRecord> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    reject_existing_control_record(records, &command.command_id, "virtual lease renewal")?;
+    scheduling_checkpoint_record(
+        records.last().map(|record| record.record_id.clone()),
+        scheduler,
+        &command.command_id,
+        None,
+        Some(command.clone()),
+        None,
+    )
+}
+
+fn replay_lease_renewal_receipt<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &VirtualLeaseRenewalCommand,
+) -> VirtualResult<Option<VirtualLeaseRenewalReceipt>> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    let Some(record) = records
+        .iter()
+        .find(|record| record.record_id == command.command_id)
+    else {
+        return Ok(None);
+    };
+    let checkpoint = decode_checkpoint(record)?;
+    if checkpoint.lease_renewal_control.as_ref() != Some(command)
+        || checkpoint.receipt_lease_renewal_id.as_deref() != Some(command.command_id.as_str())
+    {
+        return Err(VirtualError::Conflict(format!(
+            "virtual lease renewal command {} was reused with different semantics",
+            command.command_id
+        )));
+    }
+    let receipt = scheduler
+        .snapshot()
+        .lease_renewal_receipts
+        .get(&command.command_id)
+        .cloned()
+        .ok_or_else(|| {
+            VirtualError::Validation(format!(
+                "virtual lease renewal command {} receipt is unavailable",
+                command.command_id
+            ))
+        })?;
+    Ok(Some(receipt))
+}
+
+fn recovery_checkpoint_record<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &VirtualRecoveryCommand,
+) -> VirtualResult<JournalRecord> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    reject_existing_control_record(records, &command.command_id, "virtual recovery")?;
+    scheduling_checkpoint_record(
+        records.last().map(|record| record.record_id.clone()),
+        scheduler,
+        &command.command_id,
+        None,
+        None,
+        Some(command.clone()),
+    )
+}
+
+fn replay_recovery_receipt<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &VirtualRecoveryCommand,
+) -> VirtualResult<Option<VirtualRecoveryReceipt>> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    let Some(record) = records
+        .iter()
+        .find(|record| record.record_id == command.command_id)
+    else {
+        return Ok(None);
+    };
+    let checkpoint = decode_checkpoint(record)?;
+    if checkpoint.recovery_control.as_ref() != Some(command)
+        || checkpoint.receipt_recovery_id.as_deref() != Some(command.command_id.as_str())
+    {
+        return Err(VirtualError::Conflict(format!(
+            "virtual recovery command {} was reused with different semantics",
+            command.command_id
+        )));
+    }
+    let receipt = scheduler
+        .snapshot()
+        .recovery_receipts
+        .get(&command.command_id)
+        .cloned()
+        .ok_or_else(|| {
+            VirtualError::Validation(format!(
+                "virtual recovery command {} receipt is unavailable",
+                command.command_id
+            ))
+        })?;
+    Ok(Some(receipt))
+}
+
+fn run_weight_checkpoint_record<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &VirtualRunWeightCommand,
+) -> VirtualResult<JournalRecord> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    reject_existing_control_record(records, &command.command_id, "virtual Run weight")?;
+    let checkpoint = VirtualCheckpoint {
+        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
+        checkpoint_id: command.command_id.clone(),
+        parent_checkpoint: records.last().map(|record| record.record_id.clone()),
+        snapshot: scheduler.snapshot(),
+        control: None,
+        receipt_occurrence_id: None,
+        migration_control: None,
+        receipt_migration_id: None,
+        compaction_control: None,
+        receipt_compaction_id: None,
+        rehydration_control: None,
+        receipt_rehydration_id: None,
+        claim_control: None,
+        receipt_claim_id: None,
+        lease_renewal_control: None,
+        receipt_lease_renewal_id: None,
+        recovery_control: None,
+        receipt_recovery_id: None,
+        run_weight_control: Some(command.clone()),
+        receipt_run_weight_id: Some(command.command_id.clone()),
+    };
+    let payload = serde_json::to_value(checkpoint)
+        .map_err(|error| VirtualError::Validation(error.to_string()))?;
+    JournalRecord::new(&command.command_id, VIRTUAL_CHECKPOINT_SCHEMA, payload)
+        .map_err(durable_error)
+}
+
+fn replay_run_weight_receipt<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &VirtualRunWeightCommand,
+) -> VirtualResult<Option<VirtualRunWeightReceipt>> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    let Some(record) = records
+        .iter()
+        .find(|record| record.record_id == command.command_id)
+    else {
+        return Ok(None);
+    };
+    let checkpoint = decode_checkpoint(record)?;
+    if checkpoint.run_weight_control.as_ref() != Some(command)
+        || checkpoint.receipt_run_weight_id.as_deref() != Some(command.command_id.as_str())
+    {
+        return Err(VirtualError::Conflict(format!(
+            "virtual Run weight command {} was reused with different semantics",
+            command.command_id
+        )));
+    }
+    let receipt = scheduler
+        .snapshot()
+        .run_weight_receipts
+        .get(&command.command_id)
+        .cloned()
+        .ok_or_else(|| {
+            VirtualError::Validation(format!(
+                "virtual Run weight command {} receipt is unavailable",
+                command.command_id
+            ))
+        })?;
+    Ok(Some(receipt))
+}
+
+fn scheduling_checkpoint_record(
+    parent_checkpoint: Option<String>,
+    scheduler: &VirtualScheduler,
+    command_id: &str,
+    claim_control: Option<VirtualClaimCommand>,
+    lease_renewal_control: Option<VirtualLeaseRenewalCommand>,
+    recovery_control: Option<VirtualRecoveryCommand>,
+) -> VirtualResult<JournalRecord> {
+    let checkpoint = VirtualCheckpoint {
+        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
+        checkpoint_id: command_id.to_owned(),
+        parent_checkpoint,
+        snapshot: scheduler.snapshot(),
+        control: None,
+        receipt_occurrence_id: None,
+        migration_control: None,
+        receipt_migration_id: None,
+        compaction_control: None,
+        receipt_compaction_id: None,
+        rehydration_control: None,
+        receipt_rehydration_id: None,
+        receipt_claim_id: claim_control.as_ref().map(|_| command_id.to_owned()),
+        claim_control,
+        receipt_lease_renewal_id: lease_renewal_control
+            .as_ref()
+            .map(|_| command_id.to_owned()),
+        lease_renewal_control,
+        receipt_recovery_id: recovery_control.as_ref().map(|_| command_id.to_owned()),
+        recovery_control,
+        run_weight_control: None,
+        receipt_run_weight_id: None,
+    };
+    let payload = serde_json::to_value(checkpoint)
+        .map_err(|error| VirtualError::Validation(error.to_string()))?;
+    JournalRecord::new(command_id, VIRTUAL_CHECKPOINT_SCHEMA, payload).map_err(durable_error)
+}
+
+fn reject_existing_control_record(
+    records: &[JournalRecord],
+    command_id: &str,
+    family: &str,
+) -> VirtualResult<()> {
+    if records.iter().any(|record| record.record_id == command_id) {
+        return Err(VirtualError::Conflict(format!(
+            "{family} command {command_id} already exists without a replayable receipt"
+        )));
+    }
+    Ok(())
+}
+
+fn virtual_lease(lease: &AuthorityLease) -> VirtualClaimLease {
+    VirtualClaimLease {
+        resource: lease.resource.clone(),
+        owner: lease.owner.clone(),
+        epoch: lease.epoch,
+        expires_at: lease.expires_at,
+    }
+}
+
 fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint> {
     if record.schema != VIRTUAL_CHECKPOINT_SCHEMA {
         return Err(VirtualError::Validation(format!(
@@ -808,6 +1393,10 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
         checkpoint.migration_control.is_some(),
         checkpoint.compaction_control.is_some(),
         checkpoint.rehydration_control.is_some(),
+        checkpoint.claim_control.is_some(),
+        checkpoint.lease_renewal_control.is_some(),
+        checkpoint.recovery_control.is_some(),
+        checkpoint.run_weight_control.is_some(),
     ]
     .into_iter()
     .filter(|present| *present)
@@ -950,6 +1539,139 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
             )));
         }
     }
+    match (&checkpoint.claim_control, &checkpoint.receipt_claim_id) {
+        (None, None) => {}
+        (Some(command), Some(receipt_id)) => {
+            let receipt = checkpoint
+                .snapshot
+                .claim_receipts
+                .get(receipt_id)
+                .ok_or_else(|| {
+                    VirtualError::Validation(format!(
+                        "virtual checkpoint {} claim receipt is missing",
+                        record.record_id
+                    ))
+                })?;
+            if command.control_version != VIRTUAL_CLAIM_CONTROL_VERSION
+                || command.command_id != record.record_id
+                || receipt_id != &command.command_id
+                || receipt.command != *command
+            {
+                return Err(VirtualError::Validation(format!(
+                    "virtual checkpoint {} claim receipt does not match its command",
+                    record.record_id
+                )));
+            }
+        }
+        _ => {
+            return Err(VirtualError::Validation(format!(
+                "virtual checkpoint {} has a partial claim receipt",
+                record.record_id
+            )));
+        }
+    }
+    match (
+        &checkpoint.lease_renewal_control,
+        &checkpoint.receipt_lease_renewal_id,
+    ) {
+        (None, None) => {}
+        (Some(command), Some(receipt_id)) => {
+            let receipt = checkpoint
+                .snapshot
+                .lease_renewal_receipts
+                .get(receipt_id)
+                .ok_or_else(|| {
+                    VirtualError::Validation(format!(
+                        "virtual checkpoint {} lease renewal receipt is missing",
+                        record.record_id
+                    ))
+                })?;
+            if command.control_version != VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION
+                || command.command_id != record.record_id
+                || receipt_id != &command.command_id
+                || receipt.command != *command
+            {
+                return Err(VirtualError::Validation(format!(
+                    "virtual checkpoint {} lease renewal receipt does not match its command",
+                    record.record_id
+                )));
+            }
+        }
+        _ => {
+            return Err(VirtualError::Validation(format!(
+                "virtual checkpoint {} has a partial lease renewal receipt",
+                record.record_id
+            )));
+        }
+    }
+    match (
+        &checkpoint.recovery_control,
+        &checkpoint.receipt_recovery_id,
+    ) {
+        (None, None) => {}
+        (Some(command), Some(receipt_id)) => {
+            let receipt = checkpoint
+                .snapshot
+                .recovery_receipts
+                .get(receipt_id)
+                .ok_or_else(|| {
+                    VirtualError::Validation(format!(
+                        "virtual checkpoint {} recovery receipt is missing",
+                        record.record_id
+                    ))
+                })?;
+            if command.control_version != VIRTUAL_RECOVERY_CONTROL_VERSION
+                || command.command_id != record.record_id
+                || receipt_id != &command.command_id
+                || receipt.command != *command
+            {
+                return Err(VirtualError::Validation(format!(
+                    "virtual checkpoint {} recovery receipt does not match its command",
+                    record.record_id
+                )));
+            }
+        }
+        _ => {
+            return Err(VirtualError::Validation(format!(
+                "virtual checkpoint {} has a partial recovery receipt",
+                record.record_id
+            )));
+        }
+    }
+    match (
+        &checkpoint.run_weight_control,
+        &checkpoint.receipt_run_weight_id,
+    ) {
+        (None, None) => {}
+        (Some(command), Some(receipt_id)) => {
+            let receipt = checkpoint
+                .snapshot
+                .run_weight_receipts
+                .get(receipt_id)
+                .ok_or_else(|| {
+                    VirtualError::Validation(format!(
+                        "virtual checkpoint {} Run weight receipt is missing",
+                        record.record_id
+                    ))
+                })?;
+            if command.control_version != VIRTUAL_RUN_WEIGHT_CONTROL_VERSION
+                || command.command_id != record.record_id
+                || receipt_id != &command.command_id
+                || receipt.command != *command
+            {
+                return Err(VirtualError::Validation(format!(
+                    "virtual checkpoint {} Run weight receipt does not match its command",
+                    record.record_id
+                )));
+            }
+        }
+        _ => {
+            return Err(VirtualError::Validation(format!(
+                "virtual checkpoint {} has a partial Run weight receipt",
+                record.record_id
+            )));
+        }
+    }
     Ok(checkpoint)
 }
 
@@ -975,6 +1697,7 @@ fn control_matches_occurrence(
     if command.work_id != occurrence.work_id
         || command.owner != occurrence.owner
         || command.epoch != occurrence.epoch
+        || command.expected_lease_epoch != occurrence.lease_epoch
     {
         return false;
     }

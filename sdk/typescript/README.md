@@ -29,7 +29,8 @@ the durable runtime remains responsible for matching pending waits and admitting
 the activation through CAS.
 
 `VirtualWorkControl` is a transport-neutral interface for querying identified
-M3 attempt occurrences and submitting owner/epoch-fenced resolution commands.
+M3 attempt occurrences and submitting owner/work/lease/time-fenced resolution
+commands.
 `VirtualWorkControlBuilder` creates success, retry, failure, and cancellation
 commands without choosing a scheduler or worker transport.
 The same interface accepts adapter-produced region split/merge plans with
@@ -38,6 +39,11 @@ cursor strings itself.
 It also carries completed-region compaction and exact-occurrence rehydration
 commands. `VirtualArchive` is only an immutable byte seam; the Rust controller
 computes and verifies manifest and certificate identity before M1 admission.
+
+`VirtualSchedulingControl` carries capacity-slot claims, lease renewals,
+explicit expired-claim recovery, and future Run-weight updates. Builders require
+work and lease fences plus logical Clock values; they never run a worker loop or
+infer expiry from JavaScript time.
 
 The package is published from GitHub Actions with npm trusted publishing and
 provenance. The Rust Engine remains the semantic authority.

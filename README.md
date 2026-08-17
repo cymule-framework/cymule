@@ -24,9 +24,10 @@ than framework semantics.
 
 > **Project status:** Cymule `0.1.x` is an early executable reference
 > implementation of this model, not yet a complete production fabric. The
-> bounded M0 semantic profile is implemented; M1-M4 provide fault-tested but
-> partial foundations for durable single-domain execution, large virtual work,
-> and live evolution. Optional Agent integration is maintained as a plugin. See
+> bounded M0 semantic and single-domain M3 large-virtual-work profiles are
+> implemented; M1 and M4 provide fault-tested but partial foundations for
+> durable execution and live evolution. Optional Agent integration is
+> maintained as a plugin. See
 > the [roadmap](docs/roadmap.md) for the exact implemented and remaining
 > boundaries.
 
@@ -351,8 +352,8 @@ See [Architecture](docs/architecture.md) and the
 | Go SDK | Implemented | Builder and engine client. |
 | Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, M1 handoff journal. |
 | Durable wait activation | Implemented foundation | Identified signal/timer records, consume-once admission, reopen-safe epoch advance, and four SDK wire validation. |
-| Large virtual work | Partial | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, M1 checkpoints, and fencing. |
-| Virtual work control | Implemented foundation | Binding-pinned attempts, closed retry/failure/cancel dispositions, and four SDK transport interfaces. |
+| Large virtual work M3 | Implemented | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker recovery, M1 checkpoints, and four SDK controls. |
+| Virtual work control | Implemented | Binding-pinned attempts, work/lease fencing, explicit recovery, closed dispositions, and four SDK transport interfaces. |
 | Agent interaction plugin | Optional, partial | Rust plugin with Session, occurrence, input, workspace, and stream conformance tests. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
 | JSON Schema contracts | Implemented | Draft 2020-12 Plan and protocol schemas. |
@@ -368,9 +369,9 @@ publishing and provenance; local development commands never publish releases.
 
 ## Current capabilities and limits
 
-Version `0.1.x` implements the bounded Semantic Interpreter M0 and Embedded M0
-profiles. M1 through M4 have useful, tested foundations but remain partial and
-are not advertised as complete conformance profiles.
+Version `0.1.x` implements the bounded Semantic Interpreter M0, Embedded M0,
+and single-domain Large Virtual Work M3 profiles. M1 and M4 have useful, tested
+foundations but remain partial and are not advertised as complete profiles.
 
 Implemented today:
 
@@ -403,6 +404,9 @@ Implemented today:
   coverage evidence;
 - certified cold-history compaction through a provider-neutral immutable byte
   archive, plus exact occurrence-selection rehydration with tamper/fault tests;
+- capacity-slot worker leases with atomic M1 claims, renewal, pre-expiry result
+  fencing, explicit post-expiry recovery, lost-receipt reopen, and four-language
+  scheduling/Run-weight controls;
 - immutable Plan evolution DAGs, impact cones, canaries, rollback pins,
   migration receipts, and shadow evidence.
 
@@ -411,7 +415,6 @@ Not yet claimed:
 - complete nested-scope durable interpretation and every crash window;
 - production resource resolver/store plugins and automatic interpreter
   activation of incoming handoffs;
-- multi-worker virtual-work crash matrices and scheduling control clients;
 - automatic live-evolution diffing, shadow execution, observation gates, and
   mixed-version dispatch;
 - distributed ownership, consensus, scheduling, and failover;

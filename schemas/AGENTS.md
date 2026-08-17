@@ -18,7 +18,8 @@
   from wire state and rebuilt from the closed parked-work map on restore.
   Its owned definitions also freeze `cymule.virtual-work-occurrence/1` and
   `cymule.virtual-work-control/1`; disposition variants are closed and preserve
-  owner/epoch/binding preconditions.
+  owner, work epoch, lease epoch, logical observation time, and binding
+  preconditions.
   Scheduling policy, integer Run weights/deficits, dispatch sequence, ready age,
   and last selections are checkpoint authority; derived parked indexes remain
   omitted.
@@ -29,3 +30,7 @@
   manifest, replay classification, retained binding/debug indexes, pinned
   compactor, and exact partial-rehydration selection. Concrete archive locators
   and credentials never enter this schema.
+  Multi-worker scheduling definitions preserve capacity-slot identity, logical
+  Clock values, work/lease fences, explicit recovery disposition, and future
+  Run weight. Worker addresses, heartbeats, queue/provider fields, and topology
+  remain outside semantic records.

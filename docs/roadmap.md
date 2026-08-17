@@ -64,7 +64,7 @@ do not block the framework roadmap.
 
 ## M3 - Large virtual work
 
-Status: partial.
+Status: implemented.
 
 - virtual regions, opaque cursors, bounded materialization, parked indexes,
   capability-aware claims, fencing, deterministic Run fairness, and portable
@@ -74,7 +74,7 @@ Status: partial.
   can commit its M3 indexed wake in the same CAS revision;
 - every claim creates a binding-pinned occurrence; retry, park, success,
   terminal failure, and cancellation are durably recorded with owner/epoch
-  fencing and atomic result/evidence Artifacts;
+  plus lease fencing and atomic result/evidence Artifacts;
 - Rust, TypeScript, Python, and Go expose the same occurrence and idempotent
   control-command contracts through transport-neutral interfaces;
 - integer weighted-deficit selection accounts for item cost, durable priority
@@ -90,9 +90,14 @@ Status: partial.
 - archive write/read failure, tamper, stale CAS, reopen, and old receipt replay
   are fault-tested; four SDKs expose the same compact/rehydrate controls without
   provider semantics;
+- capacity-slot leases make claim and M1 authority atomic, renew the active
+  lease fence, reject normal output at expiry, and require explicit fenced
+  retry/fail/cancel recovery before a later worker claims a greater work epoch;
+- claim, renewal, recovery, and Run-weight commands retain receipts across lost
+  acknowledgements, process reopen, and stale CAS; Rust, TypeScript, Python, and
+  Go expose the same transport-neutral scheduling controls;
 - million-item tests prove bounded frontiers, fairness, park/wake, stale-owner
-  rejection, and restore behavior;
-- scheduling control clients and multi-worker crash matrices remain proposed.
+  rejection, multi-worker takeover, and restore behavior.
 
 ## M4 - Live evolution
 

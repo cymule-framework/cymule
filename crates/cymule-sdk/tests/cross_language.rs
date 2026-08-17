@@ -5,8 +5,10 @@ use std::env;
 
 use cymule_sdk::{
     CliEngine, DispatchPolicy, EffectProfile, Engine, Expression, FlowBuilder, MutationKind,
-    ReconciliationMode, RegionMigrationCommand, ResourceCandidate, VirtualCompactionCommand,
-    VirtualRehydrationCommand, WaitActivation, WorkOccurrence, WorkResolutionCommand,
+    ReconciliationMode, RegionMigrationCommand, ResourceCandidate, VirtualClaimCommand,
+    VirtualCompactionCommand, VirtualLeaseRenewalCommand, VirtualRecoveryCommand,
+    VirtualRehydrationCommand, VirtualRunWeightCommand, WaitActivation, WorkOccurrence,
+    WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -123,4 +125,24 @@ fn rust_virtual_work_query_and_control_fixtures_are_typed() {
             .occurrence_ids
             .contains(&occurrence.occurrence_id)
     );
+    let claim: VirtualClaimCommand = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/virtual-claim-control.json"
+    ))
+    .expect("virtual claim control deserializes");
+    assert_eq!(claim.owner, occurrence.owner);
+    let renewal: VirtualLeaseRenewalCommand = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/virtual-lease-renewal-control.json"
+    ))
+    .expect("virtual lease renewal control deserializes");
+    assert_eq!(renewal.work_id, occurrence.work_id);
+    let recovery: VirtualRecoveryCommand = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/virtual-recovery-control.json"
+    ))
+    .expect("virtual recovery control deserializes");
+    assert_eq!(recovery.expected_epoch, occurrence.epoch);
+    let run_weight: VirtualRunWeightCommand = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/virtual-run-weight-control.json"
+    ))
+    .expect("virtual Run weight control deserializes");
+    assert_eq!(run_weight.weight, 3);
 }
