@@ -12,9 +12,9 @@ use cymule_durable::{
 };
 use cymule_virtual::{
     DurableVirtualController, FrontierLimits, MaterializedPage, ParkReason, ParkedWork,
-    RegionSource, VIRTUAL_WORK_CONTROL_VERSION, VirtualCheckpoint, VirtualCursor, VirtualError,
-    VirtualRegion, VirtualResult, VirtualScheduler, WorkItem, WorkOccurrenceState, WorkResolution,
-    WorkResolutionCommand,
+    RegionSource, SchedulingPolicy, VIRTUAL_WORK_CONTROL_VERSION, VirtualCheckpoint, VirtualCursor,
+    VirtualError, VirtualRegion, VirtualResult, VirtualScheduler, WorkItem, WorkOccurrenceState,
+    WorkResolution, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -22,6 +22,12 @@ struct MillionItemSource;
 
 struct FailsAfterFirstRegion;
 struct StalledSource;
+
+struct FairSource {
+    run_b_cost: u64,
+}
+
+struct PriorityAgingSource;
 
 impl RegionSource for MillionItemSource {
     fn materialize(
@@ -100,6 +106,79 @@ impl RegionSource for StalledSource {
     }
 }
 
+impl RegionSource for FairSource {
+    fn materialize(
+        &mut self,
+        region: &VirtualRegion,
+        limit: usize,
+    ) -> VirtualResult<MaterializedPage> {
+        let start: u64 = region.cursor.position.parse().expect("numeric cursor");
+        let end = start + limit as u64;
+        let cost = if region.run_id == "run:b" {
+            self.run_b_cost
+        } else {
+            1
+        };
+        Ok(MaterializedPage {
+            items: (start..end)
+                .map(|index| WorkItem {
+                    work_id: format!("{}:{index}", region.region_id),
+                    region_id: region.region_id.clone(),
+                    run_id: region.run_id.clone(),
+                    payload: ArtifactRef {
+                        artifact_id: format!("artifact:fair:{index}"),
+                        kind: "example/work".to_owned(),
+                    },
+                    capability: Some("cpu".to_owned()),
+                    priority: 0,
+                    cost,
+                })
+                .collect(),
+            next_cursor: VirtualCursor {
+                version: region.cursor.version.clone(),
+                position: end.to_string(),
+                exhausted: false,
+            },
+        })
+    }
+}
+
+impl RegionSource for PriorityAgingSource {
+    fn materialize(
+        &mut self,
+        region: &VirtualRegion,
+        limit: usize,
+    ) -> VirtualResult<MaterializedPage> {
+        let start: u64 = region.cursor.position.parse().expect("numeric cursor");
+        let end = (start + limit as u64).min(100);
+        Ok(MaterializedPage {
+            items: (start..end)
+                .map(|index| WorkItem {
+                    work_id: if index == 0 {
+                        "work:aged-low".to_owned()
+                    } else {
+                        format!("work:new-high:{index}")
+                    },
+                    region_id: region.region_id.clone(),
+                    run_id: region.run_id.clone(),
+                    payload: ArtifactRef {
+                        artifact_id: format!("artifact:aging:{index}"),
+                        kind: "example/work".to_owned(),
+                    },
+                    capability: Some("cpu".to_owned()),
+                    priority: if index == 0 { 0 } else { 5 },
+                    cost: 1,
+                })
+                .collect(),
+            next_cursor: VirtualCursor {
+                version: region.cursor.version.clone(),
+                position: end.to_string(),
+                exhausted: end == 100,
+            },
+        })
+    }
+}
+
 fn region(id: &str, run_id: &str) -> VirtualRegion {
     VirtualRegion {
         region_id: id.to_owned(),
@@ -121,6 +200,91 @@ fn limits() -> FrontierLimits {
         max_active_per_run: 2,
         materialize_batch: 4,
     }
+}
+
+fn fairness_limits() -> FrontierLimits {
+    FrontierLimits {
+        max_materialized: 160,
+        max_active: 1,
+        max_active_per_run: 1,
+        materialize_batch: 80,
+    }
+}
+
+fn weighted_dispatch_counts(run_b_weight: u32, run_b_cost: u64) -> (usize, usize) {
+    let limits = fairness_limits();
+    let mut scheduler = VirtualScheduler::new_with_policy(
+        limits,
+        SchedulingPolicy {
+            base_quantum: 1,
+            aging_interval: 1,
+        },
+    )
+    .expect("scheduler creates");
+    scheduler
+        .register(region("region:a", "run:a"))
+        .expect("first region registers");
+    scheduler
+        .register(region("region:b", "run:b"))
+        .expect("second region registers");
+    scheduler
+        .set_run_weight("run:b", run_b_weight)
+        .expect("weight updates");
+    let mut source = FairSource { run_b_cost };
+    scheduler.fill(&mut source).expect("frontier fills");
+    let capabilities = BTreeSet::from(["cpu".to_owned()]);
+    let mut counts = BTreeMap::<String, usize>::new();
+    for step in 0..80 {
+        let owner = format!("worker:fair:{step}");
+        let binding = format!("binding:worker/fair/{step}");
+        if step == 40 {
+            let mut restored =
+                VirtualScheduler::restore(limits, scheduler.snapshot()).expect("snapshot restores");
+            let predicted = restored
+                .claim(&owner, &binding, &capabilities)
+                .expect("restored claim")
+                .expect("restored work");
+            let actual = scheduler
+                .claim(&owner, &binding, &capabilities)
+                .expect("claim")
+                .expect("work");
+            assert_eq!(predicted.item.work_id, actual.item.work_id);
+            *counts.entry(actual.item.run_id.clone()).or_default() += 1;
+            scheduler
+                .succeed(
+                    &actual.item.work_id,
+                    &owner,
+                    actual.epoch,
+                    ArtifactRef {
+                        artifact_id: format!("artifact:fair-result:{step}"),
+                        kind: "example/result".to_owned(),
+                    },
+                )
+                .expect("work succeeds");
+        } else {
+            let claim = scheduler
+                .claim(&owner, &binding, &capabilities)
+                .expect("claim")
+                .expect("work");
+            *counts.entry(claim.item.run_id.clone()).or_default() += 1;
+            scheduler
+                .succeed(
+                    &claim.item.work_id,
+                    &owner,
+                    claim.epoch,
+                    ArtifactRef {
+                        artifact_id: format!("artifact:fair-result:{step}"),
+                        kind: "example/result".to_owned(),
+                    },
+                )
+                .expect("work succeeds");
+        }
+        assert!(scheduler.materialized_count() <= limits.max_materialized);
+    }
+    (
+        counts.get("run:a").copied().unwrap_or_default(),
+        counts.get("run:b").copied().unwrap_or_default(),
+    )
 }
 
 fn durable_machine_with_wait() -> (Machine, Continuation, WaitCondition) {
@@ -266,6 +430,121 @@ fn million_item_regions_keep_a_bounded_fair_frontier_across_restore() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn weighted_deficit_fairness_tracks_run_shares_and_item_cost() {
+    let equal_cost = weighted_dispatch_counts(3, 1);
+    assert_eq!(equal_cost, (20, 60));
+
+    let proportional_cost = weighted_dispatch_counts(3, 3);
+    assert_eq!(proportional_cost, (40, 40));
+}
+
+#[test]
+fn bounded_materialization_round_robin_keeps_every_region_visible() {
+    let limits = FrontierLimits {
+        max_materialized: 1,
+        max_active: 1,
+        max_active_per_run: 1,
+        materialize_batch: 1,
+    };
+    let mut scheduler = VirtualScheduler::new(limits).expect("scheduler creates");
+    scheduler
+        .register(region("region:a", "run:a"))
+        .expect("first region registers");
+    scheduler
+        .register(region("region:b", "run:b"))
+        .expect("second region registers");
+    let mut source = FairSource { run_b_cost: 1 };
+    let capabilities = BTreeSet::from(["cpu".to_owned()]);
+    let mut counts = BTreeMap::<String, usize>::new();
+    for step in 0..20 {
+        scheduler.fill(&mut source).expect("one slot materializes");
+        let owner = format!("worker:materialize:{step}");
+        let claim = scheduler
+            .claim(
+                &owner,
+                &format!("binding:worker/materialize/{step}"),
+                &capabilities,
+            )
+            .expect("claim")
+            .expect("work");
+        *counts.entry(claim.item.run_id.clone()).or_default() += 1;
+        scheduler
+            .succeed(
+                &claim.item.work_id,
+                &owner,
+                claim.epoch,
+                ArtifactRef {
+                    artifact_id: format!("artifact:materialize-result:{step}"),
+                    kind: "example/result".to_owned(),
+                },
+            )
+            .expect("work succeeds");
+    }
+    assert_eq!(counts.get("run:a"), Some(&10));
+    assert_eq!(counts.get("run:b"), Some(&10));
+}
+
+#[test]
+fn priority_aging_prevents_starvation_under_continuous_high_priority_arrivals() {
+    let limits = FrontierLimits {
+        max_materialized: 2,
+        max_active: 1,
+        max_active_per_run: 1,
+        materialize_batch: 2,
+    };
+    let mut scheduler = VirtualScheduler::new_with_policy(
+        limits,
+        SchedulingPolicy {
+            base_quantum: 1,
+            aging_interval: 1,
+        },
+    )
+    .expect("scheduler creates");
+    scheduler
+        .register(region("region:aging", "run:aging"))
+        .expect("region registers");
+    let mut source = PriorityAgingSource;
+    scheduler.fill(&mut source).expect("initial frontier fills");
+    let capabilities = BTreeSet::from(["cpu".to_owned()]);
+    let mut low_claimed_at = None;
+    for step in 0..10 {
+        if step == 3 {
+            scheduler = VirtualScheduler::restore(limits, scheduler.snapshot())
+                .expect("aging state restores");
+        }
+        let owner = format!("worker:aging:{step}");
+        let claim = scheduler
+            .claim(
+                &owner,
+                &format!("binding:worker/aging/{step}"),
+                &capabilities,
+            )
+            .expect("claim")
+            .expect("work");
+        let is_low = claim.item.work_id == "work:aged-low";
+        scheduler
+            .succeed(
+                &claim.item.work_id,
+                &owner,
+                claim.epoch,
+                ArtifactRef {
+                    artifact_id: format!("artifact:aging-result:{step}"),
+                    kind: "example/result".to_owned(),
+                },
+            )
+            .expect("work succeeds");
+        if is_low {
+            low_claimed_at = Some(step + 1);
+            break;
+        }
+        scheduler
+            .fill(&mut source)
+            .expect("high priority work replenishes");
+    }
+    assert_eq!(low_claimed_at, Some(7));
 }
 
 #[test]
@@ -460,6 +739,26 @@ fn restore_rejects_duplicate_work_and_per_run_claim_overflow() {
     let overflow = claimed.snapshot();
     assert!(matches!(
         VirtualScheduler::restore(strict_limits, overflow),
+        Err(VirtualError::Validation(_))
+    ));
+
+    let mut invalid_policy = scheduler.snapshot();
+    invalid_policy.scheduling_policy.base_quantum = 0;
+    assert!(matches!(
+        VirtualScheduler::restore(limits(), invalid_policy),
+        Err(VirtualError::Validation(_))
+    ));
+    let mut invalid_weight = scheduler.snapshot();
+    invalid_weight.run_weights.insert("run:a".to_owned(), 0);
+    assert!(matches!(
+        VirtualScheduler::restore(limits(), invalid_weight),
+        Err(VirtualError::Validation(_))
+    ));
+    let mut future_age = scheduler.snapshot();
+    let ready_id = future_age.ready["run:a"][0].work_id.clone();
+    future_age.ready_since.insert(ready_id, 1);
+    assert!(matches!(
+        VirtualScheduler::restore(limits(), future_age),
         Err(VirtualError::Validation(_))
     ));
 }
@@ -895,4 +1194,101 @@ fn durable_claim_and_result_survive_reopen_and_stale_cas() {
         Err(VirtualError::Conflict(_))
     ));
     assert_eq!(restored.snapshot(), before_replay);
+}
+
+#[test]
+fn weighted_fairness_and_aging_accounting_survive_m1_reopen() {
+    let limits = FrontierLimits {
+        max_materialized: 8,
+        max_active: 2,
+        max_active_per_run: 1,
+        materialize_batch: 4,
+    };
+    let machine = Machine::new();
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let mut scheduler = VirtualScheduler::new_with_policy(
+        limits,
+        SchedulingPolicy {
+            base_quantum: 2,
+            aging_interval: 3,
+        },
+    )
+    .expect("scheduler creates");
+    scheduler
+        .register(region("region:a", "run:a"))
+        .expect("first region registers");
+    scheduler
+        .register(region("region:b", "run:b"))
+        .expect("second region registers");
+    scheduler
+        .set_run_weight("run:b", 4)
+        .expect("weight updates");
+    DurableVirtualController::fill_and_checkpoint(
+        &mut coordinator,
+        &mut scheduler,
+        &mut FairSource { run_b_cost: 2 },
+        "journal:virtual",
+        "virtual:fairness:fill",
+    )
+    .expect("frontier checkpoints");
+    let claim = DurableVirtualController::claim_and_checkpoint(
+        &mut coordinator,
+        &mut scheduler,
+        "worker:fairness",
+        "binding:worker/fairness",
+        &BTreeSet::from(["cpu".to_owned()]),
+        "journal:virtual",
+        "virtual:fairness:claim",
+    )
+    .expect("claim checkpoints")
+    .expect("work claims");
+    let reason = ParkReason::Backpressure {
+        domain: "fairness:test".to_owned(),
+    };
+    scheduler
+        .park(
+            &claim.item.work_id,
+            "worker:fairness",
+            claim.epoch,
+            reason.clone(),
+        )
+        .expect("claim parks");
+    DurableVirtualController::checkpoint(
+        &mut coordinator,
+        &scheduler,
+        "journal:virtual",
+        "virtual:fairness:park",
+    )
+    .expect("park checkpoints");
+    assert_eq!(scheduler.wake(&reason), 1);
+    DurableVirtualController::checkpoint(
+        &mut coordinator,
+        &scheduler,
+        "journal:virtual",
+        "virtual:fairness:wake",
+    )
+    .expect("wake checkpoints");
+    let expected = scheduler.snapshot();
+    drop(coordinator);
+
+    let reopened = DurableCoordinator::open(store).expect("store reopens");
+    let mut restored = DurableVirtualController::load(&reopened, "journal:virtual", limits)
+        .expect("scheduler restores");
+    assert_eq!(restored.snapshot(), expected);
+    let mut original = VirtualScheduler::restore(limits, expected).expect("original restores");
+    let capabilities = BTreeSet::from(["cpu".to_owned()]);
+    let expected_claim = original
+        .claim("worker:next", "binding:worker/next", &capabilities)
+        .expect("expected claim")
+        .expect("expected work");
+    let restored_claim = restored
+        .claim("worker:next", "binding:worker/next", &capabilities)
+        .expect("restored claim")
+        .expect("restored work");
+    assert_eq!(restored_claim.item.work_id, expected_claim.item.work_id);
+    assert_eq!(restored.snapshot(), original.snapshot());
 }

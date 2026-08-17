@@ -46,6 +46,9 @@ Use this precedence order when guidance conflicts:
 - Every virtual-work claim creates a binding-pinned, epoch-fenced occurrence
   before execution. Success, retry, park, failure, and cancellation are closed
   dispositions; a retry creates a later occurrence and never rewrites history.
+- Weighted fairness applies to materialized, capability-compatible backlogged
+  Runs. Persist integer weights, deficits, dispatch sequence, and ready age;
+  region materialization uses a separate round-robin visibility guarantee.
 - Public mutation enters through typed commands with idempotent IDs and causal
   preconditions. Raw canonical event append is internal only.
 - Prefer optimistic CAS, immutable records, idempotency, fencing epochs, and

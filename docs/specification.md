@@ -209,6 +209,28 @@ Repeating that command after any number of later checkpoints MUST return the
 original occurrence receipt without reverting scheduler state. Reusing its ID
 with different semantics MUST fail.
 
+For continuously backlogged, materialized, capability-compatible Runs, M3
+weighted selection uses positive integer Run weights and exact positive
+`WorkItem.cost`. A scheduling round grants `base_quantum * weight` deficit and a
+claim debits its cost. Implementations MUST use integer, snapshot-persisted
+accounting and deterministic Run order; floating point, wall time, worker
+latency, and queue-provider order are not scheduling authority.
+A Run weight change resets that Run's accumulated deficit before future
+selection so credit earned under an older policy cannot leak into the new share.
+
+Priority is local to one Run. Effective priority is base priority plus
+`floor((dispatch_sequence - ready_since) / aging_interval)`. Both sequences and
+the positive aging interval MUST be durable. Stable ready order breaks equal
+scores. Therefore a continuously eligible old item eventually outranks a
+continuous stream with any fixed finite higher base priority.
+
+Weighted dispatch does not claim knowledge of work that has not been
+materialized. Bounded materialization MUST separately rotate across registered
+non-exhausted regions so every source remains visible even with one frontier
+slot. Once work is visible, weight/cost selection owns dispatch fairness.
+Policy, Run weights, deficits, dispatch sequence, ready age, and last Run/region
+selection MUST survive checkpoint restore and produce the same next claim.
+
 ## 8. Causal events
 
 A causal cut is a causally closed down-set of admitted events. Implementations

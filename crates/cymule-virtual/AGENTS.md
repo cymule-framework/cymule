@@ -19,6 +19,21 @@
   is a semantic scheduler result, not an out-of-memory fallback.
 - Fairness must be deterministic over identical scheduler state. Capability
   mismatch parks or skips work; it must not silently discard it.
+- Run fairness uses integer deficit accounting: add `base_quantum * weight` and
+  debit exact `WorkItem.cost`. Never use floating point, wall time, queue length,
+  or provider latency as replay authority.
+- Priority aging uses durable successful-dispatch sequence and `ready_since`,
+  not a clock. Within one Run, select the greatest base-priority-plus-age score;
+  stable queue order breaks ties.
+- Weighted throughput claims cover continuously backlogged, materialized,
+  capability-compatible Runs. Region materialization has a separate
+  round-robin visibility guarantee and must not pretend to know item cost before
+  a source returns the item.
+- Persist scheduling policy, Run weights/deficits, dispatch sequence, ready age,
+  and last selected Run/region. Snapshot restore must produce the same next
+  claim and reject zero weights, invalid policy, or future age timestamps.
+  Changing a Run weight resets its prior deficit so old shares cannot create a
+  burst under the new policy.
 - `parked_index` is a rebuildable exact-reason index. Wake-up must look up the
   reason directly rather than scan all parked work. A wait park reason uses the
   exact M1 wait ID so one identified activation can wake only its selected work.

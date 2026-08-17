@@ -11,8 +11,13 @@ Status: partial.
   without advancing any cursor or frontier;
 - logical region cardinality independent from materialized work cardinality;
 - explicit global, active, per-Run, and page-size frontier limits;
-- deterministic per-Run round-robin fairness with priority ordering inside a
-  Run;
+- integer weighted-deficit Run fairness that debits exact item cost, with tests
+  proving 1:3 shares and cost-normalized service;
+- durable dispatch-sequence priority aging with a continuous high-priority
+  adversarial test proving an older low-priority item is selected after a finite
+  bound, including snapshot/restore;
+- independent region round-robin materialization proving visibility fairness
+  with a single frontier slot;
 - capability-aware claims with monotonically increasing fencing epochs;
 - stale-completion rejection;
 - binding-pinned work occurrences created with every claim and retained across
@@ -38,16 +43,17 @@ Status: partial.
   reopen, and in-process rollback after stale CAS;
 - atomic M1 wait activation plus M3 indexed wake checkpoints, including a stale
   writer fault test proving neither side partially commits;
+- M1 reopen of scheduling policy, Run weights/deficits, dispatch sequence,
+  ready age, and last selections with identical next-claim evidence;
 - million-item source tests proving an eight-item bounded frontier, fairness,
   parking, waking, fencing, and restart behavior.
 
 ## Remaining completion gates
 
-- weighted cost budgets, priority aging, and starvation proofs;
 - partition split/merge and cursor migration;
 - subtree completion summaries, compaction certificates, and partial
   rehydration;
-- multi-worker crash tests and SDK query/control interfaces.
+- multi-worker crash tests and scheduling/partition SDK control interfaces.
 
 `RegionSource` implementations may enumerate a database, object store, API, or
 generated range, but those technologies never enter M3 semantic state.
@@ -58,4 +64,6 @@ parked-reason index that restore always rebuilds from parked work. Neither chang
 alters `cymule.semantic/1`, the Plan IR, or M1's generic application-journal
 envelope. Work lifecycle adds independent `cymule.virtual-work-occurrence/1`
 and `cymule.virtual-work-control/1` domains; SDKs expose their closed wire types
-and transport interfaces but do not reduce scheduler state.
+and transport interfaces but do not reduce scheduler state. Additive scheduling
+policy, integer weight/deficit, dispatch-sequence, and ready-age fields remain
+inside the partial `cymule.virtual-checkpoint/1` domain.

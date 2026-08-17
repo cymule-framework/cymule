@@ -20,3 +20,6 @@
   from attempt epoch, owner, immutable binding, and exactly one disposition.
 - Virtual work control fixtures carry a stable command ID and exact owner/epoch
   precondition; SDKs do not infer retry or cancellation policy from strings.
+- Fairness tests distinguish materialization visibility from weighted dispatch,
+  debit exact item cost, restore scheduler accounting, and use continuous
+  high-priority arrivals to prove finite priority-aging progress.

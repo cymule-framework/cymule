@@ -4,7 +4,7 @@ use cymule_core::content_id;
 use cymule_durable::WaitActivation;
 
 use crate::{
-    ClaimedWork, FrontierLimits, MaterializedPage, ParkReason, ParkedWork,
+    ClaimedWork, FrontierLimits, MaterializedPage, ParkReason, ParkedWork, SchedulingPolicy,
     VIRTUAL_WORK_OCCURRENCE_VERSION, VirtualError, VirtualRegion, VirtualResult, VirtualSnapshot,
     WorkItem, WorkOccurrence, WorkOccurrenceState, WorkResolution,
 };
@@ -29,6 +29,14 @@ pub struct VirtualScheduler {
 impl VirtualScheduler {
     /// Create an empty scheduler with explicit bounds.
     pub fn new(limits: FrontierLimits) -> VirtualResult<Self> {
+        Self::new_with_policy(limits, SchedulingPolicy::default())
+    }
+
+    /// Create an empty scheduler with explicit bounds and scheduling policy.
+    pub fn new_with_policy(
+        limits: FrontierLimits,
+        scheduling_policy: SchedulingPolicy,
+    ) -> VirtualResult<Self> {
         if limits.max_materialized == 0
             || limits.max_active == 0
             || limits.max_active_per_run == 0
@@ -38,9 +46,11 @@ impl VirtualScheduler {
                 "all frontier limits must be positive".to_owned(),
             ));
         }
+        validate_scheduling_policy(scheduling_policy)?;
         Ok(Self {
             limits,
             snapshot: VirtualSnapshot {
+                scheduling_policy,
                 regions: BTreeMap::new(),
                 ready: BTreeMap::new(),
                 active: BTreeMap::new(),
@@ -48,15 +58,31 @@ impl VirtualScheduler {
                 parked_index: BTreeMap::new(),
                 known: BTreeSet::new(),
                 last_run: None,
+                last_region: None,
                 claim_epochs: BTreeMap::new(),
                 occurrences: BTreeMap::new(),
+                run_weights: BTreeMap::new(),
+                run_deficits: BTreeMap::new(),
+                dispatch_sequence: 0,
+                ready_since: BTreeMap::new(),
             },
         })
     }
 
     /// Restore scheduler state under the same explicit limits.
     pub fn restore(limits: FrontierLimits, mut snapshot: VirtualSnapshot) -> VirtualResult<Self> {
+        validate_scheduling_policy(snapshot.scheduling_policy)?;
         snapshot.parked_index = build_parked_index(&snapshot.parked);
+        for run_id in snapshot.regions.values().map(|region| &region.run_id) {
+            snapshot.run_weights.entry(run_id.clone()).or_insert(1);
+            snapshot.run_deficits.entry(run_id.clone()).or_insert(0);
+        }
+        for item in snapshot.ready.values().flatten() {
+            snapshot
+                .ready_since
+                .entry(item.work_id.clone())
+                .or_insert(0);
+        }
         let scheduler = Self { limits, snapshot };
         scheduler.validate_bounds()?;
         Ok(scheduler)
@@ -65,6 +91,7 @@ impl VirtualScheduler {
     /// Register an idempotent virtual region.
     pub fn register(&mut self, region: VirtualRegion) -> VirtualResult<()> {
         validate_region(&region)?;
+        let run_id = region.run_id.clone();
         match self.snapshot.regions.get(&region.region_id) {
             Some(existing) if existing == &region => Ok(()),
             Some(_) => Err(VirtualError::Conflict(format!(
@@ -77,7 +104,43 @@ impl VirtualScheduler {
                     .insert(region.region_id.clone(), region);
                 Ok(())
             }
+        }?;
+        self.snapshot.run_weights.entry(run_id.clone()).or_insert(1);
+        self.snapshot
+            .run_deficits
+            .entry(run_id.clone())
+            .or_insert(0);
+        Ok(())
+    }
+
+    /// Set the positive future scheduling share for one registered Run.
+    pub fn set_run_weight(&mut self, run_id: &str, weight: u32) -> VirtualResult<()> {
+        if weight == 0 {
+            return Err(VirtualError::Validation(
+                "Run fairness weight must be positive".to_owned(),
+            ));
         }
+        if !self
+            .snapshot
+            .regions
+            .values()
+            .any(|region| region.run_id == run_id)
+        {
+            return Err(VirtualError::NotFound(format!(
+                "Run {run_id} has no virtual region"
+            )));
+        }
+        let changed = self.snapshot.run_weights.get(run_id).copied() != Some(weight);
+        self.snapshot.run_weights.insert(run_id.to_owned(), weight);
+        if changed {
+            self.snapshot.run_deficits.insert(run_id.to_owned(), 0);
+        } else {
+            self.snapshot
+                .run_deficits
+                .entry(run_id.to_owned())
+                .or_insert(0);
+        }
+        Ok(())
     }
 
     /// Fill the bounded ready frontier using deterministic region order.
@@ -94,7 +157,8 @@ impl VirtualScheduler {
 
     fn fill_inner(&mut self, source: &mut impl RegionSource) -> VirtualResult<usize> {
         let mut added = 0;
-        let region_ids: Vec<String> = self.snapshot.regions.keys().cloned().collect();
+        let mut region_ids: Vec<String> = self.snapshot.regions.keys().cloned().collect();
+        rotate_after(&mut region_ids, self.snapshot.last_region.as_deref());
         for region_id in region_ids {
             let available = self
                 .limits
@@ -138,10 +202,7 @@ impl VirtualScheduler {
                         region.source
                     )));
                 }
-                insert_priority(
-                    self.snapshot.ready.entry(item.run_id.clone()).or_default(),
-                    item,
-                );
+                insert_ready(&mut self.snapshot, item);
                 added += 1;
             }
             self.snapshot
@@ -149,6 +210,7 @@ impl VirtualScheduler {
                 .get_mut(&region_id)
                 .expect("region exists")
                 .cursor = page.next_cursor;
+            self.snapshot.last_region = Some(region_id);
         }
         self.validate_bounds()?;
         Ok(added)
@@ -185,76 +247,107 @@ impl VirtualScheduler {
         if self.snapshot.active.len() >= self.limits.max_active {
             return Ok(None);
         }
-        let runs = self.eligible_runs();
-        for run_id in runs {
-            let active_for_run = self
-                .snapshot
-                .active
-                .values()
-                .filter(|claim| claim.item.run_id == run_id)
-                .count();
-            if active_for_run >= self.limits.max_active_per_run {
-                continue;
-            }
-            let queue = self
-                .snapshot
-                .ready
-                .get_mut(&run_id)
-                .expect("eligible queue exists");
-            let Some(index) = queue.iter().position(|item| {
-                item.capability
-                    .as_ref()
-                    .is_none_or(|capability| capabilities.contains(capability))
-            }) else {
-                continue;
-            };
-            let item = queue.remove(index).expect("selected item exists");
-            let epoch = self
-                .snapshot
-                .claim_epochs
-                .entry(item.work_id.clone())
-                .and_modify(|epoch| *epoch += 1)
-                .or_insert(1);
-            let occurrence_id = work_occurrence_id(&item.work_id, *epoch)?;
-            let claim = ClaimedWork {
-                item: item.clone(),
-                owner: owner.to_owned(),
-                epoch: *epoch,
-                occurrence_id: occurrence_id.clone(),
-                occurrence_binding: occurrence_binding.to_owned(),
-            };
-            let occurrence = WorkOccurrence {
-                occurrence_version: VIRTUAL_WORK_OCCURRENCE_VERSION.to_owned(),
-                occurrence_id: occurrence_id.clone(),
-                work_id: item.work_id,
-                region_id: item.region_id,
-                run_id: item.run_id,
-                owner: owner.to_owned(),
-                epoch: *epoch,
-                occurrence_binding: occurrence_binding.to_owned(),
-                state: WorkOccurrenceState::Running,
-                result: None,
-                error: None,
-                next_reason: None,
-            };
-            if self
-                .snapshot
-                .occurrences
-                .insert(occurrence_id, occurrence)
-                .is_some()
-            {
-                return Err(VirtualError::Conflict(format!(
-                    "work {} claim epoch {} already exists",
-                    claim.item.work_id, claim.epoch
-                )));
-            }
-            self.snapshot
-                .active
-                .insert(claim.item.work_id.clone(), claim.clone());
-            self.snapshot.last_run = Some(run_id);
-            return Ok(Some(claim));
+        let candidates = self.eligible_candidates(capabilities);
+        if candidates.is_empty() {
+            return Ok(None);
         }
-        Ok(None)
+        let rounds = candidates
+            .iter()
+            .map(|candidate| {
+                let deficit = self
+                    .snapshot
+                    .run_deficits
+                    .get(&candidate.run_id)
+                    .copied()
+                    .unwrap_or_default();
+                required_deficit_rounds(deficit, candidate.cost, self.quantum(&candidate.run_id))
+            })
+            .min()
+            .unwrap_or_default();
+        for candidate in &candidates {
+            let quantum = self.quantum(&candidate.run_id);
+            self.snapshot
+                .run_deficits
+                .entry(candidate.run_id.clone())
+                .and_modify(|deficit| {
+                    *deficit = deficit.saturating_add(quantum.saturating_mul(rounds));
+                })
+                .or_insert_with(|| quantum.saturating_mul(rounds));
+        }
+        let candidate = candidates
+            .into_iter()
+            .find(|candidate| {
+                self.snapshot
+                    .run_deficits
+                    .get(&candidate.run_id)
+                    .is_some_and(|deficit| *deficit >= candidate.cost)
+            })
+            .ok_or_else(|| {
+                VirtualError::Validation(
+                    "weighted scheduler did not make an eligible candidate affordable".to_owned(),
+                )
+            })?;
+        let run_id = candidate.run_id;
+        let queue = self
+            .snapshot
+            .ready
+            .get_mut(&run_id)
+            .expect("eligible queue exists");
+        let item = queue
+            .remove(candidate.item_index)
+            .expect("selected item exists");
+        self.snapshot.ready_since.remove(&item.work_id);
+        let deficit = self
+            .snapshot
+            .run_deficits
+            .get_mut(&run_id)
+            .expect("eligible Run has deficit accounting");
+        *deficit = deficit.saturating_sub(item.cost);
+        self.snapshot.dispatch_sequence = self.snapshot.dispatch_sequence.saturating_add(1);
+        let epoch = self
+            .snapshot
+            .claim_epochs
+            .entry(item.work_id.clone())
+            .and_modify(|epoch| *epoch += 1)
+            .or_insert(1);
+        let occurrence_id = work_occurrence_id(&item.work_id, *epoch)?;
+        let claim = ClaimedWork {
+            item: item.clone(),
+            owner: owner.to_owned(),
+            epoch: *epoch,
+            occurrence_id: occurrence_id.clone(),
+            occurrence_binding: occurrence_binding.to_owned(),
+        };
+        let occurrence = WorkOccurrence {
+            occurrence_version: VIRTUAL_WORK_OCCURRENCE_VERSION.to_owned(),
+            occurrence_id: occurrence_id.clone(),
+            work_id: item.work_id,
+            region_id: item.region_id,
+            run_id: item.run_id,
+            owner: owner.to_owned(),
+            epoch: *epoch,
+            occurrence_binding: occurrence_binding.to_owned(),
+            state: WorkOccurrenceState::Running,
+            result: None,
+            error: None,
+            next_reason: None,
+        };
+        if self
+            .snapshot
+            .occurrences
+            .insert(occurrence_id, occurrence)
+            .is_some()
+        {
+            return Err(VirtualError::Conflict(format!(
+                "work {} claim epoch {} already exists",
+                claim.item.work_id, claim.epoch
+            )));
+        }
+        self.snapshot
+            .active
+            .insert(claim.item.work_id.clone(), claim.clone());
+        self.snapshot.last_run = Some(run_id);
+        Ok(Some(claim))
     }
 
     /// Resolve exactly one fenced active occurrence.
@@ -379,10 +472,7 @@ impl VirtualScheduler {
             }
             WorkResolution::Retry {
                 next_reason: None, ..
-            } => insert_priority(
-                self.snapshot.ready.entry(item.run_id.clone()).or_default(),
-                item,
-            ),
+            } => insert_ready(&mut self.snapshot, item),
             WorkResolution::Succeeded { .. }
             | WorkResolution::Failed { .. }
             | WorkResolution::Cancelled { .. } => {}
@@ -400,13 +490,7 @@ impl VirtualScheduler {
             .unwrap_or_default();
         for id in &ids {
             let parked = self.snapshot.parked.remove(id).expect("parked item exists");
-            insert_priority(
-                self.snapshot
-                    .ready
-                    .entry(parked.item.run_id.clone())
-                    .or_default(),
-                parked.item,
-            );
+            insert_ready(&mut self.snapshot, parked.item);
         }
         ids.len()
     }
@@ -453,15 +537,111 @@ impl VirtualScheduler {
             .filter(|(_, queue)| !queue.is_empty())
             .map(|(run, _)| run.clone())
             .collect();
-        if let Some(last) = &self.snapshot.last_run
-            && let Some(index) = runs.iter().position(|run| run > last)
-        {
-            runs.rotate_left(index);
-        }
+        rotate_after(&mut runs, self.snapshot.last_run.as_deref());
         runs
     }
 
+    fn eligible_candidates(&self, capabilities: &BTreeSet<String>) -> Vec<RunCandidate> {
+        self.eligible_runs()
+            .into_iter()
+            .filter_map(|run_id| {
+                let active_for_run = self
+                    .snapshot
+                    .active
+                    .values()
+                    .filter(|claim| claim.item.run_id == run_id)
+                    .count();
+                if active_for_run >= self.limits.max_active_per_run {
+                    return None;
+                }
+                let queue = self.snapshot.ready.get(&run_id)?;
+                let mut best = None::<(usize, i128)>;
+                for (index, item) in queue.iter().enumerate() {
+                    if item
+                        .capability
+                        .as_ref()
+                        .is_some_and(|capability| !capabilities.contains(capability))
+                    {
+                        continue;
+                    }
+                    let score = self.effective_priority(item);
+                    if best.is_none_or(|(_, current)| score > current) {
+                        best = Some((index, score));
+                    }
+                }
+                let (item_index, _) = best?;
+                Some(RunCandidate {
+                    run_id,
+                    item_index,
+                    cost: queue[item_index].cost,
+                })
+            })
+            .collect()
+    }
+
+    fn effective_priority(&self, item: &WorkItem) -> i128 {
+        let since = self
+            .snapshot
+            .ready_since
+            .get(&item.work_id)
+            .copied()
+            .unwrap_or(self.snapshot.dispatch_sequence);
+        let age = self.snapshot.dispatch_sequence.saturating_sub(since)
+            / self.snapshot.scheduling_policy.aging_interval;
+        i128::from(item.priority) + i128::from(age)
+    }
+
+    fn quantum(&self, run_id: &str) -> u64 {
+        self.snapshot
+            .scheduling_policy
+            .base_quantum
+            .saturating_mul(u64::from(
+                self.snapshot.run_weights.get(run_id).copied().unwrap_or(1),
+            ))
+    }
+
     fn validate_bounds(&self) -> VirtualResult<()> {
+        validate_scheduling_policy(self.snapshot.scheduling_policy)?;
+        let registered_runs: BTreeSet<String> = self
+            .snapshot
+            .regions
+            .values()
+            .map(|region| region.run_id.clone())
+            .collect();
+        if self
+            .snapshot
+            .run_weights
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != registered_runs
+            || self
+                .snapshot
+                .run_deficits
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != registered_runs
+            || self
+                .snapshot
+                .run_weights
+                .values()
+                .any(|weight| *weight == 0)
+        {
+            return Err(VirtualError::Validation(
+                "Run fairness accounting does not match registered Runs".to_owned(),
+            ));
+        }
+        if self
+            .snapshot
+            .last_region
+            .as_ref()
+            .is_some_and(|region_id| !self.snapshot.regions.contains_key(region_id))
+        {
+            return Err(VirtualError::Validation(
+                "last materialized region is not registered".to_owned(),
+            ));
+        }
         if self.materialized_count() > self.limits.max_materialized {
             return Err(VirtualError::Validation(
                 "snapshot exceeds max_materialized".to_owned(),
@@ -473,6 +653,7 @@ impl VirtualScheduler {
             ));
         }
         let mut materialized = BTreeSet::new();
+        let mut ready_ids = BTreeSet::new();
         let mut active_per_run = BTreeMap::<String, usize>::new();
         for (run_id, queue) in &self.snapshot.ready {
             for item in queue {
@@ -483,6 +664,7 @@ impl VirtualScheduler {
                     )));
                 }
                 self.validate_snapshot_item(item, &mut materialized)?;
+                ready_ids.insert(item.work_id.clone());
             }
         }
         for (work_id, claim) in &self.snapshot.active {
@@ -545,6 +727,23 @@ impl VirtualScheduler {
         if self.snapshot.parked_index != build_parked_index(&self.snapshot.parked) {
             return Err(VirtualError::Validation(
                 "parked reason index does not match parked work".to_owned(),
+            ));
+        }
+        if self
+            .snapshot
+            .ready_since
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != ready_ids
+            || self
+                .snapshot
+                .ready_since
+                .values()
+                .any(|sequence| *sequence > self.snapshot.dispatch_sequence)
+        {
+            return Err(VirtualError::Validation(
+                "priority-aging timestamps do not match ready work".to_owned(),
             ));
         }
         let mut max_occurrence_epochs = BTreeMap::<String, u64>::new();
@@ -649,6 +848,29 @@ impl VirtualScheduler {
         }
         Ok(())
     }
+}
+
+struct RunCandidate {
+    run_id: String,
+    item_index: usize,
+    cost: u64,
+}
+
+fn required_deficit_rounds(deficit: u64, cost: u64, quantum: u64) -> u64 {
+    if deficit >= cost {
+        return 0;
+    }
+    let missing = cost - deficit;
+    missing.saturating_add(quantum - 1) / quantum
+}
+
+fn validate_scheduling_policy(policy: SchedulingPolicy) -> VirtualResult<()> {
+    if policy.base_quantum == 0 || policy.aging_interval == 0 {
+        return Err(VirtualError::Validation(
+            "scheduling quantum and aging interval must be positive".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_region(region: &VirtualRegion) -> VirtualResult<()> {
@@ -878,4 +1100,22 @@ fn insert_priority(queue: &mut VecDeque<WorkItem>, item: WorkItem) {
         .position(|current| current.priority < item.priority)
         .unwrap_or(queue.len());
     queue.insert(index, item);
+}
+
+fn insert_ready(snapshot: &mut VirtualSnapshot, item: WorkItem) {
+    snapshot
+        .ready_since
+        .insert(item.work_id.clone(), snapshot.dispatch_sequence);
+    insert_priority(snapshot.ready.entry(item.run_id.clone()).or_default(), item);
+}
+
+fn rotate_after(items: &mut [String], last: Option<&str>) {
+    let Some(last) = last else {
+        return;
+    };
+    let index = items
+        .iter()
+        .position(|item| item.as_str() > last)
+        .unwrap_or(0);
+    items.rotate_left(index);
 }
