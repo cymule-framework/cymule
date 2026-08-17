@@ -302,6 +302,8 @@ Implemented today:
 - ambiguous mutating-effect recovery by reconciliation without redispatch;
 - typed agent interactions with M1-backed Session journal replay and
   binding-pinned host-call occurrences that block ambiguous redispatch;
+- caller-driven durable interaction execution that returns retained or
+  reconciled typed responses after reopen without owning the Agent loop;
 - atomic durable agent input waits that keep `RequiresAction`/`Running` Session
   state and the owning Continuation wait in one CAS revision;
 - query-only recovery of ambiguous host calls through their original binding,
@@ -313,8 +315,8 @@ Implemented today:
 Not yet claimed:
 
 - complete nested-scope durable interpretation and every crash window;
-- durable host occurrence recovery for model, context, permission, tool,
-  elicitation, and workspace calls;
+- workspace scope integration, finalized streaming content, protocol adapters,
+  and cross-language agent-interaction clients;
 - durable virtual-work partition migration and subtree rehydration;
 - automatic live-evolution diffing, shadow execution, observation gates, and
   mixed-version dispatch;

@@ -42,7 +42,9 @@ standards.
   Service registry, dependency injection, scoped isolation/interception, Fiber
   lifecycle, and disposable effects. Cymule adopts the interface/lifecycle
   separation, while durable identity and replay remain owned by its Rust
-  semantic profiles rather than an ambient runtime context.
+  semantic profiles rather than an ambient runtime context. It does not adopt
+  an Agent loop: caller-owned orchestration supplies individually identified
+  interactions to the durable boundary.
 - [Agent Client Protocol](https://agentclientprotocol.com/protocol/overview)
   separates accepted prompts from ordered session updates, typed content, tool
   status, permission requests, elicitation, plans, usage, and terminal state.

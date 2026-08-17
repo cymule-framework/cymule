@@ -10,12 +10,12 @@ use std::{
 
 use cymule_agent::{
     AgentError, AgentHost, AgentHostOccurrenceState, AgentHostRequest, AgentInputController,
-    AgentJournal, AgentMessage, AgentOccurrenceResolution, AgentOccurrenceStore,
-    AgentRecoveryController, AgentResult, AgentSession, AgentState, AgentTurnDriver, AgentUpdate,
-    ContentBlock, ContextRequest, ContextSnapshot, ElicitationRequest, ElicitationResponse,
-    MemoryAgentJournal, MessageRole, ModelRequest, ModelResponse, PermissionDecision,
-    PermissionRequest, PermissionResponse, SessionStopReason, ToolCall, ToolCallStatus,
-    ToolRequest, ToolResponse, Usage, WorkspaceChange, WorkspaceReceipt,
+    AgentInteractionController, AgentJournal, AgentMessage, AgentOccurrenceResolution,
+    AgentOccurrenceStore, AgentRecoveryController, AgentResult, AgentSession, AgentState,
+    AgentTurnDriver, AgentUpdate, ContentBlock, ContextRequest, ContextSnapshot,
+    ElicitationRequest, ElicitationResponse, MemoryAgentJournal, MessageRole, ModelRequest,
+    ModelResponse, PermissionDecision, PermissionRequest, PermissionResponse, SessionStopReason,
+    ToolCall, ToolCallStatus, ToolRequest, ToolResponse, Usage, WorkspaceChange, WorkspaceReceipt,
 };
 use cymule_core::{ArtifactRef, Machine, ROOT_SCOPE_ID, canonical_digest};
 use cymule_durable::{
@@ -342,6 +342,51 @@ fn m1_cas_journal_reopens_the_agent_projection() {
     let reopened = AgentTurnDriver::resume("session:m1", FakeHost::default(), coordinator)
         .expect("M1 journal replays");
     assert_eq!(reopened.session(), &expected);
+}
+
+#[test]
+fn interaction_controller_replays_a_retained_response_through_m1_without_redispatch() {
+    let store = MemoryStore::new();
+    let coordinator = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&Machine::new())
+        .expect("store initializes");
+    let request = AgentHostRequest::Tool(ToolRequest {
+        tool_call_id: "tool:interaction".to_owned(),
+        operation: "workspace.read".to_owned(),
+        input: json!({"path": "README.md"}),
+    });
+    let mut controller =
+        AgentInteractionController::resume("session:interaction", FakeHost::default(), coordinator)
+            .expect("interaction controller opens");
+    let first = controller
+        .execute("occurrence:caller-owned:tool:1", request.clone())
+        .expect("first interaction completes");
+    let (first_host, coordinator) = controller.into_parts();
+    assert_eq!(first_host.tool_calls, 1);
+    drop(coordinator);
+
+    let coordinator = DurableCoordinator::open(store).expect("store reopens");
+    let mut replay =
+        AgentInteractionController::resume("session:interaction", FakeHost::default(), coordinator)
+            .expect("interaction controller reopens");
+    let retained = replay
+        .execute("occurrence:caller-owned:tool:1", request.clone())
+        .expect("retained response replays");
+    assert_eq!(retained, first);
+    assert!(matches!(
+        replay.execute(
+            "occurrence:caller-owned:tool:1",
+            AgentHostRequest::Tool(ToolRequest {
+                tool_call_id: "tool:interaction".to_owned(),
+                operation: "workspace.write".to_owned(),
+                input: json!({"path": "README.md"}),
+            }),
+        ),
+        Err(AgentError::IllegalTransition(_))
+    ));
+    let (replay_host, _) = replay.into_parts();
+    assert_eq!(replay_host.tool_calls, 0);
 }
 
 #[test]
@@ -837,6 +882,72 @@ impl AgentHost for FailingToolHost {
 }
 
 #[test]
+fn interaction_controller_consumes_reconciled_response_without_owning_the_agent_loop() {
+    let mut journal = MemoryAgentJournal::default();
+    let host = FailingToolHost::default();
+    let dispatches = host.dispatches.clone();
+    let reconciliations = host.reconciliations.clone();
+    let request = AgentHostRequest::Tool(ToolRequest {
+        tool_call_id: "tool:caller-loop".to_owned(),
+        operation: "workspace.read".to_owned(),
+        input: json!({"path": "README.md"}),
+    });
+    let mut controller =
+        AgentInteractionController::resume("session:caller-loop", host, journal.clone())
+            .expect("interaction controller opens");
+    assert!(matches!(
+        controller.execute("occurrence:caller-loop:1", request.clone()),
+        Err(AgentError::Host(_))
+    ));
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    drop(controller);
+
+    let mut blocked = AgentInteractionController::resume(
+        "session:caller-loop",
+        FailingToolHost {
+            dispatches: dispatches.clone(),
+            reconciliations: reconciliations.clone(),
+        },
+        journal.clone(),
+    )
+    .expect("controller reopens with unknown occurrence");
+    assert!(matches!(
+        blocked.execute("occurrence:caller-loop:1", request.clone()),
+        Err(AgentError::RecoveryRequired(_))
+    ));
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    drop(blocked);
+
+    let mut recovery_host = FailingToolHost {
+        dispatches: dispatches.clone(),
+        reconciliations: reconciliations.clone(),
+    };
+    AgentRecoveryController::reconcile(
+        &mut recovery_host,
+        &mut journal,
+        "session:caller-loop",
+        "occurrence:caller-loop:1",
+    )
+    .expect("original occurrence reconciles");
+
+    let mut resumed = AgentInteractionController::resume(
+        "session:caller-loop",
+        FailingToolHost {
+            dispatches: dispatches.clone(),
+            reconciliations: reconciliations.clone(),
+        },
+        journal,
+    )
+    .expect("controller reopens after reconciliation");
+    let response = resumed
+        .execute("occurrence:caller-loop:1", request)
+        .expect("reconciled response is consumed");
+    assert!(matches!(response, cymule_agent::AgentHostResponse::Tool(_)));
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(reconciliations.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn host_failure_preserves_the_last_accepted_interaction_state() {
     let mut journal = MemoryAgentJournal::default();
     let host = FailingToolHost::default();
@@ -1058,6 +1169,41 @@ impl AgentOccurrenceStore for FailAfterToolResultJournal {
         }
         self.inner.record_occurrence(occurrence)
     }
+}
+
+#[test]
+fn interaction_controller_does_not_redispatch_when_the_completion_receipt_is_lost() {
+    let journal = FailAfterToolResultJournal::default();
+    let request = AgentHostRequest::Tool(ToolRequest {
+        tool_call_id: "tool:receipt-loss-controller".to_owned(),
+        operation: "workspace.read".to_owned(),
+        input: json!({"path": "README.md"}),
+    });
+    let mut controller = AgentInteractionController::resume(
+        "session:receipt-loss-controller",
+        FakeHost::default(),
+        journal.clone(),
+    )
+    .expect("interaction controller opens");
+    assert!(matches!(
+        controller.execute("occurrence:receipt-loss-controller:1", request.clone()),
+        Err(AgentError::Persistence(_))
+    ));
+    let (host, journal) = controller.into_parts();
+    assert_eq!(host.tool_calls, 1);
+
+    let mut reopened = AgentInteractionController::resume(
+        "session:receipt-loss-controller",
+        FakeHost::default(),
+        journal,
+    )
+    .expect("controller reopens with a started occurrence");
+    assert!(matches!(
+        reopened.execute("occurrence:receipt-loss-controller:1", request),
+        Err(AgentError::RecoveryRequired(_))
+    ));
+    let (host, _) = reopened.into_parts();
+    assert_eq!(host.tool_calls, 0);
 }
 
 #[test]

@@ -2,6 +2,12 @@
 
 - This crate owns protocol-neutral agent interaction contracts and projections,
   not a model loop, model SDK, UI transport, or tool catalog.
+- The caller or adapter owns Agent/script loop ordering, strategy, program
+  counter, and continuation decisions. Never make context-model-tool ordering,
+  loop phases, or a particular reasoning pattern part of Cymule semantics.
+- `AgentInteractionController` owns only one caller-identified host occurrence:
+  binding pinning, lifecycle persistence, retained-response replay, and explicit
+  recovery boundaries. It must not infer or advance the caller's loop.
 - Keep Messages, Tasks, Artifacts, session updates, permissions, elicitation,
   context selection, model calls, tool calls, and workspace changes distinct.
 - External ACP, MCP, A2A, provider, and editor types belong in adapters. Preserve
