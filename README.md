@@ -1,5 +1,7 @@
 # Cymule
 
+[![CI](https://github.com/cymule-framework/cymule/actions/workflows/ci.yml/badge.svg)](https://github.com/cymule-framework/cymule/actions/workflows/ci.yml)
+
 Cymule is a small, Rust-first framework for defining and executing durable,
 effectful programs from TypeScript, Python, Rust, and Go.
 

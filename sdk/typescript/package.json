@@ -2,6 +2,13 @@
   "name": "@cymule/sdk",
   "version": "0.1.0",
   "description": "TypeScript authoring and engine client SDK for Cymule",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cymule-framework/cymule.git",
+    "directory": "sdk/typescript"
+  },
+  "homepage": "https://github.com/cymule-framework/cymule#readme",
+  "bugs": "https://github.com/cymule-framework/cymule/issues",
   "type": "module",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
@@ -19,4 +26,3 @@
   },
   "license": "MIT OR Apache-2.0"
 }
-
