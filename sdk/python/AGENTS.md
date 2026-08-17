@@ -15,3 +15,5 @@
 - Virtual work query/control types preserve command, occurrence, binding,
   owner, epoch, and disposition fields. SDK transports do not classify errors
   or decide retry policy.
+- Region migration types preserve opaque cursor maps, pinned adapter binding,
+  and coverage evidence. Python clients never split cursor strings locally.

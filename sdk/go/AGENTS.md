@@ -10,4 +10,6 @@
   sort/deduplicate targets; Rust verification is not durable CAS admission.
 - Virtual work query/control structs preserve binding, owner, epoch, command,
   and disposition identity. Do not implement retry classification in the SDK.
+- Region migration structs retain opaque source cursors, pinned adapter binding,
+  and coverage evidence. Never partition cursor strings in Go client code.
 - Run `gofmt` and `go test ./...` for every change.

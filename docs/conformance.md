@@ -10,7 +10,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
 | Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, identified signal/timer activation, lease, outbox, occurrence replay, Resource handoff, directory-store reopen, and ambiguous-effect reconciliation; nested scopes and the full crash matrix remain |
 | Optional Agent Interaction plugin | Partial plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces; not a framework profile |
-| Large Virtual Graph | Partial | bounded virtual regions, M1 checkpoints, exact parked index, atomic activation wake, binding-pinned occurrences, closed dispositions, weighted cost fairness, priority aging, four SDK work control contracts, fencing, and restore; partition/compaction remain |
+| Large Virtual Graph | Partial | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, priority aging, verified cursor split/merge, four SDK work/migration controls, fencing, and restore; compaction remains |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
 | Live Evolution | Partial | Plan DAG, impact, occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; runtime rollout automation remains |
@@ -58,6 +58,11 @@ The local suite verifies:
 - priority aging selects an old priority-zero item after six continuous
   priority-five dispatches, and one-slot region rotation gives both sources
   equal materialization visibility;
+- split/merge requires pinned adapter verification and exact source cursors;
+  retirement preserves existing work, stale cursor/evidence/CAS retires nothing,
+  split-merge lineage reopens, and old commands return original receipts;
+- TypeScript, Python, Rust, and Go parse the same opaque-cursor migration command
+  without implementing cursor partitioning or coverage validation;
 - M3 claim/result checkpoints survive reopen, stale CAS rolls back scheduler
   state, and result/evidence Artifacts commit with occurrence state;
 - TypeScript, Python, Rust, and Go parse one occurrence fixture and construct one

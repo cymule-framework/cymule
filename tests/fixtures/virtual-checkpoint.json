@@ -35,8 +35,12 @@
       "run:fixture": 0
     },
     "dispatch_sequence": 0,
-    "ready_since": {}
+    "ready_since": {},
+    "retired_regions": {},
+    "migrations": {}
   },
   "control": null,
-  "receipt_occurrence_id": null
+  "receipt_occurrence_id": null,
+  "migration_control": null,
+  "receipt_migration_id": null
 }

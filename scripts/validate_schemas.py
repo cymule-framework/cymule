@@ -175,6 +175,19 @@ def main() -> int:
         registry=registry,
     )
     control_validator.validate(virtual_control)
+    migration_control = load(
+        root / "tests/fixtures/virtual-region-migration-control.json"
+    )
+    migration_validator = Draft202012Validator(
+        {
+            "$ref": (
+                "https://cymule.dev/schemas/virtual-checkpoint.schema.json"
+                "#/$defs/migrationControlCommand"
+            )
+        },
+        registry=registry,
+    )
+    migration_validator.validate(migration_control)
     malformed_virtual = dict(virtual_checkpoint)
     malformed_virtual["provider"] = "must-not-enter-virtual-checkpoint"
     try:
@@ -199,6 +212,14 @@ def main() -> int:
         pass
     else:
         raise AssertionError("virtual work control accepted a provider field")
+    malformed_migration = dict(migration_control)
+    malformed_migration["provider"] = "must-not-enter-region-migration"
+    try:
+        migration_validator.validate(malformed_migration)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("virtual region migration accepted a provider field")
 
     credential_url = {
         "resource_version": "cymule.resource/1",

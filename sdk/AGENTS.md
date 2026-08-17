@@ -14,4 +14,7 @@
 - Virtual work SDK contracts preserve stable control command and occurrence
   identities, owner/epoch fencing, immutable binding, and closed disposition
   variants. SDKs expose transport interfaces but no local state reducer.
+- Region migration contracts preserve exact source cursors, target descriptors,
+  migration binding, and evidence across languages. No SDK interprets cursor
+  positions or certifies coverage.
 - Avoid runtime dependencies unless they materially improve correctness.

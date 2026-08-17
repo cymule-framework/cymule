@@ -40,6 +40,8 @@ The following domains evolve independently:
 | Virtual checkpoint | `cymule.virtual-checkpoint/1` | cursor and bounded frontier advance together |
 | Virtual work occurrence | `cymule.virtual-work-occurrence/1` | one immutable binding per claim epoch |
 | Virtual work control | `cymule.virtual-work-control/1` | stable command ID plus owner/epoch precondition |
+| Virtual region migration | `cymule.virtual-region-migration/1` | opaque cursor coverage and retirement lineage |
+| Virtual migration control | `cymule.virtual-region-migration-control/1` | stable command ID plus verified plan |
 | Conformance profile | `cymule.conformance/1` | complete profile cases are required |
 
 Changing effect identity, scope isolation, authority, causal admission, replay,
@@ -230,6 +232,30 @@ non-exhausted regions so every source remains visible even with one frontier
 slot. Once work is visible, weight/cost selection owns dispatch fairness.
 Policy, Run weights, deficits, dispatch sequence, ready age, and last Run/region
 selection MUST survive checkpoint restore and produce the same next claim.
+
+M3 MUST treat every region cursor as opaque. Split and merge are planned and
+verified by a replaceable `RegionMigrator` pinned through an immutable migration
+binding. A split has exactly one active source and at least two targets; a merge
+has at least two active sources and exactly one target. All sources and targets
+MUST belong to one Run and abstract source operation.
+
+A migration plan fixes its stable ID, kind, exact source cursor map, replacement
+regions, migration binding, and immutable coverage-evidence Artifact. Before
+admission, the pinned adapter MUST verify that evidence proves complete,
+non-overlapping coverage of remaining source work. Framework shape validation
+or possession of an evidence reference alone is not verification.
+
+Admission MUST compare every source cursor with the current checkpoint, reject
+retired sources and existing/duplicate target IDs, retain the coverage Artifact,
+and atomically record source retirement, target activation, migration receipt,
+and scheduler checkpoint. A stale cursor, failed adapter verification, evidence
+failure, target conflict, or stale CAS MUST retire nothing.
+
+Retirement is not deletion. Existing ready, active, parked, known, and
+occurrence records keep their source region IDs and remain valid; retired regions
+remain in lineage but cannot materialize new work. Replacement targets own only
+future materialization. A stable migration command replay MUST return its
+original receipt after later checkpoints, while semantic ID reuse fails.
 
 ## 8. Causal events
 

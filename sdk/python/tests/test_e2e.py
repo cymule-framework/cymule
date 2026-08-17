@@ -114,6 +114,18 @@ class EndToEndTest(unittest.TestCase):
         )
         with open(control_path, encoding="utf-8") as source:
             self.assertEqual(command, json.load(source))
+        migration_path = os.environ.get("CYMULE_VIRTUAL_MIGRATION_FIXTURE")
+        if migration_path is None:
+            self.skipTest("virtual region migration SDK conformance is not configured")
+        with open(migration_path, encoding="utf-8") as source:
+            migration_fixture = json.load(source)
+        self.assertEqual(
+            VirtualWorkControlBuilder.migration(
+                "command:migration:fixture-split",
+                migration_fixture["plan"],
+            ),
+            migration_fixture,
+        )
 
 
 if __name__ == "__main__":

@@ -18,6 +18,9 @@ pub use cymule_resource::{
 };
 pub use cymule_runtime::ExecutionResult;
 pub use cymule_virtual::{
-    ParkReason, VIRTUAL_WORK_CONTROL_VERSION, VIRTUAL_WORK_OCCURRENCE_VERSION, WorkOccurrence,
+    ParkReason, RegionMigrationCommand, RegionMigrationKind, RegionMigrationPlan,
+    RegionMigrationReceipt, RegionMigrationRequest, RegionMigrator,
+    VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_VERSION,
+    VIRTUAL_WORK_CONTROL_VERSION, VIRTUAL_WORK_OCCURRENCE_VERSION, WorkOccurrence,
     WorkOccurrenceState, WorkResolution, WorkResolutionCommand,
 };

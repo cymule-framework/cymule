@@ -32,6 +32,9 @@ the activation through CAS.
 M3 attempt occurrences and submitting owner/epoch-fenced resolution commands.
 `VirtualWorkControlBuilder` creates success, retry, failure, and cancellation
 commands without choosing a scheduler or worker transport.
+The same interface accepts adapter-produced region split/merge plans with
+opaque cursor preconditions and coverage evidence; SDK code never partitions
+cursor strings itself.
 
 The package is published from GitHub Actions with npm trusted publishing and
 provenance. The Rust Engine remains the semantic authority.

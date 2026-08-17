@@ -4,9 +4,10 @@ use cymule_core::content_id;
 use cymule_durable::WaitActivation;
 
 use crate::{
-    ClaimedWork, FrontierLimits, MaterializedPage, ParkReason, ParkedWork, SchedulingPolicy,
-    VIRTUAL_WORK_OCCURRENCE_VERSION, VirtualError, VirtualRegion, VirtualResult, VirtualSnapshot,
-    WorkItem, WorkOccurrence, WorkOccurrenceState, WorkResolution,
+    ClaimedWork, FrontierLimits, MaterializedPage, ParkReason, ParkedWork, RegionMigrationKind,
+    RegionMigrationPlan, RegionMigrationReceipt, RegionMigrationRequest, SchedulingPolicy,
+    VIRTUAL_REGION_MIGRATION_VERSION, VIRTUAL_WORK_OCCURRENCE_VERSION, VirtualError, VirtualRegion,
+    VirtualResult, VirtualSnapshot, WorkItem, WorkOccurrence, WorkOccurrenceState, WorkResolution,
 };
 
 /// Replaceable source of bounded pages for one virtual region.
@@ -17,6 +18,23 @@ pub trait RegionSource {
         region: &VirtualRegion,
         limit: usize,
     ) -> VirtualResult<MaterializedPage>;
+}
+
+/// Replaceable adapter that can split or merge opaque source cursors.
+pub trait RegionMigrator {
+    /// Immutable adapter binding used for this migration occurrence.
+    fn binding(&self) -> &str;
+
+    /// Produce replacement regions and immutable coverage evidence from exact
+    /// active source snapshots.
+    fn plan(
+        &mut self,
+        request: &RegionMigrationRequest,
+        sources: &[VirtualRegion],
+    ) -> VirtualResult<RegionMigrationPlan>;
+
+    /// Verify target coverage evidence under the plan's pinned binding.
+    fn verify(&mut self, plan: &RegionMigrationPlan) -> VirtualResult<()>;
 }
 
 /// Deterministic bounded scheduler for virtual work.
@@ -65,6 +83,8 @@ impl VirtualScheduler {
                 run_deficits: BTreeMap::new(),
                 dispatch_sequence: 0,
                 ready_since: BTreeMap::new(),
+                retired_regions: BTreeMap::new(),
+                migrations: BTreeMap::new(),
             },
         })
     }
@@ -91,6 +111,16 @@ impl VirtualScheduler {
     /// Register an idempotent virtual region.
     pub fn register(&mut self, region: VirtualRegion) -> VirtualResult<()> {
         validate_region(&region)?;
+        if self
+            .snapshot
+            .retired_regions
+            .contains_key(&region.region_id)
+        {
+            return Err(VirtualError::Conflict(format!(
+                "region {} is retired",
+                region.region_id
+            )));
+        }
         let run_id = region.run_id.clone();
         match self.snapshot.regions.get(&region.region_id) {
             Some(existing) if existing == &region => Ok(()),
@@ -143,6 +173,189 @@ impl VirtualScheduler {
         Ok(())
     }
 
+    /// Ask one pinned adapter to plan an opaque cursor split or merge.
+    pub fn plan_migration(
+        &self,
+        migrator: &mut impl RegionMigrator,
+        request: &RegionMigrationRequest,
+    ) -> VirtualResult<RegionMigrationPlan> {
+        validate_migration_request(request)?;
+        if migrator.binding() != request.migration_binding {
+            return Err(VirtualError::Source(
+                "selected migration adapter does not match the pinned binding".to_owned(),
+            ));
+        }
+        let mut sources = Vec::with_capacity(request.source_region_ids.len());
+        for region_id in &request.source_region_ids {
+            if self.snapshot.retired_regions.contains_key(region_id) {
+                return Err(VirtualError::Conflict(format!(
+                    "region {region_id} is already retired"
+                )));
+            }
+            sources.push(
+                self.snapshot
+                    .regions
+                    .get(region_id)
+                    .ok_or_else(|| {
+                        VirtualError::NotFound(format!("region {region_id} is missing"))
+                    })?
+                    .clone(),
+            );
+        }
+        let plan = migrator.plan(request, &sources)?;
+        if plan.migration_id != request.migration_id
+            || plan.kind != request.kind
+            || plan.migration_binding != request.migration_binding
+            || plan
+                .expected_sources
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != request.source_region_ids
+            || plan.targets.len() != request.target_count
+        {
+            return Err(VirtualError::Source(
+                "migration adapter changed request identity, binding, sources, or target count"
+                    .to_owned(),
+            ));
+        }
+        migrator.verify(&plan)?;
+        self.validate_migration_plan(&plan)?;
+        Ok(plan)
+    }
+
+    /// Atomically retire source regions and activate replacement cursors.
+    pub fn migrate(
+        &mut self,
+        migrator: &mut impl RegionMigrator,
+        plan: &RegionMigrationPlan,
+    ) -> VirtualResult<RegionMigrationReceipt> {
+        if migrator.binding() != plan.migration_binding {
+            return Err(VirtualError::Source(
+                "selected migration adapter does not match the plan binding".to_owned(),
+            ));
+        }
+        migrator.verify(plan)?;
+        let before = self.snapshot.clone();
+        match self.migrate_inner(plan) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                self.snapshot = before;
+                Err(error)
+            }
+        }
+    }
+
+    /// Query one retained migration receipt.
+    pub fn migration(&self, migration_id: &str) -> Option<&RegionMigrationReceipt> {
+        self.snapshot.migrations.get(migration_id)
+    }
+
+    fn migrate_inner(
+        &mut self,
+        plan: &RegionMigrationPlan,
+    ) -> VirtualResult<RegionMigrationReceipt> {
+        if let Some(existing) = self.snapshot.migrations.get(&plan.migration_id) {
+            if existing.plan == *plan {
+                return Ok(existing.clone());
+            }
+            return Err(VirtualError::Conflict(format!(
+                "migration {} already exists with different semantics",
+                plan.migration_id
+            )));
+        }
+        self.validate_migration_plan(plan)?;
+        let retired_regions: BTreeSet<String> = plan.expected_sources.keys().cloned().collect();
+        let active_targets: BTreeSet<String> = plan
+            .targets
+            .iter()
+            .map(|target| target.region_id.clone())
+            .collect();
+        for region_id in &retired_regions {
+            self.snapshot
+                .retired_regions
+                .insert(region_id.clone(), plan.migration_id.clone());
+        }
+        for target in &plan.targets {
+            self.snapshot
+                .regions
+                .insert(target.region_id.clone(), target.clone());
+        }
+        let receipt = RegionMigrationReceipt {
+            plan: plan.clone(),
+            retired_regions,
+            active_targets,
+        };
+        self.snapshot
+            .migrations
+            .insert(plan.migration_id.clone(), receipt.clone());
+        self.validate_bounds()?;
+        Ok(receipt)
+    }
+
+    fn validate_migration_plan(&self, plan: &RegionMigrationPlan) -> VirtualResult<()> {
+        validate_migration_plan_shape(plan)?;
+        let source_ids: BTreeSet<String> = plan.expected_sources.keys().cloned().collect();
+        let target_ids: BTreeSet<String> = plan
+            .targets
+            .iter()
+            .map(|target| target.region_id.clone())
+            .collect();
+        if target_ids.len() != plan.targets.len() || !source_ids.is_disjoint(&target_ids) {
+            return Err(VirtualError::Validation(
+                "migration target IDs must be unique and distinct from sources".to_owned(),
+            ));
+        }
+        let mut run_id = None::<&str>;
+        let mut source_operation = None::<&str>;
+        for (region_id, expected_cursor) in &plan.expected_sources {
+            if self.snapshot.retired_regions.contains_key(region_id) {
+                return Err(VirtualError::Conflict(format!(
+                    "migration source {region_id} is retired"
+                )));
+            }
+            let source = self.snapshot.regions.get(region_id).ok_or_else(|| {
+                VirtualError::NotFound(format!("migration source {region_id} is missing"))
+            })?;
+            if &source.cursor != expected_cursor {
+                return Err(VirtualError::Conflict(format!(
+                    "migration source {region_id} cursor changed"
+                )));
+            }
+            match run_id {
+                Some(expected) if expected != source.run_id => {
+                    return Err(VirtualError::Validation(
+                        "migration sources must belong to one Run".to_owned(),
+                    ));
+                }
+                None => run_id = Some(source.run_id.as_str()),
+                Some(_) => {}
+            }
+            match source_operation {
+                Some(expected) if expected != source.source => {
+                    return Err(VirtualError::Validation(
+                        "migration sources must use one source operation".to_owned(),
+                    ));
+                }
+                None => source_operation = Some(source.source.as_str()),
+                Some(_) => {}
+            }
+        }
+        for target in &plan.targets {
+            validate_region(target)?;
+            if self.snapshot.regions.contains_key(&target.region_id)
+                || Some(target.run_id.as_str()) != run_id
+                || Some(target.source.as_str()) != source_operation
+            {
+                return Err(VirtualError::Conflict(format!(
+                    "migration target {} conflicts with region, Run, or source authority",
+                    target.region_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Fill the bounded ready frontier using deterministic region order.
     pub fn fill(&mut self, source: &mut impl RegionSource) -> VirtualResult<usize> {
         let before = self.snapshot.clone();
@@ -168,7 +381,7 @@ impl VirtualScheduler {
                 break;
             }
             let region = self.snapshot.regions[&region_id].clone();
-            if region.cursor.exhausted {
+            if region.cursor.exhausted || self.snapshot.retired_regions.contains_key(&region_id) {
                 continue;
             }
             let limit = available.min(self.limits.materialize_batch);
@@ -642,6 +855,65 @@ impl VirtualScheduler {
                 "last materialized region is not registered".to_owned(),
             ));
         }
+        for (region_id, migration_id) in &self.snapshot.retired_regions {
+            if !self.snapshot.regions.contains_key(region_id)
+                || !self.snapshot.migrations.contains_key(migration_id)
+            {
+                return Err(VirtualError::Validation(format!(
+                    "retired region {region_id} has no region or migration receipt"
+                )));
+            }
+        }
+        for (migration_id, receipt) in &self.snapshot.migrations {
+            validate_migration_plan_shape(&receipt.plan)?;
+            let expected_sources: BTreeSet<String> =
+                receipt.plan.expected_sources.keys().cloned().collect();
+            let expected_targets: BTreeSet<String> = receipt
+                .plan
+                .targets
+                .iter()
+                .map(|target| target.region_id.clone())
+                .collect();
+            if receipt.plan.migration_id != *migration_id
+                || receipt.retired_regions != expected_sources
+                || receipt.active_targets != expected_targets
+            {
+                return Err(VirtualError::Validation(format!(
+                    "migration receipt {migration_id} does not match its plan"
+                )));
+            }
+            for (source_id, cursor) in &receipt.plan.expected_sources {
+                let source = self.snapshot.regions.get(source_id).ok_or_else(|| {
+                    VirtualError::Validation(format!(
+                        "migration {migration_id} source {source_id} is missing"
+                    ))
+                })?;
+                if &source.cursor != cursor
+                    || self.snapshot.retired_regions.get(source_id) != Some(migration_id)
+                {
+                    return Err(VirtualError::Validation(format!(
+                        "migration {migration_id} source retirement is inconsistent"
+                    )));
+                }
+            }
+            for target in &receipt.plan.targets {
+                let current = self
+                    .snapshot
+                    .regions
+                    .get(&target.region_id)
+                    .ok_or_else(|| {
+                        VirtualError::Validation(format!(
+                            "migration {migration_id} target {} is missing",
+                            target.region_id
+                        ))
+                    })?;
+                if current.run_id != target.run_id || current.source != target.source {
+                    return Err(VirtualError::Validation(format!(
+                        "migration {migration_id} target authority changed"
+                    )));
+                }
+            }
+        }
         if self.materialized_count() > self.limits.max_materialized {
             return Err(VirtualError::Validation(
                 "snapshot exceeds max_materialized".to_owned(),
@@ -868,6 +1140,56 @@ fn validate_scheduling_policy(policy: SchedulingPolicy) -> VirtualResult<()> {
     if policy.base_quantum == 0 || policy.aging_interval == 0 {
         return Err(VirtualError::Validation(
             "scheduling quantum and aging interval must be positive".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_migration_request(request: &RegionMigrationRequest) -> VirtualResult<()> {
+    if request.migration_id.is_empty()
+        || request.migration_binding.is_empty()
+        || request.source_region_ids.is_empty()
+        || request.source_region_ids.iter().any(String::is_empty)
+    {
+        return Err(VirtualError::Validation(
+            "migration request identities and sources must not be empty".to_owned(),
+        ));
+    }
+    validate_migration_cardinality(
+        request.kind,
+        request.source_region_ids.len(),
+        request.target_count,
+    )
+}
+
+fn validate_migration_plan_shape(plan: &RegionMigrationPlan) -> VirtualResult<()> {
+    if plan.migration_version != VIRTUAL_REGION_MIGRATION_VERSION
+        || plan.migration_id.is_empty()
+        || plan.migration_binding.is_empty()
+        || plan.expected_sources.is_empty()
+        || plan.expected_sources.keys().any(String::is_empty)
+    {
+        return Err(VirtualError::Validation(
+            "region migration version, identity, binding, and sources are required".to_owned(),
+        ));
+    }
+    validate_artifact(&plan.coverage_evidence)?;
+    validate_migration_cardinality(plan.kind, plan.expected_sources.len(), plan.targets.len())
+}
+
+fn validate_migration_cardinality(
+    kind: RegionMigrationKind,
+    source_count: usize,
+    target_count: usize,
+) -> VirtualResult<()> {
+    let valid = match kind {
+        RegionMigrationKind::Split => source_count == 1 && target_count >= 2,
+        RegionMigrationKind::Merge => source_count >= 2 && target_count == 1,
+    };
+    if !valid {
+        return Err(VirtualError::Validation(
+            "split requires one source and multiple targets; merge requires multiple sources and one target"
+                .to_owned(),
         ));
     }
     Ok(())

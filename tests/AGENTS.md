@@ -23,3 +23,8 @@
 - Fairness tests distinguish materialization visibility from weighted dispatch,
   debit exact item cost, restore scheduler accounting, and use continuous
   high-priority arrivals to prove finite priority-aging progress.
+- Region migration fixtures keep source cursors opaque, pin the migration
+  binding, retain coverage evidence, and distinguish retirement from deletion.
+  Stateful tests cover adapter verification, stale cursor/CAS, target conflict,
+  split-then-merge lineage, existing-work preservation, reopen, and historical
+  command replay.
