@@ -163,7 +163,11 @@ non-consuming waits but MUST consume at most one wait whose signal policy is
 consume-once. One timer activation MUST target exactly one matching timer wait.
 Selection and eventual delivery belong to scheduler, signal, and clock
 substrates; those substrates propose activations and never mutate canonical
-state directly.
+state directly. M1 exposes a rebuildable parked-wait index rather than a second
+durable queue. A source driver MUST return exact indexed targets within the
+framework bound and acknowledge transport delivery only after the activation
+CAS succeeds. Lost acknowledgement MUST redeliver the identical activation ID,
+source, targets, and value; admission then returns the retained decision.
 
 When an activation or other wait completion makes a Continuation `Ready`, a
 resume after any process boundary MUST advance its epoch and commit a new fenced

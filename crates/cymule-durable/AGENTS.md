@@ -4,6 +4,9 @@
   not name a database, queue, object store, cloud, or transport product.
 - A durable write is compare-and-swap over one complete `DurableState` revision.
   Adapters must not acknowledge a partial state transition.
+- Run initialization includes the initial Continuation in that first state CAS.
+  Both pre-commit failure and post-commit acknowledgement loss must reopen to a
+  retryable or resumable state.
 - Continuations contain only typed canonical references and explicit logical
   positions. Never persist process memory, closures, host-language stacks, or
   ambient time.
@@ -22,6 +25,10 @@
   its result and ready every selected Continuation, and allow one signal token
   to consume at most one consume-once wait. Stable activation redelivery is
   idempotent; conflicting ID reuse and stale writers fail closed.
+- `ParkedWaitIndex` is derived from pending waits and Continuation wait sets; it
+  is never a second durable authority. Source drivers may poll or receive by
+  any transport, but must return exact indexed targets within the framework
+  bound and acknowledge only after admission succeeds.
 - Activation admission may add only its result Artifact to the current Machine
   snapshot. Reject a caller snapshot that also changes Plans, Events, commands,
   or unrelated Artifacts; wait ingress is not a raw Machine mutation surface.
@@ -63,5 +70,8 @@
   Contention must surface as a CAS conflict rather than waiting on a mutex.
 - Concrete storage belongs under `plugins/` and must pass this crate's shared
   conformance suite, including reopen and stale-writer tests.
+- Extend the deterministic CAS boundary sweep when a Run path adds a durable
+  write. Its integrity probe must validate the whole state, replay the Machine,
+  and inspect provider call counts after reopen.
 - M1 changes require updates to the profile document, fault matrix, schemas,
   SDK control surfaces, and restart-level tests.

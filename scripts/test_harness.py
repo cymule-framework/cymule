@@ -23,8 +23,11 @@ SDK_SUITES = {"protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go"}
 
 ROUTES: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
     (("README.md", "docs/**", "**/AGENTS.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "LICENSE*"), frozenset({"docs"})),
-    (("crates/cymule-core/**", "crates/cymule-runtime/**", "crates/cymule-cli/**"), frozenset({"rust-workspace", *SDK_SUITES, "example"})),
-    (("crates/cymule-durable/**",), frozenset({"rust-durable"})),
+    (("crates/cymule-core/tests/**",), frozenset({"rust-core"})),
+    (("crates/cymule-core/src/**", "crates/cymule-core/Cargo.toml", "crates/cymule-runtime/**", "crates/cymule-cli/**"), frozenset({"rust-workspace", *SDK_SUITES, "example"})),
+    (("crates/cymule-durable/tests/**", "crates/cymule-durable/src/executor.rs", "crates/cymule-durable/src/error.rs", "crates/cymule-durable/src/wait_source.rs"), frozenset({"rust-durable"})),
+    (("crates/cymule-durable/src/coordinator.rs", "crates/cymule-durable/src/store.rs"), frozenset({"rust-durable", "rust-directory-plugin", "rust-virtual", "rust-resource", "rust-agent-plugin"})),
+    (("crates/cymule-durable/src/model.rs", "crates/cymule-durable/src/lib.rs", "crates/cymule-durable/Cargo.toml"), frozenset({"rust-durable", "rust-directory-plugin", "rust-virtual", "rust-resource", "rust-agent-plugin", *SDK_SUITES})),
     (("crates/cymule-virtual/**",), frozenset({"rust-virtual", *SDK_SUITES})),
     (("crates/cymule-evolution/**",), frozenset({"rust-evolution"})),
     (("crates/cymule-resource/**",), frozenset({"rust-resource", *SDK_SUITES})),

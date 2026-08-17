@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/cymule-framework/cymule/actions/workflows/ci.yml/badge.svg)](https://github.com/cymule-framework/cymule/actions/workflows/ci.yml)
 
-Cymule is a semantic execution fabric for long-running programs that execute
-code, wait, recurse over large bodies of work, affect external systems, accept
-live intervention, and evolve while they are still running.
+Cymule is a semantic execution fabric for programs that must remain correct
+across suspension, retries, external side effects, worker changes, historical
+replay, and live evolution.
 
 Its purpose is to keep one live computation coherent when durability,
 transactional state, ambiguous world effects, authority, replay and historical
@@ -351,7 +351,7 @@ See [Architecture](docs/architecture.md) and the
 | Python SDK | Implemented | Dependency-light builder and engine client. |
 | Go SDK | Implemented | Builder and engine client. |
 | Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, M1 handoff journal. |
-| Durable wait activation | Implemented foundation | Identified signal/timer records, consume-once admission, reopen-safe epoch advance, and four SDK wire validation. |
+| Durable wait activation | Implemented foundation | Identified signal/timer records, bounded parked indexes, replaceable source drivers, acknowledgement-loss replay, reopen-safe epoch advance, and four SDK wire validation. |
 | Durable effect policies | Implemented foundation | Nested commit gates, eager observation binding, explicit caller release, exact outbox deltas, and ambiguity reconciliation. |
 | Large virtual work M3 | Implemented | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker recovery, M1 checkpoints, and four SDK controls. |
 | Virtual work control | Implemented | Binding-pinned attempts, work/lease fencing, explicit recovery, closed dispositions, and four SDK transport interfaces. |
@@ -386,6 +386,8 @@ Implemented today:
 - one-shot process plugins and four SDK execution chains;
 - durable whole-state CAS, complete Continuations, waits, leases, outbox, and
   component occurrence replay;
+- atomic Run-plus-Continuation creation and deterministic failure scans across
+  every pre-CAS write and post-commit acknowledgement-loss boundary;
 - process reopen after a durable wait without reinvoking a recorded component;
 - ambiguous mutating-effect recovery by reconciliation without redispatch;
 - exact canonical Event/command/Artifact delta validation for root effect
@@ -416,8 +418,11 @@ Implemented today:
 
 Not yet claimed:
 
-- complete nested-scope and non-commit-gated effect interpretation plus their
-  additional crash windows;
+- production wait-source plugins and automatic higher-profile indexed-wake
+  routing;
+- M1 snapshot compaction and suffix rehydration;
+- process-kill crash campaigns beyond the deterministic adapter-level fault
+  matrix;
 - production resource resolver/store plugins and automatic interpreter
   activation of incoming handoffs;
 - automatic live-evolution diffing, shadow execution, observation gates, and

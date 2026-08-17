@@ -5,6 +5,7 @@ mod error;
 mod executor;
 mod model;
 mod store;
+mod wait_source;
 
 pub use coordinator::DurableCoordinator;
 pub use error::{DurableError, DurableResult};
@@ -16,3 +17,6 @@ pub use model::{
     WaitKind, WaitState,
 };
 pub use store::{DurableStore, MemoryStore, StoreCommit};
+pub use wait_source::{
+    MAX_WAIT_DELIVERY_TARGETS, ParkedWaitIndex, WaitDelivery, WaitSelection, WaitSourceDriver,
+};

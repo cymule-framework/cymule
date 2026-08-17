@@ -1,0 +1,54 @@
+name: Soak
+
+on:
+  schedule:
+    - cron: "23 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      proptest_cases:
+        description: Generated causal replay cases
+        required: false
+        default: "16384"
+        type: string
+      repetitions:
+        description: Deterministic fault-sweep repetitions
+        required: false
+        default: "5"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  rust-soak:
+    name: Soak / Rust semantic and fault properties
+    runs-on: ubuntu-24.04
+    env:
+      PROPTEST_CASES: ${{ inputs.proptest_cases || '16384' }}
+      CYMULE_SOAK_REPETITIONS: ${{ inputs.repetitions || '5' }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup default 1.97.0
+
+      - name: Run the independent soak suite
+        run: >-
+          python3 scripts/test_harness.py run
+          rust-soak
+          --report .cache/test-harness/rust-soak.json
+
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-rust-soak
+          path: .cache/test-harness/rust-soak.json
+          if-no-files-found: warn

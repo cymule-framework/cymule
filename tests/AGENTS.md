@@ -7,6 +7,9 @@
 - A seeded property/fuzz failure must print its seed and be minimized into a
   permanent regression fixture. Do not rely on wall-clock races when a CAS
   revision, epoch, counter, or explicit barrier can identify the interleaving.
+- Property tests run a bounded default case count in focused suites and honor
+  `PROPTEST_CASES` in `rust-soak`; do not make ordinary test latency depend on
+  soak-scale generation.
 - Fixtures are shared across language SDKs and must stay language-neutral.
 - The expected Plan ID is always computed by the Rust kernel from the checked-in
   candidate; never duplicate canonicalization in a test script.
@@ -31,6 +34,9 @@
   identities. Stateful tests must cover redelivery, conflicting identity,
   source mismatch, consume-once competition, stale CAS, reopen, and epoch
   advance before resume.
+- Wait-source tests separate index selection from transport acknowledgement.
+  Lose the acknowledgement after the activation CAS, rebuild the index on
+  reopen, redeliver the same identity, and prove exactly one activation.
 - Virtual checkpoint fixtures omit derived indexes and preserve opaque cursor,
   bounded frontier, claim fencing, and explicit parent lineage wire shapes.
 - Virtual work occurrence fixtures preserve logical work identity separately

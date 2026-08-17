@@ -18,11 +18,17 @@ lane = "rust"
 tools = ["rust"]
 commands = [["./scripts/verify-rust.sh"]]
 
-[suites.rust-durable]
-description = "Run M1 durability and its direct durable consumers."
+[suites.rust-core]
+description = "Run the small Rust semantic kernel and its property tests."
 lane = "rust"
 tools = ["rust"]
-commands = [["./scripts/verify-rust.sh", "cymule-durable", "cymule-directory-store", "cymule-virtual", "cymule-agent"]]
+commands = [["./scripts/verify-rust.sh", "cymule-core"]]
+
+[suites.rust-durable]
+description = "Run M1 persistence, recovery, and deterministic fault tests."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-rust.sh", "cymule-durable"]]
 
 [suites.rust-virtual]
 description = "Run M3 bounded scheduling, migration, compaction, and fault tests."
@@ -101,6 +107,12 @@ description = "Run the optional MLIR workbench smoke test when the pinned toolch
 lane = "workbench"
 tools = []
 commands = [["./compiler/mlir/verify.sh"]]
+
+[suites.rust-soak]
+description = "Repeat high-risk Rust properties and deterministic fault sweeps at soak depth."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-soak.sh"]]
 
 [suites.full]
 description = "Run every required Cymule verification family."

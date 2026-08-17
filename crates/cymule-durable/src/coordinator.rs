@@ -47,6 +47,35 @@ impl<S: DurableStore> DurableCoordinator<S> {
         Ok(commit.revision)
     }
 
+    /// Atomically initialize one Run and its first resumable Continuation.
+    ///
+    /// A process must never publish a canonical Run without the Continuation
+    /// required to recover it. Receipt loss after this CAS is recoverable by
+    /// reopening the store; a failure before the CAS leaves the store empty so
+    /// the same start request can be retried.
+    pub fn initialize_run(
+        &mut self,
+        machine: &Machine,
+        continuation: Continuation,
+    ) -> DurableResult<String> {
+        if self.stored.is_some() {
+            return Err(DurableError::IllegalTransition(
+                "durable store is already initialized".to_owned(),
+            ));
+        }
+        let mut state = DurableState::new(machine.snapshot());
+        state
+            .continuations
+            .insert(continuation.run_id.clone(), continuation);
+        state.validate()?;
+        let commit = self.store.compare_and_swap(None, &state)?;
+        self.stored = Some(StoredState {
+            revision: commit.revision.clone(),
+            state,
+        });
+        Ok(commit.revision)
+    }
+
     /// Current verified state.
     pub fn state(&self) -> DurableResult<&DurableState> {
         self.stored
@@ -58,6 +87,11 @@ impl<S: DurableStore> DurableCoordinator<S> {
     /// Current revision.
     pub fn revision(&self) -> Option<&str> {
         self.stored.as_ref().map(|stored| stored.revision.as_str())
+    }
+
+    /// Rebuild the provider-neutral parked-wait index from durable authority.
+    pub fn parked_wait_index(&self) -> DurableResult<crate::ParkedWaitIndex> {
+        crate::ParkedWaitIndex::rebuild(self.state()?)
     }
 
     /// Restore the current semantic Machine from canonical durable inputs.
