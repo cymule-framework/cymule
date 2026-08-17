@@ -13,7 +13,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | Large Virtual Graph | Partial | bounded virtual regions, cursors, fair capability claims, parked index, fencing, and snapshot restore; durable compaction remains |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
-| Live Evolution | Partial | future binding update and pinning implemented; state migration proposed |
+| Live Evolution | Partial | Plan DAG, impact, occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; runtime rollout automation remains |
 
 The implemented rows do not claim persistent VEC storage, durable resumption,
 or exact execution replay of component outputs. Those are M1 gates.
