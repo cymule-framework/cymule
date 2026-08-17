@@ -168,8 +168,14 @@ binding at admission. Embedded M0 persists this for Attempts and Effect Intents,
 including reconciliation. M1 defines canonical component occurrence records.
 The partial M2 reference driver automatically records context, model,
 permission, tool, elicitation, and workspace calls as request-digested,
-binding-pinned occurrences. Nested M1 runtime call paths and explicit recovery
-of ambiguous M2 occurrences remain integration work.
+binding-pinned occurrences. Nested M1 runtime call paths and durable consumption
+of recovered M2 responses remain integration work.
+
+M2 host reconciliation MUST query the occurrence's pinned binding and MUST NOT
+redispatch its request. It may settle the occurrence as `completed` with a
+matching typed response or `not-applied` with explicit evidence. A `prepared`
+occurrence may enter `not-applied` only when dispatch is proven not to have
+started. A still-unknown result continues to block automatic turn resumption.
 
 Changing a default MUST NOT rewrite an admitted occurrence. If its original
 binding is unavailable, the occurrence enters an explicit unavailable or

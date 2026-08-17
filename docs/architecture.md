@@ -79,6 +79,12 @@ projection and Continuation wait, so a crash cannot expose `RequiresAction`
 without a deliverable wait or ready the Continuation without the resolved
 elicitation. Concrete UI, transport, and identity integrations remain adapters.
 
+An ambiguous host call is recovered by querying its original pinned binding.
+The query may return the original typed response, prove `not_applied`, or remain
+`unknown`; it never dispatches a replacement request. A call that never left
+`prepared` may be cancelled only with explicit non-dispatch evidence. Durable
+foreground turn control that consumes recovered responses remains partial.
+
 ## Storage contracts
 
 M1 defines a provider-neutral `DurableStore` as compare-and-swap over one

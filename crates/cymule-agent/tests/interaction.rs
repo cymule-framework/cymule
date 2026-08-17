@@ -1,14 +1,21 @@
 //! End-to-end agent interaction and reducer tests.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use cymule_agent::{
     AgentError, AgentHost, AgentHostOccurrenceState, AgentHostRequest, AgentInputController,
-    AgentJournal, AgentMessage, AgentOccurrenceStore, AgentResult, AgentSession, AgentState,
-    AgentTurnDriver, AgentUpdate, ContentBlock, ContextRequest, ContextSnapshot,
-    ElicitationRequest, ElicitationResponse, MemoryAgentJournal, MessageRole, ModelRequest,
-    ModelResponse, PermissionDecision, PermissionRequest, PermissionResponse, SessionStopReason,
-    ToolCall, ToolCallStatus, ToolRequest, ToolResponse, Usage, WorkspaceChange, WorkspaceReceipt,
+    AgentJournal, AgentMessage, AgentOccurrenceResolution, AgentOccurrenceStore,
+    AgentRecoveryController, AgentResult, AgentSession, AgentState, AgentTurnDriver, AgentUpdate,
+    ContentBlock, ContextRequest, ContextSnapshot, ElicitationRequest, ElicitationResponse,
+    MemoryAgentJournal, MessageRole, ModelRequest, ModelResponse, PermissionDecision,
+    PermissionRequest, PermissionResponse, SessionStopReason, ToolCall, ToolCallStatus,
+    ToolRequest, ToolResponse, Usage, WorkspaceChange, WorkspaceReceipt,
 };
 use cymule_core::{ArtifactRef, Machine, ROOT_SCOPE_ID, canonical_digest};
 use cymule_durable::{
@@ -564,8 +571,11 @@ fn elicitation_and_workspace_calls_are_pinned_occurrences() {
     );
 }
 
-#[derive(Default)]
-struct FailingToolHost;
+#[derive(Clone, Default)]
+struct FailingToolHost {
+    dispatches: Arc<AtomicUsize>,
+    reconciliations: Arc<AtomicUsize>,
+}
 
 impl AgentHost for FailingToolHost {
     fn bind_occurrence(&mut self, request: &AgentHostRequest) -> AgentResult<String> {
@@ -612,6 +622,7 @@ impl AgentHost for FailingToolHost {
     }
 
     fn invoke_tool(&mut self, _request: ToolRequest) -> AgentResult<ToolResponse> {
+        self.dispatches.fetch_add(1, Ordering::SeqCst);
         Err(AgentError::Host("simulated process loss".to_owned()))
     }
 
@@ -622,13 +633,39 @@ impl AgentHost for FailingToolHost {
     fn apply_workspace(&mut self, _change: WorkspaceChange) -> AgentResult<WorkspaceReceipt> {
         Err(AgentError::Host("not used".to_owned()))
     }
+
+    fn reconcile_occurrence(
+        &mut self,
+        occurrence: &cymule_agent::AgentHostOccurrence,
+    ) -> AgentResult<AgentOccurrenceResolution> {
+        self.reconciliations.fetch_add(1, Ordering::SeqCst);
+        let AgentHostRequest::Tool(request) = &occurrence.request else {
+            return Ok(AgentOccurrenceResolution::Unknown {
+                evidence: vec![ContentBlock::Text {
+                    text: "unsupported occurrence kind".to_owned(),
+                }],
+            });
+        };
+        Ok(AgentOccurrenceResolution::Completed {
+            response: cymule_agent::AgentHostResponse::Tool(ToolResponse {
+                tool_call_id: request.tool_call_id.clone(),
+                content: vec![ContentBlock::Json {
+                    value: json!({"exists": true, "recovered": true}),
+                }],
+                occurrence_binding: occurrence.occurrence_binding.clone(),
+            }),
+        })
+    }
 }
 
 #[test]
 fn host_failure_preserves_the_last_accepted_interaction_state() {
     let mut journal = MemoryAgentJournal::default();
-    let mut driver = AgentTurnDriver::resume("session:crash", FailingToolHost, journal.clone())
-        .expect("journal opens");
+    let host = FailingToolHost::default();
+    let dispatches = host.dispatches.clone();
+    let reconciliations = host.reconciliations.clone();
+    let mut driver =
+        AgentTurnDriver::resume("session:crash", host, journal.clone()).expect("journal opens");
     assert!(matches!(
         driver.run_turn(
             message("message:user:crash", MessageRole::User, "Read the file"),
@@ -653,15 +690,81 @@ fn host_failure_preserves_the_last_accepted_interaction_state() {
     let occurrences = journal
         .load_occurrences("session:crash")
         .expect("occurrences replay");
-    assert!(occurrences.iter().any(|occurrence| {
-        occurrence.state == AgentHostOccurrenceState::Unknown
-            && occurrence.occurrence_id.starts_with("occurrence:tool:")
-            && occurrence.occurrence_binding == "binding:tool/1"
-    }));
+    let unknown = occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.state == AgentHostOccurrenceState::Unknown
+                && occurrence.occurrence_id.starts_with("occurrence:tool:")
+                && occurrence.occurrence_binding == "binding:tool/1"
+        })
+        .expect("unknown tool occurrence exists");
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
     assert!(matches!(
-        AgentTurnDriver::resume("session:crash", FailingToolHost, journal),
+        AgentTurnDriver::resume("session:crash", FailingToolHost::default(), journal.clone()),
         Err(AgentError::RecoveryRequired(_))
     ));
+    let mut recovery_host = FailingToolHost {
+        dispatches: dispatches.clone(),
+        reconciliations: reconciliations.clone(),
+    };
+    let recovered = AgentRecoveryController::reconcile(
+        &mut recovery_host,
+        &mut journal,
+        "session:crash",
+        &unknown.occurrence_id,
+    )
+    .expect("original tool occurrence reconciles");
+    assert_eq!(recovered.state, AgentHostOccurrenceState::Completed);
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(reconciliations.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        AgentTurnDriver::resume("session:crash", FailingToolHost::default(), journal),
+        Err(AgentError::RecoveryRequired(_))
+    ));
+}
+
+#[test]
+fn prepared_occurrence_cancels_only_with_not_applied_evidence() {
+    let mut journal = MemoryAgentJournal::default();
+    let prepared = cymule_agent::AgentHostOccurrence::prepare(
+        "occurrence:tool:cancel",
+        "session:cancel",
+        AgentHostRequest::Tool(ToolRequest {
+            tool_call_id: "tool:cancel".to_owned(),
+            operation: "workspace.read".to_owned(),
+            input: json!({}),
+        }),
+        "binding:tool/1",
+    )
+    .expect("occurrence prepares");
+    journal
+        .record_occurrence(&prepared)
+        .expect("prepared occurrence persists");
+    assert!(matches!(
+        AgentTurnDriver::resume("session:cancel", FakeHost::default(), journal.clone()),
+        Err(AgentError::RecoveryRequired(_))
+    ));
+    assert!(matches!(
+        AgentRecoveryController::cancel_prepared(
+            &mut journal,
+            "session:cancel",
+            "occurrence:tool:cancel",
+            Vec::new(),
+        ),
+        Err(AgentError::Validation(_))
+    ));
+    let cancelled = AgentRecoveryController::cancel_prepared(
+        &mut journal,
+        "session:cancel",
+        "occurrence:tool:cancel",
+        vec![ContentBlock::Text {
+            text: "dispatch boundary was never entered".to_owned(),
+        }],
+    )
+    .expect("prepared occurrence settles not applied");
+    assert_eq!(cancelled.state, AgentHostOccurrenceState::NotApplied);
+    let _driver = AgentTurnDriver::resume("session:cancel", FakeHost::default(), journal)
+        .expect("terminal not-applied occurrence no longer blocks idle Session");
 }
 
 #[derive(Default)]

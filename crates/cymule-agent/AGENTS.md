@@ -21,6 +21,10 @@
   Session state updates with the owning M1 wait transition. Never expose
   `RequiresAction` without a committed wait or ready a Continuation without the
   matching resolved Session projection.
+- Reconciliation queries the original binding and may settle only the original
+  occurrence as `completed` or evidence-backed `not_applied`. A prepared call
+  may be cancelled only with proof that dispatch never started. Reconciliation
+  is an idempotent observation and never creates a replacement intent.
 - Login, capability advertisement, permission, policy, credential access, and
   effect release are separate decisions and must remain fail closed.
 - Add reducer and end-to-end tests for every new update or interaction state.

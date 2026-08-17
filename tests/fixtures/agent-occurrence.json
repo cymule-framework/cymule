@@ -22,5 +22,6 @@
     }
   },
   "occurrence_binding": "binding:tool/1",
-  "failure": null
+  "failure": null,
+  "recovery_evidence": []
 }

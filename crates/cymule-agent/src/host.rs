@@ -1,7 +1,8 @@
 use crate::{
-    AgentHostRequest, AgentResult, ContextRequest, ContextSnapshot, ElicitationRequest,
-    ElicitationResponse, ModelRequest, ModelResponse, PermissionRequest, PermissionResponse,
-    ToolRequest, ToolResponse, WorkspaceChange, WorkspaceReceipt,
+    AgentError, AgentHostOccurrence, AgentHostRequest, AgentOccurrenceResolution, AgentResult,
+    ContextRequest, ContextSnapshot, ElicitationRequest, ElicitationResponse, ModelRequest,
+    ModelResponse, PermissionRequest, PermissionResponse, ToolRequest, ToolResponse,
+    WorkspaceChange, WorkspaceReceipt,
 };
 
 /// Replaceable host boundary for one agent interaction runtime.
@@ -27,4 +28,16 @@ pub trait AgentHost {
 
     /// Commit or abort a workspace overlay through its owning substrate.
     fn apply_workspace(&mut self, change: WorkspaceChange) -> AgentResult<WorkspaceReceipt>;
+
+    /// Query the original binding for an ambiguous occurrence without
+    /// redispatching its request.
+    fn reconcile_occurrence(
+        &mut self,
+        occurrence: &AgentHostOccurrence,
+    ) -> AgentResult<AgentOccurrenceResolution> {
+        Err(AgentError::RecoveryRequired(format!(
+            "host binding {} does not implement reconciliation for {}",
+            occurrence.occurrence_binding, occurrence.occurrence_id
+        )))
+    }
 }
