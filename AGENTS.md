@@ -36,6 +36,10 @@ Use this precedence order when guidance conflicts:
   not claim that the external world has settled.
 - An ambiguous dispatch becomes `unknown` and follows reconciliation. Never turn
   it into a fresh semantic intent or silently redispatch it.
+- External signal and timer delivery is an identified durable activation, not a
+  direct worker wake-up. Match the Plan-declared source, commit the activation
+  receipt with wait results and Continuation readiness, and advance the epoch
+  before a reopened `Ready` Continuation resumes.
 - Public mutation enters through typed commands with idempotent IDs and causal
   preconditions. Raw canonical event append is internal only.
 - Prefer optimistic CAS, immutable records, idempotency, fencing epochs, and

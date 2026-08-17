@@ -81,3 +81,38 @@ func TestResourceSealsThroughRustEngine(t *testing.T) {
 		t.Fatalf("unexpected integrity kind %q", resource.Integrity.Kind)
 	}
 }
+
+func TestWaitActivationValidatesThroughRustEngine(t *testing.T) {
+	enginePath := os.Getenv("CYMULE_BIN")
+	fixturePath := os.Getenv("CYMULE_WAIT_ACTIVATION_FIXTURE")
+	if enginePath == "" || fixturePath == "" {
+		t.Skip("wait activation engine conformance is not configured")
+	}
+	activation := SignalWaitActivation(
+		"activation:shared:1",
+		"signal:continue",
+		[]string{"wait:shared:1"},
+		ArtifactRef{
+			ArtifactID: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Kind:       "cymule.wait-activation-result/1",
+		},
+	)
+	fixtureBytes, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture WaitActivation
+	if err := json.Unmarshal(fixtureBytes, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(activation, fixture) {
+		t.Fatalf("activation differs from shared fixture: %#v", activation)
+	}
+	verified, err := (CliEngine{Executable: enginePath}).VerifyWaitActivation(activation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(verified, activation) {
+		t.Fatalf("unexpected activation: %#v", verified)
+	}
+}

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import unittest
 
-from cymule import CliEngine, FlowBuilder, ResourceBuilder
+from cymule import CliEngine, FlowBuilder, ResourceBuilder, WaitActivationBuilder
 
 
 class EndToEndTest(unittest.TestCase):
@@ -60,6 +61,30 @@ class EndToEndTest(unittest.TestCase):
         )
         self.assertEqual(resource["resource_id"], expected_resource_id)
         self.assertEqual(resource["integrity"], {"kind": "inline"})
+
+    def test_python_wait_activation_validates_through_rust_engine(self) -> None:
+        engine_path = os.environ.get("CYMULE_BIN")
+        fixture_path = os.environ.get("CYMULE_WAIT_ACTIVATION_FIXTURE")
+        if engine_path is None or fixture_path is None:
+            self.skipTest("wait activation engine conformance is not configured")
+        activation = WaitActivationBuilder.signal(
+            "activation:shared:1",
+            "signal:continue",
+            ["wait:shared:1"],
+            {
+                "artifact_id": (
+                    "sha256:0123456789abcdef0123456789abcdef"
+                    "0123456789abcdef0123456789abcdef"
+                ),
+                "kind": "cymule.wait-activation-result/1",
+            },
+        )
+        with open(fixture_path, encoding="utf-8") as source:
+            self.assertEqual(activation, json.load(source))
+        self.assertEqual(
+            CliEngine(engine_path).verify_wait_activation(activation), activation
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,15 @@ standards.
 - [DBOS](https://docs.dbos.dev/) demonstrates a lightweight library experience,
   durable steps, queues, and recovery centered on a transactional database.
   Cymule keeps persistence as a contract rather than a required product class.
+- [Restate Awakeables](https://docs.restate.dev/develop/python/awakeables/) use a
+  stable externally delivered identifier to resolve a suspended invocation, and
+  [Restate durable timers](https://docs.restate.dev/develop/java/durable-timers)
+  retain wake-up progress across failure. Cymule similarly identifies external
+  activation, but keeps clocks and delivery substrates behind plugins.
+- [DBOS workflow communication](https://docs.dbos.dev/typescript/tutorials/workflow-communication)
+  persists topic messages and exposes idempotency keys for external senders.
+  This reinforces separating a durable delivery identity from the provider or
+  transport that redelivers it.
 - [Dapr components](https://docs.dapr.io/concepts/components-concept/) show how
   stable building-block interfaces can support built-in and independently
   deployed implementations. Cymule similarly separates semantic operations from

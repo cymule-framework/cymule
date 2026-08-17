@@ -6,4 +6,6 @@
 - The CLI Engine is a transport; do not add a Go reducer or authoritative hash.
 - Keep Resource Candidate, Handle, Integrity, Location, and Handoff wire structs
   explicit. The Rust Engine is the only Resource ID authority.
+- Keep WaitActivation and source structs closed and provider-neutral. Builders
+  sort/deduplicate targets; Rust verification is not durable CAS admission.
 - Run `gofmt` and `go test ./...` for every change.

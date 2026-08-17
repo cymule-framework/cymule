@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use cymule_core::{CoreError, PlanCandidate, SealedPlan};
+use cymule_durable::WaitActivation;
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::ExecutionResult;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,11 @@ pub trait Engine {
     fn seal(&self, candidate: &PlanCandidate) -> Result<SealedPlan, CoreError>;
     /// Validate and seal a provider-neutral Resource Candidate.
     fn seal_resource(&self, candidate: &ResourceCandidate) -> Result<ResourceHandle, CoreError>;
+    /// Validate a provider-neutral signal or timer activation record.
+    fn verify_wait_activation(
+        &self,
+        activation: &WaitActivation,
+    ) -> Result<WaitActivation, CoreError>;
     /// Execute a sealed plan through a selected plugin realization.
     fn run(
         &self,
@@ -73,6 +79,20 @@ impl CliEngine {
             ))),
         }
     }
+
+    fn verify_wait_activation(
+        &self,
+        activation: &WaitActivation,
+    ) -> Result<WaitActivation, CoreError> {
+        match self.request(&EngineRequest::VerifyWaitActivation {
+            activation: activation.clone(),
+        })? {
+            EngineResponse::VerifiedWaitActivation { activation } => Ok(activation),
+            response => Err(CoreError::Validation(format!(
+                "CLI returned unexpected response {response:?}"
+            ))),
+        }
+    }
 }
 
 impl Engine for CliEngine {
@@ -89,6 +109,13 @@ impl Engine for CliEngine {
 
     fn seal_resource(&self, candidate: &ResourceCandidate) -> Result<ResourceHandle, CoreError> {
         CliEngine::seal_resource(self, candidate)
+    }
+
+    fn verify_wait_activation(
+        &self,
+        activation: &WaitActivation,
+    ) -> Result<WaitActivation, CoreError> {
+        CliEngine::verify_wait_activation(self, activation)
     }
 
     fn run(
@@ -121,6 +148,9 @@ enum EngineRequest {
     SealResource {
         candidate: ResourceCandidate,
     },
+    VerifyWaitActivation {
+        activation: WaitActivation,
+    },
     Run {
         plan: SealedPlan,
         input: Value,
@@ -134,6 +164,7 @@ enum EngineRequest {
 enum EngineResponse {
     Sealed { plan: SealedPlan },
     SealedResource { resource: ResourceHandle },
+    VerifiedWaitActivation { activation: WaitActivation },
     Executed { result: ExecutionResult },
     Verified,
 }

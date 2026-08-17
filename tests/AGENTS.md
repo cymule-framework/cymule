@@ -10,3 +10,7 @@
   credentials or a signed URL.
 - Add fault-oriented tests for semantic changes, especially stale commands,
   fencing, scope closure, ambiguous effects, reconciliation, and replay.
+- Wait activation fixtures contain only stable delivery/source/wait/Artifact
+  identities. Stateful tests must cover redelivery, conflicting identity,
+  source mismatch, consume-once competition, stale CAS, reopen, and epoch
+  advance before resume.

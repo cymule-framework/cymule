@@ -7,3 +7,6 @@
 - CLI transport is one Engine implementation, not the semantic definition.
 - Resource builders emit `cymule.resource/1` candidates. Only the Rust Engine
   seals Resource IDs; the SDK must not duplicate the resource canonicalizer.
+- Wait activation DTOs preserve stable delivery, source, target, and Artifact
+  identities. CLI verification covers the closed record; only a durable runtime
+  CAS can admit it against pending waits and enforce consume-once semantics.

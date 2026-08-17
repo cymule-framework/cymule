@@ -112,6 +112,41 @@ def main() -> int:
         pass
     else:
         raise AssertionError("Resource schema accepted an unknown provider field")
+
+    wait_activation = load(root / "tests/fixtures/wait-activation.json")
+    activation_validator = Draft202012Validator(
+        by_title["Cymule Wait Activation cymule.wait-activation/1"],
+        registry=registry,
+    )
+    activation_validator.validate(wait_activation)
+    verified_activation = json.loads(
+        subprocess.run(
+            [
+                str(engine),
+                "wait-activation",
+                "verify",
+                "--input",
+                str(root / "tests/fixtures/wait-activation.json"),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    if verified_activation != wait_activation:
+        raise AssertionError("Rust Engine changed the wait activation fixture")
+    Draft202012Validator(
+        by_title["Cymule Engine Request"], registry=registry
+    ).validate({"type": "verify_wait_activation", "activation": wait_activation})
+    malformed_activation = dict(wait_activation)
+    malformed_activation["provider"] = "must-not-enter-wait-activation"
+    try:
+        activation_validator.validate(malformed_activation)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("wait activation schema accepted a provider field")
+
     credential_url = {
         "resource_version": "cymule.resource/1",
         "shape": "object",

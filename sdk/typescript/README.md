@@ -23,6 +23,10 @@ Use `ResourceBuilder.external` for content-addressed/version-pinned objects,
 directories, collections, snapshots, and live references. Concrete access stays
 behind resolver plugins; Resource Candidates never contain credentials.
 
+`WaitActivationBuilder` creates provider-neutral signal or timer delivery
+records. `CliEngine.verifyWaitActivation` validates the closed wire contract;
+the durable runtime remains responsible for matching pending waits and admitting
+the activation through CAS.
 
 The package is published from GitHub Actions with npm trusted publishing and
 provenance. The Rust Engine remains the semantic authority.

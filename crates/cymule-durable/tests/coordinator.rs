@@ -9,7 +9,7 @@ use cymule_core::{
 use cymule_durable::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
     EffectDispatch, FrameState, JournalBatch, JournalRecord, MemoryStore, OutboxState,
-    WaitCondition, WaitKind, WaitState,
+    WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitState,
 };
 use serde_json::json;
 
@@ -74,6 +74,21 @@ fn continuation(plan_id: String) -> Continuation {
 }
 
 #[test]
+fn frozen_wait_activation_fixture_matches_the_rust_contract() {
+    let activation: WaitActivation =
+        serde_json::from_str(include_str!("../../../tests/fixtures/wait-activation.json"))
+            .expect("wait activation fixture deserializes");
+    activation.verify().expect("wait activation verifies");
+
+    let mut malformed = activation;
+    malformed.result.artifact_id = "artifact:not-content-addressed".to_owned();
+    assert!(matches!(
+        malformed.verify(),
+        Err(DurableError::Validation(_))
+    ));
+}
+
+#[test]
 fn wait_completion_survives_reopen_and_readies_the_continuation() {
     let (mut machine, plan_id) = machine_with_run();
     let result = machine.put_artifact("example/input", b"accepted".to_vec());
@@ -113,6 +128,232 @@ fn wait_completion_survives_reopen_and_readies_the_continuation() {
         ContinuationStatus::Ready
     );
     assert!(state.continuations["run:durable"].wait_set.is_empty());
+}
+
+#[test]
+fn identified_signal_activation_is_atomic_idempotent_and_reopenable() {
+    let (mut machine, plan_id) = machine_with_run();
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    coordinator
+        .put_continuation(continuation(plan_id))
+        .expect("continuation persists");
+    for (wait_id, consume_once) in [
+        ("wait:signal:broadcast:1", false),
+        ("wait:signal:broadcast:2", false),
+        ("wait:signal:consumer", true),
+    ] {
+        coordinator
+            .register_wait(WaitCondition {
+                wait_id: wait_id.to_owned(),
+                run_id: "run:durable".to_owned(),
+                kind: WaitKind::Signal {
+                    key: "signal:approved".to_owned(),
+                },
+                consume_once,
+                state: WaitState::Pending,
+                result: None,
+            })
+            .expect("signal wait registers");
+    }
+    let result = machine.put_artifact("example/signal", b"approved".to_vec());
+    let activation = WaitActivation::new(
+        "activation:signal:1",
+        WaitActivationSource::Signal {
+            key: "signal:approved".to_owned(),
+        },
+        BTreeSet::from([
+            "wait:signal:broadcast:1".to_owned(),
+            "wait:signal:broadcast:2".to_owned(),
+            "wait:signal:consumer".to_owned(),
+        ]),
+        result,
+    )
+    .expect("activation validates");
+    coordinator
+        .activate_waits(&machine, activation.clone())
+        .expect("activation commits");
+    coordinator
+        .activate_waits(&machine, activation.clone())
+        .expect("redelivery is idempotent");
+    let conflicting = WaitActivation::new(
+        "activation:signal:1",
+        WaitActivationSource::Signal {
+            key: "signal:approved".to_owned(),
+        },
+        BTreeSet::from(["wait:signal:broadcast:1".to_owned()]),
+        activation.result.clone(),
+    )
+    .expect("conflicting activation shape validates");
+    assert!(matches!(
+        coordinator.activate_waits(&machine, conflicting),
+        Err(DurableError::IllegalTransition(_))
+    ));
+    assert_eq!(
+        coordinator.state().expect("state").wait_activations["activation:signal:1"],
+        activation
+    );
+    assert!(
+        coordinator
+            .state()
+            .expect("state")
+            .waits
+            .values()
+            .all(|wait| wait.state == WaitState::Completed)
+    );
+    assert_eq!(
+        coordinator.state().expect("state").continuations["run:durable"].status,
+        ContinuationStatus::Ready
+    );
+
+    drop(coordinator);
+    let mut reopened = DurableCoordinator::open(store).expect("store reopens");
+    reopened
+        .activate_waits(&machine, activation)
+        .expect("redelivery after reopen is idempotent");
+    assert_eq!(reopened.state().expect("state").wait_activations.len(), 1);
+}
+
+#[test]
+fn signal_activation_rejects_wrong_or_multiple_consume_once_targets_atomically() {
+    let (mut machine, plan_id) = machine_with_run();
+    let result = machine.put_artifact("example/signal", b"payload".to_vec());
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    coordinator
+        .put_continuation(continuation(plan_id))
+        .expect("continuation persists");
+    for wait_id in ["wait:signal:one", "wait:signal:two"] {
+        coordinator
+            .register_wait(WaitCondition {
+                wait_id: wait_id.to_owned(),
+                run_id: "run:durable".to_owned(),
+                kind: WaitKind::Signal {
+                    key: "signal:exclusive".to_owned(),
+                },
+                consume_once: true,
+                state: WaitState::Pending,
+                result: None,
+            })
+            .expect("signal wait registers");
+    }
+    let before = coordinator.revision().expect("revision").to_owned();
+    let multiple = WaitActivation::new(
+        "activation:signal:multiple",
+        WaitActivationSource::Signal {
+            key: "signal:exclusive".to_owned(),
+        },
+        BTreeSet::from(["wait:signal:one".to_owned(), "wait:signal:two".to_owned()]),
+        result.clone(),
+    )
+    .expect("activation shape validates");
+    assert!(matches!(
+        coordinator.activate_waits(&machine, multiple),
+        Err(DurableError::Validation(_))
+    ));
+    let wrong_key = WaitActivation::new(
+        "activation:signal:wrong-key",
+        WaitActivationSource::Signal {
+            key: "signal:other".to_owned(),
+        },
+        BTreeSet::from(["wait:signal:one".to_owned()]),
+        result.clone(),
+    )
+    .expect("activation shape validates");
+    assert!(matches!(
+        coordinator.activate_waits(&machine, wrong_key),
+        Err(DurableError::Validation(_))
+    ));
+    let mut unrelated_machine = coordinator
+        .restore_machine()
+        .expect("durable Machine restores");
+    unrelated_machine.put_artifact("example/unrelated", b"unrelated".to_vec());
+    let unrelated = WaitActivation::new(
+        "activation:signal:unrelated-machine",
+        WaitActivationSource::Signal {
+            key: "signal:exclusive".to_owned(),
+        },
+        BTreeSet::from(["wait:signal:one".to_owned()]),
+        result.clone(),
+    )
+    .expect("activation shape validates");
+    assert!(matches!(
+        coordinator.activate_waits(&unrelated_machine, unrelated),
+        Err(DurableError::Validation(_))
+    ));
+    assert!(matches!(
+        coordinator.complete_wait("wait:signal:one", result),
+        Err(DurableError::Validation(_))
+    ));
+    assert_eq!(coordinator.revision(), Some(before.as_str()));
+    assert!(
+        coordinator
+            .state()
+            .expect("state")
+            .waits
+            .values()
+            .all(|wait| wait.state == WaitState::Pending)
+    );
+    assert!(
+        coordinator
+            .state()
+            .expect("state")
+            .wait_activations
+            .is_empty()
+    );
+}
+
+#[test]
+fn timer_activation_is_exactly_identified_and_stale_writers_fail_closed() {
+    let (mut machine, plan_id) = machine_with_run();
+    let store = MemoryStore::new();
+    let mut current = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    current
+        .put_continuation(continuation(plan_id))
+        .expect("continuation persists");
+    current
+        .register_wait(WaitCondition {
+            wait_id: "wait:timer:1".to_owned(),
+            run_id: "run:durable".to_owned(),
+            kind: WaitKind::Timer {
+                timer_id: "timer:deadline".to_owned(),
+            },
+            consume_once: false,
+            state: WaitState::Pending,
+            result: None,
+        })
+        .expect("timer wait registers");
+    let mut stale = DurableCoordinator::open(store).expect("stale view opens");
+    let result = machine.put_artifact("example/timer", b"fired".to_vec());
+    let activation = WaitActivation::new(
+        "activation:timer:1",
+        WaitActivationSource::Timer {
+            timer_id: "timer:deadline".to_owned(),
+        },
+        BTreeSet::from(["wait:timer:1".to_owned()]),
+        result,
+    )
+    .expect("timer activation validates");
+    current
+        .activate_waits(&machine, activation.clone())
+        .expect("timer activation commits");
+    assert!(matches!(
+        stale.activate_waits(&machine, activation),
+        Err(DurableError::Conflict { .. })
+    ));
+    assert_eq!(
+        current.state().expect("state").waits["wait:timer:1"].state,
+        WaitState::Completed
+    );
 }
 
 #[test]

@@ -12,6 +12,7 @@ pub use executor::{DriveOutcome, ResumableRuntime};
 pub use model::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableState,
     EffectDispatch, FrameState, JournalBatch, JournalRecord, OutboxState, SnapshotRecord,
-    StoredState, WaitCondition, WaitKind, WaitState,
+    StoredState, WAIT_ACTIVATION_VERSION, WaitActivation, WaitActivationSource, WaitCondition,
+    WaitKind, WaitState,
 };
 pub use store::{DurableStore, MemoryStore, StoreCommit};

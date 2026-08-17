@@ -12,8 +12,8 @@ use serde_json::Value;
 
 use crate::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
-    DurableResult, DurableStore, EffectDispatch, FrameState, OutboxState, WaitCondition, WaitKind,
-    WaitState,
+    DurableResult, DurableStore, EffectDispatch, FrameState, OutboxState, WaitActivation,
+    WaitActivationSource, WaitCondition, WaitKind, WaitState,
 };
 
 /// Result of driving one Run until its next durable boundary.
@@ -120,24 +120,86 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             .clone();
         self.coordinator
             .complete_wait_with_machine(&machine, wait_id, result)?;
-        let epoch = self.coordinator.state()?.continuations[&run_id].epoch + 1;
-        submit(
-            &mut machine,
-            &run_id,
-            format!("{run_id}:advance:{epoch}"),
-            Command::AdvanceEpoch,
-        )?;
-        begin_attempt(&mut machine, &run_id, &self.manifest, epoch)?;
-        let mut continuation = self.coordinator.state()?.continuations[&run_id].clone();
-        continuation.epoch = epoch;
-        continuation.status = ContinuationStatus::Running;
-        self.coordinator.checkpoint(&machine, continuation, None)?;
-        self.drive(&run_id)
+        self.resume(&run_id)
+    }
+
+    /// Admit one externally identified signal or timer delivery.
+    ///
+    /// The activation and all selected wait completions enter one durable CAS
+    /// revision. This method does not run ready Continuations; the caller or
+    /// scheduler may resume each returned Run independently. Concrete signal
+    /// and clock substrates remain plugins and can safely redeliver the same
+    /// activation ID after losing an acknowledgement.
+    pub fn admit_wait_activation(
+        &mut self,
+        activation_id: impl Into<String>,
+        source: WaitActivationSource,
+        wait_ids: BTreeSet<String>,
+        value: &Value,
+    ) -> DurableResult<BTreeSet<String>> {
+        let mut machine = self.coordinator.restore_machine()?;
+        let result =
+            machine.put_artifact("cymule.wait-activation-result/1", canonical_bytes(value)?);
+        let mut run_ids = BTreeSet::new();
+        for wait_id in &wait_ids {
+            let wait = self
+                .coordinator
+                .state()?
+                .waits
+                .get(wait_id)
+                .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
+            run_ids.insert(wait.run_id.clone());
+        }
+        let activation = WaitActivation::new(activation_id, source, wait_ids, result)?;
+        self.coordinator.activate_waits(&machine, activation)?;
+        let state = self.coordinator.state()?;
+        run_ids.retain(|run_id| {
+            state
+                .continuations
+                .get(run_id)
+                .is_some_and(|continuation| continuation.status == ContinuationStatus::Ready)
+        });
+        Ok(run_ids)
     }
 
     /// Resume an existing ready/running Run after process reopen or a recoverable
     /// adapter failure.
     pub fn resume(&mut self, run_id: &str) -> DurableResult<DriveOutcome> {
+        let status = self
+            .coordinator
+            .state()?
+            .continuations
+            .get(run_id)
+            .ok_or_else(|| DurableError::NotFound(format!("continuation {run_id} is missing")))?
+            .status;
+        match status {
+            ContinuationStatus::Ready => {
+                let mut machine = self.coordinator.restore_machine()?;
+                let mut continuation = self.coordinator.state()?.continuations[run_id].clone();
+                let epoch = continuation.epoch + 1;
+                submit(
+                    &mut machine,
+                    run_id,
+                    format!("{run_id}:advance:{epoch}"),
+                    Command::AdvanceEpoch,
+                )?;
+                begin_attempt(&mut machine, run_id, &self.manifest, epoch)?;
+                continuation.epoch = epoch;
+                continuation.status = ContinuationStatus::Running;
+                self.coordinator.checkpoint(&machine, continuation, None)?;
+            }
+            ContinuationStatus::Running => {}
+            ContinuationStatus::Waiting => {
+                return Err(DurableError::IllegalTransition(format!(
+                    "continuation {run_id} is still waiting"
+                )));
+            }
+            ContinuationStatus::Completed => {
+                return Err(DurableError::IllegalTransition(format!(
+                    "continuation {run_id} is already completed"
+                )));
+            }
+        }
         self.drive(run_id)
     }
 
