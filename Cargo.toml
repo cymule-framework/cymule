@@ -2,10 +2,12 @@
 resolver = "3"
 members = [
   "crates/cymule-core",
+  "crates/cymule-durable",
   "crates/cymule-runtime",
   "crates/cymule-sdk",
   "crates/cymule-cli",
   "examples/hello-world",
+  "plugins/directory-store",
   "plugins/test-adapter",
 ]
 

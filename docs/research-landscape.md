@@ -1,6 +1,6 @@
 # Research and Implementation Landscape
 
-Status: informative snapshot, reviewed 2026-08-16.
+Status: informative snapshot, reviewed 2026-08-17.
 
 Cymule borrows mechanisms, not semantic ownership, from maintained systems and
 standards.
@@ -36,6 +36,38 @@ standards.
   the preferred direction for a future sandboxed plugin ABI after current WASI
   async/toolchain support is sufficiently uniform.
 
+## Composition and agent interaction
+
+- [Cordis](https://github.com/cordiverse/cordis) demonstrates a small Context,
+  Service registry, dependency injection, scoped isolation/interception, Fiber
+  lifecycle, and disposable effects. Cymule adopts the interface/lifecycle
+  separation, while durable identity and replay remain owned by its Rust
+  semantic profiles rather than an ambient runtime context.
+- [Agent Client Protocol](https://agentclientprotocol.com/protocol/overview)
+  separates accepted prompts from ordered session updates, typed content, tool
+  status, permission requests, elicitation, plans, usage, and terminal state.
+  Cymule M2 maps these to durable occurrences and projections instead of making
+  a transport session canonical.
+- [Model Context Protocol](https://modelcontextprotocol.io/specification/) keeps
+  resources, prompts, tools, user input, and asynchronous Tasks as capability
+  surfaces. Cymule treats external protocol objects as adapter inputs and pins
+  the selected context/tool occurrence before execution.
+- [A2A](https://a2a-protocol.org/dev/specification/) distinguishes Messages,
+  Tasks, status updates, and Artifacts. Cymule uses the same communication versus
+  durable-output distinction without adopting A2A transport bindings in core.
+
+## State scale and live evolution
+
+- [Apache Flink checkpoints and savepoints](https://nightlies.apache.org/flink/flink-docs-stable/docs/ops/state/checkpoints_vs_savepoints/)
+  distinguish fast runtime recovery from portable, user-owned upgrade state.
+  Cymule similarly separates automatic checkpoints from portable canonical
+  savepoints and requires serializer/schema evidence for M4 migration.
+- [Flink state schema evolution](https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/datastream/fault-tolerance/serialization/schema_evolution/)
+  demonstrates why key migrations and serializer compatibility must fail closed.
+- [Restate versioning](https://docs.restate.dev/services/versioning) keeps
+  deployments immutable and pins in-flight invocations while new work advances.
+  This informs Cymule's occurrence binding and Plan/Binding separation.
+
 ## Encoding and schemas
 
 - [RFC 8785 JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785.html)
@@ -51,4 +83,3 @@ does not treat a plugin catalog as authority, and does not claim external
 exactly-once when a provider cannot prove it. Its contribution is the closure of
 causal replay, scopes, obligations, binding evolution, and effect uncertainty on
 one small semantic kernel.
-

@@ -90,9 +90,10 @@ immutable occurrence binding and the continuation epoch. Output from a stale
 attempt MUST be rejected.
 
 The M0 kernel implements Run, Attempt, epoch, scope, effect obligation, and
-binding projections. A first-class persisted continuation artifact containing
-the complete field set above is proposed for M1 and is not claimed by the
-Embedded profile.
+binding projections. M1 now defines and persists the complete first-class
+Continuation field set through a provider-neutral CAS store. Automatic capture
+and resumable interpretation at every safe point remain partial and are not
+claimed by the Embedded profile.
 
 ## 8. Causal events
 
@@ -157,8 +158,9 @@ intent. Compensation is a separately admitted effect.
 A Plan changes semantic meaning. A Binding Context changes realization defaults
 for future occurrences. Every persisted occurrence must pin an immutable
 binding at admission. Embedded M0 persists this for Attempts and Effect Intents,
-including reconciliation. Canonical component/model/context occurrence records
-are proposed M1/M2 work and are not claimed by the current process-call adapter.
+including reconciliation. M1 defines canonical component occurrence records;
+automatic recording by every runtime call path and model/context occurrences
+remain M1/M2 integration work.
 
 Changing a default MUST NOT rewrite an admitted occurrence. If its original
 binding is unavailable, the occurrence enters an explicit unavailable or

@@ -17,12 +17,15 @@ Status: implemented in 0.1.0.
 
 ## M1 - Durable single domain
 
-Status: proposed.
+Status: partial.
 
-- durable state and artifact substrate adapters;
-- timers, signals, outbox, and dispatch fencing;
+- provider-neutral durable state CAS, full Continuation data, waits, leases,
+  outbox, component occurrences, and snapshot records are implemented;
+- memory and atomic directory-store adapters pass reopen and stale-writer tests;
+- resumable interpretation, timer/signal activation, atomic event-plus-outbox,
+  and dispatch crash-window recovery remain proposed;
 - process-level crash injection for every effect window;
-- snapshots, compaction certificates, and rehydration.
+- snapshot compaction and suffix rehydration;
 - canonical component-call occurrences and exact execution replay without
   reinvoking plugins;
 

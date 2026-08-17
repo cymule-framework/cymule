@@ -10,6 +10,9 @@ domains described in `docs/specification.md`.
   quick start.
 - Publish GitHub-native repository metadata, CI, and a clean-history public
   mirror workflow.
+- Add the first M1 durable profile foundation: portable Machine snapshots,
+  whole-state CAS, full Continuations, durable waits, leases, effect outbox,
+  component occurrences, snapshot records, and an atomic directory adapter.
 
 ## [0.1.0] - 2026-08-16
 

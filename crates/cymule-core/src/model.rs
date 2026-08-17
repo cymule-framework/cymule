@@ -24,7 +24,8 @@ pub struct ArtifactRef {
 }
 
 /// Immutable artifact bytes held by the embedded store.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactRecord {
     /// Reference derived from type and bytes.
     pub reference: ArtifactRef,

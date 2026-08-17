@@ -164,6 +164,46 @@ fn command_idempotency_and_stale_action_are_explicit() {
 }
 
 #[test]
+fn machine_snapshot_restores_projection_artifacts_and_command_deduplication() {
+    let mut machine = Machine::new();
+    let plan = machine.seal_plan(candidate()).expect("plan seals");
+    let start = envelope(
+        &machine,
+        1,
+        "run:snapshot",
+        Command::StartRun {
+            plan_id: plan.plan_id,
+            binding_context: "binding:v1".to_owned(),
+        },
+    );
+    let receipt = machine.submit(start.clone()).expect("run starts");
+    let artifact = machine.put_artifact("example/state", b"durable".to_vec());
+    let snapshot = machine.snapshot();
+    let snapshot_digest = snapshot.digest().expect("snapshot hashes");
+
+    let mut restored = Machine::restore(snapshot).expect("snapshot restores");
+    assert_eq!(
+        restored.projection().digest().expect("projection hashes"),
+        machine.projection().digest().expect("projection hashes")
+    );
+    assert_eq!(
+        restored
+            .artifact(&artifact)
+            .expect("artifact restores")
+            .bytes,
+        b"durable"
+    );
+    assert_eq!(
+        restored.submit(start).expect("command retry restores"),
+        receipt
+    );
+    assert_eq!(
+        restored.snapshot().digest().expect("snapshot hashes"),
+        snapshot_digest
+    );
+}
+
+#[test]
 fn binding_is_pinned_and_unknown_effect_must_reconcile() {
     let mut machine = Machine::new();
     let plan = machine.seal_plan(candidate()).expect("plan seals");
