@@ -44,3 +44,6 @@
   skipped.
 - If a force-push event's prior SHA is absent or has no merge base, CI must
   select `full`. Never infer a narrow diff from an unreachable public history.
+- Keep CI lanes as statically declared jobs selected by planner outputs. GitHub
+  resolves `uses:` actions before step-level conditions, so a conditional
+  matrix would download unrelated toolchain actions and defeat lane isolation.

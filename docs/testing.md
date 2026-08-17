@@ -79,6 +79,11 @@ Every execution writes a JSON report under `.cache/test-harness/` with the
 exact HEAD, requested and expanded suites, command arguments, exit status, and
 duration. CI uploads one report per lane.
 
+CI lanes are static jobs selected by planner outputs, not one matrix job with
+conditional setup steps. Each job therefore downloads only the toolchain actions
+its suite actually needs; skipped Go, Node, pnpm, or uv setup is not part of an
+unrelated lane's failure surface.
+
 ## Routing rules
 
 Routing is a conservative union over every changed path:
