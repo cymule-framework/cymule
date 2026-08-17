@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus, DispatchPolicy,
     EffectTransition, Expression, Machine, MutationKind, Operation, PlanCandidate, ROOT_SCOPE_ID,
-    ReconciliationResolution, SealedPlan, WaitSpec, WorldOutcome, canonical_bytes, content_id,
-    effect_intent_id,
+    ReconciliationResolution, Region, SealedPlan, WaitSpec, WorldOutcome, canonical_bytes,
+    content_id, effect_intent_id,
 };
 use cymule_runtime::{ExecutionResult, PluginHost, PluginManifest, PluginRequest, PluginResponse};
 use serde::Serialize;
@@ -29,12 +29,18 @@ pub enum DriveOutcome {
         /// Original structural effect intent.
         intent_id: String,
     },
+    /// Run has committed scopes with effects awaiting an explicit release.
+    ReleaseRequired {
+        /// Structural intents that the caller may release independently.
+        intent_ids: BTreeSet<String>,
+    },
     /// Run reached a terminal Result.
     Completed(ExecutionResult),
 }
 
 /// Resumable sequential interpreter backed by a provider-neutral durable store.
-/// Nested scopes and effects remain delegated to later M1 integration work.
+/// Frame paths and the scope stack are persisted so nested regions can resume
+/// without reconstructing a host-language call stack.
 pub struct ResumableRuntime<S, P> {
     coordinator: DurableCoordinator<S>,
     plugin: P,
@@ -203,6 +209,58 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
         self.drive(run_id)
     }
 
+    /// Explicitly release one prepared effect after its owning scope commits.
+    ///
+    /// The release is idempotent after a lost receipt. Once the fenced claim is
+    /// durable, recovery reconciles under that claim and never redispatches the
+    /// semantic intent.
+    pub fn release_effect(&mut self, intent_id: &str) -> DurableResult<DriveOutcome> {
+        let machine = self.coordinator.restore_machine()?;
+        let state = self.coordinator.state()?;
+        let dispatch = state
+            .outbox
+            .get(intent_id)
+            .ok_or_else(|| DurableError::NotFound(format!("effect {intent_id} is missing")))?;
+        let run_id = dispatch.run_id.clone();
+        let run = machine
+            .projection()
+            .runs
+            .get(&run_id)
+            .ok_or_else(|| DurableError::NotFound(format!("Run {run_id} is missing")))?;
+        let effect = run
+            .effects
+            .get(intent_id)
+            .ok_or_else(|| DurableError::NotFound(format!("effect {intent_id} is missing")))?;
+        let contract = effect_contract(&machine, run, &effect.operation)?;
+        if contract.profile.dispatch != DispatchPolicy::Explicit {
+            return Err(DurableError::IllegalTransition(format!(
+                "effect {intent_id} does not require explicit release"
+            )));
+        }
+        let scope = run.scopes.get(&effect.scope_id).ok_or_else(|| {
+            DurableError::NotFound(format!("scope {} is missing", effect.scope_id))
+        })?;
+        if scope.status != cymule_core::ScopeStatus::ClosedCommitted {
+            return Err(DurableError::IllegalTransition(format!(
+                "effect {intent_id} cannot release before its scope commits"
+            )));
+        }
+        let status = state
+            .continuations
+            .get(&run_id)
+            .ok_or_else(|| DurableError::NotFound(format!("continuation {run_id} is missing")))?
+            .status;
+        if status == ContinuationStatus::Completed {
+            return Ok(DriveOutcome::Completed(completed_result(
+                &machine, &run_id,
+            )?));
+        }
+        if let Some(outcome) = self.dispatch_outbox(&run_id, Some(intent_id))? {
+            return Ok(outcome);
+        }
+        self.drive(&run_id)
+    }
+
     /// Access durable state for inspection.
     pub const fn coordinator(&self) -> &DurableCoordinator<S> {
         &self.coordinator
@@ -235,13 +293,69 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     DurableError::Validation("input artifact is missing".to_owned())
                 })?,
             )?;
+            let frame_index =
+                continuation.frames.len().checked_sub(1).ok_or_else(|| {
+                    DurableError::Validation("continuation has no frame".to_owned())
+                })?;
+            let region = region_at_path(
+                &definition.body,
+                &continuation.frames[frame_index].region_path,
+            )?
+            .clone();
+            let current_scope =
+                continuation.scope_stack.last().cloned().ok_or_else(|| {
+                    DurableError::Validation("continuation has no scope".to_owned())
+                })?;
             let frame = continuation
                 .frames
-                .last_mut()
-                .ok_or_else(|| DurableError::Validation("continuation has no frame".to_owned()))?;
+                .get_mut(frame_index)
+                .expect("frame index exists");
 
-            let Some(step) = definition.body.steps.get(frame.next_step) else {
-                let value = evaluate(&machine, &definition.body.result, &input, &frame.locals)?;
+            let Some(step) = region.steps.get(frame.next_step) else {
+                let value = evaluate(&machine, &region.result, &input, &frame.locals)?;
+                if frame_index > 0 {
+                    let parent_index = frame_index - 1;
+                    let parent_path = continuation.frames[parent_index].region_path.clone();
+                    let parent_step_index = continuation.frames[parent_index].next_step;
+                    let parent_region = region_at_path(&definition.body, &parent_path)?;
+                    let parent_step =
+                        parent_region.steps.get(parent_step_index).ok_or_else(|| {
+                            DurableError::Validation(
+                                "parent scope frame no longer points at its child step".to_owned(),
+                            )
+                        })?;
+                    let Operation::Scope { bind, .. } = &parent_step.operation else {
+                        return Err(DurableError::Validation(
+                            "parent scope frame points at a non-scope step".to_owned(),
+                        ));
+                    };
+                    submit(
+                        &mut machine,
+                        run_id,
+                        format!("{run_id}:commit:{current_scope}:{}", continuation.epoch),
+                        Command::CommitScope {
+                            scope_id: current_scope.clone(),
+                        },
+                    )?;
+                    let result_ref =
+                        machine.put_artifact("cymule.scope-result/1", canonical_bytes(&value)?);
+                    continuation.frames.pop();
+                    continuation.scope_stack.pop();
+                    let parent = continuation
+                        .frames
+                        .get_mut(parent_index)
+                        .expect("parent frame remains");
+                    parent.next_step += 1;
+                    if let Some(binding) = bind {
+                        parent.locals.insert(binding.clone(), result_ref);
+                    }
+                    self.coordinator
+                        .checkpoint(&machine, continuation.clone(), None)?;
+                    if let Some(outcome) = self.dispatch_outbox(run_id, None)? {
+                        return Ok(outcome);
+                    }
+                    continue;
+                }
                 if machine.projection().runs[run_id].scopes[ROOT_SCOPE_ID].status
                     == cymule_core::ScopeStatus::Open
                 {
@@ -256,8 +370,14 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     self.coordinator
                         .checkpoint(&machine, continuation.clone(), None)?;
                 }
-                if let Some(outcome) = self.dispatch_outbox(run_id)? {
+                if let Some(outcome) = self.dispatch_outbox(run_id, None)? {
                     return Ok(outcome);
+                }
+                let explicit = pending_explicit_effects(&machine, run_id)?;
+                if !explicit.is_empty() {
+                    return Ok(DriveOutcome::ReleaseRequired {
+                        intent_ids: explicit,
+                    });
                 }
                 machine = self.coordinator.restore_machine()?;
                 yield_attempt(&mut machine, run_id, continuation.epoch)?;
@@ -391,12 +511,6 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     occurrence,
                     bind,
                 } => {
-                    if bind.is_some() {
-                        return Err(DurableError::Validation(
-                            "commit-gated durable effects cannot bind inside the open scope"
-                                .to_owned(),
-                        ));
-                    }
                     let contract = plan
                         .candidate
                         .effects
@@ -405,11 +519,11 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         .ok_or_else(|| {
                             DurableError::Validation(format!("effect contract {effect} is missing"))
                         })?;
-                    if contract.profile.mutation != MutationKind::Mutating
-                        || contract.profile.dispatch != DispatchPolicy::OnScopeCommit
-                    {
+                    let eager = contract.profile.mutation == MutationKind::Observational
+                        && contract.profile.dispatch == DispatchPolicy::Eager;
+                    if bind.is_some() && !eager {
                         return Err(DurableError::Validation(
-                            "resumable M1 currently requires mutating on_scope_commit effects"
+                            "deferred durable effects cannot bind inside their open scope"
                                 .to_owned(),
                         ));
                     }
@@ -431,18 +545,52 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         run_id,
                         &plan.candidate.entry,
                         &step.id,
-                        ROOT_SCOPE_ID,
+                        &current_scope,
                         continuation.epoch,
                         occurrence,
                         &args,
                         "cymule.effect-schema/1",
                     )?;
+                    if eager
+                        && let Some(dispatch) =
+                            self.coordinator.state()?.outbox.get(&intent_id).cloned()
+                    {
+                        match dispatch.state {
+                            OutboxState::Applied => {
+                                if let Some(binding) = bind {
+                                    let result = dispatch.result.ok_or_else(|| {
+                                        DurableError::Validation(format!(
+                                            "eager effect {intent_id} produced no bound result"
+                                        ))
+                                    })?;
+                                    frame.locals.insert(binding.clone(), result);
+                                }
+                                frame.next_step += 1;
+                                self.coordinator.checkpoint(&machine, continuation, None)?;
+                            }
+                            OutboxState::NotApplied if bind.is_none() => {
+                                frame.next_step += 1;
+                                self.coordinator.checkpoint(&machine, continuation, None)?;
+                            }
+                            OutboxState::NotApplied => {
+                                return Err(DurableError::IllegalTransition(format!(
+                                    "eager effect {intent_id} was not applied and has no result"
+                                )));
+                            }
+                            OutboxState::Pending | OutboxState::Claimed | OutboxState::Unknown => {
+                                if let Some(outcome) = self.dispatch_outbox(run_id, None)? {
+                                    return Ok(outcome);
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     submit(
                         &mut machine,
                         run_id,
                         format!("{run_id}:effect-propose:{}", step.id),
                         Command::ProposeEffect {
-                            scope_id: ROOT_SCOPE_ID.to_owned(),
+                            scope_id: current_scope.clone(),
                             invocation_id: plan.candidate.entry.clone(),
                             site_id: step.id.clone(),
                             occurrence: occurrence.clone(),
@@ -473,10 +621,12 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                             transition: EffectTransition::Prepare,
                         },
                     )?;
-                    frame.next_step += 1;
+                    if !eager {
+                        frame.next_step += 1;
+                    }
                     self.coordinator.checkpoint_effect_enqueue(
                         &machine,
-                        continuation,
+                        continuation.clone(),
                         EffectDispatch {
                             intent_id,
                             run_id: run_id.to_owned(),
@@ -489,32 +639,90 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                             result: None,
                         },
                     )?;
+                    if eager && let Some(outcome) = self.dispatch_outbox(run_id, None)? {
+                        return Ok(outcome);
+                    }
                 }
                 Operation::Scope { .. } => {
-                    return Err(DurableError::Validation(format!(
-                        "resumable M1 interpreter does not yet support step {}",
-                        step.id
-                    )));
+                    let mut child_path = frame.region_path.clone();
+                    child_path.push(frame.next_step);
+                    let child_scope = durable_scope_id(
+                        run_id,
+                        &frame.invocation_id,
+                        &child_path,
+                        &step.id,
+                        continuation.epoch,
+                    )?;
+                    submit(
+                        &mut machine,
+                        run_id,
+                        format!("{run_id}:open:{child_scope}:{}", continuation.epoch),
+                        Command::OpenScope {
+                            scope_id: child_scope.clone(),
+                            parent_scope: current_scope,
+                        },
+                    )?;
+                    let child_locals = frame.locals.clone();
+                    let invocation_id = frame.invocation_id.clone();
+                    continuation.scope_stack.push(child_scope);
+                    continuation.frames.push(FrameState {
+                        invocation_id,
+                        region_path: child_path,
+                        next_step: 0,
+                        locals: child_locals,
+                    });
+                    self.coordinator.checkpoint(&machine, continuation, None)?;
                 }
             }
         }
     }
 
-    fn dispatch_outbox(&mut self, run_id: &str) -> DurableResult<Option<DriveOutcome>> {
-        let entries: Vec<EffectDispatch> = self
-            .coordinator
-            .state()?
-            .outbox
-            .values()
-            .filter(|dispatch| {
-                dispatch.run_id == run_id
-                    && matches!(
-                        dispatch.state,
-                        OutboxState::Pending | OutboxState::Claimed | OutboxState::Unknown
-                    )
-            })
-            .cloned()
-            .collect();
+    fn dispatch_outbox(
+        &mut self,
+        run_id: &str,
+        explicit_release: Option<&str>,
+    ) -> DurableResult<Option<DriveOutcome>> {
+        let scheduling_machine = self.coordinator.restore_machine()?;
+        let scheduling_run = scheduling_machine
+            .projection()
+            .runs
+            .get(run_id)
+            .ok_or_else(|| DurableError::NotFound(format!("Run {run_id} is missing")))?;
+        let mut entries = Vec::new();
+        for dispatch in self.coordinator.state()?.outbox.values() {
+            if dispatch.run_id != run_id {
+                continue;
+            }
+            let effect = scheduling_run
+                .effects
+                .get(&dispatch.intent_id)
+                .ok_or_else(|| {
+                    DurableError::NotFound(format!("effect {} is missing", dispatch.intent_id))
+                })?;
+            let contract = effect_contract(&scheduling_machine, scheduling_run, &effect.operation)?;
+            let scope = scheduling_run.scopes.get(&effect.scope_id).ok_or_else(|| {
+                DurableError::NotFound(format!("scope {} is missing", effect.scope_id))
+            })?;
+            let eligible = match dispatch.state {
+                OutboxState::Pending => match contract.profile.dispatch {
+                    DispatchPolicy::Eager => {
+                        contract.profile.mutation == MutationKind::Observational
+                    }
+                    DispatchPolicy::OnScopeCommit => {
+                        scope.status == cymule_core::ScopeStatus::ClosedCommitted
+                    }
+                    DispatchPolicy::Explicit => {
+                        scope.status == cymule_core::ScopeStatus::ClosedCommitted
+                            && explicit_release == Some(dispatch.intent_id.as_str())
+                    }
+                },
+                OutboxState::Claimed | OutboxState::Unknown => true,
+                OutboxState::Applied | OutboxState::NotApplied => false,
+            };
+            if eligible {
+                entries.push(dispatch.clone());
+            }
+        }
         for entry in entries {
             let mut machine = self.coordinator.restore_machine()?;
             let input = read_value(&machine, &entry.input)?;
@@ -703,6 +911,97 @@ const fn reconciliation_suffix(resolution: ReconciliationResolution) -> &'static
         ReconciliationResolution::StillUnknown => "still-unknown",
         ReconciliationResolution::GovernanceRequired => "governance-required",
     }
+}
+
+fn region_at_path<'a>(root: &'a Region, path: &[usize]) -> DurableResult<&'a Region> {
+    let mut region = root;
+    for step_index in path {
+        let step = region.steps.get(*step_index).ok_or_else(|| {
+            DurableError::Validation(format!(
+                "nested region path references missing step {step_index}"
+            ))
+        })?;
+        let Operation::Scope { body, .. } = &step.operation else {
+            return Err(DurableError::Validation(format!(
+                "nested region path step {step_index} is not a scope"
+            )));
+        };
+        region = body;
+    }
+    Ok(region)
+}
+
+fn durable_scope_id(
+    run_id: &str,
+    invocation_id: &str,
+    region_path: &[usize],
+    step_id: &str,
+    epoch: u64,
+) -> DurableResult<String> {
+    content_id(
+        "cymule.durable-scope/1",
+        &(run_id, invocation_id, region_path, step_id, epoch),
+    )
+    .map_err(Into::into)
+}
+
+fn effect_contract<'a>(
+    machine: &'a Machine,
+    run: &cymule_core::RunProjection,
+    operation: &str,
+) -> DurableResult<&'a cymule_core::EffectContract> {
+    let plan = machine
+        .plan(&run.current_plan)
+        .ok_or_else(|| DurableError::NotFound(format!("Plan {} is missing", run.current_plan)))?;
+    plan.candidate
+        .effects
+        .iter()
+        .find(|contract| contract.id == operation)
+        .ok_or_else(|| DurableError::NotFound(format!("effect contract {operation} is missing")))
+}
+
+fn pending_explicit_effects(machine: &Machine, run_id: &str) -> DurableResult<BTreeSet<String>> {
+    let run = machine
+        .projection()
+        .runs
+        .get(run_id)
+        .ok_or_else(|| DurableError::NotFound(format!("Run {run_id} is missing")))?;
+    run.effects
+        .values()
+        .filter(|effect| effect.phase == cymule_core::EffectPhase::Prepared)
+        .filter_map(|effect| {
+            let result = effect_contract(machine, run, &effect.operation);
+            match result {
+                Ok(contract) if contract.profile.dispatch == DispatchPolicy::Explicit => {
+                    Some(Ok(effect.intent_id.clone()))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .collect()
+}
+
+fn completed_result(machine: &Machine, run_id: &str) -> DurableResult<ExecutionResult> {
+    let run = machine
+        .projection()
+        .runs
+        .get(run_id)
+        .ok_or_else(|| DurableError::NotFound(format!("Run {run_id} is missing")))?;
+    let value = run
+        .result
+        .as_ref()
+        .map(|reference| read_value(machine, reference))
+        .transpose()?
+        .unwrap_or(Value::Null);
+    Ok(ExecutionResult {
+        run_id: run_id.to_owned(),
+        plan_id: run.current_plan.clone(),
+        value,
+        projection_digest: machine.projection().digest()?,
+        precondition_token: run.precondition_token(),
+        effects: run.effects.keys().cloned().collect(),
+    })
 }
 
 fn validate_manifest(plan: &SealedPlan, manifest: &PluginManifest) -> DurableResult<()> {

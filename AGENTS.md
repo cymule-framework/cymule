@@ -34,6 +34,9 @@ Use this precedence order when guidance conflicts:
   Updating future defaults must never reinterpret historical work.
 - Scope closure commits declared state and transfers effect obligations. It does
   not claim that the external world has settled.
+- Only observational effects may dispatch eagerly while a scope is open.
+  Commit-gated effects wait for their owning scope; explicit effects remain
+  prepared until a caller issues the release control after commit.
 - An ambiguous dispatch becomes `unknown` and follows reconciliation. Never turn
   it into a fresh semantic intent or silently redispatch it.
 - Durable Effect stages validate an exact canonical Machine delta against their

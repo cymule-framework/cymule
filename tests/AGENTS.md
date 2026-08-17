@@ -21,6 +21,12 @@
   scope commit, dispatch-start claim, provider application, Applied settlement,
   and Unknown observation. Assert exact provider call counts and reject
   unrelated Machine deltas at every outbox stage.
+- Nested-scope restart tests must fault both before and after the child commit,
+  prove no staged effect dispatches while its scope is open, and reopen from the
+  persisted region path without repeating completed component occurrences.
+- Eager-effect tests retain the frame until a durable result binding exists.
+  Explicit-release tests prove resume alone performs no dispatch and retry the
+  same release after claim or settlement receipt loss.
 - Wait activation fixtures contain only stable delivery/source/wait/Artifact
   identities. Stateful tests must cover redelivery, conflicting identity,
   source mismatch, consume-once competition, stale CAS, reopen, and epoch

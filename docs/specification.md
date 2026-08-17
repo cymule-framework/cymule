@@ -397,6 +397,13 @@ outcome: unobserved | applied | not-applied | unknown
 reconciliation: not-required | pending | resolved | governance-required
 ```
 
+Dispatch policy is admission authority, not adapter preference. `eager` is
+legal only for observational effects and may claim while the scope is open.
+`on_scope_commit` remains pending until its owning scope is committed.
+`explicit` remains prepared after commit until the caller releases that exact
+intent; repeating release after receipt loss MUST converge on the recorded
+claim, reconciliation, settlement, or completed Result.
+
 After dispatch ambiguity, the original intent becomes `unknown`. It MUST keep
 its original occurrence binding and reconciler. It MUST NOT become a fresh
 intent. An `unknown` outbox entry remains eligible for reconciliation under its
@@ -417,6 +424,11 @@ unrelated Artifacts, and unrelated Events MUST remain byte-identical.
 structural intent ID, immutable binding, and input. Adapters MUST make this
 operation idempotent. A committed `DispatchStarted` with no authoritative
 outcome enters reconciliation after reopen and MUST NOT redispatch.
+
+The M1 resumable interpreter persists nested frames as index-only paths into the
+sealed Plan plus a matching scope stack. A restart MUST resolve the path from
+the immutable Plan, MUST NOT serialize a host-language call stack, and MUST NOT
+dispatch a child commit-gated effect while its child scope remains open.
 
 ## 12. Binding evolution
 
