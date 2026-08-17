@@ -44,6 +44,10 @@ Use this precedence order when guidance conflicts:
   substrate interfaces.
 - Keep all source code, comments, documentation, commit messages, schemas, and
   user-facing project metadata in English.
+- GitHub Actions is the only publication authority for every public artifact,
+  including packages, release assets, and future registry distributions. Local
+  commands may build, test, stage, and inspect release bytes, but must never
+  publish them or require a long-lived registry token.
 
 ## Change discipline
 

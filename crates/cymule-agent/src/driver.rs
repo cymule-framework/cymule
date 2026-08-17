@@ -1,27 +1,50 @@
 use crate::{
-    AgentError, AgentHost, AgentMessage, AgentResult, AgentSession, AgentState, AgentUpdate,
-    ContentBlock, ContextRequest, MessageRole, ModelRequest, PermissionDecision, PermissionRequest,
-    SessionStopReason, ToolCall, ToolCallStatus,
+    AgentError, AgentHost, AgentJournal, AgentMessage, AgentResult, AgentSession, AgentState,
+    AgentUpdate, ContentBlock, ContextRequest, MessageRole, ModelRequest, NoopAgentJournal,
+    PermissionDecision, PermissionRequest, SessionStopReason, ToolCall, ToolCallStatus,
 };
 
 /// Synchronous reference turn driver over one replaceable `AgentHost`.
 #[must_use]
-pub struct AgentTurnDriver<H> {
+pub struct AgentTurnDriver<H, J = NoopAgentJournal> {
     host: H,
+    journal: J,
     session: AgentSession,
     sequence: u64,
     max_model_rounds: u32,
 }
 
-impl<H: AgentHost> AgentTurnDriver<H> {
+impl<H: AgentHost> AgentTurnDriver<H, NoopAgentJournal> {
     /// Create a driver for one Session.
     pub fn new(session_id: impl Into<String>, host: H) -> Self {
         Self {
             host,
+            journal: NoopAgentJournal,
             session: AgentSession::new(session_id),
             sequence: 0,
             max_model_rounds: 16,
         }
+    }
+}
+
+impl<H: AgentHost, J: AgentJournal> AgentTurnDriver<H, J> {
+    /// Restore a durable driver by replaying one Session journal.
+    pub fn resume(session_id: impl Into<String>, host: H, mut journal: J) -> AgentResult<Self> {
+        let session_id = session_id.into();
+        let updates = journal.load(&session_id)?;
+        let sequence = updates
+            .iter()
+            .filter_map(|update| update.update_id().rsplit(':').next()?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        let session = AgentSession::replay(session_id, updates)?;
+        Ok(Self {
+            host,
+            journal,
+            session,
+            sequence,
+            max_model_rounds: 16,
+        })
     }
 
     /// Set the bounded number of model rounds in one foreground turn.
@@ -43,12 +66,12 @@ impl<H: AgentHost> AgentTurnDriver<H> {
             ));
         }
         let update_id = self.next_id("user-message");
-        self.apply(AgentUpdate::Message {
+        self.apply(&AgentUpdate::Message {
             update_id,
             message: user_message,
         })?;
         let update_id = self.next_id("running");
-        self.apply(AgentUpdate::State {
+        self.apply(&AgentUpdate::State {
             update_id,
             state: AgentState::Running,
             stop_reason: None,
@@ -66,19 +89,19 @@ impl<H: AgentHost> AgentTurnDriver<H> {
                 tools: tools.to_owned(),
             })?;
             let update_id = self.next_id("usage");
-            self.apply(AgentUpdate::Usage {
+            self.apply(&AgentUpdate::Usage {
                 update_id,
                 usage: response.usage,
             })?;
             let update_id = self.next_id("agent-message");
-            self.apply(AgentUpdate::Message {
+            self.apply(&AgentUpdate::Message {
                 update_id,
                 message: response.message,
             })?;
 
             if response.tool_requests.is_empty() {
                 let update_id = self.next_id("idle");
-                self.apply(AgentUpdate::State {
+                self.apply(&AgentUpdate::State {
                     update_id,
                     state: AgentState::Idle,
                     stop_reason: Some(SessionStopReason::EndTurn),
@@ -97,7 +120,7 @@ impl<H: AgentHost> AgentTurnDriver<H> {
                 if decision == PermissionDecision::Deny {
                     self.update_tool(&request, ToolCallStatus::Cancelled, None)?;
                     let update_id = self.next_id("tool-denied");
-                    self.apply(AgentUpdate::Message {
+                    self.apply(&AgentUpdate::Message {
                         update_id,
                         message: AgentMessage {
                             message_id: format!("message:tool:{}", request.tool_call_id),
@@ -122,7 +145,7 @@ impl<H: AgentHost> AgentTurnDriver<H> {
                     Some(tool_response.content.clone()),
                 )?;
                 let update_id = self.next_id("tool-message");
-                self.apply(AgentUpdate::Message {
+                self.apply(&AgentUpdate::Message {
                     update_id,
                     message: AgentMessage {
                         message_id: format!("message:tool:{}", request.tool_call_id),
@@ -148,6 +171,11 @@ impl<H: AgentHost> AgentTurnDriver<H> {
         (self.host, self.session)
     }
 
+    /// Consume the driver and return its host, journal, and Session.
+    pub fn into_durable_parts(self) -> (H, J, AgentSession) {
+        (self.host, self.journal, self.session)
+    }
+
     fn update_tool(
         &mut self,
         request: &crate::ToolRequest,
@@ -155,7 +183,7 @@ impl<H: AgentHost> AgentTurnDriver<H> {
         output: Option<Vec<ContentBlock>>,
     ) -> AgentResult<()> {
         let update_id = self.next_id("tool");
-        self.apply(AgentUpdate::Tool {
+        self.apply(&AgentUpdate::Tool {
             update_id,
             tool: ToolCall {
                 tool_call_id: request.tool_call_id.clone(),
@@ -168,8 +196,12 @@ impl<H: AgentHost> AgentTurnDriver<H> {
         })
     }
 
-    fn apply(&mut self, update: AgentUpdate) -> AgentResult<()> {
-        self.session.apply(update)
+    fn apply(&mut self, update: &AgentUpdate) -> AgentResult<()> {
+        let mut next = self.session.clone();
+        next.apply(update.clone())?;
+        self.journal.append(&self.session.session_id, update)?;
+        self.session = next;
+        Ok(())
     }
 
     fn next_id(&mut self, kind: &str) -> String {

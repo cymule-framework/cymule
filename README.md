@@ -272,10 +272,15 @@ The process protocol is intentionally simple and useful for local integration.
 It is not the only possible production transport. Future WIT or network
 transports can implement the same `PluginHost` behavior.
 
+Public packages and release artifacts are produced only by GitHub Actions after
+repository verification and staged-byte inspection. npm packages use trusted
+publishing and provenance; local development commands never publish releases.
+
 ## Current capabilities and limits
 
-Version `0.1.0` implements the bounded Semantic Interpreter M0 and Embedded M0
-profiles.
+Version `0.1.x` implements the bounded Semantic Interpreter M0 and Embedded M0
+profiles. M1 through M4 have useful, tested foundations but remain partial and
+are not advertised as complete conformance profiles.
 
 Implemented today:
 
@@ -287,21 +292,32 @@ Implemented today:
 - scope, effect, obligation, and reconciliation state machines;
 - future-default binding updates with pinned Attempt and Effect bindings;
 - one-shot process plugins and four SDK execution chains;
-- `wait` authoring and a suspension boundary.
+- durable whole-state CAS, complete Continuations, waits, leases, outbox, and
+  component occurrence replay;
+- process reopen after a durable wait without reinvoking a recorded component;
+- ambiguous mutating-effect recovery by reconciliation without redispatch;
+- typed agent interactions with M1-backed Session journal replay;
+- bounded virtual work with deterministic fairness and portable snapshots;
+- immutable Plan evolution DAGs, impact cones, canaries, rollback pins,
+  migration receipts, and shadow evidence.
 
 Not yet claimed:
 
-- persistent crash recovery and durable wait resumption;
-- a persisted complete continuation object;
-- exact execution replay of unrecorded component outputs;
+- complete nested-scope durable interpretation and every crash window;
+- durable host occurrence recovery for model, context, permission, tool,
+  elicitation, and workspace calls;
+- durable virtual-work partition migration and subtree rehydration;
+- automatic live-evolution diffing, shadow execution, observation gates, and
+  mixed-version dispatch;
 - distributed ownership, consensus, scheduling, and failover;
 - strong untrusted-code or multi-tenant isolation;
 - provider-level exactly-once guarantees;
 - a registered MLIR dialect and deterministic MLIR-to-Plan lowering.
 
 M0 proves exact canonical **state replay** over retained Events and required
-Artifacts. It does not claim exact execution replay or distributed durability.
-The distinction is intentional and tested.
+Artifacts. Partial M1 additionally proves resume and exact execution replay
+only where a component occurrence was durably recorded. Neither claim implies
+distributed consensus or provider-level exactly-once behavior.
 
 See [Conformance](docs/conformance.md) for precise profile claims and
 [Roadmap](docs/roadmap.md) for the implementation sequence.

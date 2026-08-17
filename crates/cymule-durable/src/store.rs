@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 
 use crate::{DurableError, DurableResult, DurableState, StoredState};
 
@@ -39,10 +39,14 @@ impl MemoryStore {
 
 impl DurableStore for MemoryStore {
     fn load(&mut self) -> DurableResult<Option<StoredState>> {
-        self.current
-            .lock()
-            .map(|current| current.clone())
-            .map_err(|error| DurableError::Substrate(error.to_string()))
+        match self.current.try_lock() {
+            Ok(current) => Ok(current.clone()),
+            Err(TryLockError::WouldBlock) => Err(DurableError::Conflict {
+                expected: None,
+                current: Some("memory-store-writer-active".to_owned()),
+            }),
+            Err(TryLockError::Poisoned(error)) => Err(DurableError::Substrate(error.to_string())),
+        }
     }
 
     fn compare_and_swap(
@@ -50,10 +54,18 @@ impl DurableStore for MemoryStore {
         expected_revision: Option<&str>,
         next: &DurableState,
     ) -> DurableResult<StoreCommit> {
-        let mut stored = self
-            .current
-            .lock()
-            .map_err(|error| DurableError::Substrate(error.to_string()))?;
+        let mut stored = match self.current.try_lock() {
+            Ok(stored) => stored,
+            Err(TryLockError::WouldBlock) => {
+                return Err(DurableError::Conflict {
+                    expected: expected_revision.map(str::to_owned),
+                    current: Some("memory-store-writer-active".to_owned()),
+                });
+            }
+            Err(TryLockError::Poisoned(error)) => {
+                return Err(DurableError::Substrate(error.to_string()));
+            }
+        };
         let current = stored.as_ref().map(|current| current.revision.clone());
         if expected_revision != current.as_deref() {
             return Err(DurableError::Conflict {

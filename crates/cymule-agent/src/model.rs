@@ -157,7 +157,8 @@ pub enum AgentUpdate {
 }
 
 impl AgentUpdate {
-    fn id(&self) -> &str {
+    /// Stable idempotency identity for this update.
+    pub fn update_id(&self) -> &str {
         match self {
             Self::Message { update_id, .. }
             | Self::State { update_id, .. }
@@ -208,17 +209,17 @@ impl AgentSession {
     pub fn apply(&mut self, update: AgentUpdate) -> AgentResult<()> {
         let update_hash =
             canonical_digest(&update).map_err(|error| AgentError::Validation(error.to_string()))?;
-        if let Some(existing) = self.applied_updates.get(update.id()) {
+        if let Some(existing) = self.applied_updates.get(update.update_id()) {
             return if existing == &update_hash {
                 Ok(())
             } else {
                 Err(AgentError::IllegalTransition(format!(
                     "update ID {} was reused with different content",
-                    update.id()
+                    update.update_id()
                 )))
             };
         }
-        let update_id = update.id().to_owned();
+        let update_id = update.update_id().to_owned();
         match update {
             AgentUpdate::Message { message, .. } => {
                 if !self.messages.contains_key(&message.message_id) {
@@ -264,6 +265,18 @@ impl AgentSession {
         self.message_order
             .iter()
             .filter_map(|id| self.messages.get(id))
+    }
+
+    /// Rebuild a Session projection from its ordered durable update journal.
+    pub fn replay(
+        session_id: impl Into<String>,
+        updates: impl IntoIterator<Item = AgentUpdate>,
+    ) -> AgentResult<Self> {
+        let mut session = Self::new(session_id);
+        for update in updates {
+            session.apply(update)?;
+        }
+        Ok(session)
     }
 }
 
