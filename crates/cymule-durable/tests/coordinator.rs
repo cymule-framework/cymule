@@ -172,7 +172,12 @@ fn continuation(plan_id: String) -> Continuation {
         plan_id,
         binding_context: "binding:test/1".to_owned(),
         frames: vec![FrameState {
+            definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
+            input: cymule_core::ArtifactRef {
+                artifact_id: format!("sha256:{}", "0".repeat(64)),
+                kind: "test/input".to_owned(),
+            },
             region_path: Vec::new(),
             next_step: 0,
             locals: BTreeMap::new(),

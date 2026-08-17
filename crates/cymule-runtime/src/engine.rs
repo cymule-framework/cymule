@@ -50,6 +50,7 @@ pub struct EmbeddedRuntime<P: PluginHost> {
     plugin: P,
     command_sequence: u64,
     scope_sequence: u64,
+    invocation_sequence: u64,
 }
 
 impl<P: PluginHost> EmbeddedRuntime<P> {
@@ -60,6 +61,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             plugin,
             command_sequence: 0,
             scope_sequence: 0,
+            invocation_sequence: 0,
         }
     }
 
@@ -119,6 +121,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             &definition.body,
             input,
             ROOT_SCOPE_ID,
+            &definition.id,
             &mut environment,
         )?;
 
@@ -171,6 +174,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
         region: &Region,
         input: &Value,
         scope_id: &str,
+        invocation_id: &str,
         environment: &mut BTreeMap<String, Value>,
     ) -> RuntimeResult<RegionOutcome> {
         let mut pending = Vec::new();
@@ -193,6 +197,37 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                     };
                     if let Some(binding) = bind {
                         environment.insert(binding.clone(), value);
+                    }
+                }
+                Operation::Invoke {
+                    definition,
+                    input: expression,
+                    bind,
+                } => {
+                    let value = evaluate(expression, input, environment)?;
+                    let target = plan
+                        .candidate
+                        .definitions
+                        .iter()
+                        .find(|candidate| candidate.id == *definition)
+                        .expect("plan validation guarantees invoked definition");
+                    self.invocation_sequence += 1;
+                    let child_invocation =
+                        format!("{invocation_id}/{}:{}", step.id, self.invocation_sequence);
+                    let mut child_environment = BTreeMap::new();
+                    let child = self.execute_region(
+                        run_id,
+                        plan,
+                        manifest,
+                        &target.body,
+                        &value,
+                        scope_id,
+                        &child_invocation,
+                        &mut child_environment,
+                    )?;
+                    pending.extend(child.pending);
+                    if let Some(binding) = bind {
+                        environment.insert(binding.clone(), child.value);
                     }
                 }
                 Operation::Wait { wait } => {
@@ -221,7 +256,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                     let epoch = self.current_epoch(run_id)?;
                     let intent_id = effect_intent_id(
                         run_id,
-                        &plan.candidate.entry,
+                        invocation_id,
                         &step.id,
                         scope_id,
                         epoch,
@@ -233,7 +268,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         run_id,
                         Command::ProposeEffect {
                             scope_id: scope_id.to_owned(),
-                            invocation_id: plan.candidate.entry.clone(),
+                            invocation_id: invocation_id.to_owned(),
                             site_id: step.id.clone(),
                             occurrence: occurrence.clone(),
                             operation: effect.clone(),
@@ -306,6 +341,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         body,
                         input,
                         &child_scope,
+                        invocation_id,
                         &mut child_environment,
                     )?;
                     self.submit(

@@ -13,6 +13,9 @@
 - Nested interpreter frames persist an index-only `region_path` into the sealed
   Plan and a matching scope stack. Resume must re-resolve that path from the
   immutable Plan; never serialize nested Region bodies into Continuations.
+- Each durable frame separates `definition_id`, structural `invocation_id`, and
+  immutable input Artifact. Invoked definitions push frames without pushing a
+  scope; nested scopes retain the current definition, invocation, and input.
 - Wait completion, lease acquisition, outbox claims, occurrence recording, and
   snapshot publication must be idempotent and fenced.
 - Higher profiles that couple a logical lease to journal state must preview the

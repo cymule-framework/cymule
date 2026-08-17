@@ -460,6 +460,71 @@ fn nested_wait_candidate() -> PlanCandidate {
     }
 }
 
+fn invoked_wait_candidate() -> PlanCandidate {
+    PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "invoked_resume_after_input".to_owned(),
+        entry: "main".to_owned(),
+        components: vec![ComponentContract {
+            id: "test.greet".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            requirements: BTreeMap::new(),
+        }],
+        effects: Vec::new(),
+        definitions: vec![
+            Definition {
+                id: "main".to_owned(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                body: Region {
+                    steps: vec![Step {
+                        id: "invoke.review".to_owned(),
+                        operation: Operation::Invoke {
+                            definition: "review".to_owned(),
+                            input: Expression::Input,
+                            bind: Some("review_result".to_owned()),
+                        },
+                    }],
+                    result: Expression::Binding {
+                        name: "review_result".to_owned(),
+                    },
+                },
+            },
+            Definition {
+                id: "review".to_owned(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                body: Region {
+                    steps: vec![
+                        Step {
+                            id: "call.review-greet".to_owned(),
+                            operation: Operation::Call {
+                                component: "test.greet".to_owned(),
+                                input: Expression::Input,
+                                bind: Some("greeting".to_owned()),
+                            },
+                        },
+                        Step {
+                            id: "wait.review-approval".to_owned(),
+                            operation: Operation::Wait {
+                                wait: WaitSpec::Input {
+                                    correlation: "review-approval".to_owned(),
+                                    schema: json!({}),
+                                },
+                            },
+                        },
+                    ],
+                    result: Expression::Binding {
+                        name: "greeting".to_owned(),
+                    },
+                },
+            },
+        ],
+        metadata: BTreeMap::new(),
+    }
+}
+
 fn effect_candidate() -> PlanCandidate {
     PlanCandidate {
         ir_version: cymule_core::IR_VERSION.to_owned(),
@@ -673,6 +738,55 @@ fn nested_scope_wait_reopens_from_region_path_without_reinvoking_component() {
     assert_eq!(
         restored.continuations["run:nested-resume"].scope_stack,
         vec![cymule_core::ROOT_SCOPE_ID.to_owned()]
+    );
+}
+
+#[test]
+fn invoked_definition_wait_reopens_without_reinvoking_completed_component() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut runtime = ResumableRuntime::open(
+        MemoryStore::new(),
+        CountingPlugin {
+            calls: calls.clone(),
+        },
+    )
+    .expect("runtime opens");
+    let run_id = "run:invoked-resume";
+    let DriveOutcome::Suspended { wait_id } = runtime
+        .start(invoked_wait_candidate(), &json!({"name": "Ada"}), run_id)
+        .expect("invoked Run suspends")
+    else {
+        panic!("invoked Run should suspend");
+    };
+    let continuation = &runtime.coordinator().state().expect("state").continuations[run_id];
+    assert_eq!(continuation.frames.len(), 2);
+    assert_eq!(continuation.frames[0].definition_id, "main");
+    assert_eq!(continuation.frames[1].definition_id, "review");
+    assert!(continuation.frames[1].invocation_id.starts_with("sha256:"));
+    assert_eq!(continuation.scope_stack.len(), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let (store, _) = runtime.into_parts();
+    let mut reopened = ResumableRuntime::open(
+        store,
+        CountingPlugin {
+            calls: calls.clone(),
+        },
+    )
+    .expect("runtime reopens");
+    let DriveOutcome::Completed(result) = reopened
+        .complete_wait(&wait_id, &json!({"approved": true}))
+        .expect("invoked Run resumes")
+    else {
+        panic!("invoked Run should complete");
+    };
+    assert_eq!(result.value, json!({"greeting": "Hello, Ada!"}));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        reopened.coordinator().state().expect("state").continuations[run_id]
+            .frames
+            .len(),
+        1
     );
 }
 

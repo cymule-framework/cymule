@@ -6,6 +6,12 @@ domains described in `docs/specification.md`.
 
 ## [Unreleased]
 
+- Introduce frozen `cymule.ir/2` with reusable local definition invocation,
+  durable invocation frames, and matching TypeScript, Python, Rust, and Go
+  authoring/execution conformance.
+- Add latest-compatible reusable-definition registry linking with exact-schema
+  compatibility, direct dependent relinking, pinned revisions, and historical
+  parent Plan retention.
 - Add a self-contained Hello World Flow and example plugin as the stable user
   quick start.
 - Publish GitHub-native repository metadata, CI, and a clean-history public

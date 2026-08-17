@@ -1,7 +1,11 @@
 # Cymule Python SDK
 
-This package authors `cymule.ir/1` Plan Candidates and calls a trusted Cymule
+This package authors `cymule.ir/2` Plan Candidates and calls a trusted Cymule
 Engine. It has no runtime dependencies and does not implement semantic replay.
+
+`FlowBuilder.definition()` adds a reusable definition to the same immutable
+Plan and `invoke()` calls it with explicit input and result binding. The Python
+SDK never resolves logical latest-compatible registry heads.
 
 ```python
 from cymule import CliEngine, ResourceBuilder

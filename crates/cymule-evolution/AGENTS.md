@@ -8,6 +8,10 @@
 - Never implement a dynamic `latest` reference inside a sealed Plan. Existing
   invocations remain pinned; yielded work changes Plan only through safe-point
   migration, and cross-version calls require checked contract adapters.
+- `DefinitionRegistry` defaults to `LatestCompatible`, resolves by monotonic
+  publication order, injects an exact local definition before sealing, and
+  retains every historical linked Plan. Exact schema equality is the current
+  compatibility profile; adapters remain explicit future work.
 - Keep semantic Plan changes separate from Binding Context changes. Rollout and
   rollback affect future selection only; admitted occurrences remain pinned.
 - State migration is legal only at an explicit semantic safe point and must

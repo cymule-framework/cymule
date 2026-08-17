@@ -14,6 +14,7 @@ pub struct FlowBuilder {
     output_schema: Value,
     components: Vec<ComponentContract>,
     effects: Vec<EffectContract>,
+    definitions: Vec<Definition>,
     steps: Vec<Step>,
 }
 
@@ -26,6 +27,7 @@ impl FlowBuilder {
             output_schema,
             components: Vec::new(),
             effects: Vec::new(),
+            definitions: Vec::new(),
             steps: Vec::new(),
         }
     }
@@ -83,6 +85,42 @@ impl FlowBuilder {
         self
     }
 
+    /// Add one reusable definition to the same immutable Plan.
+    pub fn definition(
+        mut self,
+        id: impl Into<String>,
+        input_schema: Value,
+        output_schema: Value,
+        body: Region,
+    ) -> Self {
+        self.definitions.push(Definition {
+            id: id.into(),
+            input_schema,
+            output_schema,
+            body,
+        });
+        self
+    }
+
+    /// Append one reusable definition invocation.
+    pub fn invoke(
+        mut self,
+        site: impl Into<String>,
+        definition: impl Into<String>,
+        input: Expression,
+        bind: impl Into<String>,
+    ) -> Self {
+        self.steps.push(Step {
+            id: site.into(),
+            operation: Operation::Invoke {
+                definition: definition.into(),
+                input,
+                bind: Some(bind.into()),
+            },
+        });
+        self
+    }
+
     /// Append an external effect.
     pub fn effect(
         mut self,
@@ -133,21 +171,23 @@ impl FlowBuilder {
 
     /// Finish the candidate with one explicit result expression.
     pub fn finish(self, result: Expression) -> PlanCandidate {
+        let mut definitions = vec![Definition {
+            id: "main".to_owned(),
+            input_schema: self.input_schema,
+            output_schema: self.output_schema,
+            body: Region {
+                steps: self.steps,
+                result,
+            },
+        }];
+        definitions.extend(self.definitions);
         PlanCandidate {
             ir_version: cymule_core::IR_VERSION.to_owned(),
             name: self.name,
             entry: "main".to_owned(),
             components: self.components,
             effects: self.effects,
-            definitions: vec![Definition {
-                id: "main".to_owned(),
-                input_schema: self.input_schema,
-                output_schema: self.output_schema,
-                body: Region {
-                    steps: self.steps,
-                    result,
-                },
-            }],
+            definitions,
             metadata: BTreeMap::new(),
         }
     }

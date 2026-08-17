@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::{CoreError, Result, content_id};
 
 /// Frozen canonical IR version.
-pub const IR_VERSION: &str = "cymule.ir/1";
+pub const IR_VERSION: &str = "cymule.ir/2";
 
 /// An unsealed, language-neutral semantic plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -162,7 +162,7 @@ pub struct Step {
     pub operation: Operation,
 }
 
-/// Frozen structured operations. Complex frontend syntax lowers to these four
+/// Frozen structured operations. Complex frontend syntax lowers to these five
 /// semantic boundaries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -172,6 +172,16 @@ pub enum Operation {
         /// Component contract ID.
         component: String,
         /// Typed input expression.
+        input: Expression,
+        /// Optional result binding.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bind: Option<String>,
+    },
+    /// Invoke another definition in the same immutable Plan.
+    Invoke {
+        /// Referenced definition ID.
+        definition: String,
+        /// Typed invocation input expression.
         input: Expression,
         /// Optional result binding.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -337,6 +347,7 @@ impl PlanCandidate {
                 &definition.body,
                 &component_ids,
                 &effect_ids,
+                &definition_ids,
                 &mut sites,
                 &BTreeSet::new(),
             )?;
@@ -378,6 +389,7 @@ fn validate_region(
     region: &Region,
     components: &BTreeSet<String>,
     effects: &BTreeSet<String>,
+    definitions: &BTreeSet<String>,
     sites: &mut BTreeSet<String>,
     inherited: &BTreeSet<String>,
 ) -> Result<()> {
@@ -406,6 +418,20 @@ fn validate_region(
                 validate_expression(input, &bindings)?;
                 bind.as_ref()
             }
+            Operation::Invoke {
+                definition,
+                input,
+                bind,
+            } => {
+                if !definitions.contains(definition) {
+                    return Err(CoreError::Validation(format!(
+                        "step {} references unknown definition {definition:?}",
+                        step.id
+                    )));
+                }
+                validate_expression(input, &bindings)?;
+                bind.as_ref()
+            }
             Operation::Wait { wait } => {
                 validate_wait(wait)?;
                 None
@@ -427,7 +453,7 @@ fn validate_region(
                 bind.as_ref()
             }
             Operation::Scope { body, bind, .. } => {
-                validate_region(body, components, effects, sites, &bindings)?;
+                validate_region(body, components, effects, definitions, sites, &bindings)?;
                 bind.as_ref()
             }
         };

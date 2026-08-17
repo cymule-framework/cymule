@@ -8,8 +8,8 @@ pub use builder::FlowBuilder;
 pub use client::{CliEngine, Engine};
 pub use control::{VirtualSchedulingControl, VirtualWorkControl};
 pub use cymule_core::{
-    ArtifactRef, DispatchPolicy, EffectProfile, Expression, MutationKind, PlanCandidate,
-    ReconciliationMode, ScopeMode, SealedPlan, WaitSpec,
+    ArtifactRef, DispatchPolicy, EffectProfile, Expression, MutationKind, Operation, PlanCandidate,
+    ReconciliationMode, Region, ScopeMode, SealedPlan, Step, WaitSpec,
 };
 pub use cymule_durable::{WAIT_ACTIVATION_VERSION, WaitActivation, WaitActivationSource};
 pub use cymule_resource::{

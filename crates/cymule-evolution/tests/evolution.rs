@@ -10,8 +10,9 @@ use cymule_durable::{
     DurableState, DurableStore, FrameState, MemoryStore, StoreCommit, StoredState,
 };
 use cymule_evolution::{
-    DurableEvolutionController, EvolutionController, EvolutionError, MigrationReceipt,
-    PatchOperation, RolloutDecision, RolloutMode, ShadowComparison, diff_plans,
+    DefinitionRegistry, DurableEvolutionController, EvolutionController, EvolutionError,
+    MigrationReceipt, PatchOperation, PlanTemplate, ReferenceStrategy, RolloutDecision,
+    RolloutMode, ShadowComparison, SubflowReference, diff_plans,
 };
 use serde_json::json;
 
@@ -52,7 +53,12 @@ fn continuation(plan_id: &str) -> Continuation {
         plan_id: plan_id.to_owned(),
         binding_context: "binding:1".to_owned(),
         frames: vec![FrameState {
+            definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
+            input: cymule_core::ArtifactRef {
+                artifact_id: format!("sha256:{}", "0".repeat(64)),
+                kind: "test/input".to_owned(),
+            },
             region_path: Vec::new(),
             next_step: 0,
             locals: BTreeMap::new(),
@@ -66,6 +72,59 @@ fn continuation(plan_id: &str) -> Continuation {
         causal_frontier: BTreeSet::new(),
         epoch: 0,
         status: ContinuationStatus::Ready,
+    }
+}
+
+fn reusable_definition(version: &str, input_schema: serde_json::Value) -> Definition {
+    Definition {
+        id: "review".to_owned(),
+        input_schema,
+        output_schema: json!({}),
+        body: Region {
+            steps: Vec::new(),
+            result: Expression::Literal {
+                value: json!({"version": version}),
+            },
+        },
+    }
+}
+
+fn parent_template(strategy: ReferenceStrategy) -> PlanTemplate {
+    PlanTemplate {
+        template_id: "template:review-parent".to_owned(),
+        candidate: PlanCandidate {
+            ir_version: cymule_core::IR_VERSION.to_owned(),
+            name: "review_parent".to_owned(),
+            entry: "main".to_owned(),
+            components: Vec::new(),
+            effects: Vec::new(),
+            definitions: vec![Definition {
+                id: "main".to_owned(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                body: Region {
+                    steps: vec![cymule_core::Step {
+                        id: "invoke.review".to_owned(),
+                        operation: cymule_core::Operation::Invoke {
+                            definition: "review_dependency".to_owned(),
+                            input: Expression::Input,
+                            bind: Some("reviewed".to_owned()),
+                        },
+                    }],
+                    result: Expression::Binding {
+                        name: "reviewed".to_owned(),
+                    },
+                },
+            }],
+            metadata: BTreeMap::new(),
+        },
+        references: vec![SubflowReference {
+            logical_ref: "subflow:review".to_owned(),
+            local_definition: "review_dependency".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            strategy,
+        }],
     }
 }
 
@@ -135,6 +194,69 @@ fn plan_dag_impact_and_cycles_fail_closed() {
         ),
         Err(EvolutionError::Conflict(_))
     ));
+}
+
+#[test]
+fn latest_compatible_subflow_relinks_future_parent_without_rewriting_history() {
+    let mut registry = DefinitionRegistry::new();
+    let first = registry
+        .publish("subflow:review", reusable_definition("1", json!({})))
+        .expect("first revision publishes");
+    let initial = registry
+        .register_template(parent_template(ReferenceStrategy::LatestCompatible))
+        .expect("parent links");
+    assert_eq!(
+        initial.resolved_revisions["subflow:review"],
+        first.revision_id
+    );
+
+    let (second, relinked) = registry
+        .publish_and_relink("subflow:review", reusable_definition("2", json!({})))
+        .expect("compatible revision relinks");
+    assert_eq!(relinked.len(), 1);
+    assert_ne!(relinked[0].plan.plan_id, initial.plan.plan_id);
+    assert_eq!(
+        relinked[0].resolved_revisions["subflow:review"],
+        second.revision_id
+    );
+    assert_eq!(
+        registry
+            .historical_link(&initial.plan.plan_id)
+            .expect("old Plan remains historical"),
+        &initial
+    );
+
+    let (_, incompatible_relink) = registry
+        .publish_and_relink(
+            "subflow:review",
+            reusable_definition("3", json!({"type": "string"})),
+        )
+        .expect("incompatible head keeps latest compatible revision");
+    assert_eq!(
+        incompatible_relink[0].plan.plan_id,
+        relinked[0].plan.plan_id
+    );
+    assert_eq!(
+        registry
+            .current_link("template:review-parent")
+            .expect("current link exists")
+            .resolved_revisions["subflow:review"],
+        second.revision_id
+    );
+
+    let pinned_template = PlanTemplate {
+        template_id: "template:pinned-parent".to_owned(),
+        ..parent_template(ReferenceStrategy::Pinned {
+            revision_id: first.revision_id.clone(),
+        })
+    };
+    let pinned = registry
+        .register_template(pinned_template)
+        .expect("pinned parent links");
+    assert_eq!(
+        pinned.resolved_revisions["subflow:review"],
+        first.revision_id
+    );
 }
 
 #[test]

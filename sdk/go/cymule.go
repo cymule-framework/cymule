@@ -831,7 +831,7 @@ type FlowBuilder struct {
 // NewFlow creates a Flow builder.
 func NewFlow(name string, inputSchema, outputSchema map[string]any) *FlowBuilder {
 	return &FlowBuilder{candidate: PlanCandidate{
-		IRVersion:  "cymule.ir/1",
+		IRVersion:  "cymule.ir/2",
 		Name:       name,
 		Entry:      "main",
 		Components: []Contract{},
@@ -867,6 +867,21 @@ func (builder *FlowBuilder) Call(site, component string, input Expression, bind 
 	entry := &builder.candidate.Definitions[0]
 	entry.Body.Steps = append(entry.Body.Steps, Step{
 		"id": site, "op": "call", "component": component, "input": input, "bind": bind,
+	})
+	return builder
+}
+
+// Definition adds one reusable definition to the same immutable Plan.
+func (builder *FlowBuilder) Definition(definition Definition) *FlowBuilder {
+	builder.candidate.Definitions = append(builder.candidate.Definitions, definition)
+	return builder
+}
+
+// Invoke appends one reusable definition invocation.
+func (builder *FlowBuilder) Invoke(site, definition string, input Expression, bind string) *FlowBuilder {
+	entry := &builder.candidate.Definitions[0]
+	entry.Body.Steps = append(entry.Body.Steps, Step{
+		"id": site, "op": "invoke", "definition": definition, "input": input, "bind": bind,
 	})
 	return builder
 }

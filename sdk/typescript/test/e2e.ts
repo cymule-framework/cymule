@@ -31,7 +31,17 @@ test("TypeScript candidate seals and executes through the Rust engine", () => {
   const candidate = new FlowBuilder("cross_language_echo", {}, {})
     .component("test.echo", {}, {})
     .effectContract("test.capture", {}, {}, profile)
-    .call("call.echo", "test.echo", { kind: "input" }, "echoed")
+    .definition("echo_subflow", {}, {}, {
+      steps: [{
+        id: "call.echo",
+        op: "call",
+        component: "test.echo",
+        input: { kind: "input" },
+        bind: "echoed",
+      }],
+      result: { kind: "binding", name: "echoed" },
+    })
+    .invoke("invoke.echo-subflow", "echo_subflow", { kind: "input" }, "echoed")
     .effect(
       "effect.capture",
       "test.capture",

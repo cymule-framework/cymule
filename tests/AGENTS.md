@@ -15,6 +15,9 @@
   candidate; never duplicate canonicalization in a test script.
 - Cross-language tests must seal and execute through the real engine and process
   plugin, not mocks.
+- The shared Plan exercises a reusable definition invocation so every SDK
+  proves `cymule.ir/2` declaration, invocation input/result binding, Rust
+  sealing, and real embedded execution.
 - Resource fixtures are sealed only by the Rust engine. Every SDK must submit
   the shared candidate and receive the same Resource ID; no fixture may contain
   credentials or a signed URL.

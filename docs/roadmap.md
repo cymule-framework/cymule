@@ -121,9 +121,12 @@ Status: partial.
 - deterministic structural Plan diff, M1 durable checkpoint lineage,
   mixed-version occurrence pinning, stale-CAS rollback, and lost-receipt reopen
   are implemented;
-- reusable definition/subflow dependency relinking, patch application, schema
-  migration adapters, shadow execution, observation gates, promotion,
-  cross-language controls, and the remaining crash matrix remain proposed.
+- reusable local definition invocation, four-language `cymule.ir/2` authoring,
+  latest-compatible exact-schema registry resolution, direct reverse dependency
+  relinking, pinned references, and historical linked Plans are implemented;
+- transitive module relinking, patch application, schema migration adapters,
+  shadow execution, observation gates, promotion, cross-language controls, and
+  the remaining crash matrix remain proposed.
 
 ## M5 - Isolation and federation
 

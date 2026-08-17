@@ -36,7 +36,17 @@ func TestCrossLanguageEndToEnd(t *testing.T) {
 	candidate := NewFlow("cross_language_echo", map[string]any{}, map[string]any{}).
 		Component("test.echo", map[string]any{}, map[string]any{}).
 		EffectContract("test.capture", map[string]any{}, map[string]any{}, profile).
-		Call("call.echo", "test.echo", Expression{"kind": "input"}, "echoed").
+		Definition(Definition{
+			ID: "echo_subflow", InputSchema: map[string]any{}, OutputSchema: map[string]any{},
+			Body: Region{
+				Steps: []Step{{
+					"id": "call.echo", "op": "call", "component": "test.echo",
+					"input": Expression{"kind": "input"}, "bind": "echoed",
+				}},
+				Result: Expression{"kind": "binding", "name": "echoed"},
+			},
+		}).
+		Invoke("invoke.echo-subflow", "echo_subflow", Expression{"kind": "input"}, "echoed").
 		Effect("effect.capture", "test.capture", Expression{"kind": "binding", "name": "echoed"}, "primary").
 		Finish(Expression{"kind": "binding", "name": "echoed"})
 

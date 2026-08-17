@@ -5,10 +5,10 @@ use std::env;
 
 use cymule_sdk::{
     CliEngine, DispatchPolicy, EffectProfile, Engine, Expression, FlowBuilder, MutationKind,
-    ReconciliationMode, RegionMigrationCommand, ResourceCandidate, VirtualClaimCommand,
-    VirtualCompactionCommand, VirtualLeaseRenewalCommand, VirtualRecoveryCommand,
-    VirtualRehydrationCommand, VirtualRunWeightCommand, WaitActivation, WorkOccurrence,
-    WorkResolutionCommand,
+    Operation, ReconciliationMode, Region, RegionMigrationCommand, ResourceCandidate, Step,
+    VirtualClaimCommand, VirtualCompactionCommand, VirtualLeaseRenewalCommand,
+    VirtualRecoveryCommand, VirtualRehydrationCommand, VirtualRunWeightCommand, WaitActivation,
+    WorkOccurrence, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -35,7 +35,30 @@ fn rust_candidate_seals_and_executes_through_the_cli() {
                 irreversible: false,
             },
         )
-        .call("call.echo", "test.echo", Expression::Input, "echoed")
+        .definition(
+            "echo_subflow",
+            json!({}),
+            json!({}),
+            Region {
+                steps: vec![Step {
+                    id: "call.echo".to_owned(),
+                    operation: Operation::Call {
+                        component: "test.echo".to_owned(),
+                        input: Expression::Input,
+                        bind: Some("echoed".to_owned()),
+                    },
+                }],
+                result: Expression::Binding {
+                    name: "echoed".to_owned(),
+                },
+            },
+        )
+        .invoke(
+            "invoke.echo-subflow",
+            "echo_subflow",
+            Expression::Input,
+            "echoed",
+        )
         .effect(
             "effect.capture",
             "test.capture",

@@ -29,7 +29,7 @@ The following domains evolve independently:
 | Domain | Current version | Compatibility rule |
 | --- | --- | --- |
 | Semantic specification | `cymule.semantic/1` | transition meaning is frozen |
-| Canonical IR | `cymule.ir/1` | unknown operations are rejected |
+| Canonical IR | `cymule.ir/2` | unknown operations are rejected |
 | Canonical encoding | `cymule.jcs/1` | RFC 8785 JSON, SHA-256 IDs |
 | Event schema | `cymule.event/1` | readers reject unknown semantic events |
 | Command protocol | `cymule.command/1` | typed envelope and stable error codes |
@@ -109,10 +109,13 @@ slot has at most one handoff; multiple values use one collection Resource.
 
 ## 6. Frozen IR
 
-`cymule.ir/1` contains:
+`cymule.ir/2` contains:
 
 - named component and effect contracts;
-- structured definitions composed from `call`, `wait`, `effect`, and `scope`;
+- structured definitions composed from `call`, `invoke`, `wait`, `effect`, and
+  `scope`;
+- reusable definition invocation inside the same immutable Plan with explicit
+  input and result binding;
 - literal, input, binding, object, and array expressions;
 - explicit input/output JSON Schemas;
 - provider-neutral effect and execution properties.
@@ -130,6 +133,11 @@ and contains:
 plan ID | future binding context | frame | typed state | wait set | scope
 effect obligations | authority leases | budget | causal cut | epoch
 ```
+
+M1 `cymule.durable-state/2` frames separate the resolved definition ID,
+structural invocation ID, immutable input Artifact, nested Region path, next
+step, and local Artifact bindings. An invocation pushes a frame without opening
+a scope. A nested scope retains the same definition, invocation, and input.
 
 Process memory and host-language stacks are not canonical. An Attempt pins an
 immutable occurrence binding and the continuation epoch. Output from a stale
@@ -458,6 +466,15 @@ MUST resolve to immutable semantic dependency edges when a Plan is sealed. An
 updated dependency creates a new child and, when selected, newly linked
 dependent Plan commits. A sealed Plan MUST NOT contain an ambient `latest`
 pointer whose later resolution can change its meaning.
+
+The default authoring strategy for a logical reusable-definition reference is
+`latest_compatible`. M4 resolves the newest monotonically published revision
+whose input and output contract satisfies the reference, injects that exact
+definition into a new parent candidate, seals a new parent Plan, advances only
+the future default link, and retains every historical linked Plan. The current
+implemented compatibility profile requires exact input/output JSON Schema
+equality. Checked schema adapters and transitive module relinking require later
+M4 admission and MUST NOT be inferred.
 
 Future calls may select a compatible new child Plan under an admitted rollout.
 An already materialized invocation remains pinned to its original Plan. A

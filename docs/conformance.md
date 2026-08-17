@@ -13,7 +13,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | Large Virtual Graph M3 | Implemented | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker slot leases/recovery, four SDK controls, and restore |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
-| Live Evolution | Partial | deterministic Plan diff, Plan DAG, impact, M1 durable controls, mixed-version occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; reusable subflow relinking and rollout automation remain |
+| Live Evolution | Partial | reusable definition invocation, direct latest-compatible relinking, deterministic Plan diff, Plan DAG, impact, M1 durable controls, mixed-version occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; transitive modules and rollout automation remain |
 
 The M0 rows do not claim persistence. The partial M1 implementation does prove
 single-domain durable wait and nested-scope resumption, exact replay of recorded
@@ -109,6 +109,9 @@ The local suite verifies:
 - replay availability is not reported as exact when an artifact is missing;
 - TypeScript, Python, Rust, and Go author the same plan and execute through the
   same Rust kernel and external plugin;
+- that shared Plan invokes a reusable definition, so all four SDKs produce one
+  `cymule.ir/2` Plan ID and the Rust runtime binds the invoked result before its
+  effect;
 - TypeScript, Python, Rust, and Go submit the same Resource Candidate to the
   Rust resource sealer and receive the same Resource ID;
 - TypeScript, Python, Rust, and Go construct the same identified wait activation

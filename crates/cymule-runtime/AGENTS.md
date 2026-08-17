@@ -5,6 +5,9 @@
 - `PluginHost` is the authority boundary for external execution. A manifest is a
   capability advertisement, not authorization.
 - Every plugin call pins an immutable occurrence binding before execution.
+- Reusable definition calls create a distinct deterministic invocation identity,
+  receive only their explicit input, and return only their declared result.
+  They do not inherit caller locals or imply a new transactional scope.
 - Mutating effects remain staged until scope commit unless an explicit release
   policy says otherwise. Dispatch ambiguity must be recorded as `unknown` before
   reconciliation.

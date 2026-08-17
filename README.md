@@ -34,7 +34,8 @@ than framework semantics.
 ## What Cymule gives you
 
 - **One Flow format across languages.** TypeScript, Python, Rust, and Go SDKs
-  produce the same frozen `cymule.ir/1` Plan.
+  produce the same frozen `cymule.ir/2` Plan, including reusable definition
+  declaration and invocation.
 - **Stable program identity.** Validated Plans are canonicalized and assigned a
   content-addressed `PlanId`.
 - **Safe command retries.** Repeating the same command returns the original
@@ -425,6 +426,8 @@ Implemented today:
 - deterministic Plan diff and immutable evolution DAGs, impact cones, canaries,
   rollback pins, safe-point migration receipts, and shadow evidence, with M1
   checkpoint lineage, stale-CAS rollback, and lost-acknowledgement replay.
+- latest-compatible reusable definition linking that creates a new immutable
+  parent Plan for future work while retaining every historical linked Plan.
 
 Not yet claimed:
 
@@ -435,8 +438,8 @@ Not yet claimed:
   matrix;
 - production resource resolver/store plugins and automatic interpreter
   activation of incoming handoffs;
-- sealed reusable definition/subflow dependency relinking, shadow execution,
-  observation gates, promotion, and complete mixed-version dispatch;
+- transitive reusable module relinking, shadow execution, observation gates,
+  promotion, and complete mixed-version dispatch;
 - distributed ownership, consensus, scheduling, and failover;
 - strong untrusted-code or multi-tenant isolation;
 - provider-level exactly-once guarantees;
