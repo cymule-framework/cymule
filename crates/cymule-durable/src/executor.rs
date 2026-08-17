@@ -603,9 +603,12 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         transition: EffectTransition::Observe(WorldOutcome::Unknown),
                     },
                 )?;
-                self.coordinator.checkpoint(
+                self.coordinator.checkpoint_effect_settlement(
                     &machine,
-                    self.coordinator.state()?.continuations[run_id].clone(),
+                    &entry.intent_id,
+                    owner,
+                    lease.epoch,
+                    OutboxState::Unknown,
                     None,
                 )?;
                 (owner.to_owned(), lease.epoch)
@@ -623,6 +626,14 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                             intent_id: entry.intent_id.clone(),
                             transition: EffectTransition::Observe(WorldOutcome::Unknown),
                         },
+                    )?;
+                    self.coordinator.checkpoint_effect_settlement(
+                        &machine,
+                        &entry.intent_id,
+                        &owner,
+                        entry.claim_epoch,
+                        OutboxState::Unknown,
+                        None,
                     )?;
                 }
                 (owner, entry.claim_epoch)

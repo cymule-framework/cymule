@@ -8,6 +8,8 @@
 - Mutating effects remain staged until scope commit unless an explicit release
   policy says otherwise. Dispatch ambiguity must be recorded as `unknown` before
   reconciliation.
+- `PrepareEffect` may be repeated after response loss with the same structural
+  intent ID and input. A plugin must make that prepare idempotent and must not
+  interpret the repeat as a new world mutation.
 - Keep the reference runtime synchronous and dependency-light. Production async,
   durable, and distributed realizations should be separate adapters.
-

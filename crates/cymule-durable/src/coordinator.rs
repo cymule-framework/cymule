@@ -1,4 +1,7 @@
-use cymule_core::Machine;
+use cymule_core::{
+    EffectTransition, Event, EventPayload, Machine, MachineSnapshot, ReconciliationResolution,
+    WorldOutcome,
+};
 
 use crate::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableError,
@@ -116,10 +119,20 @@ impl<S: DurableStore> DurableCoordinator<S> {
         continuation: Continuation,
         dispatch: EffectDispatch,
     ) -> DurableResult<String> {
+        let machine_snapshot = machine.snapshot();
         self.mutate_checked(|state| {
-            state.machine = machine.snapshot();
             match state.outbox.get(&dispatch.intent_id) {
-                Some(existing) if existing == &dispatch => {}
+                Some(existing) if existing == &dispatch => {
+                    if state.machine != machine_snapshot
+                        || state.continuations.get(&continuation.run_id) != Some(&continuation)
+                    {
+                        return Err(DurableError::IllegalTransition(format!(
+                            "effect {} enqueue replay does not match current durable state",
+                            dispatch.intent_id
+                        )));
+                    }
+                    return Ok(());
+                }
                 Some(_) => {
                     return Err(DurableError::IllegalTransition(format!(
                         "effect {} already has a different outbox entry",
@@ -127,6 +140,8 @@ impl<S: DurableStore> DurableCoordinator<S> {
                     )));
                 }
                 None => {
+                    ensure_effect_enqueue_machine(&state.machine, &machine_snapshot, &dispatch)?;
+                    state.machine = machine_snapshot.clone();
                     state.outbox.insert(dispatch.intent_id.clone(), dispatch);
                 }
             }
@@ -162,13 +177,19 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 "new effect dispatch must be unclaimed and pending".to_owned(),
             ));
         }
+        let machine_snapshot = machine.snapshot();
         self.mutate_checked(|state| {
-            state.machine = machine.snapshot();
-            for record in records {
-                append_journal_record(state, journal_id, record.clone())?;
-            }
             match state.outbox.get(&dispatch.intent_id) {
-                Some(existing) if existing == &dispatch => {}
+                Some(existing) if existing == &dispatch => {
+                    if state.machine != machine_snapshot
+                        || state.continuations.get(&continuation.run_id) != Some(&continuation)
+                    {
+                        return Err(DurableError::IllegalTransition(format!(
+                            "effect {} enqueue replay does not match current durable state",
+                            dispatch.intent_id
+                        )));
+                    }
+                }
                 Some(_) => {
                     return Err(DurableError::IllegalTransition(format!(
                         "effect {} already has a different outbox entry",
@@ -176,8 +197,13 @@ impl<S: DurableStore> DurableCoordinator<S> {
                     )));
                 }
                 None => {
+                    ensure_effect_enqueue_machine(&state.machine, &machine_snapshot, &dispatch)?;
+                    state.machine = machine_snapshot.clone();
                     state.outbox.insert(dispatch.intent_id.clone(), dispatch);
                 }
+            }
+            for record in records {
+                append_journal_record(state, journal_id, record.clone())?;
             }
             state
                 .continuations
@@ -194,6 +220,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         owner: &str,
         lease_epoch: u64,
     ) -> DurableResult<String> {
+        let machine_snapshot = machine.snapshot();
         self.mutate_checked(|state| {
             let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
                 DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
@@ -203,10 +230,11 @@ impl<S: DurableStore> DurableCoordinator<S> {
                     "effect {intent_id} is not pending"
                 )));
             }
+            ensure_effect_claim_machine(&state.machine, &machine_snapshot, dispatch)?;
             dispatch.state = OutboxState::Claimed;
             dispatch.claim_owner = Some(owner.to_owned());
             dispatch.claim_epoch = lease_epoch;
-            state.machine = machine.snapshot();
+            state.machine = machine_snapshot.clone();
             Ok(())
         })
     }
@@ -235,6 +263,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 "effect claim owner must not be empty".to_owned(),
             ));
         }
+        let machine_snapshot = machine.snapshot();
         self.mutate_checked(|state| {
             let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
                 DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
@@ -244,10 +273,11 @@ impl<S: DurableStore> DurableCoordinator<S> {
                     "effect {intent_id} is not pending"
                 )));
             }
+            ensure_effect_claim_machine(&state.machine, &machine_snapshot, dispatch)?;
             dispatch.state = OutboxState::Claimed;
             dispatch.claim_owner = Some(owner.to_owned());
             dispatch.claim_epoch = lease_epoch;
-            state.machine = machine.snapshot();
+            state.machine = machine_snapshot.clone();
             for record in records {
                 append_journal_record(state, journal_id, record.clone())?;
             }
@@ -269,6 +299,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         outcome: OutboxState,
         result: Option<cymule_core::ArtifactRef>,
     ) -> DurableResult<String> {
+        let machine_snapshot = machine.snapshot();
         self.mutate_checked(|state| {
             if !matches!(
                 outcome,
@@ -295,9 +326,19 @@ impl<S: DurableStore> DurableCoordinator<S> {
                         .map(|current| format!("{current}:{}", dispatch.claim_epoch)),
                 });
             }
+            if already_settled && state.machine == machine_snapshot {
+                return Ok(());
+            }
+            ensure_effect_settlement_machine(
+                &state.machine,
+                &machine_snapshot,
+                dispatch,
+                outcome,
+                result.as_ref(),
+            )?;
             dispatch.state = outcome;
             dispatch.result = result;
-            state.machine = machine.snapshot();
+            state.machine = machine_snapshot.clone();
             Ok(())
         })
     }
@@ -332,6 +373,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 "settlement must be applied, not_applied, or unknown".to_owned(),
             ));
         }
+        let machine_snapshot = machine.snapshot();
         self.mutate_checked(|state| {
             let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
                 DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
@@ -350,9 +392,18 @@ impl<S: DurableStore> DurableCoordinator<S> {
                         .map(|current| format!("{current}:{}", dispatch.claim_epoch)),
                 });
             }
-            dispatch.state = outcome;
-            dispatch.result = result;
-            state.machine = machine.snapshot();
+            if !already_settled || state.machine != machine_snapshot {
+                ensure_effect_settlement_machine(
+                    &state.machine,
+                    &machine_snapshot,
+                    dispatch,
+                    outcome,
+                    result.as_ref(),
+                )?;
+                dispatch.state = outcome;
+                dispatch.result = result;
+                state.machine = machine_snapshot.clone();
+            }
             for record in records {
                 append_journal_record(state, journal_id, record.clone())?;
             }
@@ -1085,6 +1136,235 @@ fn ensure_direct_wait_completion(wait: &WaitCondition) -> DurableResult<()> {
         )));
     }
     Ok(())
+}
+
+fn ensure_effect_enqueue_machine(
+    current: &MachineSnapshot,
+    next: &MachineSnapshot,
+    dispatch: &EffectDispatch,
+) -> DurableResult<()> {
+    let events = ensure_canonical_machine_delta(
+        current,
+        next,
+        &std::collections::BTreeSet::from([dispatch.input.clone()]),
+        "effect enqueue",
+    )?;
+    if !matches!(events.len(), 2 | 3) {
+        return Err(DurableError::Validation(
+            "effect enqueue must add propose/prepare and optional matching scope-commit Events"
+                .to_owned(),
+        ));
+    }
+    let proposed = &events[0];
+    let prepared = &events[1];
+    let proposed_scope = match &proposed.payload {
+        EventPayload::EffectProposed {
+            intent_id,
+            scope_id,
+            operation,
+            mutating: true,
+            args,
+            occurrence_binding,
+        } if proposed.run_id == dispatch.run_id
+            && intent_id == &dispatch.intent_id
+            && operation == &dispatch.operation
+            && args == &dispatch.input
+            && occurrence_binding == &dispatch.occurrence_binding =>
+        {
+            Some(scope_id)
+        }
+        _ => None,
+    };
+    let prepared_matches = prepared.run_id == dispatch.run_id
+        && matches!(
+            &prepared.payload,
+            EventPayload::EffectTransitioned { intent_id, transition: EffectTransition::Prepare }
+                if intent_id == &dispatch.intent_id
+        );
+    let scope_commit_matches = events.get(2).is_none_or(|committed| {
+        committed.run_id == dispatch.run_id
+            && matches!(
+                (&committed.payload, proposed_scope),
+                (EventPayload::ScopeCommitted { scope_id, .. }, Some(expected))
+                    if scope_id == expected
+            )
+    });
+    if proposed_scope.is_none() || !prepared_matches || !scope_commit_matches {
+        return Err(DurableError::Validation(
+            "effect enqueue Events do not match the pending outbox entry".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_effect_claim_machine(
+    current: &MachineSnapshot,
+    next: &MachineSnapshot,
+    dispatch: &EffectDispatch,
+) -> DurableResult<()> {
+    let events = ensure_canonical_machine_delta(
+        current,
+        next,
+        &std::collections::BTreeSet::new(),
+        "effect claim",
+    )?;
+    let [authorized, started] = events.as_slice() else {
+        return Err(DurableError::Validation(
+            "effect claim must add exactly authorize-release and dispatch-started Events"
+                .to_owned(),
+        ));
+    };
+    let matches_transition = |event: &Event, transition: EffectTransition| {
+        event.run_id == dispatch.run_id
+            && matches!(
+                &event.payload,
+                EventPayload::EffectTransitioned { intent_id, transition: actual }
+                    if intent_id == &dispatch.intent_id && actual == &transition
+            )
+    };
+    if !matches_transition(authorized, EffectTransition::AuthorizeRelease)
+        || !matches_transition(started, EffectTransition::StartDispatch)
+    {
+        return Err(DurableError::Validation(
+            "effect claim Events do not match the pending outbox entry".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_effect_settlement_machine(
+    current: &MachineSnapshot,
+    next: &MachineSnapshot,
+    dispatch: &EffectDispatch,
+    outcome: OutboxState,
+    result: Option<&cymule_core::ArtifactRef>,
+) -> DurableResult<()> {
+    if outcome == OutboxState::Unknown && result.is_some() {
+        return Err(DurableError::Validation(
+            "unknown effect outcome cannot publish a result Artifact".to_owned(),
+        ));
+    }
+    let artifacts = result.cloned().into_iter().collect();
+    let events = ensure_canonical_machine_delta(current, next, &artifacts, "effect settlement")?;
+    let [observed] = events.as_slice() else {
+        return Err(DurableError::Validation(
+            "effect settlement must add exactly one observation or reconciliation Event".to_owned(),
+        ));
+    };
+    if observed.run_id != dispatch.run_id {
+        return Err(DurableError::Validation(
+            "effect settlement Event escaped its Run".to_owned(),
+        ));
+    }
+    let EventPayload::EffectTransitioned {
+        intent_id,
+        transition,
+    } = &observed.payload
+    else {
+        return Err(DurableError::Validation(
+            "effect settlement did not add an effect transition".to_owned(),
+        ));
+    };
+    let transition_matches = intent_id == &dispatch.intent_id
+        && matches!(
+            (outcome, transition),
+            (
+                OutboxState::Applied,
+                EffectTransition::Observe(WorldOutcome::Applied)
+                    | EffectTransition::Reconcile(ReconciliationResolution::ResolvedApplied)
+            ) | (
+                OutboxState::NotApplied,
+                EffectTransition::Observe(WorldOutcome::NotApplied)
+                    | EffectTransition::Reconcile(ReconciliationResolution::ResolvedNotApplied)
+            ) | (
+                OutboxState::Unknown,
+                EffectTransition::Observe(WorldOutcome::Unknown)
+                    | EffectTransition::Reconcile(
+                        ReconciliationResolution::StillUnknown
+                            | ReconciliationResolution::GovernanceRequired
+                    )
+            )
+        );
+    if !transition_matches {
+        return Err(DurableError::Validation(
+            "effect settlement transition does not match the outbox outcome".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_canonical_machine_delta(
+    current: &MachineSnapshot,
+    next: &MachineSnapshot,
+    artifacts: &std::collections::BTreeSet<cymule_core::ArtifactRef>,
+    operation: &str,
+) -> DurableResult<Vec<Event>> {
+    if current.snapshot_version != next.snapshot_version || current.plans != next.plans {
+        return Err(DurableError::Validation(format!(
+            "{operation} cannot change Machine version or Plans"
+        )));
+    }
+    if next.events.len() < current.events.len()
+        || next.events[..current.events.len()] != current.events
+    {
+        return Err(DurableError::Validation(format!(
+            "{operation} must append to the current Event history"
+        )));
+    }
+    let new_events = next.events[current.events.len()..].to_vec();
+    let mut expected_artifacts = current.artifacts.clone();
+    for artifact in artifacts {
+        if expected_artifacts
+            .iter()
+            .any(|record| record.reference == *artifact)
+        {
+            continue;
+        }
+        let record = next
+            .artifacts
+            .iter()
+            .find(|record| record.reference == *artifact)
+            .ok_or_else(|| {
+                DurableError::Validation(format!(
+                    "{operation} Artifact {} bytes are missing",
+                    artifact.artifact_id
+                ))
+            })?;
+        expected_artifacts.push(record.clone());
+    }
+    expected_artifacts
+        .sort_by(|left, right| left.reference.artifact_id.cmp(&right.reference.artifact_id));
+    if expected_artifacts != next.artifacts {
+        return Err(DurableError::Validation(format!(
+            "{operation} Machine contains unrelated Artifact changes"
+        )));
+    }
+
+    let current_commands = current.command_digests()?;
+    let next_commands = next.command_digests()?;
+    if current_commands
+        .iter()
+        .any(|(id, digest)| next_commands.get(id) != Some(digest))
+    {
+        return Err(DurableError::Validation(format!(
+            "{operation} changed or removed an existing command receipt"
+        )));
+    }
+    let new_command_ids: std::collections::BTreeSet<String> = next_commands
+        .keys()
+        .filter(|id| !current_commands.contains_key(*id))
+        .cloned()
+        .collect();
+    let event_command_ids: std::collections::BTreeSet<String> = new_events
+        .iter()
+        .map(|event| event.command_id.clone())
+        .collect();
+    if new_command_ids != event_command_ids || new_command_ids.len() != new_events.len() {
+        return Err(DurableError::Validation(format!(
+            "{operation} command receipts do not match its appended Events"
+        )));
+    }
+    Ok(new_events)
 }
 
 fn ensure_activation_machine(

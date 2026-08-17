@@ -387,6 +387,9 @@ Implemented today:
   component occurrence replay;
 - process reopen after a durable wait without reinvoking a recorded component;
 - ambiguous mutating-effect recovery by reconciliation without redispatch;
+- exact canonical Event/command/Artifact delta validation for root effect
+  enqueue, dispatch claim, Applied/Unknown observation, and reconciliation, with
+  prepare/commit/dispatch/receipt-loss reopen tests;
 - an optional Agent interaction plugin with M1-backed Session/input replay,
   binding-pinned host occurrences, workspace scope integration, and finalized
   streams; none of these types enter the framework core or main SDKs;
@@ -412,7 +415,8 @@ Implemented today:
 
 Not yet claimed:
 
-- complete nested-scope durable interpretation and every crash window;
+- complete nested-scope and non-commit-gated effect interpretation plus their
+  additional crash windows;
 - production resource resolver/store plugins and automatic interpreter
   activation of incoming handoffs;
 - automatic live-evolution diffing, shadow execution, observation gates, and

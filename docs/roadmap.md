@@ -26,14 +26,17 @@ Status: partial.
   recorded component outputs without reinvocation;
 - root commit-gated effects persist outbox claims before provider execution and
   reconcile rather than redispatch after crash ambiguity;
+- effect enqueue, scope commit, dispatch-start, Applied/Unknown observation, and
+  reconciliation fault windows retain exact Machine/outbox atomicity and reject
+  unrelated canonical deltas; prepare response loss reuses the same intent;
 - `unknown` outbox entries remain reconciliation-eligible across repeated
   process reopen and can later settle under the original claim;
 - identified signal/timer activation receipts atomically match and complete
   selected waits, enforce consume-once competition, survive redelivery/reopen,
   and resume under a new fenced Attempt epoch;
 - nested scope and non-commit-gated effect resumption, bounded clock/signal
-  source drivers, parked-index integration, atomic event-plus-outbox, and
-  remaining dispatch crash windows are proposed;
+  source drivers, parked-index integration, and their additional crash windows
+  remain proposed;
 - process-level crash injection for every effect window;
 - snapshot compaction and suffix rehydration;
 - canonical component-call occurrences and exact execution replay without

@@ -41,6 +41,18 @@ impl MachineSnapshot {
     pub fn digest(&self) -> Result<String> {
         canonical_digest(self)
     }
+
+    /// Stable content digests for idempotent command records, keyed by command
+    /// identity. Durable layers use this to validate an exact canonical delta
+    /// without exposing the private command-record representation.
+    pub fn command_digests(&self) -> Result<BTreeMap<String, String>> {
+        self.commands
+            .iter()
+            .map(|(command_id, record)| {
+                canonical_digest(record).map(|digest| (command_id.clone(), digest))
+            })
+            .collect()
+    }
 }
 
 /// In-memory reference machine for the Semantic Interpreter and Embedded

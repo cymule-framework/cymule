@@ -29,6 +29,10 @@
   original claim. Reopen must query them again and may settle them as applied or
   not applied; it must never redispatch the original Effect or reuse one command
   ID for different reconciliation decisions.
+- Effect enqueue, claim, observation, and reconciliation checkpoints validate
+  the exact appended Machine Events, command receipts, and allowed Artifacts
+  against the proposed outbox transition. Never use a generic Machine write for
+  `Unknown`; its observation Event and outbox state share one CAS.
 - Higher profiles may append typed, self-validating records through
   `application_journals` so they share the M1 CAS authority. M1 stores only the
   versioned envelope; the owning profile validates and reduces its payload.

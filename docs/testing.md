@@ -121,6 +121,12 @@ expiry, recovery CAS, recovery receipt loss, and late output after takeover.
 Integrity probes compare both the M1 lease map and M3 journal/snapshot; a green
 scheduler-only assertion cannot prove atomic ownership.
 
+M1 effect tests separately inject prepare-response loss and durable receipt loss
+after enqueue, scope commit, dispatch-start claim, Applied settlement, and
+Unknown observation. They count prepare, dispatch, and reconciliation calls and
+verify the exact Machine/outbox pair after reopen; a successful Run alone is not
+proof that the provider was invoked once.
+
 Fault adapters belong in test support or behind existing substrate interfaces.
 Do not add test-only branches to the semantic reducer. Do not use wall-clock
 races as correctness evidence when an explicit barrier, counter, epoch, or CAS

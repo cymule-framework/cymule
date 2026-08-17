@@ -17,6 +17,10 @@
   credentials or a signed URL.
 - Add fault-oriented tests for semantic changes, especially stale commands,
   fencing, scope closure, ambiguous effects, reconciliation, and replay.
+- Effect fault matrices distinguish prepare-response loss, durable enqueue,
+  scope commit, dispatch-start claim, provider application, Applied settlement,
+  and Unknown observation. Assert exact provider call counts and reject
+  unrelated Machine deltas at every outbox stage.
 - Wait activation fixtures contain only stable delivery/source/wait/Artifact
   identities. Stateful tests must cover redelivery, conflicting identity,
   source mismatch, consume-once competition, stale CAS, reopen, and epoch
