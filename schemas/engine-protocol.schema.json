@@ -12,6 +12,13 @@
       "properties": { "type": { "const": "verify" }, "plan": { "$ref": "sealed-plan.schema.json" } }
     },
     {
+      "type": "object", "additionalProperties": false, "required": ["type", "candidate"],
+      "properties": {
+        "type": { "const": "seal_resource" },
+        "candidate": { "$ref": "resource.schema.json#/$defs/resourceCandidate" }
+      }
+    },
+    {
       "type": "object", "additionalProperties": false,
       "required": ["type", "plan", "input", "plugin", "run_id"],
       "properties": {
@@ -22,4 +29,3 @@
     }
   ]
 }
-

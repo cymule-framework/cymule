@@ -4,6 +4,8 @@
 - Keep the package dependency-free at runtime.
 - Do not depend on object insertion order for identity; the Rust engine performs
   canonicalization and sealing.
+- Keep Resource unions closed and dependency-free. Never normalize URLs or hash
+  Resource Candidates in TypeScript; `CliEngine.sealResource` is authoritative.
 - Use discriminated unions for IR and Engine protocol types.
 - The public npm package name is `cymule`. Changes to exports, files, engine
   requirements, or minimum Node versions require a package dry-run and release

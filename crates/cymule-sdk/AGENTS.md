@@ -5,4 +5,5 @@
 - Keep convenient APIs lossless: effect risk, occurrence identity, scopes, and
   version information must remain explicit in the emitted plan.
 - CLI transport is one Engine implementation, not the semantic definition.
-
+- Resource builders emit `cymule.resource/1` candidates. Only the Rust Engine
+  seals Resource IDs; the SDK must not duplicate the resource canonicalizer.

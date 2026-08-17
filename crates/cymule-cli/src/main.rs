@@ -6,6 +6,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use cymule_core::{PlanCandidate, SealedPlan};
+use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{EmbeddedRuntime, ExecutionResult, ProcessPlugin};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,6 +20,9 @@ enum EngineRequest {
     Verify {
         plan: SealedPlan,
     },
+    SealResource {
+        candidate: ResourceCandidate,
+    },
     Run {
         plan: SealedPlan,
         input: Value,
@@ -31,6 +35,7 @@ enum EngineRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum EngineResponse {
     Sealed { plan: SealedPlan },
+    SealedResource { resource: ResourceHandle },
     Executed { result: ExecutionResult },
     Verified,
 }
@@ -57,6 +62,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("verified {}", plan.plan_id);
             Ok(())
         }
+        Some("resource") if arguments.get(1).map(String::as_str) == Some("seal") => {
+            let candidate: ResourceCandidate = read_path(argument_value(&arguments, "--input")?)?;
+            print_json(&candidate.seal()?)
+        }
         Some("run") => {
             let plan: SealedPlan = read_path(argument_value(&arguments, "--plan")?)?;
             let input: Value = read_path(argument_value(&arguments, "--input")?)?;
@@ -66,7 +75,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let result = runtime.execute(plan, &input, run_id)?;
             print_json(&result)
         }
-        _ => Err("usage: cymule <rpc|seal|verify|run> [options]".into()),
+        _ => Err("usage: cymule <rpc|seal|verify|run|resource seal> [options]".into()),
     }
 }
 
@@ -82,6 +91,9 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
             plan.verify()?;
             EngineResponse::Verified
         }
+        EngineRequest::SealResource { candidate } => EngineResponse::SealedResource {
+            resource: candidate.seal()?,
+        },
         EngineRequest::Run {
             plan,
             input,

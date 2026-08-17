@@ -2,19 +2,32 @@
 
 [![CI](https://github.com/cymule-framework/cymule/actions/workflows/ci.yml/badge.svg)](https://github.com/cymule-framework/cymule/actions/workflows/ci.yml)
 
-Cymule is a small, Rust-first framework for defining and executing durable,
-effectful programs from TypeScript, Python, Rust, and Go.
+Cymule is a semantic execution fabric for long-running programs that execute
+code, wait, recurse over large bodies of work, affect external systems, accept
+live intervention, and evolve while they are still running.
 
-Write a Flow once, keep its meaning independent from infrastructure, and run it
-through replaceable components and effect plugins. Cymule gives every Plan,
-state transition, and external effect a stable identity so retries, worker
-upgrades, ambiguous outcomes, and replay can be handled explicitly.
+Its purpose is to keep one live computation coherent when durability,
+transactional state, ambiguous world effects, authority, replay and historical
+forks, large virtual work, and live Plan evolution interact. Cymule's central
+runtime object is a **versioned effectful continuation**: durable,
+version-bound execution state that carries Plan identity, typed state, waits,
+scope, outstanding effect obligations, authority, budget, causal position, and
+a fencing epoch.
 
-> **Project status:** version `0.1.0` provides the executable Embedded M0
-> profile plus preview, fault-tested foundations for durable execution, agent
-> interaction, virtual work, and live evolution. The complete M1-M4 profiles
-> and a distributed production runtime remain in development; see the
-> [roadmap](docs/roadmap.md) for exact boundaries.
+The public model stays deliberately small - `Flow -> Run -> Result`, with
+`call / wait / effect / scope` inside a Flow and `observe / decide / change`
+around a Run. Under that facade, immutable Plans, causal Events, and Artifacts
+are the only canonical truth; graphs, frontiers, schedulers, and debugger views
+are rebuildable projections. Languages, databases, queues, sandboxes,
+providers, and deployment topologies remain replaceable realizations rather
+than framework semantics.
+
+> **Project status:** Cymule `0.1.x` is an early executable reference
+> implementation of this model, not yet a complete production fabric. The
+> bounded M0 semantic profile is implemented; M1-M4 provide fault-tested but
+> partial foundations for durable single-domain execution, caller-owned agent
+> interaction, large virtual work, and live evolution. See the
+> [roadmap](docs/roadmap.md) for the exact implemented and remaining boundaries.
 
 ## What Cymule gives you
 
@@ -33,6 +46,10 @@ upgrades, ambiguous outcomes, and replay can be handled explicitly.
 - **Durable typed input.** Agent input schemas, waits, Session state, and
   Continuations advance under one optimistic CAS authority; invalid responses
   make no durable change.
+- **Portable resources between Runs.** Pass inline text/JSON/bytes, large
+  objects, directories, collections, sandbox snapshots, remote-drive items, or
+  public URLs through one versioned Resource Handle without choosing a storage
+  provider in the framework.
 - **Replaceable integrations.** Plans name abstract operations rather than
   queues, object stores, vendors, endpoints, or credentials.
 - **Deterministic state replay.** Canonical Events rebuild the same Run
@@ -149,9 +166,9 @@ The Python, Rust, and Go SDKs expose the same concepts with idiomatic builders.
 All four SDKs send Plan Candidates to the Rust engine; none implements a second
 canonicalizer or state reducer.
 
-Version `0.1.0` keeps the SDK packages in this repository for source/workspace
-consumption. Publishing to public language package registries is not part of
-the current release.
+Version `0.1.x` keeps all SDK sources in this repository. Public package
+publication is performed only by the reviewed GitHub Actions release workflow;
+local development and verification never publish registry bytes.
 
 ## The programming model
 
@@ -172,6 +189,57 @@ Inside a Flow: call | wait | effect | scope
 
 A `Run` is the live handle. It can accumulate state, history, waits, and effect
 obligations before it produces a terminal `Result`.
+
+## Pass resources between Runs
+
+Resources are separate from Plans: a Plan describes what a program requires,
+while a Resource Handle describes a value and the evidence needed to retrieve
+or replay it. The trusted Rust Engine seals Resource Candidates just as it seals
+Plans, so every SDK receives the same location-independent `ResourceId`.
+
+```ts
+import { CliEngine, ResourceBuilder } from "cymule";
+
+const engine = new CliEngine("./target/debug/cymule");
+
+const note = engine.sealResource(
+  ResourceBuilder.text("reviewed input", { purpose: "next-run-input" }),
+);
+
+const dataset = engine.sealResource(
+  ResourceBuilder.external(
+    "directory",
+    "application/vnd.example.dataset-directory",
+    {
+      kind: "content",
+      digest: "sha256:...",
+      size: 48291,
+    },
+    [{
+      kind: "resolver",
+      binding: "binding:dataset-resolver/3",
+      reference: "dataset:quarterly-input",
+    }],
+  ),
+);
+
+const handoff = ResourceBuilder.handoff(
+  "transfer:analysis-input",
+  "run:prepare",
+  "run:analyze",
+  "input.dataset",
+  dataset,
+);
+```
+
+`inline` and verified `content` Resources carry exact evidence independently of
+location; replay still requires retained inline bytes or a usable resolver.
+An immutable `version` requires its original resolver binding. A mutable `live`
+Resource is intentionally live-only and never advertised as exact replay.
+Public URLs must contain no credentials, query, or fragment; private object
+stores, remote drives, sandboxes, and signed URLs use opaque resolver plugins.
+Directory, collection, and snapshot adapters expose bounded cursor pages, and
+large object reads/writes are chunked rather than loaded into memory.
 
 ## How Cymule handles failures
 
@@ -268,6 +336,7 @@ See [Architecture](docs/architecture.md) and the
 | TypeScript SDK | Implemented | Builder and CLI-backed engine client. |
 | Python SDK | Implemented | Dependency-light builder and engine client. |
 | Go SDK | Implemented | Builder and engine client. |
+| Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, M1 handoff journal. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
 | JSON Schema contracts | Implemented | Draft 2020-12 Plan and protocol schemas. |
 | MLIR workbench | Partial | Generic-operation syntax and MLIR 22 smoke validation. |
@@ -310,6 +379,10 @@ Implemented today:
   with typed completion or evidence-backed non-application and no redispatch;
 - durable workspace overlay commit/abort coupled to scope obligations and the
   M1 outbox, including receipt-loss recovery without provider redispatch;
+- provider-neutral cross-Run Resource Handles for inline values, objects,
+  directories, collections, snapshots, remote references, and public URLs;
+- bounded resolver/store interfaces and durable idempotent M1 handoffs, with
+  one shared Resource ID sealed through all four SDKs;
 - bounded virtual work with deterministic fairness and portable snapshots;
 - immutable Plan evolution DAGs, impact cones, canaries, rollback pins,
   migration receipts, and shadow evidence.
@@ -317,8 +390,8 @@ Implemented today:
 Not yet claimed:
 
 - complete nested-scope durable interpretation and every crash window;
-- provider-neutral cross-Run resource descriptors and resolver/store plugins
-  for large objects, directories, sandbox snapshots, remote drives, and URLs;
+- production resource resolver/store plugins and automatic interpreter
+  activation of incoming handoffs;
 - finalized streaming content, protocol adapters, and cross-language
   agent-interaction clients;
 - durable virtual-work partition migration and subtree rehydration;
@@ -345,6 +418,7 @@ crates/cymule-agent     provider-neutral M2 agent interaction contracts
 crates/cymule-durable   provider-neutral M1 persistence and recovery contracts
 crates/cymule-evolution provider-neutral M4 Plan DAG and rollout semantics
 crates/cymule-runtime   embedded interpreter and plugin host
+crates/cymule-resource  provider-neutral Resource Handles and Run handoffs
 crates/cymule-sdk       native Rust authoring and engine facade
 crates/cymule-virtual   provider-neutral M3 bounded virtual-work scheduler
 crates/cymule-cli       command-line and JSON engine boundary

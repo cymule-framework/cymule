@@ -1,0 +1,21 @@
+//! Provider-neutral cross-Run resource descriptors and transfer contracts.
+
+mod error;
+mod handoff;
+mod model;
+mod resolver;
+mod store;
+
+pub use error::{ResourceError, ResourceResult};
+pub use handoff::{RESOURCE_HANDOFF_VERSION, ResourceHandoff, ResourceHandoffController};
+pub use model::{
+    INLINE_RESOURCE_LIMIT, InlineData, RESOURCE_VERSION, ResourceCandidate, ResourceHandle,
+    ResourceIntegrity, ResourceLocation, ResourceReplayClass, ResourceShape,
+};
+pub use resolver::{
+    ArtifactResolver, MAX_LIST_PAGE, MAX_READ_CHUNK, ResourceChunk, ResourceClient, ResourceEntry,
+    ResourceObservation, ResourcePage,
+};
+pub use store::{
+    ArtifactStore, MAX_WRITE_CHUNK, ResourceWriteIntent, ResourceWriteSession, ResourceWriter,
+};

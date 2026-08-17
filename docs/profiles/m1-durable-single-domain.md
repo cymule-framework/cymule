@@ -20,6 +20,13 @@ Status: partial.
   resolution without a second dispatch;
 - canonical component occurrence inputs, outputs, binding, and revision;
 - portable snapshot metadata;
+- provider-neutral `cymule.resource/1` handles for inline values, objects,
+  collections, directories, and sandbox/workspace snapshots, with
+  content-verified, resolver-required, and live-only replay classification;
+- bounded chunk/list `ArtifactResolver`, chunked `ArtifactStore`, and M1 typed
+  Run-to-Run handoff journals with idempotent transfer IDs and reopen replay;
+- Rust, TypeScript, Python, and Go Resource builders sealed to one shared ID by
+  the trusted Rust Engine;
 - non-blocking shared-memory CAS reference and atomic directory-store adapter;
 - resumable sequential `call`/`wait` interpretation with process reopen, epoch
   advance, and component-result replay without reinvocation;
@@ -37,7 +44,16 @@ Status: partial.
 - atomic semantic event plus outbox publication;
 - crash injection at every prepare/commit/dispatch/receipt window;
 - snapshot compaction and suffix rehydration;
-- all SDK control/query surfaces and restart-level end-to-end tests.
+- all SDK control/query surfaces and restart-level end-to-end tests;
+- production resolver/store plugins and durable activation from incoming
+  handoffs into interpreter Continuation state.
 
 No concrete storage product is part of this profile. An adapter conforms only
 when it provides atomic whole-state CAS and passes the profile fault suite.
+
+Version decision: Resources introduce independent `cymule.resource/1` and
+`cymule.resource-handoff/1` domains. The additive `seal_resource` Engine RPC is
+returned only to callers that request it, so the Engine request domain and
+semantic kernel version do not change. `cymule-core`, `ArtifactRef`, Event, and
+Continuation wire shapes remain unchanged while the partial M1 profile stores
+handoffs through its existing typed application-journal seam.

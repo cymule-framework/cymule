@@ -116,6 +116,69 @@ def main() -> int:
     else:
         raise AssertionError("Agent schema accepted an unknown provider field")
 
+    resource_validator = Draft202012Validator(
+        by_title["Cymule Resource Protocol cymule.resource/1"], registry=registry
+    )
+    resource_candidate = load(root / "tests/fixtures/resource-candidate.json")
+    resource_validator.validate(resource_candidate)
+    sealed_resource = json.loads(
+        subprocess.run(
+            [
+                str(engine),
+                "resource",
+                "seal",
+                "--input",
+                str(root / "tests/fixtures/resource-candidate.json"),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    resource_validator.validate(sealed_resource)
+    Draft202012Validator(
+        by_title["Cymule Engine Request"], registry=registry
+    ).validate({"type": "seal_resource", "candidate": resource_candidate})
+    resource_validator.validate(
+        {
+            "handoff_version": "cymule.resource-handoff/1",
+            "transfer_id": "transfer:fixture",
+            "from_run": "run:producer",
+            "to_run": "run:consumer",
+            "slot": "input.resource",
+            "resource": sealed_resource,
+        }
+    )
+    malformed_resource = dict(resource_candidate)
+    malformed_resource["provider"] = "must-not-enter-resource-semantics"
+    try:
+        resource_validator.validate(malformed_resource)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("Resource schema accepted an unknown provider field")
+    credential_url = {
+        "resource_version": "cymule.resource/1",
+        "shape": "object",
+        "media_type": "application/octet-stream",
+        "integrity": {"kind": "live", "identity": "live:credential-check"},
+        "locations": [
+            {
+                "kind": "public_url",
+                "url": "https://example.com/object?access_token=secret",
+            }
+        ],
+    }
+    credential_result = subprocess.run(
+        [str(engine), "resource", "seal", "--input", "-"],
+        input=json.dumps(credential_url),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if credential_result.returncode == 0:
+        raise AssertionError("Rust resource sealer accepted a credential-bearing public URL")
+
     malformed = dict(candidate)
     malformed["provider"] = "must-not-enter-canonical-plan"
     try:

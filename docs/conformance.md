@@ -8,8 +8,8 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | --- | --- | --- |
 | Semantic Interpreter M0 | Implemented | frozen IR, canonical stores, admission, reducer, exact state replay |
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
-| Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, wait, lease, outbox, occurrence replay, directory reopen, and ambiguous-effect reconciliation; nested scopes and the full crash matrix remain |
-| Agent Interaction | Partial | typed Session updates, M1-backed replay, atomic input waits, binding-pinned host occurrences, no-redispatch reconciliation, and model-tool-model loop; durable turn control and protocol adapters remain |
+| Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, wait, lease, outbox, occurrence replay, Resource handoff, directory-store reopen, and ambiguous-effect reconciliation; nested scopes and the full crash matrix remain |
+| Agent Interaction | Partial | typed Session updates, M1-backed replay, atomic input waits, caller-owned binding-pinned interactions, workspace scope obligations, and no-redispatch reconciliation; protocol adapters remain |
 | Large Virtual Graph | Partial | bounded virtual regions, cursors, fair capability claims, parked index, fencing, and snapshot restore; durable compaction remains |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
@@ -38,7 +38,12 @@ The local suite verifies:
 - a Binding Context update changes only future occurrences;
 - replay availability is not reported as exact when an artifact is missing;
 - TypeScript, Python, Rust, and Go author the same plan and execute through the
-  same Rust kernel and external plugin.
+  same Rust kernel and external plugin;
+- TypeScript, Python, Rust, and Go submit the same Resource Candidate to the
+  Rust resource sealer and receive the same Resource ID;
+- Resource identity ignores locations, public credential-bearing URLs fail,
+  bounded reads/lists reject malformed adapters, content bytes are verified,
+  and Run-to-Run handoffs survive M1 reopen and reject conflicting transfer IDs.
 
 ## Cross-axis scenario
 

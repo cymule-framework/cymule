@@ -34,6 +34,13 @@ CYMULE_EXPECTED_PLAN_ID=$(
 export CYMULE_EXPECTED_PLAN_ID
 echo "shared Plan ID: $CYMULE_EXPECTED_PLAN_ID"
 
+CYMULE_EXPECTED_RESOURCE_ID=$(
+  "$CYMULE_BIN" resource seal --input "$ROOT/tests/fixtures/resource-candidate.json" |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["resource_id"])'
+)
+export CYMULE_EXPECTED_RESOURCE_ID
+echo "shared Resource ID: $CYMULE_EXPECTED_RESOURCE_ID"
+
 echo "== Hello World user quick start =="
 mkdir -p "$ROOT/.cache"
 cargo run --quiet -p cymule-example-hello-world -- Ada \

@@ -129,14 +129,14 @@ store name is part of the contract.
 
 ## Cross-Run resources
 
-Status: proposed.
+Status: implemented foundation.
 
-Run state and outputs will accept a versioned resource descriptor rather than
+Run state and outputs can use a versioned resource descriptor rather than
 assuming every Artifact is a small inline blob. The descriptor separates
 logical shape and replay evidence from realization: inline text/JSON/bytes,
 immutable objects, directory or collection manifests, and sandbox/workspace
 snapshots share one contract. External URLs and storage locators are resolved by
-an `ArtifactResolver`; writes and materialization use an `ArtifactStore`.
+bounded `ArtifactResolver` reads/lists; chunked writes use `ArtifactStore`.
 Concrete local, object-storage, remote-drive, WebDAV, sandbox, and HTTP
 implementations remain plugins.
 
@@ -145,3 +145,15 @@ prove bytes independently of where they are found. A locator or expiring access
 grant is never canonical identity, and credentials never enter durable state.
 Mutable references remain usable but cannot support exact replay until pinned by
 content digest or immutable version evidence.
+
+`cymule-resource` owns this higher-profile contract; `cymule-core` remains
+unchanged. Resource ID covers shape, media type, inline/content/version/live
+evidence, and semantic annotations but deliberately excludes locations. The
+trusted Rust resource sealer validates and hashes candidates. TypeScript,
+Python, Rust, and Go builders call that sealer through the Engine protocol.
+
+`ResourceHandoffController` appends a typed, self-validating transfer to the
+target Run's M1 application journal. The caller supplies source Run, target Run,
+stable transfer ID, and target slot. Handoffs survive reopen, retry
+idempotently, and reject conflicting ID reuse without adding Resource semantics
+to M1 storage.

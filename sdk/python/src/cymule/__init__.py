@@ -114,6 +114,69 @@ class FlowBuilder:
         return self._entry()["body"]["steps"]
 
 
+class ResourceBuilder:
+    """Provider-neutral resource candidates sealed only by the Rust engine."""
+
+    @staticmethod
+    def text(text: str, annotations: dict[str, str] | None = None) -> dict[str, Any]:
+        return {
+            "resource_version": "cymule.resource/1",
+            "shape": "inline",
+            "media_type": "text/plain;charset=utf-8",
+            "inline": {"encoding": "utf8", "text": text},
+            "integrity": {"kind": "inline"},
+            "annotations": dict(annotations or {}),
+        }
+
+    @staticmethod
+    def json(value: Json, annotations: dict[str, str] | None = None) -> dict[str, Any]:
+        return {
+            "resource_version": "cymule.resource/1",
+            "shape": "inline",
+            "media_type": "application/json",
+            "inline": {"encoding": "json", "value": value},
+            "integrity": {"kind": "inline"},
+            "annotations": dict(annotations or {}),
+        }
+
+    @staticmethod
+    def external(
+        shape: str,
+        media_type: str,
+        integrity: dict[str, Json],
+        locations: list[dict[str, str]],
+        annotations: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        if shape == "inline":
+            raise ValueError("external resource shape cannot be inline")
+        return {
+            "resource_version": "cymule.resource/1",
+            "shape": shape,
+            "media_type": media_type,
+            "integrity": copy.deepcopy(integrity),
+            "locations": copy.deepcopy(locations),
+            "annotations": dict(annotations or {}),
+        }
+
+    @staticmethod
+    def handoff(
+        transfer_id: str,
+        from_run: str,
+        to_run: str,
+        slot: str,
+        resource: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create one M1 Run-to-Run resource handoff record."""
+        return {
+            "handoff_version": "cymule.resource-handoff/1",
+            "transfer_id": transfer_id,
+            "from_run": from_run,
+            "to_run": to_run,
+            "slot": slot,
+            "resource": copy.deepcopy(resource),
+        }
+
+
 class CliEngine:
     """CLI-backed Engine transport."""
 
@@ -125,6 +188,13 @@ class CliEngine:
         if response.get("type") != "sealed":
             raise RuntimeError(f"unexpected engine response: {response!r}")
         return response["plan"]
+
+    def seal_resource(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        """Validate and seal a Resource Candidate with the Rust engine."""
+        response = self._request({"type": "seal_resource", "candidate": candidate})
+        if response.get("type") != "sealed_resource":
+            raise RuntimeError(f"unexpected engine response: {response!r}")
+        return response["resource"]
 
     def run(
         self,
@@ -160,4 +230,4 @@ class CliEngine:
         return json.loads(completed.stdout)
 
 
-__all__ = ["CliEngine", "FlowBuilder", "Json"]
+__all__ = ["CliEngine", "FlowBuilder", "Json", "ResourceBuilder"]

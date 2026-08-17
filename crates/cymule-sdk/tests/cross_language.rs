@@ -1,10 +1,11 @@
 //! Rust SDK side of the shared cross-language end-to-end scenario.
 
+use std::collections::BTreeMap;
 use std::env;
 
 use cymule_sdk::{
     CliEngine, DispatchPolicy, EffectProfile, Engine, Expression, FlowBuilder, MutationKind,
-    ReconciliationMode,
+    ReconciliationMode, ResourceCandidate,
 };
 use serde_json::json;
 
@@ -53,4 +54,23 @@ fn rust_candidate_seals_and_executes_through_the_cli() {
         .expect("plan executes");
     assert_eq!(result.value, input);
     assert_eq!(result.effects.len(), 1);
+}
+
+#[test]
+fn rust_resource_seals_through_the_cli() {
+    let (Ok(engine_path), Ok(expected_resource_id)) = (
+        env::var("CYMULE_BIN"),
+        env::var("CYMULE_EXPECTED_RESOURCE_ID"),
+    ) else {
+        return;
+    };
+    let mut candidate = ResourceCandidate::text("shared cross-run resource");
+    candidate.annotations = BTreeMap::from([(
+        "purpose".to_owned(),
+        "cross-language-conformance".to_owned(),
+    )]);
+    let resource = CliEngine::new(engine_path)
+        .seal_resource(&candidate)
+        .expect("Resource Candidate seals");
+    assert_eq!(resource.resource_id, expected_resource_id);
 }

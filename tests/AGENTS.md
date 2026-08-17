@@ -5,6 +5,9 @@
   candidate; never duplicate canonicalization in a test script.
 - Cross-language tests must seal and execute through the real engine and process
   plugin, not mocks.
+- Resource fixtures are sealed only by the Rust engine. Every SDK must submit
+  the shared candidate and receive the same Resource ID; no fixture may contain
+  credentials or a signed URL.
 - Add fault-oriented tests for semantic changes, especially stale commands,
   fencing, scope closure, ambiguous effects, reconciliation, and replay.
 - Agent occurrence fixtures must pass both Draft 2020-12 shape validation and

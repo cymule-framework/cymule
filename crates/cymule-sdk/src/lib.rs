@@ -9,4 +9,8 @@ pub use cymule_core::{
     DispatchPolicy, EffectProfile, Expression, MutationKind, PlanCandidate, ReconciliationMode,
     ScopeMode, SealedPlan, WaitSpec,
 };
+pub use cymule_resource::{
+    InlineData, ResourceCandidate, ResourceHandle, ResourceHandoff, ResourceIntegrity,
+    ResourceLocation, ResourceReplayClass, ResourceShape,
+};
 pub use cymule_runtime::ExecutionResult;

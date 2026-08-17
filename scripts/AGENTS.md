@@ -5,6 +5,8 @@
 - Do not hide skipped coverage. Optional-tool skips must print the exact reason.
 - Cross-language tests must use freshly built Rust binaries and a Plan ID sealed
   from the checked-in shared fixture.
+- Export the Resource ID sealed from the checked-in Resource Candidate so every
+  SDK verifies the same Rust-owned identity.
 - Schema verification covers every `schemas/*.schema.json` file and must include
   positive and unknown-field rejection cases for each public protocol family.
 - Keep host-native verification reproducible and avoid container-only workflows.

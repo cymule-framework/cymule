@@ -1,0 +1,15 @@
+{
+  "resource_version": "cymule.resource/1",
+  "shape": "inline",
+  "media_type": "text/plain;charset=utf-8",
+  "inline": {
+    "encoding": "utf8",
+    "text": "shared cross-run resource"
+  },
+  "integrity": {
+    "kind": "inline"
+  },
+  "annotations": {
+    "purpose": "cross-language-conformance"
+  }
+}

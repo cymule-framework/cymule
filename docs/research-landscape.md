@@ -23,7 +23,7 @@ standards.
   plugins, but plugin availability is not authority.
 - [OCI content descriptors](https://github.com/opencontainers/image-spec/blob/main/descriptor.md)
   separate media type, digest, size, and optional retrieval URLs. Cymule's
-  proposed cross-Run resources adopt that content-proof separation without
+  cross-Run Resource Handle adopts that content-proof separation without
   adopting the container-image domain model.
 - [Apache OpenDAL](https://opendal.apache.org/) provides a maintained Rust data
   access layer across object stores, filesystems, WebDAV, and other services.

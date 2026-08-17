@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/resource.schema.json",
+  "title": "Cymule Resource Protocol cymule.resource/1",
+  "oneOf": [
+    { "$ref": "#/$defs/resourceCandidate" },
+    { "$ref": "#/$defs/resourceHandle" },
+    { "$ref": "#/$defs/resourceHandoff" }
+  ],
+  "$defs": {
+    "nonEmpty": { "type": "string", "minLength": 1 },
+    "shape": { "enum": ["inline", "object", "collection", "directory", "snapshot"] },
+    "inlineData": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["encoding", "text"],
+          "properties": { "encoding": { "const": "utf8" }, "text": { "type": "string" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["encoding", "value"],
+          "properties": { "encoding": { "const": "json" }, "value": true }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["encoding", "data"],
+          "properties": { "encoding": { "const": "base64" }, "data": { "type": "string" } }
+        }
+      ]
+    },
+    "integrity": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind"],
+          "properties": { "kind": { "const": "inline" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "digest", "size"],
+          "properties": {
+            "kind": { "const": "content" },
+            "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "size": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "authority", "version"],
+          "properties": {
+            "kind": { "const": "version" },
+            "authority": { "$ref": "#/$defs/nonEmpty" },
+            "version": { "$ref": "#/$defs/nonEmpty" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "identity"],
+          "properties": {
+            "kind": { "const": "live" },
+            "identity": { "$ref": "#/$defs/nonEmpty" }
+          }
+        }
+      ]
+    },
+    "location": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "url"],
+          "properties": {
+            "kind": { "const": "public_url" },
+            "url": { "type": "string", "format": "uri", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "binding", "reference"],
+          "properties": {
+            "kind": { "const": "resolver" },
+            "binding": { "$ref": "#/$defs/nonEmpty" },
+            "reference": { "$ref": "#/$defs/nonEmpty" }
+          }
+        }
+      ]
+    },
+    "candidateFields": {
+      "type": "object",
+      "required": ["resource_version", "shape", "media_type", "integrity"],
+      "properties": {
+        "resource_version": { "const": "cymule.resource/1" },
+        "shape": { "$ref": "#/$defs/shape" },
+        "media_type": { "type": "string", "minLength": 3, "maxLength": 255 },
+        "inline": { "$ref": "#/$defs/inlineData" },
+        "integrity": { "$ref": "#/$defs/integrity" },
+        "locations": {
+          "type": "array", "items": { "$ref": "#/$defs/location" }, "uniqueItems": true
+        },
+        "annotations": {
+          "type": "object", "additionalProperties": { "type": "string", "maxLength": 4096 }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "shape": { "const": "inline" } }, "required": ["shape"] },
+          "then": {
+            "required": ["inline"],
+            "properties": {
+              "integrity": {
+                "type": "object", "required": ["kind"],
+                "properties": { "kind": { "const": "inline" } }
+              },
+              "locations": { "maxItems": 0 }
+            }
+          },
+          "else": {
+            "not": { "required": ["inline"] },
+            "required": ["locations"],
+            "properties": {
+              "integrity": {
+                "not": {
+                  "type": "object", "required": ["kind"],
+                  "properties": { "kind": { "const": "inline" } }
+                }
+              },
+              "locations": { "minItems": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "resourceCandidate": {
+      "allOf": [{ "$ref": "#/$defs/candidateFields" }],
+      "unevaluatedProperties": false
+    },
+    "resourceHandle": {
+      "allOf": [
+        { "$ref": "#/$defs/candidateFields" },
+        {
+          "type": "object", "required": ["resource_id"],
+          "properties": {
+            "resource_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "resourceHandoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handoff_version", "transfer_id", "from_run", "to_run", "slot", "resource"],
+      "properties": {
+        "handoff_version": { "const": "cymule.resource-handoff/1" },
+        "transfer_id": { "$ref": "#/$defs/nonEmpty" },
+        "from_run": { "$ref": "#/$defs/nonEmpty" },
+        "to_run": { "$ref": "#/$defs/nonEmpty" },
+        "slot": { "$ref": "#/$defs/nonEmpty" },
+        "resource": { "$ref": "#/$defs/resourceHandle" }
+      }
+    }
+  }
+}
