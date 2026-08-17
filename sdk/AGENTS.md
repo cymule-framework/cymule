@@ -1,6 +1,9 @@
 # SDK Guidance
 
-- Every SDK emits the same frozen `cymule.ir/1` JSON shape and calls an Engine.
+- Every SDK emits the same frozen `cymule.ir/2` JSON shape and calls an Engine.
+- Every SDK exposes reusable definition declaration and `invoke` authoring with
+  the same explicit local definition ID, input expression, site ID, and result
+  binding. Linking logical latest-compatible references remains Rust authority.
 - SDKs must not compute authoritative Plan/Event IDs or implement a reducer.
 - SDKs also author the same `cymule.resource/1` candidates and Run handoff wire
   records. They delegate Resource ID validation and sealing to the Rust Engine.

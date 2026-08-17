@@ -1,5 +1,5 @@
 {
-  "ir_version": "cymule.ir/1",
+  "ir_version": "cymule.ir/2",
   "name": "invalid_unknown_component",
   "entry": "main",
   "components": [],

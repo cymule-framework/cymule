@@ -85,6 +85,9 @@ Use this precedence order when guidance conflicts:
   and must surface contention instead of waiting indefinitely.
 - Cross-language SDKs author the same frozen IR and use the same engine contract.
   They must not implement a second reducer or invent language-specific semantics.
+- `cymule.ir/2` reusable definition calls resolve inside one immutable Plan.
+  Logical latest-compatible references are linked by M4 into a new parent Plan;
+  a sealed Plan never dereferences a mutable `latest` alias at runtime.
 - New behavior is provider-neutral by default. Concrete persistence, activation,
   execution, model, tool, and effect integrations belong behind plugin or
   substrate interfaces.

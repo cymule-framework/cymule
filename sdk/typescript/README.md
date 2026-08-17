@@ -1,7 +1,12 @@
 # Cymule TypeScript SDK
 
-This package authors `cymule.ir/1` Plan Candidates and calls a trusted Cymule
+This package authors `cymule.ir/2` Plan Candidates and calls a trusted Cymule
 Engine. It does not implement canonical sealing or runtime semantics.
+
+`FlowBuilder.definition()` adds a reusable definition to the same immutable
+Plan and `invoke()` calls it with explicit input and result binding. Logical
+latest-compatible registry resolution is performed by the Rust M4 linker before
+sealing, never by the SDK.
 
 ```sh
 npm install cymule

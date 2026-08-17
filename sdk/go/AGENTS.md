@@ -4,6 +4,8 @@
 - Public wire structs use explicit JSON tags and avoid interface-based semantic
   dispatch when a closed type can express the contract.
 - The CLI Engine is a transport; do not add a Go reducer or authoritative hash.
+- `Definition` and `Invoke` author exact local reusable calls; logical subflow
+  registry resolution remains Rust M4 authority.
 - Keep Resource Candidate, Handle, Integrity, Location, and Handoff wire structs
   explicit. The Rust Engine is the only Resource ID authority.
 - Keep WaitActivation and source structs closed and provider-neutral. Builders

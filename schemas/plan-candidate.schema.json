@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/plan-candidate.schema.json",
-  "title": "Cymule Plan Candidate cymule.ir/1",
+  "title": "Cymule Plan Candidate cymule.ir/2",
   "type": "object",
   "additionalProperties": false,
   "required": ["ir_version", "name", "entry", "components", "effects", "definitions", "metadata"],
   "properties": {
-    "ir_version": { "const": "cymule.ir/1" },
+    "ir_version": { "const": "cymule.ir/2" },
     "name": { "$ref": "#/$defs/id" },
     "entry": { "$ref": "#/$defs/id" },
     "components": { "type": "array", "items": { "$ref": "#/$defs/component" } },
@@ -75,6 +75,7 @@
     "step": {
       "oneOf": [
         { "$ref": "#/$defs/call" },
+        { "$ref": "#/$defs/invoke" },
         { "$ref": "#/$defs/wait" },
         { "$ref": "#/$defs/effect" },
         { "$ref": "#/$defs/scope" }
@@ -92,6 +93,16 @@
       "properties": {
         "id": { "$ref": "#/$defs/id" }, "op": { "const": "call" },
         "component": { "$ref": "#/$defs/id" }, "input": { "$ref": "#/$defs/expression" },
+        "bind": { "$ref": "#/$defs/id" }
+      }
+    },
+    "invoke": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "op", "definition", "input"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "op": { "const": "invoke" },
+        "definition": { "$ref": "#/$defs/id" }, "input": { "$ref": "#/$defs/expression" },
         "bind": { "$ref": "#/$defs/id" }
       }
     },
@@ -151,4 +162,3 @@
     }
   }
 }
-

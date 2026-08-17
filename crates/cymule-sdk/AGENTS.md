@@ -1,7 +1,9 @@
 # Rust SDK Guidance
 
 - The SDK is an authoring and client facade. It does not own semantic reduction.
-- Builders must emit the same `cymule.ir/1` objects as other language SDKs.
+- Builders must emit the same `cymule.ir/2` objects as other language SDKs.
+- Rust builder definitions and invocations must match the TypeScript, Python,
+  and Go wire shape; they never resolve logical registry heads locally.
 - Keep convenient APIs lossless: effect risk, occurrence identity, scopes, and
   version information must remain explicit in the emitted plan.
 - CLI transport is one Engine implementation, not the semantic definition.

@@ -21,6 +21,8 @@
   work/lease fences, logical times, TTL, and recovery disposition. They never
   read `Date.now()`, manage workers, or infer retryability.
 - Use discriminated unions for IR and Engine protocol types.
+- Keep `invoke` as a closed discriminated variant and `definition()` as a pure
+  candidate authoring operation; neither may resolve logical latest heads.
 - The public npm package name is `cymule`. Changes to exports, files, engine
   requirements, or minimum Node versions require a package dry-run and release
   workflow review.

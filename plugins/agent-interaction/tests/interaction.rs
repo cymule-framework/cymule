@@ -303,7 +303,12 @@ fn agent_continuation(run_id: &str) -> Continuation {
         plan_id: "plan:agent-test".to_owned(),
         binding_context: "binding:agent-test/1".to_owned(),
         frames: vec![FrameState {
+            definition_id: "agent-turn".to_owned(),
             invocation_id: "agent-turn".to_owned(),
+            input: cymule_core::ArtifactRef {
+                artifact_id: format!("sha256:{}", "0".repeat(64)),
+                kind: "test/input".to_owned(),
+            },
             region_path: Vec::new(),
             next_step: 0,
             locals: BTreeMap::new(),

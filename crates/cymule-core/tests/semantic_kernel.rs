@@ -175,6 +175,20 @@ fn public_validation_errors_and_effect_policy_boundaries_are_stable() {
         Err(CoreError::Validation(message)) if message.contains("unknown effect")
     ));
 
+    let mut unknown_definition = candidate();
+    unknown_definition.definitions[0].body.steps.push(Step {
+        id: "invoke.unknown".to_owned(),
+        operation: Operation::Invoke {
+            definition: "missing.definition".to_owned(),
+            input: Expression::Input,
+            bind: Some("invoked".to_owned()),
+        },
+    });
+    assert!(matches!(
+        unknown_definition.validate(),
+        Err(CoreError::Validation(message)) if message.contains("unknown definition")
+    ));
+
     let mut invalid_wait = candidate();
     invalid_wait.definitions[0].body.steps.push(Step {
         id: "wait.invalid".to_owned(),

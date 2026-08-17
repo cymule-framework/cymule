@@ -6,6 +6,8 @@
 - Subprocess errors must include bounded stderr and never expose environment
   variables or credentials.
 - The Rust engine remains the only authoritative sealer and reducer.
+- `definition()` and `invoke()` emit exact `cymule.ir/2` wire records. Python
+  must not resolve or cache logical subflow heads.
 - Resource builders preserve exact wire names and send candidates to the Rust
   engine. Do not add a Python Resource ID implementation or accept credentials
   in public URL helpers.

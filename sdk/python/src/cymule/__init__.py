@@ -330,7 +330,7 @@ class FlowBuilder:
 
     def __init__(self, name: str, input_schema: Json, output_schema: Json) -> None:
         self._candidate: dict[str, Any] = {
-            "ir_version": "cymule.ir/1",
+            "ir_version": "cymule.ir/2",
             "name": name,
             "entry": "main",
             "components": [],
@@ -378,6 +378,43 @@ class FlowBuilder:
     def call(self, site: str, component: str, expression: dict[str, Json], bind: str) -> FlowBuilder:
         self._steps().append(
             {"id": site, "op": "call", "component": component, "input": expression, "bind": bind}
+        )
+        return self
+
+    def definition(
+        self,
+        definition_id: str,
+        input_schema: Json,
+        output_schema: Json,
+        body: dict[str, Any],
+    ) -> FlowBuilder:
+        """Add one reusable definition to the same immutable Plan."""
+        self._candidate["definitions"].append(
+            {
+                "id": definition_id,
+                "input_schema": input_schema,
+                "output_schema": output_schema,
+                "body": body,
+            }
+        )
+        return self
+
+    def invoke(
+        self,
+        site: str,
+        definition: str,
+        expression: dict[str, Json],
+        bind: str,
+    ) -> FlowBuilder:
+        """Append one reusable definition invocation."""
+        self._steps().append(
+            {
+                "id": site,
+                "op": "invoke",
+                "definition": definition,
+                "input": expression,
+                "bind": bind,
+            }
         )
         return self
 

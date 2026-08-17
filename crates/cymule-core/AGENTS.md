@@ -9,6 +9,9 @@
   caches or global state.
 - Preserve closed effect, scope, attempt, and Run state machines. Illegal jumps
   fail closed.
+- `Operation::Invoke` targets a definition in the same sealed Plan. Keep
+  definition lookup semantic and immutable; logical registries and future-head
+  selection belong in `cymule-evolution`.
 - Do not add a provider name or transport detail to IR, events, or projections.
 - `MachineSnapshot::command_digests` exposes only stable validation evidence for
   durable exact-delta checks. Keep the private command-record representation and

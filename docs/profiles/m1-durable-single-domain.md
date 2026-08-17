@@ -14,6 +14,9 @@ Status: partial.
   one higher-profile transition publishes several typed projections;
 - complete typed Continuation fields for frame, state, waits, scopes,
   obligations, leases, budget, causal frontier, and epoch;
+- `cymule.durable-state/2` frames with separate definition, structural
+  invocation, immutable input Artifact, nested Region path, locals, and next
+  step;
 - idempotent wait registration/completion;
 - identified `cymule.wait-activation/1` signal and timer receipts with declared
   source matching, atomic result/wait/Continuation updates, broadcast delivery,
@@ -53,6 +56,9 @@ Status: partial.
   advance, and component-result replay without reinvocation;
 - nested Region interpretation with index-only persisted frame paths, durable
   scope stacks, child-result binding, and restart-safe child commit;
+- reusable definition invocation with isolated input/locals, deterministic
+  invocation identity, result binding, wait/reopen recovery, and component
+  occurrence replay without reinvocation;
 - nested commit-gated effects that remain staged while their child scope is
   open and dispatch exactly once after a durable child commit, including lost
   enqueue and child-commit receipt recovery;

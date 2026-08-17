@@ -48,6 +48,14 @@ The frozen IR is intentionally much smaller than the source language. Source
 frontends may be TypeScript, Python, Rust, Go, a visual editor, or generated
 code. They all emit a Plan Candidate.
 
+`cymule.ir/2` distinguishes component `call` from reusable definition
+`invoke`. An invocation resolves another definition already sealed into the
+same Plan, creates a structural invocation identity, receives explicit input,
+and returns a result binding without inheriting caller locals. The M4
+`DefinitionRegistry` operates before sealing: it resolves a logical reference,
+injects one exact revision, and creates a new parent Plan. Runtime interpretation
+never follows a mutable registry head.
+
 MLIR is optional and remains outside the kernel. The partial workbench currently
 syntax-checks an experimental generic-operation form and documents its mapping
 to the Plan Candidate schema. A registered dialect, structural verifiers, and

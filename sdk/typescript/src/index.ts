@@ -350,7 +350,7 @@ export interface EffectProfile {
 }
 
 export interface PlanCandidate {
-  ir_version: "cymule.ir/1";
+  ir_version: "cymule.ir/2";
   name: string;
   entry: string;
   components: Array<{
@@ -377,6 +377,7 @@ export interface PlanCandidate {
 
 export type Step =
   | { id: string; op: "call"; component: string; input: Expression; bind: string }
+  | { id: string; op: "invoke"; definition: string; input: Expression; bind: string }
   | { id: string; op: "wait"; wait: WaitSpec }
   | { id: string; op: "effect"; effect: string; input: Expression; occurrence: string }
   | {
@@ -406,7 +407,7 @@ export class FlowBuilder {
 
   constructor(name: string, inputSchema: Schema, outputSchema: Schema) {
     this.#candidate = {
-      ir_version: "cymule.ir/1",
+      ir_version: "cymule.ir/2",
       name,
       entry: "main",
       components: [],
@@ -449,6 +450,26 @@ export class FlowBuilder {
 
   call(site: string, component: string, input: Expression, bind: string): this {
     this.entry().body.steps.push({ id: site, op: "call", component, input, bind });
+    return this;
+  }
+
+  definition(
+    id: string,
+    inputSchema: Schema,
+    outputSchema: Schema,
+    body: Region,
+  ): this {
+    this.#candidate.definitions.push({
+      id,
+      input_schema: inputSchema,
+      output_schema: outputSchema,
+      body,
+    });
+    return this;
+  }
+
+  invoke(site: string, definition: string, input: Expression, bind: string): this {
+    this.entry().body.steps.push({ id: site, op: "invoke", definition, input, bind });
     return this;
   }
 

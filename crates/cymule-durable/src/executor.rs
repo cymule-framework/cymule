@@ -93,7 +93,9 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             plan_id: plan.plan_id,
             binding_context: format!("binding:plugin/{}", self.manifest.implementation_id),
             frames: vec![FrameState {
+                definition_id: plan.candidate.entry.clone(),
                 invocation_id: plan.candidate.entry,
+                input: input_ref.clone(),
                 region_path: Vec::new(),
                 next_step: 0,
                 locals: BTreeMap::new(),
@@ -324,29 +326,24 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 .plan(&continuation.plan_id)
                 .cloned()
                 .ok_or_else(|| DurableError::NotFound("continuation Plan is missing".to_owned()))?;
-            let definition = plan
-                .candidate
-                .definitions
-                .iter()
-                .find(|definition| definition.id == plan.candidate.entry)
-                .ok_or_else(|| {
-                    DurableError::Validation("entry definition is missing".to_owned())
-                })?;
-            let input = read_value(
-                &machine,
-                continuation.state.as_ref().ok_or_else(|| {
-                    DurableError::Validation("input artifact is missing".to_owned())
-                })?,
-            )?;
             let frame_index =
                 continuation.frames.len().checked_sub(1).ok_or_else(|| {
                     DurableError::Validation("continuation has no frame".to_owned())
                 })?;
-            let region = region_at_path(
-                &definition.body,
-                &continuation.frames[frame_index].region_path,
-            )?
-            .clone();
+            let current_frame = continuation.frames[frame_index].clone();
+            let definition = plan
+                .candidate
+                .definitions
+                .iter()
+                .find(|definition| definition.id == current_frame.definition_id)
+                .ok_or_else(|| {
+                    DurableError::Validation(format!(
+                        "frame definition {} is missing",
+                        current_frame.definition_id
+                    ))
+                })?;
+            let input = read_value(&machine, &current_frame.input)?;
+            let region = region_at_path(&definition.body, &current_frame.region_path)?.clone();
             let current_scope =
                 continuation.scope_stack.last().cloned().ok_or_else(|| {
                     DurableError::Validation("continuation has no scope".to_owned())
@@ -360,32 +357,55 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 let value = evaluate(&machine, &region.result, &input, &frame.locals)?;
                 if frame_index > 0 {
                     let parent_index = frame_index - 1;
-                    let parent_path = continuation.frames[parent_index].region_path.clone();
-                    let parent_step_index = continuation.frames[parent_index].next_step;
-                    let parent_region = region_at_path(&definition.body, &parent_path)?;
-                    let parent_step =
-                        parent_region.steps.get(parent_step_index).ok_or_else(|| {
-                            DurableError::Validation(
-                                "parent scope frame no longer points at its child step".to_owned(),
-                            )
+                    let parent_frame = continuation.frames[parent_index].clone();
+                    let parent_definition = plan
+                        .candidate
+                        .definitions
+                        .iter()
+                        .find(|definition| definition.id == parent_frame.definition_id)
+                        .ok_or_else(|| {
+                            DurableError::Validation(format!(
+                                "parent frame definition {} is missing",
+                                parent_frame.definition_id
+                            ))
                         })?;
-                    let Operation::Scope { bind, .. } = &parent_step.operation else {
-                        return Err(DurableError::Validation(
-                            "parent scope frame points at a non-scope step".to_owned(),
-                        ));
+                    let parent_region =
+                        region_at_path(&parent_definition.body, &parent_frame.region_path)?;
+                    let parent_step =
+                        parent_region
+                            .steps
+                            .get(parent_frame.next_step)
+                            .ok_or_else(|| {
+                                DurableError::Validation(
+                                    "parent frame no longer points at its child step".to_owned(),
+                                )
+                            })?;
+                    let (bind, closes_scope, result_kind) = match &parent_step.operation {
+                        Operation::Scope { bind, .. } => {
+                            submit(
+                                &mut machine,
+                                run_id,
+                                format!("{run_id}:commit:{current_scope}:{}", continuation.epoch),
+                                Command::CommitScope {
+                                    scope_id: current_scope.clone(),
+                                },
+                            )?;
+                            (bind, true, "cymule.scope-result/1")
+                        }
+                        Operation::Invoke { bind, .. } => {
+                            (bind, false, "cymule.invocation-result/1")
+                        }
+                        _ => {
+                            return Err(DurableError::Validation(
+                                "parent frame points at a non-structured step".to_owned(),
+                            ));
+                        }
                     };
-                    submit(
-                        &mut machine,
-                        run_id,
-                        format!("{run_id}:commit:{current_scope}:{}", continuation.epoch),
-                        Command::CommitScope {
-                            scope_id: current_scope.clone(),
-                        },
-                    )?;
-                    let result_ref =
-                        machine.put_artifact("cymule.scope-result/1", canonical_bytes(&value)?);
+                    let result_ref = machine.put_artifact(result_kind, canonical_bytes(&value)?);
                     continuation.frames.pop();
-                    continuation.scope_stack.pop();
+                    if closes_scope {
+                        continuation.scope_stack.pop();
+                    }
                     let parent = continuation
                         .frames
                         .get_mut(parent_index)
@@ -396,7 +416,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     }
                     self.coordinator
                         .checkpoint(&machine, continuation.clone(), None)?;
-                    if let Some(outcome) = self.dispatch_outbox(run_id, None)? {
+                    if closes_scope && let Some(outcome) = self.dispatch_outbox(run_id, None)? {
                         return Ok(outcome);
                     }
                     continue;
@@ -471,6 +491,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     );
                     let occurrence_id = component_occurrence_id(
                         run_id,
+                        &frame.invocation_id,
                         &step.id,
                         continuation.epoch,
                         &input_ref,
@@ -517,10 +538,46 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     self.coordinator
                         .checkpoint(&machine, continuation, occurrence)?;
                 }
+                Operation::Invoke {
+                    definition,
+                    input: expression,
+                    ..
+                } => {
+                    let value = evaluate(&machine, expression, &input, &frame.locals)?;
+                    let input_ref =
+                        machine.put_artifact("cymule.invocation-input/1", canonical_bytes(&value)?);
+                    let invocation_id = durable_invocation_id(
+                        run_id,
+                        &frame.invocation_id,
+                        &step.id,
+                        continuation.epoch,
+                        &input_ref,
+                    )?;
+                    let target = plan
+                        .candidate
+                        .definitions
+                        .iter()
+                        .find(|candidate| candidate.id == *definition)
+                        .ok_or_else(|| {
+                            DurableError::Validation(format!(
+                                "invoked definition {definition} is missing"
+                            ))
+                        })?;
+                    continuation.frames.push(FrameState {
+                        definition_id: target.id.clone(),
+                        invocation_id,
+                        input: input_ref,
+                        region_path: Vec::new(),
+                        next_step: 0,
+                        locals: BTreeMap::new(),
+                    });
+                    self.coordinator.checkpoint(&machine, continuation, None)?;
+                }
                 Operation::Wait { wait } => {
                     frame.next_step += 1;
                     yield_attempt(&mut machine, run_id, continuation.epoch)?;
-                    let wait_id = wait_id(run_id, &step.id, continuation.epoch)?;
+                    let wait_id =
+                        wait_id(run_id, &frame.invocation_id, &step.id, continuation.epoch)?;
                     let condition = WaitCondition {
                         wait_id: wait_id.clone(),
                         run_id: run_id.to_owned(),
@@ -588,7 +645,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     );
                     let intent_id = effect_intent_id(
                         run_id,
-                        &plan.candidate.entry,
+                        &frame.invocation_id,
                         &step.id,
                         &current_scope,
                         continuation.epoch,
@@ -633,10 +690,10 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     submit(
                         &mut machine,
                         run_id,
-                        format!("{run_id}:effect-propose:{}", step.id),
+                        format!("{run_id}:effect-propose:{intent_id}"),
                         Command::ProposeEffect {
                             scope_id: current_scope.clone(),
-                            invocation_id: plan.candidate.entry.clone(),
+                            invocation_id: frame.invocation_id.clone(),
                             site_id: step.id.clone(),
                             occurrence: occurrence.clone(),
                             operation: effect.clone(),
@@ -660,7 +717,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     submit(
                         &mut machine,
                         run_id,
-                        format!("{run_id}:effect-prepare:{}", step.id),
+                        format!("{run_id}:effect-prepare:{intent_id}"),
                         Command::TransitionEffect {
                             intent_id: intent_id.clone(),
                             transition: EffectTransition::Prepare,
@@ -709,9 +766,13 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     )?;
                     let child_locals = frame.locals.clone();
                     let invocation_id = frame.invocation_id.clone();
+                    let definition_id = frame.definition_id.clone();
+                    let frame_input = frame.input.clone();
                     continuation.scope_stack.push(child_scope);
                     continuation.frames.push(FrameState {
+                        definition_id,
                         invocation_id,
+                        input: frame_input,
                         region_path: child_path,
                         next_step: 0,
                         locals: child_locals,
@@ -1172,12 +1233,27 @@ fn evaluate(
     }
 }
 
-fn wait_id(run_id: &str, site_id: &str, epoch: u64) -> DurableResult<String> {
-    content_id("cymule.wait/1", &(run_id, site_id, epoch)).map_err(Into::into)
+fn wait_id(run_id: &str, invocation_id: &str, site_id: &str, epoch: u64) -> DurableResult<String> {
+    content_id("cymule.wait/1", &(run_id, invocation_id, site_id, epoch)).map_err(Into::into)
+}
+
+fn durable_invocation_id(
+    run_id: &str,
+    parent_invocation_id: &str,
+    site_id: &str,
+    epoch: u64,
+    input: &cymule_core::ArtifactRef,
+) -> DurableResult<String> {
+    content_id(
+        "cymule.invocation/1",
+        &(run_id, parent_invocation_id, site_id, epoch, input),
+    )
+    .map_err(Into::into)
 }
 
 fn component_occurrence_id(
     run_id: &str,
+    invocation_id: &str,
     site_id: &str,
     epoch: u64,
     input: &cymule_core::ArtifactRef,
@@ -1186,6 +1262,7 @@ fn component_occurrence_id(
     #[derive(Serialize)]
     struct Preimage<'a> {
         run_id: &'a str,
+        invocation_id: &'a str,
         site_id: &'a str,
         epoch: u64,
         input: &'a cymule_core::ArtifactRef,
@@ -1195,6 +1272,7 @@ fn component_occurrence_id(
         "cymule.component-occurrence/1",
         &Preimage {
             run_id,
+            invocation_id,
             site_id,
             epoch,
             input,

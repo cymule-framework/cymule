@@ -1,5 +1,5 @@
 {
-  "ir_version": "cymule.ir/1",
+  "ir_version": "cymule.ir/2",
   "name": "cross_language_echo",
   "entry": "main",
   "components": [
@@ -33,9 +33,9 @@
       "body": {
         "steps": [
           {
-            "id": "call.echo",
-            "op": "call",
-            "component": "test.echo",
+            "id": "invoke.echo-subflow",
+            "op": "invoke",
+            "definition": "echo_subflow",
             "input": { "kind": "input" },
             "bind": "echoed"
           },
@@ -49,8 +49,24 @@
         ],
         "result": { "kind": "binding", "name": "echoed" }
       }
+    },
+    {
+      "id": "echo_subflow",
+      "input_schema": {},
+      "output_schema": {},
+      "body": {
+        "steps": [
+          {
+            "id": "call.echo",
+            "op": "call",
+            "component": "test.echo",
+            "input": { "kind": "input" },
+            "bind": "echoed"
+          }
+        ],
+        "result": { "kind": "binding", "name": "echoed" }
+      }
     }
   ],
   "metadata": {}
 }
-

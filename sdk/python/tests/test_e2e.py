@@ -38,7 +38,24 @@ class EndToEndTest(unittest.TestCase):
                     "irreversible": False,
                 },
             )
-            .call("call.echo", "test.echo", {"kind": "input"}, "echoed")
+            .definition(
+                "echo_subflow",
+                {},
+                {},
+                {
+                    "steps": [
+                        {
+                            "id": "call.echo",
+                            "op": "call",
+                            "component": "test.echo",
+                            "input": {"kind": "input"},
+                            "bind": "echoed",
+                        }
+                    ],
+                    "result": {"kind": "binding", "name": "echoed"},
+                },
+            )
+            .invoke("invoke.echo-subflow", "echo_subflow", {"kind": "input"}, "echoed")
             .effect(
                 "effect.capture",
                 "test.capture",

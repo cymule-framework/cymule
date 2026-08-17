@@ -7,6 +7,12 @@ Status: partial.
 - immutable sealed Plan nodes and content-addressed parent/child patch edges;
 - deterministic structural Plan diff over IR version, entry, component,
   effect, and definition contracts, lowered into reviewed patch operations;
+- `cymule.ir/2` reusable local definition invocation with explicit input/result
+  binding in Embedded and durable runtimes plus four SDK authoring surfaces;
+- provider-neutral `DefinitionRegistry` with default `LatestCompatible`
+  resolution, exact-schema compatibility, reverse dependency indexing, direct
+  dependent relinking into new immutable parent Plans, pinned references, and
+  retained historical links;
 - declared patch operations with review/compiler evidence artifacts;
 - cycle rejection and portable Plan DAG snapshots;
 - conservative impact cones over changed stable targets, active Continuation
@@ -25,8 +31,8 @@ Status: partial.
 
 ## Remaining completion gates
 
-- reusable definition/subflow references, sealed dependency edges, reverse
-  dependency impact, and transitive dependent Plan relinking;
+- multi-definition reusable modules, transitive dependent relinking, and impact
+  propagation beyond direct registry dependents;
 - patch application/lowering from reviewed operations into a new sealed Plan;
 - impact over nested wait/scope/tool/model state and virtual regions;
 - migration adapter registry with schema compatibility and transformed state;

@@ -32,7 +32,7 @@ def main() -> int:
     by_title = {schema["title"]: schema for schema in schemas}
 
     candidate_validator = Draft202012Validator(
-        by_title["Cymule Plan Candidate cymule.ir/1"], registry=registry
+        by_title["Cymule Plan Candidate cymule.ir/2"], registry=registry
     )
     candidate_paths = [
         root / "tests/fixtures/cross-language-plan.json",

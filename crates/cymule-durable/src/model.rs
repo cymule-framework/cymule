@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{DurableError, DurableResult};
 
 /// Durable profile state version.
-pub const DURABLE_STATE_VERSION: &str = "cymule.durable-state/1";
+pub const DURABLE_STATE_VERSION: &str = "cymule.durable-state/2";
 /// Identified external wait activation version.
 pub const WAIT_ACTIVATION_VERSION: &str = "cymule.wait-activation/1";
 
@@ -291,8 +291,12 @@ pub struct Continuation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrameState {
-    /// Definition or invocation identity.
+    /// Definition resolved inside the immutable Plan.
+    pub definition_id: String,
+    /// Structural materialized invocation identity.
     pub invocation_id: String,
+    /// Typed invocation input Artifact.
+    pub input: ArtifactRef,
     /// Nested region indices from the definition root.
     pub region_path: Vec<usize>,
     /// Next stable step index.
