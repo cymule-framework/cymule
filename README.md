@@ -49,34 +49,44 @@ request/response handler with no durable state or external side effects.
 
 ## Five-minute quick start
 
-The Hello World example is a complete Flow plus a real example plugin. It needs
-only Rust 1.97 and does not use test fixtures or temporary system paths.
+Build and run a complete code-first Flow with Rust 1.97:
 
 ```sh
 git clone https://github.com/cymule-framework/cymule.git
 cd cymule
-./examples/hello-world/run.sh
+cargo run -p cymule-example-hello-world -- Ada
 ```
 
-The script builds the engine and example plugin, seals
-`examples/hello-world/flow.json`, executes it with the checked-in input, and
-prints the Result:
+The example uses the Rust SDK to declare an `example.greet` component and a
+commit-gated `example.capture` effect. It seals the Flow, runs both operations
+through an in-process plugin, and returns the greeting:
 
 ```json
 {
   "run_id": "run:hello-world",
   "plan_id": "sha256:...",
-  "value": { "message": "hello from Cymule" },
+  "value": { "message": "Hello, Ada!" },
   "projection_digest": "...",
   "precondition_token": "pre:0:...",
   "effects": ["sha256:..."]
 }
 ```
 
-The sealed Plan and Result are written to
-`.cymule/examples/hello-world/`, a repository-local ignored state directory.
-Read [the example guide](examples/hello-world/README.md) to inspect each step or
-run the engine manually.
+Open [`src/flow.rs`](examples/hello-world/src/flow.rs) to change program meaning,
+[`src/plugin.rs`](examples/hello-world/src/plugin.rs) to replace the concrete
+implementation, and [`src/main.rs`](examples/hello-world/src/main.rs) to embed
+the runtime in your application.
+
+Then exercise Cymule's most important failure behavior:
+
+```sh
+cargo run -p cymule-example-hello-world -- Ada --unknown-once
+```
+
+This simulates losing the response after effect dispatch. Cymule records the
+outcome as `unknown` and reconciles the original intent instead of creating a
+duplicate effect. The [example guide](examples/hello-world/README.md) explains
+the execution and suggests useful first modifications.
 
 Contributors can run every SDK and semantic conformance test with:
 
@@ -306,7 +316,7 @@ sdk/python              Python SDK
 sdk/go                  Go SDK
 schemas                 frozen JSON Schema contracts
 compiler/mlir           optional, partial MLIR workbench
-examples/hello-world    self-contained user quick start and example plugin
+examples/hello-world    code-first Flow, Embedded runtime, and example plugin
 plugins/test-adapter    deterministic conformance plugin
 tests                   shared fixtures and conformance assets
 docs                    specification, architecture, and decisions

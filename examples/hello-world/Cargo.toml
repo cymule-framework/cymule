@@ -1,0 +1,18 @@
+[package]
+name = "cymule-example-hello-world"
+description = "Code-first Hello World application for Cymule"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+cymule-core = { path = "../../crates/cymule-core" }
+cymule-runtime = { path = "../../crates/cymule-runtime" }
+cymule-sdk = { path = "../../crates/cymule-sdk" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

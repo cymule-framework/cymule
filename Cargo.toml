@@ -5,7 +5,7 @@ members = [
   "crates/cymule-runtime",
   "crates/cymule-sdk",
   "crates/cymule-cli",
-  "examples/hello-world/plugin",
+  "examples/hello-world",
   "plugins/test-adapter",
 ]
 

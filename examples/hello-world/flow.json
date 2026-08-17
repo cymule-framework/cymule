@@ -4,16 +4,28 @@
   "entry": "main",
   "components": [
     {
-      "id": "example.echo",
-      "input_schema": {},
-      "output_schema": {},
+      "id": "example.greet",
+      "input_schema": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string" } }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["message"],
+        "properties": { "message": { "type": "string" } }
+      },
       "requirements": {}
     }
   ],
   "effects": [
     {
       "id": "example.capture",
-      "input_schema": {},
+      "input_schema": {
+        "type": "object",
+        "required": ["message"],
+        "properties": { "message": { "type": "string" } }
+      },
       "output_schema": {},
       "profile": {
         "mutation": "mutating",
@@ -28,30 +40,36 @@
   "definitions": [
     {
       "id": "main",
-      "input_schema": {},
-      "output_schema": {},
+      "input_schema": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string" } }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["message"],
+        "properties": { "message": { "type": "string" } }
+      },
       "body": {
         "steps": [
           {
-            "id": "call.echo",
+            "id": "call.greet",
             "op": "call",
-            "component": "example.echo",
+            "component": "example.greet",
             "input": { "kind": "input" },
-            "bind": "echoed"
+            "bind": "greeting"
           },
           {
             "id": "effect.capture",
             "op": "effect",
             "effect": "example.capture",
-            "input": { "kind": "binding", "name": "echoed" },
+            "input": { "kind": "binding", "name": "greeting" },
             "occurrence": "primary"
           }
         ],
-        "result": { "kind": "binding", "name": "echoed" }
+        "result": { "kind": "binding", "name": "greeting" }
       }
     }
   ],
-  "metadata": {
-    "example": "hello-world"
-  }
+  "metadata": {}
 }
