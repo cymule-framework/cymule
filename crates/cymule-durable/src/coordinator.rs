@@ -5,8 +5,9 @@ use cymule_core::{
 
 use crate::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableError,
-    DurableResult, DurableState, DurableStore, EffectDispatch, JournalBatch, JournalRecord,
-    OutboxState, SnapshotRecord, StoredState, WaitActivation, WaitCondition, WaitKind, WaitState,
+    DurableResult, DurableState, DurableStore, EffectDispatch, HISTORY_COMPACTION_VERSION,
+    HistoryCompactionReceipt, JournalBatch, JournalRecord, OutboxState, SnapshotRecord,
+    StoredState, WaitActivation, WaitCondition, WaitKind, WaitState,
 };
 
 /// Transactional coordinator over one provider-neutral durable store.
@@ -102,6 +103,61 @@ impl<S: DurableStore> DurableCoordinator<S> {
     /// Persist the current semantic Machine snapshot.
     pub fn persist_machine(&mut self, machine: &Machine) -> DurableResult<String> {
         self.mutate(|state| state.machine = machine.snapshot())
+    }
+
+    /// Compact one causal Event prefix and atomically publish its M1 receipt.
+    pub fn compact_history(
+        &mut self,
+        compaction_id: &str,
+        retain_suffix: usize,
+    ) -> DurableResult<HistoryCompactionReceipt> {
+        if compaction_id.is_empty() {
+            return Err(DurableError::Validation(
+                "history compaction identity must not be empty".to_owned(),
+            ));
+        }
+        if let Some(existing) = self.state()?.history_compactions.get(compaction_id) {
+            if existing.requested_suffix
+                == u64::try_from(retain_suffix)
+                    .map_err(|error| DurableError::Validation(error.to_string()))?
+            {
+                return Ok(existing.clone());
+            }
+            return Err(DurableError::IllegalTransition(format!(
+                "history compaction {compaction_id} was reused with a different suffix"
+            )));
+        }
+        let source_revision = self
+            .revision()
+            .ok_or_else(|| DurableError::NotFound("durable state is not initialized".to_owned()))?
+            .to_owned();
+        let parent_compaction = self
+            .state()?
+            .history_compactions
+            .values()
+            .max_by_key(|receipt| receipt.result.compacted_events)
+            .map(|receipt| receipt.compaction_id.clone());
+        let mut machine = self.restore_machine()?;
+        let result = machine.compact_event_history(retain_suffix)?;
+        let receipt = HistoryCompactionReceipt {
+            compaction_version: HISTORY_COMPACTION_VERSION.to_owned(),
+            compaction_id: compaction_id.to_owned(),
+            parent_compaction,
+            source_revision,
+            requested_suffix: u64::try_from(retain_suffix)
+                .map_err(|error| DurableError::Validation(error.to_string()))?,
+            result,
+        };
+        receipt.verify()?;
+        let snapshot = machine.snapshot();
+        self.mutate_checked(|state| {
+            state.machine = snapshot;
+            state
+                .history_compactions
+                .insert(compaction_id.to_owned(), receipt.clone());
+            Ok(())
+        })?;
+        Ok(receipt)
     }
 
     /// Insert or replace a continuation at a semantic safe point.
@@ -1040,6 +1096,75 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 artifacts,
                 "Artifact journal checkpoint",
             )?;
+            for batch in batches {
+                for record in &batch.records {
+                    append_journal_record(state, &batch.journal_id, record.clone())?;
+                }
+            }
+            state.machine = machine_snapshot;
+            Ok(())
+        })
+    }
+
+    /// Atomically publish one input Artifact, complete its wait, and append
+    /// higher-profile records.
+    pub fn checkpoint_input_wait_journals(
+        &mut self,
+        machine: &Machine,
+        result: &cymule_core::ArtifactRef,
+        wait_id: &str,
+        batches: &[JournalBatch],
+    ) -> DurableResult<String> {
+        if batches.is_empty() {
+            return Err(DurableError::Validation(
+                "input wait checkpoint requires at least one journal".to_owned(),
+            ));
+        }
+        let mut journal_ids = std::collections::BTreeSet::new();
+        for batch in batches {
+            validate_journal_batch(&batch.journal_id, &batch.records)?;
+            if batch.records.is_empty() || !journal_ids.insert(&batch.journal_id) {
+                return Err(DurableError::Validation(
+                    "input wait checkpoint requires non-empty unique journals".to_owned(),
+                ));
+            }
+        }
+        let machine_snapshot = machine.snapshot();
+        self.mutate_checked(|state| {
+            ensure_artifact_machine(
+                &state.machine,
+                &machine_snapshot,
+                &std::collections::BTreeSet::from([result.clone()]),
+                "input wait checkpoint",
+            )?;
+            let wait = state
+                .waits
+                .get_mut(wait_id)
+                .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
+            ensure_direct_wait_completion(wait)?;
+            match wait.state {
+                WaitState::Completed if wait.result.as_ref() == Some(result) => {}
+                WaitState::Pending => {
+                    wait.state = WaitState::Completed;
+                    wait.result = Some(result.clone());
+                    let continuation =
+                        state.continuations.get_mut(&wait.run_id).ok_or_else(|| {
+                            DurableError::NotFound(format!(
+                                "continuation {} does not exist",
+                                wait.run_id
+                            ))
+                        })?;
+                    continuation.wait_set.remove(wait_id);
+                    if continuation.wait_set.is_empty() {
+                        continuation.status = ContinuationStatus::Ready;
+                    }
+                }
+                _ => {
+                    return Err(DurableError::IllegalTransition(format!(
+                        "wait {wait_id} cannot accept this input result"
+                    )));
+                }
+            }
             for batch in batches {
                 for record in &batch.records {
                     append_journal_record(state, &batch.journal_id, record.clone())?;

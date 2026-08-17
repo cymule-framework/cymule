@@ -106,6 +106,11 @@ transfer ID and target slot. The handoff MUST be recorded in the target Run's
 M1 application journal by whole-state CAS. Repeating identical semantics is
 idempotent; reusing a transfer ID with different semantics MUST fail. One target
 slot has at most one handoff; multiple values use one collection Resource.
+When a handoff activates an input wait, the canonical Resource Handle Artifact,
+transfer record, activation record, wait result, and Continuation readiness MUST
+share one M1 CAS. The target wait MUST be an input wait whose Run and correlation
+match the handoff target and slot. Receipt loss redelivers the same transfer and
+MUST NOT complete the wait twice.
 
 ## 6. Frozen IR
 
@@ -473,8 +478,21 @@ whose input and output contract satisfies the reference, injects that exact
 definition into a new parent candidate, seals a new parent Plan, advances only
 the future default link, and retains every historical linked Plan. The current
 implemented compatibility profile requires exact input/output JSON Schema
-equality. Checked schema adapters and transitive module relinking require later
-M4 admission and MUST NOT be inferred.
+equality. A reusable revision MAY itself declare logical references. Linking
+MUST resolve the complete acyclic dependency closure, record every exact
+revision, assign collision-resistant local definition identities, and seal the
+entire module closure into the parent Plan. Publishing a compatible transitive
+dependency relinks every affected future parent default. Dependency cycles and
+conflicting revision choices MUST fail closed. Contract changes require an
+explicit checked adapter and MUST NOT be inferred from a logical name.
+
+The reusable-definition registry snapshot is portable semantic control state.
+Restore MUST verify revision content identities and publication sequences,
+rebuild reverse dependencies, deterministically reproduce current and
+historical links, and reject missing or extraneous revision claims. M1 journal
+checkpoints MUST retain explicit lineage and idempotent checkpoint identity;
+stale writers roll back their in-memory transition, while acknowledgement loss
+reopens to the committed registry result.
 
 Future calls may select a compatible new child Plan under an admitted rollout.
 An already materialized invocation remains pinned to its original Plan. A
@@ -489,6 +507,31 @@ application journal with explicit parent lineage. Plan-edge admission, future
 rollout, occurrence selection, migration, shadow evidence, promotion, and
 rollback MUST survive stale CAS and lost acknowledgement without changing an
 existing occurrence pin or creating a second decision.
+
+A reviewed patch carries the complete target Plan Candidate, an exact declared
+operation list, and evidence. M4 MUST seal the target, recompute the structural
+diff, and reject the patch unless the lists are identical. Impact analysis MUST
+inspect generic Continuation sites and MAY accept stable active-site identities
+from higher profiles; it MUST NOT import their domain models.
+
+A migration adapter is called only at a semantic safe point and is pinned by
+identity and revision. Its admitted descriptor MUST claim totality over
+reachable source state, preserve failure/cancellation and budget/ownership
+meaning, and not widen authority or effects. A shadow driver MUST suppress or
+simulate target mutating effects and pin both occurrence bindings. Migration
+output and shadow comparisons are immutable evidence, never ambient authority.
+
+Rollout observations MUST reference the decision and the occurrence's immutable
+Plan pin. A gate counts exact retained observation and shadow identities. An
+exceeded failure or inequivalence ceiling yields rollback immediately; only
+satisfied minimum success/equivalence evidence yields promotion; otherwise the
+gate is pending. Promotion and rollback create new future-only decisions and
+auditable transition receipts. Previously admitted occurrences do not change.
+
+`cymule.evolution-control/1` is the closed cross-language command boundary.
+SDKs may construct and transport its patch, selection, migration, shadow,
+observation, and gate operations, but only the Rust M4 controller resolves
+dependencies, invokes plugins, evaluates evidence, or mutates durable state.
 
 ## 13. Replay
 
@@ -505,6 +548,17 @@ an explicit required-artifact set. A missing artifact, schema, interpreter,
 binding, or required authority MUST downgrade the claim. The runtime MUST NOT
 silently regenerate missing data. M0 verifies exact canonical state replay; its
 one-shot component calls are not an exact execution-replay implementation.
+
+`cymule.machine-snapshot/2` MAY replace a causally closed Event prefix with an
+authenticated base projection, cumulative prefix digest, and exact compacted
+Event identities. Every remaining Event stays in full and MUST have all parents
+in either the base or retained suffix. Restore verifies the base projection,
+replays the suffix, and retains command receipts so old idempotent commands do
+not append duplicate Events. M1 compaction is a CAS transition with explicit
+lineage; stale writers lose and acknowledgement loss reopens to the committed
+base. Compaction preserves current state replay but does not claim the removed
+Event bodies remain available for historical inspection unless a higher-profile
+archive retained them.
 
 ## 14. Implemented profile boundary
 

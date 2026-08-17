@@ -6,12 +6,20 @@ mod control;
 
 pub use builder::FlowBuilder;
 pub use client::{CliEngine, Engine};
-pub use control::{VirtualSchedulingControl, VirtualWorkControl};
+pub use control::{EvolutionControl, VirtualSchedulingControl, VirtualWorkControl};
 pub use cymule_core::{
     ArtifactRef, DispatchPolicy, EffectProfile, Expression, MutationKind, Operation, PlanCandidate,
     ReconciliationMode, Region, ScopeMode, SealedPlan, Step, WaitSpec,
 };
 pub use cymule_durable::{WAIT_ACTIVATION_VERSION, WaitActivation, WaitActivationSource};
+pub use cymule_evolution::{
+    EVOLUTION_CONTROL_VERSION, EvolutionCommand, GateOutcome, MigrationAdapterDescriptor,
+    MigrationCapabilityChange, MigrationOutput, MigrationPreservation, MigrationReceipt,
+    MigrationRequest, MigrationStateCoverage, ObservationOutcome, PlanPatch, ReferenceStrategy,
+    RolloutDecision, RolloutEvaluation, RolloutGate, RolloutMode, RolloutObservation,
+    RolloutTransition, ShadowBindingMode, ShadowComparison, ShadowDriverDescriptor,
+    ShadowEffectMode, ShadowOutput, ShadowRequest, SubflowReference,
+};
 pub use cymule_resource::{
     InlineData, ResourceCandidate, ResourceHandle, ResourceHandoff, ResourceIntegrity,
     ResourceLocation, ResourceReplayClass, ResourceShape,

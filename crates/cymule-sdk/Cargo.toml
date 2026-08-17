@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 cymule-core = { path = "../cymule-core" }
 cymule-durable = { path = "../cymule-durable" }
+cymule-evolution = { path = "../cymule-evolution" }
 cymule-resource = { path = "../cymule-resource" }
 cymule-runtime = { path = "../cymule-runtime" }
 cymule-virtual = { path = "../cymule-virtual" }

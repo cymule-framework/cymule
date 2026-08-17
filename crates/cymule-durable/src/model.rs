@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use cymule_core::{ArtifactRef, Machine, MachineSnapshot, canonical_digest};
+use cymule_core::{
+    ArtifactRef, Machine, MachineCompaction, MachineSnapshot, canonical_digest, content_id,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{DurableError, DurableResult};
@@ -9,6 +11,8 @@ use crate::{DurableError, DurableResult};
 pub const DURABLE_STATE_VERSION: &str = "cymule.durable-state/2";
 /// Identified external wait activation version.
 pub const WAIT_ACTIVATION_VERSION: &str = "cymule.wait-activation/1";
+/// Canonical Machine history-compaction receipt version.
+pub const HISTORY_COMPACTION_VERSION: &str = "cymule.history-compaction/1";
 
 /// Complete provider-neutral state committed by one single-domain CAS write.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,6 +42,9 @@ pub struct DurableState {
     pub component_occurrences: BTreeMap<String, ComponentOccurrence>,
     /// Portable snapshots keyed by snapshot ID.
     pub snapshots: BTreeMap<String, SnapshotRecord>,
+    /// Idempotent canonical Event-prefix compactions keyed by command identity.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub history_compactions: BTreeMap<String, HistoryCompactionReceipt>,
     /// Typed application journals keyed by stable journal identity.
     ///
     /// This extension seam lets higher profiles share the same CAS authority
@@ -60,6 +67,7 @@ impl DurableState {
             outbox: BTreeMap::new(),
             component_occurrences: BTreeMap::new(),
             snapshots: BTreeMap::new(),
+            history_compactions: BTreeMap::new(),
             application_journals: BTreeMap::new(),
         }
     }
@@ -156,6 +164,50 @@ impl DurableState {
                 }
             }
         }
+        let mut compactions: Vec<&HistoryCompactionReceipt> =
+            self.history_compactions.values().collect();
+        compactions.sort_by_key(|receipt| receipt.result.compacted_events);
+        let mut expected_parent = None;
+        let mut previous_count = 0;
+        for receipt in &compactions {
+            receipt.verify()?;
+            if self.history_compactions.get(&receipt.compaction_id) != Some(*receipt) {
+                return Err(DurableError::Validation(format!(
+                    "history compaction key {} does not match its receipt",
+                    receipt.compaction_id
+                )));
+            }
+            if receipt.parent_compaction != expected_parent
+                || receipt.result.compacted_events <= previous_count
+            {
+                return Err(DurableError::Validation(
+                    "history compaction lineage is discontinuous".to_owned(),
+                ));
+            }
+            expected_parent = Some(receipt.compaction_id.clone());
+            previous_count = receipt.result.compacted_events;
+        }
+        if let Some(latest) = compactions.last() {
+            let base = self.machine.base.as_ref().ok_or_else(|| {
+                DurableError::Validation(
+                    "history compaction exists without a Machine base snapshot".to_owned(),
+                )
+            })?;
+            let base_id = content_id("cymule.machine-base/1", base)?;
+            let compacted_events = u64::try_from(base.compacted_event_ids.len())
+                .map_err(|error| DurableError::Validation(error.to_string()))?;
+            let retained_events = u64::try_from(self.machine.events.len())
+                .map_err(|error| DurableError::Validation(error.to_string()))?;
+            if latest.result.base_id != base_id
+                || latest.result.compacted_events != compacted_events
+                || latest.result.retained_events > retained_events
+                || latest.result.projection_digest != base.projection_digest
+            {
+                return Err(DurableError::Validation(
+                    "latest history compaction does not match the Machine snapshot".to_owned(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -163,6 +215,47 @@ impl DurableState {
     pub fn revision(&self) -> DurableResult<String> {
         self.validate()?;
         canonical_digest(self).map_err(Into::into)
+    }
+}
+
+/// One idempotent M1 Event-prefix compaction receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryCompactionReceipt {
+    /// Receipt schema and semantic version.
+    pub compaction_version: String,
+    /// Stable command/idempotency identity.
+    pub compaction_id: String,
+    /// Previous compaction in the cumulative base lineage.
+    pub parent_compaction: Option<String>,
+    /// Durable revision from which compaction was computed.
+    pub source_revision: String,
+    /// Requested full suffix length.
+    pub requested_suffix: u64,
+    /// Canonical Machine compaction evidence.
+    pub result: MachineCompaction,
+}
+
+impl HistoryCompactionReceipt {
+    /// Verify stable identities and bounded result metadata.
+    pub fn verify(&self) -> DurableResult<()> {
+        if self.compaction_version != HISTORY_COMPACTION_VERSION
+            || self.compaction_id.is_empty()
+            || self.source_revision.len() != 64
+            || !self
+                .source_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || !self.result.base_id.starts_with("sha256:")
+            || self.result.compacted_events == 0
+            || self.result.retained_events != self.requested_suffix
+            || self.result.causal_frontier.is_empty()
+        {
+            return Err(DurableError::Validation(
+                "history compaction receipt is malformed".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 

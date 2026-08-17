@@ -7,6 +7,7 @@ use std::path::Path;
 
 use cymule_core::{PlanCandidate, SealedPlan};
 use cymule_durable::WaitActivation;
+use cymule_evolution::EvolutionCommand;
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{EmbeddedRuntime, ExecutionResult, ProcessPlugin};
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,9 @@ enum EngineRequest {
     VerifyWaitActivation {
         activation: WaitActivation,
     },
+    VerifyEvolutionCommand {
+        command: EvolutionCommand,
+    },
     Run {
         plan: SealedPlan,
         input: Value,
@@ -41,6 +45,7 @@ enum EngineResponse {
     Sealed { plan: SealedPlan },
     SealedResource { resource: ResourceHandle },
     VerifiedWaitActivation { activation: WaitActivation },
+    VerifiedEvolutionCommand { command: EvolutionCommand },
     Executed { result: ExecutionResult },
     Verified,
 }
@@ -76,6 +81,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             activation.verify()?;
             print_json(&activation)
         }
+        Some("evolution-command") if arguments.get(1).map(String::as_str) == Some("verify") => {
+            let command: EvolutionCommand = read_path(argument_value(&arguments, "--input")?)?;
+            command.verify()?;
+            print_json(&command)
+        }
         Some("run") => {
             let plan: SealedPlan = read_path(argument_value(&arguments, "--plan")?)?;
             let input: Value = read_path(argument_value(&arguments, "--input")?)?;
@@ -86,7 +96,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             print_json(&result)
         }
         _ => Err(
-            "usage: cymule <rpc|seal|verify|run|resource seal|wait-activation verify> [options]"
+            "usage: cymule <rpc|seal|verify|run|resource seal|wait-activation verify|evolution-command verify> [options]"
                 .into(),
         ),
     }
@@ -110,6 +120,10 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
         EngineRequest::VerifyWaitActivation { activation } => {
             activation.verify()?;
             EngineResponse::VerifiedWaitActivation { activation }
+        }
+        EngineRequest::VerifyEvolutionCommand { command } => {
+            command.verify()?;
+            EngineResponse::VerifiedEvolutionCommand { command }
         }
         EngineRequest::Run {
             plan,

@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 cymule-core = { path = "../cymule-core" }
 cymule-durable = { path = "../cymule-durable" }
+cymule-evolution = { path = "../cymule-evolution" }
 cymule-resource = { path = "../cymule-resource" }
 cymule-runtime = { path = "../cymule-runtime" }
 serde.workspace = true

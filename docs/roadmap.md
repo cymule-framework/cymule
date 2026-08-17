@@ -48,9 +48,12 @@ Status: partial.
   reopens authority, and verifies replay plus terminal outbox integrity;
 - provider-neutral cross-Run Resource descriptors, replay classification,
   bounded resolver/store interfaces, M1 handoff journals, and four SDK builders
-  are implemented; production adapters and interpreter activation remain;
-- production clock/signal source plugins, process-kill crash campaigns, and
-  snapshot compaction/suffix rehydration remain proposed.
+  are implemented; handoff input activation is atomic and lost-receipt tested;
+- canonical Event-prefix compaction retains an authenticated base plus exact
+  suffix, cumulative receipt lineage, old command deduplication, and
+  stale/lost-receipt recovery;
+- production resolver/clock/signal plugins and process-kill crash campaigns
+  remain proposed.
 
 ## Optional plugin track - Agent interaction
 
@@ -111,7 +114,7 @@ Status: implemented.
 
 ## M4 - Live evolution
 
-Status: partial.
+Status: implemented for one provider-neutral durable domain.
 
 - immutable future binding updates and occurrence pinning are implemented;
 - sealed Plan DAG nodes, content-addressed patch edges, cycle rejection,
@@ -122,11 +125,13 @@ Status: partial.
   mixed-version occurrence pinning, stale-CAS rollback, and lost-receipt reopen
   are implemented;
 - reusable local definition invocation, four-language `cymule.ir/2` authoring,
-  latest-compatible exact-schema registry resolution, direct reverse dependency
-  relinking, pinned references, and historical linked Plans are implemented;
-- transitive module relinking, patch application, schema migration adapters,
-  shadow execution, observation gates, promotion, cross-language controls, and
-  the remaining crash matrix remain proposed.
+  latest-compatible exact-schema registry resolution, transitive reusable
+  module relinking, pinned references, historical linked Plans, and durable
+  tamper-checked registry recovery are implemented;
+- exact reviewed patch admission, generic higher-profile impact sites, checked
+  migration and isolated shadow plugin contracts, observation gates,
+  promotion/rollback, mixed-version Plan selection, four-language controls,
+  and lost-receipt recovery are implemented.
 
 ## M5 - Isolation and federation
 

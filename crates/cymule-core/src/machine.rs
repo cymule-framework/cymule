@@ -5,7 +5,7 @@ use crate::model::{effect_intent_id, effect_obligation_id};
 use crate::{
     ArtifactRecord, ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, CommandReceipt,
     CommandReceiptStatus, CoreError, Event, EventPayload, ObligationProjection, PlanCandidate,
-    Projection, ReplayAvailability, Result, SealedPlan, WorldOutcome, canonical_digest,
+    Projection, ReplayAvailability, Result, SealedPlan, WorldOutcome, canonical_digest, content_id,
     sha256_bytes,
 };
 
@@ -16,8 +16,67 @@ struct CommandRecord {
     receipt: CommandReceipt,
 }
 
-/// Portable, provider-neutral snapshot of all canonical machine inputs.
-/// Projections are deliberately excluded and rebuilt from Events on restore.
+/// One verified canonical base projection replacing a causally closed prefix.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineBaseSnapshot {
+    /// Content digest of all compacted prefix events and any prior base.
+    pub prefix_digest: String,
+    /// Exact identities in the compacted causal prefix.
+    pub compacted_event_ids: BTreeSet<String>,
+    /// Projection after applying the complete compacted prefix.
+    pub projection: Projection,
+    /// Digest that authenticates the retained projection bytes.
+    pub projection_digest: String,
+}
+
+impl MachineBaseSnapshot {
+    fn verify(&self) -> Result<()> {
+        if !self.prefix_digest.starts_with("sha256:")
+            || self.prefix_digest.len() != "sha256:".len() + 64
+            || self.compacted_event_ids.is_empty()
+            || self.compacted_event_ids.iter().any(String::is_empty)
+        {
+            return Err(CoreError::Validation(
+                "machine base snapshot has malformed prefix evidence".to_owned(),
+            ));
+        }
+        let expected = self.projection.digest()?;
+        if self.projection_digest != expected {
+            return Err(CoreError::IdentityMismatch(format!(
+                "machine base projection digest {} does not match {expected}",
+                self.projection_digest
+            )));
+        }
+        for run in self.projection.runs.values() {
+            if !self.compacted_event_ids.contains(&run.last_event) {
+                return Err(CoreError::Causal(format!(
+                    "machine base Run {} ends at an unretained event {}",
+                    run.run_id, run.last_event
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Portable evidence returned after compacting one canonical event prefix.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineCompaction {
+    /// Content-addressed base snapshot identity.
+    pub base_id: String,
+    /// Cumulative number of compacted event identities.
+    pub compacted_events: u64,
+    /// Number of full suffix Events retained for resume.
+    pub retained_events: u64,
+    /// Causal frontier connecting the base to retained execution.
+    pub causal_frontier: BTreeSet<String>,
+    /// Authenticated base projection digest.
+    pub projection_digest: String,
+}
+
+/// Portable, provider-neutral snapshot of canonical inputs and optional base.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineSnapshot {
@@ -27,7 +86,10 @@ pub struct MachineSnapshot {
     pub plans: Vec<SealedPlan>,
     /// Immutable Artifacts in content-ID order.
     pub artifacts: Vec<ArtifactRecord>,
-    /// Canonical Events in admitted causal order.
+    /// Optional verified projection for a compacted causal prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<MachineBaseSnapshot>,
+    /// Canonical suffix Events in admitted causal order.
     pub events: Vec<Event>,
     /// Command semantic hashes and receipts for idempotent recovery.
     commands: BTreeMap<String, CommandRecord>,
@@ -35,7 +97,7 @@ pub struct MachineSnapshot {
 
 impl MachineSnapshot {
     /// Current snapshot schema version.
-    pub const VERSION: &'static str = "cymule.machine-snapshot/1";
+    pub const VERSION: &'static str = "cymule.machine-snapshot/2";
 
     /// Content digest used by conditional durable-store writes.
     pub fn digest(&self) -> Result<String> {
@@ -63,6 +125,8 @@ pub struct Machine {
     artifacts: BTreeMap<String, ArtifactRecord>,
     events: BTreeMap<String, Event>,
     event_order: Vec<String>,
+    base: Option<MachineBaseSnapshot>,
+    compacted_event_ids: BTreeSet<String>,
     projection: Projection,
     commands: BTreeMap<String, CommandRecord>,
 }
@@ -79,6 +143,7 @@ impl Machine {
             snapshot_version: MachineSnapshot::VERSION.to_owned(),
             plans: self.plans.values().cloned().collect(),
             artifacts: self.artifacts.values().cloned().collect(),
+            base: self.base.clone(),
             events: self.events().cloned().collect(),
             commands: self.commands.clone(),
         }
@@ -86,7 +151,9 @@ impl Machine {
 
     /// Restore a Machine and deterministically rebuild all projections.
     pub fn restore(snapshot: MachineSnapshot) -> Result<Self> {
-        if snapshot.snapshot_version != MachineSnapshot::VERSION {
+        if snapshot.snapshot_version != MachineSnapshot::VERSION
+            && snapshot.snapshot_version != "cymule.machine-snapshot/1"
+        {
             return Err(CoreError::Validation(format!(
                 "unsupported machine snapshot version {:?}",
                 snapshot.snapshot_version
@@ -105,6 +172,14 @@ impl Machine {
                 )));
             }
         }
+        if let Some(base) = snapshot.base {
+            base.verify()?;
+            machine.projection = base.projection.clone();
+            machine
+                .compacted_event_ids
+                .clone_from(&base.compacted_event_ids);
+            machine.base = Some(base);
+        }
         for event in snapshot.events {
             machine.append_event(event)?;
         }
@@ -116,6 +191,7 @@ impl Machine {
             }
             if let Some(event_id) = &record.receipt.event_id
                 && !machine.events.contains_key(event_id)
+                && !machine.compacted_event_ids.contains(event_id)
             {
                 return Err(CoreError::NotFound(format!(
                     "command {command_id} references missing event {event_id}"
@@ -125,6 +201,63 @@ impl Machine {
         machine.commands = snapshot.commands;
         machine.verify_replay()?;
         Ok(machine)
+    }
+
+    /// Compact a causally closed event prefix and retain a full suffix.
+    pub fn compact_event_history(&mut self, retain_suffix: usize) -> Result<MachineCompaction> {
+        if retain_suffix >= self.event_order.len() {
+            return Err(CoreError::Validation(
+                "event compaction must remove at least one retained Event".to_owned(),
+            ));
+        }
+        let cut = self.event_order.len() - retain_suffix;
+        let prefix_ids = self.event_order[..cut].to_vec();
+        let prefix: Vec<Event> = prefix_ids
+            .iter()
+            .map(|event_id| {
+                self.events
+                    .get(event_id)
+                    .expect("event order references existing Event")
+                    .clone()
+            })
+            .collect();
+        let mut projection = self
+            .base
+            .as_ref()
+            .map(|base| base.projection.clone())
+            .unwrap_or_default();
+        for event in &prefix {
+            projection.apply_event(event)?;
+        }
+        let prior_digest = self.base.as_ref().map(|base| base.prefix_digest.as_str());
+        let prefix_digest = content_id("cymule.machine-event-prefix/1", &(prior_digest, &prefix))?;
+        let mut compacted_event_ids = self.compacted_event_ids.clone();
+        compacted_event_ids.extend(prefix_ids.iter().cloned());
+        let projection_digest = projection.digest()?;
+        let base = MachineBaseSnapshot {
+            prefix_digest,
+            compacted_event_ids: compacted_event_ids.clone(),
+            projection,
+            projection_digest: projection_digest.clone(),
+        };
+        base.verify()?;
+        let base_id = content_id("cymule.machine-base/1", &base)?;
+        for event_id in &prefix_ids {
+            self.events.remove(event_id);
+        }
+        self.event_order.drain(..cut);
+        self.compacted_event_ids = compacted_event_ids;
+        self.base = Some(base);
+        let causal_frontier = self.compaction_frontier();
+        Ok(MachineCompaction {
+            base_id,
+            compacted_events: u64::try_from(self.compacted_event_ids.len())
+                .map_err(|error| CoreError::Validation(error.to_string()))?,
+            retained_events: u64::try_from(self.event_order.len())
+                .map_err(|error| CoreError::Validation(error.to_string()))?,
+            causal_frontier,
+            projection_digest,
+        })
     }
 
     /// Validate, seal, and store a Plan Candidate.
@@ -294,6 +427,12 @@ impl Machine {
     /// Append a trusted event after identity, parent, and transition validation.
     pub fn append_event(&mut self, event: Event) -> Result<()> {
         event.verify()?;
+        if self.compacted_event_ids.contains(&event.event_id) {
+            return Err(CoreError::IdentityMismatch(format!(
+                "event {} belongs to the compacted prefix",
+                event.event_id
+            )));
+        }
         if let Some(existing) = self.events.get(&event.event_id) {
             if existing == &event {
                 return Ok(());
@@ -304,7 +443,7 @@ impl Machine {
             )));
         }
         for parent in &event.parents {
-            if !self.events.contains_key(parent) {
+            if !self.events.contains_key(parent) && !self.compacted_event_ids.contains(parent) {
                 return Err(CoreError::Causal(format!(
                     "event {} references missing parent {parent}",
                     event.event_id
@@ -375,7 +514,22 @@ impl Machine {
 
     /// Replay all current events and verify the digest matches the live projection.
     pub fn verify_replay(&self) -> Result<()> {
-        let replayed = Self::replay(self.events().cloned())?;
+        let mut replayed = self
+            .base
+            .as_ref()
+            .map(|base| base.projection.clone())
+            .unwrap_or_default();
+        let mut applied = self.compacted_event_ids.clone();
+        for event in self.events() {
+            if !event.parents.iter().all(|parent| applied.contains(parent)) {
+                return Err(CoreError::Causal(format!(
+                    "event {} has a parent outside the compacted base and suffix",
+                    event.event_id
+                )));
+            }
+            replayed.apply_event(event)?;
+            applied.insert(event.event_id.clone());
+        }
         let current_digest = self.projection.digest()?;
         let replayed_digest = replayed.digest()?;
         if current_digest != replayed_digest {
@@ -384,6 +538,24 @@ impl Machine {
             )));
         }
         Ok(())
+    }
+
+    fn compaction_frontier(&self) -> BTreeSet<String> {
+        let mut frontier: BTreeSet<String> = self
+            .events()
+            .flat_map(|event| event.parents.iter())
+            .filter(|parent| self.compacted_event_ids.contains(*parent))
+            .cloned()
+            .collect();
+        if let Some(base) = &self.base {
+            frontier.extend(
+                base.projection
+                    .runs
+                    .values()
+                    .map(|run| run.last_event.clone()),
+            );
+        }
+        frontier
     }
 
     fn admit_command(&self, envelope: &CommandEnvelope) -> Result<EventPayload> {

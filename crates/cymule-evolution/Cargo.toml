@@ -13,5 +13,8 @@ cymule-durable = { path = "../cymule-durable" }
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+cymule-runtime = { path = "../cymule-runtime" }
+
 [lints]
 workspace = true

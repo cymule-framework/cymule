@@ -25,3 +25,6 @@
 - `VirtualSchedulingControl` transports claim, renewal, expired recovery, and
   future Run-weight commands. Preserve both work and lease fences plus logical
   observation time; never turn the SDK into a worker loop or scheduler.
+- `EvolutionControl` transports closed `cymule.evolution-control/1` commands.
+  Re-export Rust M4 DTOs without adding client-side latest resolution,
+  migration/shadow execution, evidence counting, or rollout decisions.

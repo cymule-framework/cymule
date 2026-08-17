@@ -18,6 +18,10 @@
 - The shared Plan exercises a reusable definition invocation so every SDK
   proves `cymule.ir/2` declaration, invocation input/result binding, Rust
   sealing, and real embedded execution.
+- The shared evolution control fixture exercises one deterministic gate command
+  through all four SDKs and the Rust verifier. Rust stateful tests separately
+  prove transitive relinking, checked adapters, promotion/rollback, mixed Plan
+  execution, stale CAS, and acknowledgement-loss recovery.
 - Resource fixtures are sealed only by the Rust engine. Every SDK must submit
   the shared candidate and receive the same Resource ID; no fixture may contain
   credentials or a signed URL.

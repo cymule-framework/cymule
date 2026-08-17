@@ -20,4 +20,7 @@
 - Scheduling structs retain slot, logical time, work/lease fences, capabilities,
   Run weight, and explicit recovery disposition. Do not use goroutine/process
   identity, `time.Now`, or local maps as durable worker authority.
+- Evolution command structs retain the closed operation, stable command ID,
+  exact patch/request/observation/gate payload, and control version. Go never
+  resolves module heads, runs adapters, or evaluates rollout evidence.
 - Run `gofmt` and `go test ./...` for every change.

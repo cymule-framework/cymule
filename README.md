@@ -24,9 +24,9 @@ than framework semantics.
 
 > **Project status:** Cymule `0.1.x` is an early executable reference
 > implementation of this model, not yet a complete production fabric. The
-> bounded M0 semantic and single-domain M3 large-virtual-work profiles are
-> implemented; M1 and M4 provide fault-tested but partial foundations for
-> durable execution and live evolution. Optional Agent integration is
+> bounded M0 semantic, single-domain M3 large-virtual-work, and provider-neutral
+> M4 live-evolution profiles are implemented; M1 provides a fault-tested but
+> partial durable-execution foundation. Optional Agent integration is
 > maintained as a plugin. See
 > the [roadmap](docs/roadmap.md) for the exact implemented and remaining
 > boundaries.
@@ -57,6 +57,9 @@ than framework semantics.
   queues, object stores, vendors, endpoints, or credentials.
 - **Deterministic state replay.** Canonical Events rebuild the same Run
   projection and digest.
+- **Safe reusable evolution.** Logical module references follow the newest
+  compatible revision by default when a new Plan is linked, while every sealed
+  Plan and admitted occurrence remains immutable and replayable.
 
 ## When to use Cymule
 
@@ -83,6 +86,28 @@ occurrences, workspace changes, and finalized streams onto generic Cymule waits,
 effects, resources, and M1 application journals. ACP, MCP, A2A, editor, and
 provider support belongs in additional plugins above that package, not in
 framework core, CLI, or SDK semantics.
+
+## How live evolution works
+
+Application source can reference a reusable module with
+`latest_compatible` (the default) or pin one exact revision. `latest` is an
+authoring convenience, never a runtime pointer:
+
+1. Cymule resolves the complete acyclic module dependency closure.
+2. It records every selected revision and seals them into a new immutable Plan.
+3. Publishing a compatible leaf revision relinks affected future parent Plans.
+4. Existing Runs and occurrences keep their original Plan; history is not
+   rewritten.
+5. New work can advance through shadow, deterministic canary, promotion, or
+   rollback decisions backed by immutable observations.
+
+When state must cross Plan versions, a pinned migration plugin supplies the
+transformed Artifact and evidence at an explicit safe point. Shadow execution,
+metrics, deployment, and traffic movement are also replaceable plugins; Cymule
+owns only their contracts, immutable receipts, and deterministic admission
+rules. TypeScript, Python, Rust, and Go expose the same
+`cymule.evolution-control/1` transport commands without duplicating the Rust
+controller.
 
 ## Five-minute quick start
 
@@ -359,7 +384,7 @@ See [Architecture](docs/architecture.md) and the
 | TypeScript SDK | Implemented | Builder and CLI-backed engine client. |
 | Python SDK | Implemented | Dependency-light builder and engine client. |
 | Go SDK | Implemented | Builder and engine client. |
-| Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, M1 handoff journal. |
+| Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, M1 handoff journal and atomic input activation. |
 | Durable wait activation | Implemented foundation | Identified signal/timer records, bounded parked indexes, replaceable source drivers, acknowledgement-loss replay, reopen-safe epoch advance, and four SDK wire validation. |
 | Durable effect policies | Implemented foundation | Nested commit gates, eager observation binding, explicit caller release, exact outbox deltas, and ambiguity reconciliation. |
 | Large virtual work M3 | Implemented | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker recovery, M1 checkpoints, and four SDK controls. |
@@ -381,8 +406,8 @@ publishing and provenance; local development commands never publish releases.
 ## Current capabilities and limits
 
 Version `0.1.x` implements the bounded Semantic Interpreter M0, Embedded M0,
-and single-domain Large Virtual Work M3 profiles. M1 and M4 have useful, tested
-foundations but remain partial and are not advertised as complete profiles.
+single-domain Large Virtual Work M3, and provider-neutral Live Evolution M4
+profiles. M1 has a useful, tested foundation but remains partial.
 
 Implemented today:
 
@@ -409,7 +434,10 @@ Implemented today:
 - provider-neutral cross-Run Resource Handles for inline values, objects,
   directories, collections, snapshots, remote references, and public URLs;
 - bounded resolver/store interfaces and durable idempotent M1 handoffs, with
-  one shared Resource ID sealed through all four SDKs;
+  atomic target input-wait activation and one shared Resource ID sealed through
+  all four SDKs;
+- authenticated Machine Event-prefix compaction, exact suffix rehydration,
+  cumulative lineage, and old command-receipt replay;
 - bounded virtual work with deterministic fairness and portable snapshots;
 - durable M1 checkpoints for virtual cursors/frontiers and exact indexed wake-up;
 - binding-pinned virtual-work attempts with durable retry, failure, result, and
@@ -425,21 +453,24 @@ Implemented today:
   scheduling/Run-weight controls;
 - deterministic Plan diff and immutable evolution DAGs, impact cones, canaries,
   rollback pins, safe-point migration receipts, and shadow evidence, with M1
-  checkpoint lineage, stale-CAS rollback, and lost-acknowledgement replay.
-- latest-compatible reusable definition linking that creates a new immutable
-  parent Plan for future work while retaining every historical linked Plan.
+  checkpoint lineage, stale-CAS rollback, and lost-acknowledgement replay;
+- latest-compatible reusable module linking, including transitive dependency
+  relinking, that creates a new immutable parent Plan for future work while
+  retaining every historical linked Plan;
+- portable, fully verified definition-registry checkpoints with M1 journal
+  lineage, stale-writer rollback, and lost-acknowledgement recovery;
+- checked migration and isolated shadow plugin interfaces, exact reviewed patch
+  admission, higher-profile impact sites, deterministic observation gates,
+  promotion/rollback receipts, mixed-version Plan dispatch, and one closed M4
+  control protocol across all four SDKs.
 
 Not yet claimed:
 
 - production wait-source plugins and automatic higher-profile indexed-wake
   routing;
-- M1 snapshot compaction and suffix rehydration;
 - process-kill crash campaigns beyond the deterministic adapter-level fault
   matrix;
-- production resource resolver/store plugins and automatic interpreter
-  activation of incoming handoffs;
-- transitive reusable module relinking, shadow execution, observation gates,
-  promotion, and complete mixed-version dispatch;
+- production resource resolver/store plugins;
 - distributed ownership, consensus, scheduling, and failover;
 - strong untrusted-code or multi-tenant isolation;
 - provider-level exactly-once guarantees;

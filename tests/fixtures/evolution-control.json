@@ -1,0 +1,14 @@
+{
+  "control_version": "cymule.evolution-control/1",
+  "command_id": "command:evolution:fixture:promote",
+  "operation": "apply_gate",
+  "gate": {
+    "gate_id": "gate:fixture:promote",
+    "decision_id": "rollout:fixture:canary",
+    "min_target_observations": 3,
+    "max_target_failures": 0,
+    "min_equivalent_shadows": 2,
+    "max_inequivalent_shadows": 0
+  },
+  "next_decision_id": "rollout:fixture:active"
+}

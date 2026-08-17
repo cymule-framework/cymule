@@ -9,9 +9,9 @@ domains described in `docs/specification.md`.
 - Introduce frozen `cymule.ir/2` with reusable local definition invocation,
   durable invocation frames, and matching TypeScript, Python, Rust, and Go
   authoring/execution conformance.
-- Add latest-compatible reusable-definition registry linking with exact-schema
-  compatibility, direct dependent relinking, pinned revisions, and historical
-  parent Plan retention.
+- Add latest-compatible reusable-module registry linking with exact-schema
+  compatibility, transitive dependent relinking, pinned revisions, historical
+  parent Plan retention, and durable tamper-checked recovery.
 - Add a self-contained Hello World Flow and example plugin as the stable user
   quick start.
 - Publish GitHub-native repository metadata, CI, and a clean-history public
@@ -34,9 +34,15 @@ domains described in `docs/specification.md`.
 - Add the M4 evolution foundation with immutable Plan DAG edges, impact cones,
   occurrence pins, deterministic canary and rollback, safe-point migration
   receipts, shadow evidence, and cycle/fault tests.
+- Complete the bounded M4 profile with transitive reusable modules, durable
+  registry recovery, exact reviewed patches, checked migration/shadow plugins,
+  deterministic evidence gates, mixed-version dispatch, and four-SDK controls.
 - Add resumable commit-gated effect execution with fenced outbox claims and a
   crash-after-provider-application test proving recovery reconciles without
   redispatch.
+- Add authenticated canonical Event-prefix compaction with exact suffix
+  rehydration and atomic Resource handoff-to-input activation, both fault-tested
+  for stale writers and lost acknowledgements.
 
 ## [0.1.0] - 2026-08-16
 

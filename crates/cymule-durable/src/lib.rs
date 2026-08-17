@@ -12,9 +12,9 @@ pub use error::{DurableError, DurableResult};
 pub use executor::{DriveOutcome, ResumableRuntime};
 pub use model::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableState,
-    EffectDispatch, FrameState, JournalBatch, JournalRecord, OutboxState, SnapshotRecord,
-    StoredState, WAIT_ACTIVATION_VERSION, WaitActivation, WaitActivationSource, WaitCondition,
-    WaitKind, WaitState,
+    EffectDispatch, FrameState, HISTORY_COMPACTION_VERSION, HistoryCompactionReceipt, JournalBatch,
+    JournalRecord, OutboxState, SnapshotRecord, StoredState, WAIT_ACTIVATION_VERSION,
+    WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitState,
 };
 pub use store::{DurableStore, MemoryStore, StoreCommit};
 pub use wait_source::{

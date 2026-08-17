@@ -3,12 +3,13 @@ use cymule_durable::{DurableCoordinator, DurableStore, JournalRecord};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EvolutionController, EvolutionError, EvolutionResult, EvolutionSnapshot, MigrationReceipt,
-    PlanEdge, RolloutDecision, ShadowComparison,
+    EvolutionController, EvolutionError, EvolutionResult, EvolutionSnapshot, MigrationAdapter,
+    MigrationReceipt, MigrationRequest, PlanEdge, PlanPatch, RolloutDecision, RolloutGate,
+    RolloutObservation, RolloutTransition, ShadowComparison, ShadowDriver, ShadowRequest,
 };
 
 /// Versioned M4 checkpoint stored in the generic M1 journal.
-pub const EVOLUTION_CHECKPOINT_SCHEMA: &str = "cymule.evolution-checkpoint/1";
+pub const EVOLUTION_CHECKPOINT_SCHEMA: &str = "cymule.evolution-checkpoint/2";
 
 /// One complete portable evolution checkpoint with explicit lineage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -89,6 +90,23 @@ impl DurableEvolutionController {
         )
     }
 
+    /// Seal an exact reviewed patch, admit its DAG edge, and checkpoint.
+    pub fn apply_patch_and_checkpoint<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        controller: &mut EvolutionController,
+        journal_id: &str,
+        checkpoint_id: &str,
+        patch: PlanPatch,
+    ) -> EvolutionResult<PlanEdge> {
+        apply_and_checkpoint(
+            coordinator,
+            controller,
+            journal_id,
+            checkpoint_id,
+            |controller| controller.apply_patch(patch),
+        )
+    }
+
     /// Change future rollout selection and checkpoint the decision atomically.
     pub fn set_rollout_and_checkpoint<S: DurableStore>(
         coordinator: &mut DurableCoordinator<S>,
@@ -155,6 +173,78 @@ impl DurableEvolutionController {
             journal_id,
             checkpoint_id,
             |controller| controller.record_shadow(comparison),
+        )
+    }
+
+    /// Execute a checked migration and checkpoint its pinned receipt atomically.
+    pub fn execute_migration_and_checkpoint<S: DurableStore, A: MigrationAdapter>(
+        coordinator: &mut DurableCoordinator<S>,
+        controller: &mut EvolutionController,
+        journal_id: &str,
+        checkpoint_id: &str,
+        adapter: &mut A,
+        request: MigrationRequest,
+        safe_point: bool,
+    ) -> EvolutionResult<MigrationReceipt> {
+        apply_and_checkpoint(
+            coordinator,
+            controller,
+            journal_id,
+            checkpoint_id,
+            |controller| controller.execute_migration(adapter, request, safe_point),
+        )
+    }
+
+    /// Execute isolated shadow work and checkpoint comparison evidence.
+    pub fn execute_shadow_and_checkpoint<S: DurableStore, D: ShadowDriver>(
+        coordinator: &mut DurableCoordinator<S>,
+        controller: &mut EvolutionController,
+        journal_id: &str,
+        checkpoint_id: &str,
+        driver: &mut D,
+        request: ShadowRequest,
+    ) -> EvolutionResult<ShadowComparison> {
+        apply_and_checkpoint(
+            coordinator,
+            controller,
+            journal_id,
+            checkpoint_id,
+            |controller| controller.execute_shadow(driver, request),
+        )
+    }
+
+    /// Record one terminal rollout observation and checkpoint before gating.
+    pub fn record_observation_and_checkpoint<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        controller: &mut EvolutionController,
+        journal_id: &str,
+        checkpoint_id: &str,
+        observation: RolloutObservation,
+    ) -> EvolutionResult<()> {
+        apply_and_checkpoint(
+            coordinator,
+            controller,
+            journal_id,
+            checkpoint_id,
+            |controller| controller.record_observation(observation),
+        )
+    }
+
+    /// Apply a ready promotion/rollback gate and checkpoint the new decision.
+    pub fn apply_gate_and_checkpoint<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        controller: &mut EvolutionController,
+        journal_id: &str,
+        checkpoint_id: &str,
+        gate: RolloutGate,
+        next_decision_id: impl Into<String>,
+    ) -> EvolutionResult<RolloutTransition> {
+        apply_and_checkpoint(
+            coordinator,
+            controller,
+            journal_id,
+            checkpoint_id,
+            |controller| controller.apply_gate(gate, next_decision_id),
         )
     }
 }

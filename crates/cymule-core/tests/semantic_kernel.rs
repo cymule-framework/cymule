@@ -579,6 +579,164 @@ fn machine_snapshot_restores_projection_artifacts_and_command_deduplication() {
 }
 
 #[test]
+fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
+    let mut machine = Machine::new();
+    let plan = machine.seal_plan(candidate()).expect("plan seals");
+    let run_id = "run:compacted-snapshot";
+    let start = envelope(
+        &machine,
+        1,
+        run_id,
+        Command::StartRun {
+            plan_id: plan.plan_id,
+            binding_context: "binding:v1".to_owned(),
+        },
+    );
+    let start_receipt = machine.submit(start.clone()).expect("run starts");
+    machine
+        .submit(envelope(
+            &machine,
+            2,
+            run_id,
+            Command::BeginAttempt {
+                attempt_id: "attempt:compaction:1".to_owned(),
+                continuation_id: "continuation:compaction".to_owned(),
+                occurrence_binding: "binding:worker/1".to_owned(),
+                epoch: 0,
+            },
+        ))
+        .expect("attempt starts");
+    machine
+        .submit(envelope(
+            &machine,
+            3,
+            run_id,
+            Command::YieldAttempt {
+                attempt_id: "attempt:compaction:1".to_owned(),
+                epoch: 0,
+            },
+        ))
+        .expect("attempt yields");
+    machine
+        .submit(envelope(&machine, 4, run_id, Command::AdvanceEpoch))
+        .expect("epoch advances");
+    let expected_projection = machine.projection().clone();
+    let event_ids: Vec<String> = machine
+        .events()
+        .map(|event| event.event_id.clone())
+        .collect();
+    let mut legacy_snapshot = machine.snapshot();
+    legacy_snapshot.snapshot_version = "cymule.machine-snapshot/1".to_owned();
+    Machine::restore(legacy_snapshot).expect("legacy base-less snapshot restores");
+    let mut unsupported = machine.snapshot();
+    unsupported.snapshot_version = "cymule.machine-snapshot/999".to_owned();
+    assert!(matches!(
+        Machine::restore(unsupported),
+        Err(CoreError::Validation(_))
+    ));
+
+    let compaction = machine.compact_event_history(2).expect("prefix compacts");
+    assert_eq!(compaction.compacted_events, 2);
+    assert_eq!(compaction.retained_events, 2);
+    assert_eq!(
+        compaction.causal_frontier,
+        BTreeSet::from([event_ids[1].clone()])
+    );
+    machine.verify_replay().expect("base plus suffix replays");
+    let snapshot = machine.snapshot();
+    assert!(snapshot.base.is_some());
+    assert_eq!(snapshot.events.len(), 2);
+
+    let mut restored = Machine::restore(snapshot.clone()).expect("suffix rehydrates");
+    assert_eq!(restored.projection(), &expected_projection);
+    assert_eq!(
+        restored.submit(start).expect("old command receipt replays"),
+        start_receipt
+    );
+    assert_eq!(restored.events().count(), 2);
+    let second = restored
+        .compact_event_history(1)
+        .expect("later suffix prefix compacts");
+    assert_eq!(second.compacted_events, 3);
+    assert_eq!(second.retained_events, 1);
+    Machine::restore(restored.snapshot())
+        .expect("twice-compacted snapshot restores")
+        .verify_replay()
+        .expect("twice-compacted suffix replays");
+
+    let mut tampered = snapshot.clone();
+    tampered
+        .base
+        .as_mut()
+        .expect("base exists")
+        .projection_digest = format!("sha256:{}", "0".repeat(64));
+    assert!(matches!(
+        Machine::restore(tampered),
+        Err(CoreError::IdentityMismatch(_))
+    ));
+
+    for malformed_base in [
+        {
+            let mut value = snapshot.clone();
+            value.base.as_mut().expect("base exists").prefix_digest = "x".repeat(71);
+            value
+        },
+        {
+            let mut value = snapshot.clone();
+            value.base.as_mut().expect("base exists").prefix_digest = "sha256:0".to_owned();
+            value
+        },
+        {
+            let mut value = snapshot.clone();
+            value
+                .base
+                .as_mut()
+                .expect("base exists")
+                .compacted_event_ids
+                .clear();
+            value
+        },
+        {
+            let mut value = snapshot.clone();
+            value
+                .base
+                .as_mut()
+                .expect("base exists")
+                .compacted_event_ids
+                .insert(String::new());
+            value
+        },
+    ] {
+        assert!(matches!(
+            Machine::restore(malformed_base),
+            Err(CoreError::Validation(_))
+        ));
+    }
+
+    let mut orphaned = snapshot;
+    orphaned.events = vec![
+        Event::new(
+            "command:orphan-suffix".to_owned(),
+            "hash:orphan-suffix".to_owned(),
+            run_id.to_owned(),
+            vec![format!("sha256:{}", "f".repeat(64))],
+            BTreeSet::new(),
+            BTreeSet::from(["fact:orphan-suffix".to_owned()]),
+            None,
+            EventPayload::FactRecorded {
+                key: "orphan-suffix".to_owned(),
+                value: "1".to_owned(),
+            },
+        )
+        .expect("orphan event identity is valid"),
+    ];
+    assert!(matches!(
+        Machine::restore(orphaned),
+        Err(CoreError::Causal(_))
+    ));
+}
+
+#[test]
 fn structural_effect_identifiers_are_content_sensitive() {
     let args = ArtifactRef {
         artifact_id: format!("sha256:{}", "a".repeat(64)),

@@ -23,6 +23,9 @@
 - Use discriminated unions for IR and Engine protocol types.
 - Keep `invoke` as a closed discriminated variant and `definition()` as a pure
   candidate authoring operation; neither may resolve logical latest heads.
+- Keep M4 operations as the closed `EvolutionCommand` discriminated union.
+  `EvolutionControlBuilder` copies caller data but never executes adapters,
+  counts evidence, or chooses promotion/rollback.
 - The public npm package name is `cymule`. Changes to exports, files, engine
   requirements, or minimum Node versions require a package dry-run and release
   workflow review.

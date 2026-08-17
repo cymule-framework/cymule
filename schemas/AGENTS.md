@@ -36,3 +36,8 @@
   Clock values, work/lease fences, explicit recovery disposition, and future
   Run weight. Worker addresses, heartbeats, queue/provider fields, and topology
   remain outside semantic records.
+- `evolution-control.schema.json` owns the closed
+  `cymule.evolution-control/1` command union shared by all SDKs. Commands carry
+  only immutable Plan/Artifact identities, exact patches, pinned migration or
+  shadow requests, observations, and deterministic gates. Provider endpoints,
+  credentials, clocks, and Agent-loop state never enter this boundary.

@@ -12,6 +12,60 @@ Json = None | bool | int | float | str | list["Json"] | dict[str, "Json"]
 ArtifactRef = dict[str, str]
 ParkReason = dict[str, str]
 WorkResolution = dict[str, Any]
+EvolutionCommand = dict[str, Any]
+
+
+class RolloutDecision(TypedDict):
+    """One immutable future-selection decision."""
+
+    decision_id: str
+    fallback_plan: str
+    target_plan: str
+    mode: dict[str, Any]
+
+
+class RolloutObservation(TypedDict):
+    """One terminal observation for a pinned rollout occurrence."""
+
+    observation_id: str
+    decision_id: str
+    occurrence_id: str
+    plan_id: str
+    outcome: str
+    evidence: ArtifactRef
+
+
+class RolloutGate(TypedDict):
+    """Deterministic promotion and rollback thresholds."""
+
+    gate_id: str
+    decision_id: str
+    min_target_observations: int
+    max_target_failures: int
+    min_equivalent_shadows: int
+    max_inequivalent_shadows: int
+
+
+class MigrationRequest(TypedDict):
+    """Checked safe-point migration request for a pinned adapter."""
+
+    migration_id: str
+    run_id: str
+    from_plan: str
+    to_plan: str
+    input_state: ArtifactRef
+
+
+class ShadowRequest(TypedDict):
+    """Isolated, non-authoritative shadow execution request."""
+
+    comparison_id: str
+    decision_id: str
+    subject: str
+    primary_plan: str
+    shadow_plan: str
+    input: ArtifactRef
+    comparison_policy: str
 
 
 class WorkItem(TypedDict):
@@ -299,6 +353,12 @@ class RegionMigrator(Protocol):
     def verify(self, plan: RegionMigrationPlan) -> None: ...
 
 
+class EvolutionControl(Protocol):
+    """Transport-neutral M4 command interface; Rust remains authority."""
+
+    def submit(self, command: EvolutionCommand) -> Any: ...
+
+
 class VirtualWorkControl(Protocol):
     """Transport-neutral M3 occurrence query and control interface."""
 
@@ -575,6 +635,74 @@ class WaitActivationBuilder:
             "source": source,
             "wait_ids": targets,
             "result": dict(result),
+        }
+
+
+class EvolutionControlBuilder:
+    """Build closed idempotent M4 commands without reducing state locally."""
+
+    @staticmethod
+    def apply_patch(command_id: str, patch: dict[str, Any]) -> EvolutionCommand:
+        return EvolutionControlBuilder._build(
+            command_id, {"operation": "apply_patch", "patch": patch}
+        )
+
+    @staticmethod
+    def set_rollout(command_id: str, decision: RolloutDecision) -> EvolutionCommand:
+        return EvolutionControlBuilder._build(
+            command_id, {"operation": "set_rollout", "decision": decision}
+        )
+
+    @staticmethod
+    def select_occurrence(command_id: str, occurrence_id: str) -> EvolutionCommand:
+        if not occurrence_id:
+            raise ValueError("evolution selection requires an occurrence identity")
+        return EvolutionControlBuilder._build(
+            command_id,
+            {"operation": "select_occurrence", "occurrence_id": occurrence_id},
+        )
+
+    @staticmethod
+    def migrate(command_id: str, request: MigrationRequest) -> EvolutionCommand:
+        return EvolutionControlBuilder._build(
+            command_id, {"operation": "migrate", "request": request}
+        )
+
+    @staticmethod
+    def shadow(command_id: str, request: ShadowRequest) -> EvolutionCommand:
+        return EvolutionControlBuilder._build(
+            command_id, {"operation": "shadow", "request": request}
+        )
+
+    @staticmethod
+    def observe(command_id: str, observation: RolloutObservation) -> EvolutionCommand:
+        return EvolutionControlBuilder._build(
+            command_id, {"operation": "observe", "observation": observation}
+        )
+
+    @staticmethod
+    def apply_gate(
+        command_id: str, gate: RolloutGate, next_decision_id: str
+    ) -> EvolutionCommand:
+        if not next_decision_id:
+            raise ValueError("evolution gate requires a next decision identity")
+        return EvolutionControlBuilder._build(
+            command_id,
+            {
+                "operation": "apply_gate",
+                "gate": gate,
+                "next_decision_id": next_decision_id,
+            },
+        )
+
+    @staticmethod
+    def _build(command_id: str, operation: dict[str, Any]) -> EvolutionCommand:
+        if not command_id:
+            raise ValueError("evolution control requires a command identity")
+        return {
+            "control_version": "cymule.evolution-control/1",
+            "command_id": command_id,
+            **copy.deepcopy(operation),
         }
 
 
@@ -929,6 +1057,15 @@ class CliEngine:
             raise RuntimeError(f"unexpected engine response: {response!r}")
         return response["activation"]
 
+    def verify_evolution_command(self, command: EvolutionCommand) -> EvolutionCommand:
+        """Validate one closed M4 control envelope with the Rust engine."""
+        response = self._request(
+            {"type": "verify_evolution_command", "command": command}
+        )
+        if response.get("type") != "verified_evolution_command":
+            raise RuntimeError(f"unexpected engine response: {response!r}")
+        return response["command"]
+
     def run(
         self,
         plan: dict[str, Any],
@@ -966,15 +1103,23 @@ class CliEngine:
 __all__ = [
     "ArtifactRef",
     "CliEngine",
+    "EvolutionCommand",
+    "EvolutionControl",
+    "EvolutionControlBuilder",
     "FlowBuilder",
     "Json",
+    "MigrationRequest",
     "ParkReason",
     "RegionMigrationCommand",
     "RegionMigrationPlan",
     "RegionMigrationReceipt",
     "RegionMigrationRequest",
     "RegionMigrator",
+    "RolloutDecision",
+    "RolloutGate",
+    "RolloutObservation",
     "ResourceBuilder",
+    "ShadowRequest",
     "VirtualWorkControl",
     "VirtualWorkControlBuilder",
     "VirtualCursor",

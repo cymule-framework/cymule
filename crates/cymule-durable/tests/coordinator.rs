@@ -1,6 +1,8 @@
 //! Fault-oriented durable single-domain contract tests.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, Definition, DispatchPolicy, EffectContract,
@@ -9,10 +11,37 @@ use cymule_core::{
 };
 use cymule_durable::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
-    EffectDispatch, FrameState, JournalBatch, JournalRecord, MemoryStore, OutboxState,
-    WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitState,
+    DurableResult, DurableState, DurableStore, EffectDispatch, FrameState, JournalBatch,
+    JournalRecord, MemoryStore, OutboxState, StoreCommit, StoredState, WaitActivation,
+    WaitActivationSource, WaitCondition, WaitKind, WaitState,
 };
 use serde_json::json;
+
+#[derive(Clone)]
+struct LostCompactionReceiptStore {
+    inner: MemoryStore,
+    armed: Arc<AtomicBool>,
+}
+
+impl DurableStore for LostCompactionReceiptStore {
+    fn load(&mut self) -> DurableResult<Option<StoredState>> {
+        self.inner.load()
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        expected_revision: Option<&str>,
+        next: &DurableState,
+    ) -> DurableResult<StoreCommit> {
+        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        if self.armed.swap(false, Ordering::SeqCst) {
+            return Err(DurableError::Substrate(
+                "simulated lost compaction receipt".to_owned(),
+            ));
+        }
+        Ok(commit)
+    }
+}
 
 fn machine_with_run() -> (Machine, String) {
     let mut machine = Machine::new();
@@ -996,6 +1025,153 @@ fn higher_profile_journal_is_cas_committed_and_replayed_in_order() {
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].record_id, "record:1");
     assert_eq!(records[1].record_id, "record:2");
+}
+
+#[test]
+fn machine_history_compaction_reopens_and_replays_after_lost_receipt() {
+    let (mut machine, _) = machine_with_run();
+    submit(
+        &mut machine,
+        "run:durable",
+        "command:compaction:attempt",
+        Command::BeginAttempt {
+            attempt_id: "attempt:compaction".to_owned(),
+            continuation_id: "continuation:compaction".to_owned(),
+            occurrence_binding: "binding:worker/compaction@1".to_owned(),
+            epoch: 0,
+        },
+    );
+    submit(
+        &mut machine,
+        "run:durable",
+        "command:compaction:yield",
+        Command::YieldAttempt {
+            attempt_id: "attempt:compaction".to_owned(),
+            epoch: 0,
+        },
+    );
+    submit(
+        &mut machine,
+        "run:durable",
+        "command:compaction:epoch",
+        Command::AdvanceEpoch,
+    );
+    let expected_projection = machine.projection().clone();
+    let armed = Arc::new(AtomicBool::new(false));
+    let store = LostCompactionReceiptStore {
+        inner: MemoryStore::new(),
+        armed: armed.clone(),
+    };
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("coordinator opens")
+        .initialize(&machine)
+        .expect("state initializes");
+
+    armed.store(true, Ordering::SeqCst);
+    let error = coordinator
+        .compact_history("compaction:events:1", 1)
+        .expect_err("compaction acknowledgement is lost");
+    assert!(
+        matches!(&error, DurableError::Substrate(message) if message == "simulated lost compaction receipt"),
+        "unexpected compaction error: {error:?}"
+    );
+    let store = coordinator.into_store();
+    let mut reopened = DurableCoordinator::open(store).expect("compacted state reopens");
+    let receipt =
+        reopened.state().expect("state reads").history_compactions["compaction:events:1"].clone();
+    assert_eq!(receipt.result.compacted_events, 3);
+    assert_eq!(receipt.result.retained_events, 1);
+    let restored = reopened.restore_machine().expect("suffix rehydrates");
+    assert_eq!(restored.projection(), &expected_projection);
+    restored.verify_replay().expect("base plus suffix replays");
+    assert_eq!(
+        reopened
+            .compact_history("compaction:events:1", 1)
+            .expect("lost receipt retry returns original"),
+        receipt
+    );
+
+    let mut restored = reopened.restore_machine().expect("Machine restores");
+    let events_before = restored.events().count();
+    restored
+        .submit(CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: "command:start".to_owned(),
+            actor: "test".to_owned(),
+            run_id: "run:durable".to_owned(),
+            expected_precondition: None,
+            command: Command::StartRun {
+                plan_id: restored.projection().runs["run:durable"]
+                    .initial_plan
+                    .clone(),
+                binding_context: "binding:test/1".to_owned(),
+            },
+        })
+        .expect("compacted command receipt replays");
+    assert_eq!(restored.events().count(), events_before);
+    submit(
+        &mut restored,
+        "run:durable",
+        "command:compaction:attempt:2",
+        Command::BeginAttempt {
+            attempt_id: "attempt:compaction:2".to_owned(),
+            continuation_id: "continuation:compaction".to_owned(),
+            occurrence_binding: "binding:worker/compaction@2".to_owned(),
+            epoch: 1,
+        },
+    );
+    reopened
+        .persist_machine(&restored)
+        .expect("new suffix Event persists");
+    let second = reopened
+        .compact_history("compaction:events:2", 1)
+        .expect("later prefix compacts");
+    assert_eq!(
+        second.parent_compaction.as_deref(),
+        Some("compaction:events:1")
+    );
+    assert_eq!(second.result.compacted_events, 4);
+    assert_eq!(second.result.retained_events, 1);
+    reopened
+        .restore_machine()
+        .expect("cumulative base restores")
+        .verify_replay()
+        .expect("cumulative base plus suffix replays");
+}
+
+#[test]
+fn stale_history_compaction_loses_without_changing_committed_base() {
+    let (mut machine, _) = machine_with_run();
+    submit(
+        &mut machine,
+        "run:durable",
+        "command:compaction:epoch",
+        Command::AdvanceEpoch,
+    );
+    let store = MemoryStore::new();
+    let mut current = DurableCoordinator::open(store.clone())
+        .expect("current opens")
+        .initialize(&machine)
+        .expect("state initializes");
+    let mut stale = DurableCoordinator::open(store).expect("stale opens");
+    let committed = current
+        .compact_history("compaction:current", 1)
+        .expect("current compacts");
+    assert!(matches!(
+        stale.compact_history("compaction:stale", 1),
+        Err(DurableError::Conflict { .. })
+    ));
+    let current_state = current.state().expect("current state remains valid");
+    assert_eq!(current_state.history_compactions.len(), 1);
+    assert_eq!(
+        current_state.history_compactions["compaction:current"],
+        committed
+    );
+    current
+        .restore_machine()
+        .expect("committed base restores")
+        .verify_replay()
+        .expect("committed suffix replays");
 }
 
 #[test]

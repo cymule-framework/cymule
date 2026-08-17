@@ -136,6 +136,163 @@ type ArtifactRef struct {
 	Kind       string `json:"kind"`
 }
 
+// RolloutMode selects shadow, canary, active, or rolled-back future work.
+type RolloutMode struct {
+	Mode        string `json:"mode"`
+	BasisPoints uint16 `json:"basis_points,omitempty"`
+}
+
+// RolloutDecision is one immutable future-selection decision.
+type RolloutDecision struct {
+	DecisionID   string      `json:"decision_id"`
+	FallbackPlan string      `json:"fallback_plan"`
+	TargetPlan   string      `json:"target_plan"`
+	Mode         RolloutMode `json:"mode"`
+}
+
+// RolloutObservation is one terminal pinned-occurrence outcome.
+type RolloutObservation struct {
+	ObservationID string      `json:"observation_id"`
+	DecisionID    string      `json:"decision_id"`
+	OccurrenceID  string      `json:"occurrence_id"`
+	PlanID        string      `json:"plan_id"`
+	Outcome       string      `json:"outcome"`
+	Evidence      ArtifactRef `json:"evidence"`
+}
+
+// RolloutGate contains deterministic promotion and rollback thresholds.
+type RolloutGate struct {
+	GateID                 string `json:"gate_id"`
+	DecisionID             string `json:"decision_id"`
+	MinTargetObservations  uint64 `json:"min_target_observations"`
+	MaxTargetFailures      uint64 `json:"max_target_failures"`
+	MinEquivalentShadows   uint64 `json:"min_equivalent_shadows"`
+	MaxInequivalentShadows uint64 `json:"max_inequivalent_shadows"`
+}
+
+// MigrationRequest asks a pinned adapter for one safe-point transformation.
+type MigrationRequest struct {
+	MigrationID string      `json:"migration_id"`
+	RunID       string      `json:"run_id"`
+	FromPlan    string      `json:"from_plan"`
+	ToPlan      string      `json:"to_plan"`
+	InputState  ArtifactRef `json:"input_state"`
+}
+
+// ShadowRequest asks a pinned driver for isolated comparison evidence.
+type ShadowRequest struct {
+	ComparisonID     string      `json:"comparison_id"`
+	DecisionID       string      `json:"decision_id"`
+	Subject          string      `json:"subject"`
+	PrimaryPlan      string      `json:"primary_plan"`
+	ShadowPlan       string      `json:"shadow_plan"`
+	Input            ArtifactRef `json:"input"`
+	ComparisonPolicy string      `json:"comparison_policy"`
+}
+
+// PatchOperation declares one exact semantic difference.
+type PatchOperation struct {
+	Kind   string  `json:"kind"`
+	Target string  `json:"target"`
+	Before *string `json:"before"`
+	After  *string `json:"after"`
+}
+
+// PlanPatch carries a complete reviewed target and exact declared diff.
+type PlanPatch struct {
+	FromPlan   string           `json:"from_plan"`
+	Target     PlanCandidate    `json:"target"`
+	Operations []PatchOperation `json:"operations"`
+	Evidence   ArtifactRef      `json:"evidence"`
+}
+
+// EvolutionCommand is one closed idempotent M4 transport envelope.
+type EvolutionCommand struct {
+	ControlVersion string              `json:"control_version"`
+	CommandID      string              `json:"command_id"`
+	Operation      string              `json:"operation"`
+	Patch          *PlanPatch          `json:"patch,omitempty"`
+	Decision       *RolloutDecision    `json:"decision,omitempty"`
+	OccurrenceID   string              `json:"occurrence_id,omitempty"`
+	Migration      *MigrationRequest   `json:"-"`
+	Shadow         *ShadowRequest      `json:"-"`
+	Observation    *RolloutObservation `json:"observation,omitempty"`
+	Gate           *RolloutGate        `json:"gate,omitempty"`
+	NextDecisionID string              `json:"next_decision_id,omitempty"`
+}
+
+// MarshalJSON emits the exact operation-specific request shape.
+func (command EvolutionCommand) MarshalJSON() ([]byte, error) {
+	var request any
+	switch command.Operation {
+	case "migrate":
+		request = command.Migration
+	case "shadow":
+		request = command.Shadow
+	}
+	return json.Marshal(struct {
+		ControlVersion string              `json:"control_version"`
+		CommandID      string              `json:"command_id"`
+		Operation      string              `json:"operation"`
+		Patch          *PlanPatch          `json:"patch,omitempty"`
+		Decision       *RolloutDecision    `json:"decision,omitempty"`
+		OccurrenceID   string              `json:"occurrence_id,omitempty"`
+		Request        any                 `json:"request,omitempty"`
+		Observation    *RolloutObservation `json:"observation,omitempty"`
+		Gate           *RolloutGate        `json:"gate,omitempty"`
+		NextDecisionID string              `json:"next_decision_id,omitempty"`
+	}{
+		command.ControlVersion, command.CommandID, command.Operation, command.Patch,
+		command.Decision, command.OccurrenceID, request, command.Observation,
+		command.Gate, command.NextDecisionID,
+	})
+}
+
+// UnmarshalJSON reads the closed operation-specific request into typed fields.
+func (command *EvolutionCommand) UnmarshalJSON(input []byte) error {
+	var wire struct {
+		ControlVersion string              `json:"control_version"`
+		CommandID      string              `json:"command_id"`
+		Operation      string              `json:"operation"`
+		Patch          *PlanPatch          `json:"patch"`
+		Decision       *RolloutDecision    `json:"decision"`
+		OccurrenceID   string              `json:"occurrence_id"`
+		Request        json.RawMessage     `json:"request"`
+		Observation    *RolloutObservation `json:"observation"`
+		Gate           *RolloutGate        `json:"gate"`
+		NextDecisionID string              `json:"next_decision_id"`
+	}
+	if err := json.Unmarshal(input, &wire); err != nil {
+		return err
+	}
+	*command = EvolutionCommand{
+		ControlVersion: wire.ControlVersion,
+		CommandID:      wire.CommandID,
+		Operation:      wire.Operation,
+		Patch:          wire.Patch,
+		Decision:       wire.Decision,
+		OccurrenceID:   wire.OccurrenceID,
+		Observation:    wire.Observation,
+		Gate:           wire.Gate,
+		NextDecisionID: wire.NextDecisionID,
+	}
+	switch wire.Operation {
+	case "migrate":
+		var request MigrationRequest
+		if err := json.Unmarshal(wire.Request, &request); err != nil {
+			return err
+		}
+		command.Migration = &request
+	case "shadow":
+		var request ShadowRequest
+		if err := json.Unmarshal(wire.Request, &request); err != nil {
+			return err
+		}
+		command.Shadow = &request
+	}
+	return nil
+}
+
 // WaitActivationSource identifies a signal key or logical timer.
 type WaitActivationSource struct {
 	Kind    string `json:"kind"`
@@ -521,6 +678,11 @@ type RegionMigrator interface {
 	Verify(plan RegionMigrationPlan) error
 }
 
+// EvolutionControl submits typed M4 commands to durable Rust authority.
+type EvolutionControl interface {
+	Submit(command EvolutionCommand) (any, error)
+}
+
 // VirtualWorkControl is a transport-neutral occurrence query/control boundary.
 type VirtualWorkControl interface {
 	Occurrence(occurrenceID string) (*WorkOccurrence, error)
@@ -536,6 +698,64 @@ type VirtualSchedulingControl interface {
 	Renew(command VirtualLeaseRenewalCommand) (VirtualLeaseRenewalReceipt, error)
 	Recover(command VirtualRecoveryCommand) (VirtualRecoveryReceipt, error)
 	SetRunWeight(command VirtualRunWeightCommand) (VirtualRunWeightReceipt, error)
+}
+
+func evolutionCommand(commandID, operation string) EvolutionCommand {
+	return EvolutionCommand{
+		ControlVersion: "cymule.evolution-control/1",
+		CommandID:      commandID,
+		Operation:      operation,
+	}
+}
+
+// ApplyPlanPatch builds one exact reviewed patch command.
+func ApplyPlanPatch(commandID string, patch PlanPatch) EvolutionCommand {
+	command := evolutionCommand(commandID, "apply_patch")
+	command.Patch = &patch
+	return command
+}
+
+// SetEvolutionRollout builds one future-selection decision command.
+func SetEvolutionRollout(commandID string, decision RolloutDecision) EvolutionCommand {
+	command := evolutionCommand(commandID, "set_rollout")
+	command.Decision = &decision
+	return command
+}
+
+// SelectEvolutionOccurrence builds one immutable occurrence selection command.
+func SelectEvolutionOccurrence(commandID, occurrenceID string) EvolutionCommand {
+	command := evolutionCommand(commandID, "select_occurrence")
+	command.OccurrenceID = occurrenceID
+	return command
+}
+
+// MigrateEvolutionState builds one checked safe-point migration command.
+func MigrateEvolutionState(commandID string, request MigrationRequest) EvolutionCommand {
+	command := evolutionCommand(commandID, "migrate")
+	command.Migration = &request
+	return command
+}
+
+// RunEvolutionShadow builds one isolated shadow-comparison command.
+func RunEvolutionShadow(commandID string, request ShadowRequest) EvolutionCommand {
+	command := evolutionCommand(commandID, "shadow")
+	command.Shadow = &request
+	return command
+}
+
+// ObserveEvolutionRollout builds one terminal rollout-observation command.
+func ObserveEvolutionRollout(commandID string, observation RolloutObservation) EvolutionCommand {
+	command := evolutionCommand(commandID, "observe")
+	command.Observation = &observation
+	return command
+}
+
+// ApplyEvolutionGate builds one deterministic promotion or rollback command.
+func ApplyEvolutionGate(commandID string, gate RolloutGate, nextDecisionID string) EvolutionCommand {
+	command := evolutionCommand(commandID, "apply_gate")
+	command.Gate = &gate
+	command.NextDecisionID = nextDecisionID
+	return command
 }
 
 // SucceedWork creates a terminal-success control command.
@@ -963,6 +1183,21 @@ func (engine CliEngine) VerifyWaitActivation(activation WaitActivation) (WaitAct
 		err = fmt.Errorf("unexpected engine response %q", response.Type)
 	}
 	return response.Activation, err
+}
+
+// VerifyEvolutionCommand validates one M4 envelope with the Rust engine.
+func (engine CliEngine) VerifyEvolutionCommand(command EvolutionCommand) (EvolutionCommand, error) {
+	var response struct {
+		Type    string           `json:"type"`
+		Command EvolutionCommand `json:"command"`
+	}
+	err := engine.request(map[string]any{
+		"type": "verify_evolution_command", "command": command,
+	}, &response)
+	if err == nil && response.Type != "verified_evolution_command" {
+		err = fmt.Errorf("unexpected engine response %q", response.Type)
+	}
+	return response.Command, err
 }
 
 // Run executes a sealed plan through one plugin realization.

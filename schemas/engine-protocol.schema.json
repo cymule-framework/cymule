@@ -26,6 +26,13 @@
       }
     },
     {
+      "type": "object", "additionalProperties": false, "required": ["type", "command"],
+      "properties": {
+        "type": { "const": "verify_evolution_command" },
+        "command": { "$ref": "evolution-control.schema.json" }
+      }
+    },
+    {
       "type": "object", "additionalProperties": false,
       "required": ["type", "plan", "input", "plugin", "run_id"],
       "properties": {

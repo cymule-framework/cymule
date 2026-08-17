@@ -22,6 +22,44 @@ func TestJSONResourcePreservesNullValue(t *testing.T) {
 	}
 }
 
+func TestEvolutionControlValidatesThroughRust(t *testing.T) {
+	enginePath := os.Getenv("CYMULE_BIN")
+	fixturePath := os.Getenv("CYMULE_EVOLUTION_CONTROL_FIXTURE")
+	if enginePath == "" || fixturePath == "" {
+		t.Skip("evolution control conformance is not configured")
+	}
+	fixtureBytes, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expected EvolutionCommand
+	if err := json.Unmarshal(fixtureBytes, &expected); err != nil {
+		t.Fatal(err)
+	}
+	command := ApplyEvolutionGate(
+		"command:evolution:fixture:promote",
+		RolloutGate{
+			GateID:                 "gate:fixture:promote",
+			DecisionID:             "rollout:fixture:canary",
+			MinTargetObservations:  3,
+			MaxTargetFailures:      0,
+			MinEquivalentShadows:   2,
+			MaxInequivalentShadows: 0,
+		},
+		"rollout:fixture:active",
+	)
+	if !reflect.DeepEqual(command, expected) {
+		t.Fatalf("evolution command differs from shared fixture: %#v", command)
+	}
+	verified, err := (CliEngine{Executable: enginePath}).VerifyEvolutionCommand(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(verified, command) {
+		t.Fatalf("Rust engine changed evolution command: %#v", verified)
+	}
+}
+
 func TestCrossLanguageEndToEnd(t *testing.T) {
 	enginePath := os.Getenv("CYMULE_BIN")
 	pluginPath := os.Getenv("CYMULE_TEST_PLUGIN")

@@ -50,6 +50,10 @@ Use this precedence order when guidance conflicts:
 - Durable Run creation publishes the initial Machine and first Continuation in
   one CAS. Never create canonical work that cannot be resumed after a lost
   acknowledgement.
+- Machine history compaction replaces only a causally closed Event prefix with
+  an authenticated base projection and exact identities. Retain the complete
+  suffix and command receipts; CAS lineage and replay must survive stale writes
+  and lost acknowledgements.
 - Signal and timer transport belongs behind `WaitSourceDriver`. Drivers select
   only from the rebuildable parked-wait index, obey the hard target bound, and
   acknowledge only after the activation CAS; lost acknowledgement redelivers
@@ -88,6 +92,14 @@ Use this precedence order when guidance conflicts:
 - `cymule.ir/2` reusable definition calls resolve inside one immutable Plan.
   Logical latest-compatible references are linked by M4 into a new parent Plan;
   a sealed Plan never dereferences a mutable `latest` alias at runtime.
+- Reusable modules resolve their complete acyclic dependency closure before
+  sealing. Store every exact revision in the linked record, derive reverse
+  indexes from registry state, and make transitive compatible updates create a
+  new future parent Plan without rewriting any historical Plan or invocation.
+- M4 rollout state is evidence-driven and future-only. Migration/shadow code is
+  a pinned plugin, observations match immutable occurrence pins, and only Rust
+  evaluates deterministic promotion/rollback gates. SDKs carry the closed
+  control union without duplicating these decisions.
 - New behavior is provider-neutral by default. Concrete persistence, activation,
   execution, model, tool, and effect integrations belong behind plugin or
   substrate interfaces.

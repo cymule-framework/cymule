@@ -25,3 +25,6 @@
 - Scheduling protocols keep capacity slots, logical time, work/lease fences,
   Run weight, and recovery disposition explicit. Do not read a local clock or
   add a Python worker registry/reducer.
+- Evolution builders preserve the closed M4 operation tag, exact Plan and
+  Artifact identities, adapter requests, observations, and gates. Python never
+  resolves latest revisions or evaluates a gate locally.
