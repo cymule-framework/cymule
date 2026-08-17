@@ -25,6 +25,9 @@ domains described in `docs/specification.md`.
   Actions trusted publishing with provenance.
 - Adopt a project-wide build-versus-adopt policy and non-blocking lock boundary;
   prefer Tokio and other maintained mechanisms below Cymule semantics.
+- Add the M4 evolution foundation with immutable Plan DAG edges, impact cones,
+  occurrence pins, deterministic canary and rollback, safe-point migration
+  receipts, shadow evidence, and cycle/fault tests.
 
 ## [0.1.0] - 2026-08-16
 

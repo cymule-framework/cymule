@@ -312,6 +312,7 @@ See [Conformance](docs/conformance.md) for precise profile claims and
 crates/cymule-core      trusted Rust semantic kernel
 crates/cymule-agent     provider-neutral M2 agent interaction contracts
 crates/cymule-durable   provider-neutral M1 persistence and recovery contracts
+crates/cymule-evolution provider-neutral M4 Plan DAG and rollout semantics
 crates/cymule-runtime   embedded interpreter and plugin host
 crates/cymule-sdk       native Rust authoring and engine facade
 crates/cymule-virtual   provider-neutral M3 bounded virtual-work scheduler

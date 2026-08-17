@@ -60,9 +60,14 @@ Status: partial.
 
 Status: partial.
 
-- immutable future binding update and occurrence pinning are implemented;
-- Plan DAG patches, impact cones, mixed-version adapters, safe-point state
-  migration, shadow/canary, and rollback remain proposed.
+- immutable future binding updates and occurrence pinning are implemented;
+- sealed Plan DAG nodes, content-addressed patch edges, cycle rejection,
+  conservative impact cones, deterministic future-only canaries, rollback,
+  safe-point migration receipts, shadow evidence, and portable snapshots are
+  implemented;
+- automatic Plan diff/application, schema migration adapters, shadow execution,
+  observation gates, promotion, mixed-version runtime dispatch, durable control,
+  and crash tests remain proposed.
 
 ## M5 - Isolation and federation
 

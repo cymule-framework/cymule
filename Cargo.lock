@@ -97,6 +97,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cymule-evolution"
+version = "0.1.0"
+dependencies = [
+ "cymule-core",
+ "cymule-durable",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cymule-example-hello-world"
 version = "0.1.0"
 dependencies = [
