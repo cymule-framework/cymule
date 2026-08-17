@@ -8,12 +8,12 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | --- | --- | --- |
 | Semantic Interpreter M0 | Implemented | frozen IR, canonical stores, admission, reducer, exact state replay |
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
-| Durable Single Domain | Partial | snapshot/restore, CAS, nested Continuation frames, identified and bounded signal/timer activation drivers, lease, commit-gated/eager/explicit outbox policy, occurrence replay, Resource handoff, directory-store reopen, and ambiguous-effect reconciliation; compaction, production plugins, and the full crash matrix remain |
+| Durable Single Domain | Partial | snapshot/base-plus-suffix restore, CAS, nested Continuation frames, identified bounded wait-source drivers, leases, commit-gated/eager/explicit outbox policy, occurrence replay, atomic Resource handoff input activation, directory-store reopen, history compaction, and ambiguous-effect reconciliation; production plugins and process-kill coverage remain |
 | Optional Agent Interaction plugin | Partial plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces; not a framework profile |
 | Large Virtual Graph M3 | Implemented | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker slot leases/recovery, four SDK controls, and restore |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
-| Live Evolution | Partial | reusable definition invocation, direct latest-compatible relinking, deterministic Plan diff, Plan DAG, impact, M1 durable controls, mixed-version occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; transitive modules and rollout automation remain |
+| Live Evolution M4 | Implemented | reusable modules, transitive latest-compatible relinking, exact patch admission, durable registry recovery, conservative extensible impact, checked migration and isolated shadow plugins, immutable mixed-version pins, deterministic canary gates, promotion/rollback, four SDK controls, and lost-receipt recovery |
 
 The M0 rows do not claim persistence. The partial M1 implementation does prove
 single-domain durable wait and nested-scope resumption, exact replay of recorded

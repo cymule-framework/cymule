@@ -53,8 +53,16 @@ code. They all emit a Plan Candidate.
 same Plan, creates a structural invocation identity, receives explicit input,
 and returns a result binding without inheriting caller locals. The M4
 `DefinitionRegistry` operates before sealing: it resolves a logical reference,
-injects one exact revision, and creates a new parent Plan. Runtime interpretation
-never follows a mutable registry head.
+resolves the complete acyclic reusable-module closure, injects every exact
+revision, and creates a new parent Plan. Compatible transitive updates advance
+only the future link. Runtime interpretation never follows a mutable registry
+head.
+
+Live evolution remains a control plane around the runtime rather than a second
+executor. Checked migration and shadow traits are plugin seams; the controller
+validates pinned descriptors, records immutable Artifact evidence, and applies
+deterministic rollout gates. It returns one exact selected Plan for dispatch but
+does not own a worker, Agent loop, metric backend, traffic router, or sandbox.
 
 MLIR is optional and remains outside the kernel. The partial workbench currently
 syntax-checks an experimental generic-operation form and documents its mapping
@@ -114,6 +122,13 @@ neither a mutex nor a file lock is semantic authority. Production adapters use
 their substrate's native CAS and remain plugins. No database, queue, or object
 store name is part of the contract.
 
+Machine snapshot v2 can compact a causally closed canonical Event prefix into
+an authenticated base projection while retaining exact prefix identities,
+command receipts, and every full suffix Event. Restore validates the base and
+replays the suffix. The M1 coordinator records cumulative compaction lineage in
+the same whole-state CAS, so a stale writer loses and a lost response can be
+recovered by reopen without recomputing history.
+
 ## Cross-Run resources
 
 Status: implemented foundation.
@@ -144,6 +159,12 @@ target Run's M1 application journal. The caller supplies source Run, target Run,
 stable transfer ID, and target slot. Handoffs survive reopen, retry
 idempotently, and reject conflicting ID reuse without adding Resource semantics
 to M1 storage.
+
+When the consumer is already parked on a matching input wait, the controller
+can activate it atomically: canonical Resource Handle bytes become an Artifact,
+the transfer and activation records enter separate typed journals, the wait
+completes, and its Continuation becomes ready in one M1 revision. This is a
+generic input-delivery seam, not a queue or Agent message model.
 
 ## Large virtual work
 

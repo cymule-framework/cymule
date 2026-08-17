@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 
 use cymule_core::{CoreError, PlanCandidate, SealedPlan};
 use cymule_durable::WaitActivation;
+use cymule_evolution::EvolutionCommand;
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::ExecutionResult;
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,11 @@ pub trait Engine {
         &self,
         activation: &WaitActivation,
     ) -> Result<WaitActivation, CoreError>;
+    /// Validate one closed, versioned M4 control envelope.
+    fn verify_evolution_command(
+        &self,
+        command: &EvolutionCommand,
+    ) -> Result<EvolutionCommand, CoreError>;
     /// Execute a sealed plan through a selected plugin realization.
     fn run(
         &self,
@@ -93,6 +99,20 @@ impl CliEngine {
             ))),
         }
     }
+
+    fn verify_evolution_command(
+        &self,
+        command: &EvolutionCommand,
+    ) -> Result<EvolutionCommand, CoreError> {
+        match self.request(&EngineRequest::VerifyEvolutionCommand {
+            command: command.clone(),
+        })? {
+            EngineResponse::VerifiedEvolutionCommand { command } => Ok(command),
+            response => Err(CoreError::Validation(format!(
+                "CLI returned unexpected response {response:?}"
+            ))),
+        }
+    }
 }
 
 impl Engine for CliEngine {
@@ -116,6 +136,13 @@ impl Engine for CliEngine {
         activation: &WaitActivation,
     ) -> Result<WaitActivation, CoreError> {
         CliEngine::verify_wait_activation(self, activation)
+    }
+
+    fn verify_evolution_command(
+        &self,
+        command: &EvolutionCommand,
+    ) -> Result<EvolutionCommand, CoreError> {
+        CliEngine::verify_evolution_command(self, command)
     }
 
     fn run(
@@ -151,6 +178,9 @@ enum EngineRequest {
     VerifyWaitActivation {
         activation: WaitActivation,
     },
+    VerifyEvolutionCommand {
+        command: EvolutionCommand,
+    },
     Run {
         plan: SealedPlan,
         input: Value,
@@ -165,6 +195,7 @@ enum EngineResponse {
     Sealed { plan: SealedPlan },
     SealedResource { resource: ResourceHandle },
     VerifiedWaitActivation { activation: WaitActivation },
+    VerifiedEvolutionCommand { command: EvolutionCommand },
     Executed { result: ExecutionResult },
     Verified,
 }

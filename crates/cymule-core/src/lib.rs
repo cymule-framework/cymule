@@ -16,7 +16,7 @@ pub use ir::{
     IR_VERSION, MutationKind, Operation, PlanCandidate, ReconciliationMode, Region, ScopeMode,
     SealedPlan, Step, WaitSpec,
 };
-pub use machine::{Machine, MachineSnapshot};
+pub use machine::{Machine, MachineBaseSnapshot, MachineCompaction, MachineSnapshot};
 pub use model::{
     ArtifactRecord, ArtifactRef, AttemptProjection, COMMAND_VERSION, Command, CommandEnvelope,
     CommandReceipt, CommandReceiptStatus, CompactionCertificate, EVENT_VERSION, EffectPhase,

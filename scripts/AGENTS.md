@@ -33,6 +33,9 @@
   claim recovery commands plus future Run-weight updates. M1 logical lease
   admission, deterministic work selection, and recovery fencing remain Rust
   controller behavior.
+- Every SDK constructs the same closed M4 gate command and submits it to the
+  Rust verifier. Stateful linking, migration/shadow plugin calls, observation
+  gates, and lost-receipt recovery remain in the Rust evolution fault suite.
 - Schema verification covers every `schemas/*.schema.json` file and must include
   positive and unknown-field rejection cases for each public protocol family.
 - Keep host-native verification reproducible and avoid container-only workflows.

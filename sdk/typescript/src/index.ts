@@ -45,6 +45,85 @@ export interface ArtifactRef {
   kind: string;
 }
 
+export type RolloutMode =
+  | { mode: "shadow" }
+  | { mode: "canary"; basis_points: number }
+  | { mode: "active" }
+  | { mode: "rolled_back" };
+
+export interface RolloutDecision {
+  decision_id: string;
+  fallback_plan: string;
+  target_plan: string;
+  mode: RolloutMode;
+}
+
+export interface RolloutObservation {
+  observation_id: string;
+  decision_id: string;
+  occurrence_id: string;
+  plan_id: string;
+  outcome: "succeeded" | "failed";
+  evidence: ArtifactRef;
+}
+
+export interface RolloutGate {
+  gate_id: string;
+  decision_id: string;
+  min_target_observations: number;
+  max_target_failures: number;
+  min_equivalent_shadows: number;
+  max_inequivalent_shadows: number;
+}
+
+export interface MigrationRequest {
+  migration_id: string;
+  run_id: string;
+  from_plan: string;
+  to_plan: string;
+  input_state: ArtifactRef;
+}
+
+export interface ShadowRequest {
+  comparison_id: string;
+  decision_id: string;
+  subject: string;
+  primary_plan: string;
+  shadow_plan: string;
+  input: ArtifactRef;
+  comparison_policy: string;
+}
+
+export interface PlanPatch {
+  from_plan: string;
+  target: PlanCandidate;
+  operations: Array<{
+    kind: string;
+    target: string;
+    before: string | null;
+    after: string | null;
+  }>;
+  evidence: ArtifactRef;
+}
+
+type EvolutionOperation =
+  | { operation: "apply_patch"; patch: PlanPatch }
+  | { operation: "set_rollout"; decision: RolloutDecision }
+  | { operation: "select_occurrence"; occurrence_id: string }
+  | { operation: "migrate"; request: MigrationRequest }
+  | { operation: "shadow"; request: ShadowRequest }
+  | { operation: "observe"; observation: RolloutObservation }
+  | { operation: "apply_gate"; gate: RolloutGate; next_decision_id: string };
+
+export type EvolutionCommand = {
+  control_version: "cymule.evolution-control/1";
+  command_id: string;
+} & EvolutionOperation;
+
+export interface EvolutionControl<Response = Json> {
+  submit(command: EvolutionCommand): Promise<Response>;
+}
+
 export type WaitActivationSource =
   | { kind: "signal"; key: string }
   | { kind: "timer"; timer_id: string };
@@ -549,6 +628,57 @@ export class WaitActivationBuilder {
   }
 }
 
+export class EvolutionControlBuilder {
+  static applyPatch(commandId: string, patch: PlanPatch): EvolutionCommand {
+    return EvolutionControlBuilder.build(commandId, { operation: "apply_patch", patch });
+  }
+
+  static setRollout(commandId: string, decision: RolloutDecision): EvolutionCommand {
+    return EvolutionControlBuilder.build(commandId, { operation: "set_rollout", decision });
+  }
+
+  static selectOccurrence(commandId: string, occurrenceId: string): EvolutionCommand {
+    return EvolutionControlBuilder.build(commandId, {
+      operation: "select_occurrence",
+      occurrence_id: occurrenceId,
+    });
+  }
+
+  static migrate(commandId: string, request: MigrationRequest): EvolutionCommand {
+    return EvolutionControlBuilder.build(commandId, { operation: "migrate", request });
+  }
+
+  static shadow(commandId: string, request: ShadowRequest): EvolutionCommand {
+    return EvolutionControlBuilder.build(commandId, { operation: "shadow", request });
+  }
+
+  static observe(commandId: string, observation: RolloutObservation): EvolutionCommand {
+    return EvolutionControlBuilder.build(commandId, { operation: "observe", observation });
+  }
+
+  static applyGate(
+    commandId: string,
+    gate: RolloutGate,
+    nextDecisionId: string,
+  ): EvolutionCommand {
+    if (nextDecisionId.length === 0) throw new Error("evolution gate requires a next decision ID");
+    return EvolutionControlBuilder.build(commandId, {
+      operation: "apply_gate",
+      gate,
+      next_decision_id: nextDecisionId,
+    });
+  }
+
+  private static build(commandId: string, operation: EvolutionOperation): EvolutionCommand {
+    if (commandId.length === 0) throw new Error("evolution control requires a command identity");
+    return {
+      control_version: "cymule.evolution-control/1",
+      command_id: commandId,
+      ...structuredClone(operation),
+    };
+  }
+}
+
 export class VirtualWorkControlBuilder {
   static succeed(
     commandId: string,
@@ -903,6 +1033,14 @@ export class CliEngine {
     return response.activation;
   }
 
+  verifyEvolutionCommand(command: EvolutionCommand): EvolutionCommand {
+    const response = this.request({ type: "verify_evolution_command", command });
+    if (response.type !== "verified_evolution_command") {
+      throw new Error(`unexpected response ${response.type}`);
+    }
+    return response.command;
+  }
+
   run(plan: SealedPlan, input: Json, plugin: string, runId: string): ExecutionResult {
     const response = this.request({ type: "run", plan, input, plugin, run_id: runId });
     if (response.type !== "executed") throw new Error(`unexpected response ${response.type}`);
@@ -925,11 +1063,13 @@ type EngineRequest =
   | { type: "seal"; candidate: PlanCandidate }
   | { type: "seal_resource"; candidate: ResourceCandidate }
   | { type: "verify_wait_activation"; activation: WaitActivation }
+  | { type: "verify_evolution_command"; command: EvolutionCommand }
   | { type: "run"; plan: SealedPlan; input: Json; plugin: string; run_id: string };
 
 type EngineResponse =
   | { type: "sealed"; plan: SealedPlan }
   | { type: "sealed_resource"; resource: ResourceHandle }
   | { type: "verified_wait_activation"; activation: WaitActivation }
+  | { type: "verified_evolution_command"; command: EvolutionCommand }
   | { type: "executed"; result: ExecutionResult }
   | { type: "verified" };

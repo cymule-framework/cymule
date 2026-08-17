@@ -146,7 +146,15 @@ standards.
   proof to the selected source adapter instead of defining key groups in core.
 - [Restate versioning](https://docs.restate.dev/services/versioning) keeps
   deployments immutable and pins in-flight invocations while new work advances.
-  This informs Cymule's occurrence binding and Plan/Binding separation.
+  [Temporal Worker Versioning](https://temporal.io/changelog/worker-versioning-public-preview)
+  likewise separates gradual assignment, pinned executions, and instant future
+  rollback. These reinforce Cymule's immutable occurrence pin and future-only
+  decision model; Cymule does not adopt either deployment substrate.
+- [Argo Rollouts analysis](https://argoproj.github.io/argo-rollouts/features/analysis/)
+  records provider observations against explicit success/failure thresholds to
+  promote, pause, or abort progressive delivery. Cymule adopts the smaller
+  mechanism of immutable evidence plus deterministic gates while leaving metric
+  acquisition and traffic movement to plugins.
 
 ## Encoding and schemas
 

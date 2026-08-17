@@ -7,7 +7,10 @@ mod resolver;
 mod store;
 
 pub use error::{ResourceError, ResourceResult};
-pub use handoff::{RESOURCE_HANDOFF_VERSION, ResourceHandoff, ResourceHandoffController};
+pub use handoff::{
+    RESOURCE_HANDOFF_ACTIVATION_VERSION, RESOURCE_HANDOFF_VERSION, ResourceHandoff,
+    ResourceHandoffActivation, ResourceHandoffController,
+};
 pub use model::{
     INLINE_RESOURCE_LIMIT, InlineData, RESOURCE_VERSION, ResourceCandidate, ResourceHandle,
     ResourceIntegrity, ResourceLocation, ResourceReplayClass, ResourceShape,

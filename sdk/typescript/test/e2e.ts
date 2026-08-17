@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   CliEngine,
+  EvolutionControlBuilder,
   FlowBuilder,
   ResourceBuilder,
   VirtualSchedulingControlBuilder,
@@ -189,4 +190,25 @@ test("TypeScript virtual work query and control fixtures stay exact", () => {
     VirtualSchedulingControlBuilder.runWeight("command:run-weight:fixture", "run:fixture", 3),
     JSON.parse(readFileSync(runWeightPath, "utf8")),
   );
+});
+
+test("TypeScript evolution control validates through the Rust engine", () => {
+  const enginePath = process.env.CYMULE_BIN;
+  const fixturePath = process.env.CYMULE_EVOLUTION_CONTROL_FIXTURE;
+  if (enginePath === undefined || fixturePath === undefined) return;
+  const expected = JSON.parse(readFileSync(fixturePath, "utf8"));
+  const command = EvolutionControlBuilder.applyGate(
+    "command:evolution:fixture:promote",
+    {
+      gate_id: "gate:fixture:promote",
+      decision_id: "rollout:fixture:canary",
+      min_target_observations: 3,
+      max_target_failures: 0,
+      min_equivalent_shadows: 2,
+      max_inequivalent_shadows: 0,
+    },
+    "rollout:fixture:active",
+  );
+  assert.deepEqual(command, expected);
+  assert.deepEqual(new CliEngine(enginePath).verifyEvolutionCommand(command), command);
 });

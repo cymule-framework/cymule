@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::env;
 
 use cymule_sdk::{
-    CliEngine, DispatchPolicy, EffectProfile, Engine, Expression, FlowBuilder, MutationKind,
-    Operation, ReconciliationMode, Region, RegionMigrationCommand, ResourceCandidate, Step,
-    VirtualClaimCommand, VirtualCompactionCommand, VirtualLeaseRenewalCommand,
+    CliEngine, DispatchPolicy, EffectProfile, Engine, EvolutionCommand, Expression, FlowBuilder,
+    MutationKind, Operation, ReconciliationMode, Region, RegionMigrationCommand, ResourceCandidate,
+    Step, VirtualClaimCommand, VirtualCompactionCommand, VirtualLeaseRenewalCommand,
     VirtualRecoveryCommand, VirtualRehydrationCommand, VirtualRunWeightCommand, WaitActivation,
     WorkOccurrence, WorkResolutionCommand,
 };
@@ -168,4 +168,24 @@ fn rust_virtual_work_query_and_control_fixtures_are_typed() {
     ))
     .expect("virtual Run weight control deserializes");
     assert_eq!(run_weight.weight, 3);
+}
+
+#[test]
+fn rust_evolution_control_validates_through_the_cli() {
+    let (Ok(engine_path), Ok(fixture_path)) = (
+        env::var("CYMULE_BIN"),
+        env::var("CYMULE_EVOLUTION_CONTROL_FIXTURE"),
+    ) else {
+        return;
+    };
+    let command: EvolutionCommand =
+        serde_json::from_str(&std::fs::read_to_string(fixture_path).expect("fixture reads"))
+            .expect("evolution command deserializes");
+    command.verify().expect("command verifies locally");
+    assert_eq!(
+        CliEngine::new(engine_path)
+            .verify_evolution_command(&command)
+            .expect("Rust engine verifies M4 command"),
+        command
+    );
 }

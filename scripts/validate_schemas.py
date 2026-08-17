@@ -147,6 +147,136 @@ def main() -> int:
     else:
         raise AssertionError("wait activation schema accepted a provider field")
 
+    evolution_control = load(root / "tests/fixtures/evolution-control.json")
+    evolution_validator = Draft202012Validator(
+        by_title["Cymule Evolution Control cymule.evolution-control/1"],
+        registry=registry,
+    )
+    evolution_validator.validate(evolution_control)
+    verified_evolution = json.loads(
+        subprocess.run(
+            [
+                str(engine),
+                "evolution-command",
+                "verify",
+                "--input",
+                str(root / "tests/fixtures/evolution-control.json"),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    if verified_evolution != evolution_control:
+        raise AssertionError("Rust Engine changed the evolution control fixture")
+    artifact = {
+        "artifact_id": "sha256:" + "a" * 64,
+        "kind": "test/evidence",
+    }
+    evolution_variants = [
+        {
+            "control_version": "cymule.evolution-control/1",
+            "command_id": "command:patch",
+            "operation": "apply_patch",
+            "patch": {
+                "from_plan": "sha256:" + "1" * 64,
+                "target": candidate,
+                "operations": [
+                    {
+                        "kind": "replace",
+                        "target": "definition:main",
+                        "before": None,
+                        "after": "sha256:" + "2" * 64,
+                    }
+                ],
+                "evidence": artifact,
+            },
+        },
+        {
+            "control_version": "cymule.evolution-control/1",
+            "command_id": "command:rollout",
+            "operation": "set_rollout",
+            "decision": {
+                "decision_id": "rollout:canary",
+                "fallback_plan": "sha256:" + "1" * 64,
+                "target_plan": "sha256:" + "2" * 64,
+                "mode": {"mode": "canary", "basis_points": 500},
+            },
+        },
+        {
+            "control_version": "cymule.evolution-control/1",
+            "command_id": "command:select",
+            "operation": "select_occurrence",
+            "occurrence_id": "occurrence:1",
+        },
+        {
+            "control_version": "cymule.evolution-control/1",
+            "command_id": "command:migrate",
+            "operation": "migrate",
+            "request": {
+                "migration_id": "migration:1",
+                "run_id": "run:1",
+                "from_plan": "sha256:" + "1" * 64,
+                "to_plan": "sha256:" + "2" * 64,
+                "input_state": artifact,
+            },
+        },
+        {
+            "control_version": "cymule.evolution-control/1",
+            "command_id": "command:shadow",
+            "operation": "shadow",
+            "request": {
+                "comparison_id": "shadow:1",
+                "decision_id": "rollout:canary",
+                "subject": "occurrence:1",
+                "primary_plan": "sha256:" + "1" * 64,
+                "shadow_plan": "sha256:" + "2" * 64,
+                "input": artifact,
+                "comparison_policy": "json-exact/1",
+            },
+        },
+        {
+            "control_version": "cymule.evolution-control/1",
+            "command_id": "command:observe",
+            "operation": "observe",
+            "observation": {
+                "observation_id": "observation:1",
+                "decision_id": "rollout:canary",
+                "occurrence_id": "occurrence:1",
+                "plan_id": "sha256:" + "2" * 64,
+                "outcome": "succeeded",
+                "evidence": artifact,
+            },
+        },
+        evolution_control,
+    ]
+    for command in evolution_variants:
+        evolution_validator.validate(command)
+        verified = json.loads(
+            subprocess.run(
+                [str(engine), "evolution-command", "verify", "--input", "-"],
+                input=json.dumps(command),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        if verified != command:
+            raise AssertionError(
+                f"Rust Engine changed evolution operation {command['operation']}"
+            )
+    Draft202012Validator(
+        by_title["Cymule Engine Request"], registry=registry
+    ).validate({"type": "verify_evolution_command", "command": evolution_control})
+    malformed_evolution = dict(evolution_control)
+    malformed_evolution["provider"] = "must-not-enter-evolution-control"
+    try:
+        evolution_validator.validate(malformed_evolution)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("evolution control schema accepted a provider field")
+
     virtual_checkpoint = load(root / "tests/fixtures/virtual-checkpoint.json")
     virtual_validator = Draft202012Validator(
         by_title["Cymule Virtual Checkpoint cymule.virtual-checkpoint/1"],

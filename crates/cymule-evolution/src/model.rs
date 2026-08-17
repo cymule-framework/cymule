@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use cymule_core::{ArtifactRef, SealedPlan};
+use cymule_core::{ArtifactRef, PlanCandidate, SealedPlan};
 use serde::{Deserialize, Serialize};
 
 /// One declared semantic change between immutable Plans.
@@ -30,6 +30,20 @@ pub struct PlanEdge {
     /// Declared semantic operations.
     pub operations: Vec<PatchOperation>,
     /// Review or compiler evidence artifact.
+    pub evidence: ArtifactRef,
+}
+
+/// Reviewed source-to-target patch candidate before child Plan admission.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanPatch {
+    /// Immutable parent Plan identity.
+    pub from_plan: String,
+    /// Complete target candidate produced by a compiler or review tool.
+    pub target: PlanCandidate,
+    /// Exact deterministic operations expected from parent to target.
+    pub operations: Vec<PatchOperation>,
+    /// Review/compiler evidence artifact.
     pub evidence: ArtifactRef,
 }
 
@@ -102,6 +116,14 @@ pub struct MigrationReceipt {
     pub from_plan: String,
     /// Target Plan.
     pub to_plan: String,
+    /// Pinned migration adapter identity.
+    pub adapter_id: String,
+    /// Pinned migration adapter revision.
+    pub adapter_revision: String,
+    /// Declared source state-schema digest.
+    pub from_schema: String,
+    /// Declared target state-schema digest.
+    pub to_schema: String,
     /// Source state artifact.
     pub input_state: ArtifactRef,
     /// Migrated state artifact.
@@ -118,16 +140,120 @@ pub struct ShadowComparison {
     pub comparison_id: String,
     /// Run or occurrence identity.
     pub subject: String,
+    /// Rollout decision that requested this comparison.
+    pub decision_id: String,
     /// Authoritative Plan.
     pub primary_plan: String,
     /// Shadow Plan.
     pub shadow_plan: String,
+    /// Pinned shadow driver identity.
+    pub driver_id: String,
+    /// Pinned shadow driver revision.
+    pub driver_revision: String,
+    /// Declared comparison-policy identity.
+    pub comparison_policy: String,
     /// Authoritative result digest.
     pub primary_digest: String,
     /// Shadow result digest.
     pub shadow_digest: String,
     /// Whether results are equivalent under declared comparison semantics.
     pub equivalent: bool,
+    /// Immutable execution/comparison evidence.
+    pub evidence: ArtifactRef,
+}
+
+/// Observed terminal outcome for one rollout occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationOutcome {
+    /// The selected Plan completed within the rollout's success contract.
+    Succeeded,
+    /// The selected Plan failed its rollout success contract.
+    Failed,
+}
+
+/// Immutable rollout observation used by deterministic gates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutObservation {
+    /// Stable observation identity.
+    pub observation_id: String,
+    /// Decision under which the occurrence was admitted.
+    pub decision_id: String,
+    /// Immutable occurrence identity.
+    pub occurrence_id: String,
+    /// Plan pinned for the occurrence.
+    pub plan_id: String,
+    /// Closed success/failure outcome.
+    pub outcome: ObservationOutcome,
+    /// Immutable observation evidence.
+    pub evidence: ArtifactRef,
+}
+
+/// Deterministic admission thresholds for promotion or rollback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutGate {
+    /// Stable policy identity.
+    pub gate_id: String,
+    /// Rollout decision evaluated by this policy.
+    pub decision_id: String,
+    /// Minimum terminal target observations before promotion.
+    pub min_target_observations: u64,
+    /// Maximum target failures tolerated before rollback.
+    pub max_target_failures: u64,
+    /// Minimum equivalent shadow comparisons before promotion.
+    pub min_equivalent_shadows: u64,
+    /// Maximum inequivalent shadow comparisons tolerated before rollback.
+    pub max_inequivalent_shadows: u64,
+}
+
+/// Closed deterministic result of evaluating one rollout gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateOutcome {
+    /// More evidence is required and no transition is legal.
+    Pending,
+    /// Evidence admits target activation.
+    Promote,
+    /// Evidence requires fallback selection for future work.
+    Rollback,
+}
+
+/// Reproducible gate evaluation with exact evidence counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutEvaluation {
+    /// Content-addressed evaluation identity.
+    pub evaluation_id: String,
+    /// Gate policy.
+    pub gate: RolloutGate,
+    /// Count of terminal target observations.
+    pub target_observations: u64,
+    /// Count of failed target observations.
+    pub target_failures: u64,
+    /// Count of equivalent shadow comparisons.
+    pub equivalent_shadows: u64,
+    /// Count of inequivalent shadow comparisons.
+    pub inequivalent_shadows: u64,
+    /// Closed evaluation result.
+    pub outcome: GateOutcome,
+    /// Exact observation and comparison identities used by the evaluation.
+    pub evidence_ids: BTreeSet<String>,
+}
+
+/// Auditable promotion or rollback transition for future selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutTransition {
+    /// Content-addressed transition identity.
+    pub transition_id: String,
+    /// Decision evaluated by the gate.
+    pub from_decision: String,
+    /// Newly admitted future-selection decision.
+    pub to_decision: String,
+    /// Exact deterministic gate evaluation.
+    pub evaluation: RolloutEvaluation,
 }
 
 /// Portable complete live-evolution state.
@@ -140,10 +266,19 @@ pub struct EvolutionSnapshot {
     pub edges: BTreeMap<String, PlanEdge>,
     /// Current rollout decision.
     pub rollout: Option<RolloutDecision>,
+    /// Immutable rollout decision history keyed by decision ID.
+    #[serde(default)]
+    pub rollout_decisions: BTreeMap<String, RolloutDecision>,
     /// Immutable Plan assignment per admitted occurrence.
     pub occurrence_plans: BTreeMap<String, String>,
     /// Migration receipts keyed by migration ID.
     pub migrations: BTreeMap<String, MigrationReceipt>,
     /// Shadow comparisons keyed by comparison ID.
     pub shadows: BTreeMap<String, ShadowComparison>,
+    /// Rollout observations keyed by observation ID.
+    #[serde(default)]
+    pub observations: BTreeMap<String, RolloutObservation>,
+    /// Applied promotion/rollback transitions keyed by transition ID.
+    #[serde(default)]
+    pub transitions: BTreeMap<String, RolloutTransition>,
 }

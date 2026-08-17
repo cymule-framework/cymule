@@ -16,6 +16,10 @@
 - `MachineSnapshot::command_digests` exposes only stable validation evidence for
   durable exact-delta checks. Keep the private command-record representation and
   reduction semantics inside this core.
+- A compacted Machine snapshot may replace only a causally closed Event prefix
+  with an authenticated base projection plus exact compacted Event identities.
+  Resume replays the full retained suffix from that base, command receipts keep
+  deduplication authority, and a parent outside base plus suffix fails closed.
 - Property failures persist under `proptest-regressions/`. Commit the minimized
   corpus file with its fix; never depend on an ephemeral CI seed alone.
 - Changes here require specification, schema, conformance, and SDK review.

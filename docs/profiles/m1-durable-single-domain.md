@@ -4,8 +4,12 @@ Status: partial.
 
 ## Implemented foundation
 
-- portable `MachineSnapshot` with deterministic projection rebuild and restored
-  command deduplication;
+- portable `cymule.machine-snapshot/2` with deterministic projection rebuild,
+  restored command deduplication, and legacy v1 read compatibility;
+- cumulative causally closed Event-prefix compaction into an authenticated base
+  projection plus exact full suffix, with M1 receipts, stale-CAS rejection,
+  repeated compaction lineage, old-command replay, tamper rejection, and
+  lost-acknowledgement reopen;
 - provider-neutral whole-state compare-and-swap `DurableStore`;
 - typed, self-validating higher-profile journals committed by the same M1 CAS,
   allowing M2-M4 state to share one durable authority without entering the
@@ -49,6 +53,9 @@ Status: partial.
   content-verified, resolver-required, and live-only replay classification;
 - bounded chunk/list `ArtifactResolver`, chunked `ArtifactStore`, and M1 typed
   Run-to-Run handoff journals with idempotent transfer IDs and reopen replay;
+- atomic handoff-to-input activation that stores the canonical Resource Handle
+  Artifact, transfer and activation records, input-wait completion, and
+  Continuation readiness in one M1 CAS, including lost-receipt replay;
 - Rust, TypeScript, Python, and Go Resource builders sealed to one shared ID by
   the trusted Rust Engine;
 - non-blocking shared-memory CAS reference and atomic directory-store adapter;
@@ -84,10 +91,8 @@ Status: partial.
 
 ## Remaining completion gates
 
-- snapshot compaction and suffix rehydration;
 - all SDK control/query surfaces and restart-level end-to-end tests;
-- production resolver/store and wait-source plugins, plus durable activation
-  from incoming handoffs into interpreter Continuation state.
+- production resolver/store and wait-source plugins.
 
 No concrete storage product is part of this profile. An adapter conforms only
 when it provides atomic whole-state CAS and passes the profile fault suite.

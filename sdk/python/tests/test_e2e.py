@@ -8,6 +8,7 @@ import unittest
 
 from cymule import (
     CliEngine,
+    EvolutionControlBuilder,
     FlowBuilder,
     ResourceBuilder,
     VirtualSchedulingControlBuilder,
@@ -17,6 +18,27 @@ from cymule import (
 
 
 class EndToEndTest(unittest.TestCase):
+    def test_python_evolution_control_validates(self) -> None:
+        engine_path = os.environ.get("CYMULE_BIN")
+        fixture_path = os.environ.get("CYMULE_EVOLUTION_CONTROL_FIXTURE")
+        if engine_path is None or fixture_path is None:
+            self.skipTest("evolution control conformance is not configured")
+        command = EvolutionControlBuilder.apply_gate(
+            "command:evolution:fixture:promote",
+            {
+                "gate_id": "gate:fixture:promote",
+                "decision_id": "rollout:fixture:canary",
+                "min_target_observations": 3,
+                "max_target_failures": 0,
+                "min_equivalent_shadows": 2,
+                "max_inequivalent_shadows": 0,
+            },
+            "rollout:fixture:active",
+        )
+        with open(fixture_path, encoding="utf-8") as source:
+            self.assertEqual(command, json.load(source))
+        self.assertEqual(CliEngine(engine_path).verify_evolution_command(command), command)
+
     def test_python_candidate_seals_and_executes(self) -> None:
         engine_path = os.environ.get("CYMULE_BIN")
         plugin_path = os.environ.get("CYMULE_TEST_PLUGIN")

@@ -16,5 +16,9 @@
   collection, snapshot, or large object to materialize in memory.
 - Higher-profile handoffs use M1 application journals and stable caller-supplied
   transfer IDs. Reuse with different semantics fails closed.
+- Handoff input activation requires a target input wait whose Run and
+  correlation match the handoff. Commit the canonical Resource Handle Artifact,
+  transfer and activation records, wait result, and Continuation readiness in
+  one M1 CAS; lost receipts replay the same activation.
 - Concrete local, object-storage, drive, WebDAV, sandbox, and HTTP adapters live
   under `plugins/` and should reuse mature maintained libraries where practical.

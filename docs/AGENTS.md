@@ -10,4 +10,6 @@
   schema, and a conformance test, or be explicitly marked proposed.
 - Prefer technology-neutral property names. Concrete products may appear in
   research comparisons and adapter documentation, never as semantic authority.
-
+- M4 is implemented only for one provider-neutral durable domain. Keep metrics,
+  traffic movement, deployments, shadow sandboxes, schema transformation code,
+  and Agent/session controllers explicitly outside the profile.

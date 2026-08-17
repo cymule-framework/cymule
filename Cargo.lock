@@ -139,6 +139,7 @@ version = "0.1.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",
+ "cymule-evolution",
  "cymule-resource",
  "cymule-runtime",
  "serde",
@@ -182,6 +183,7 @@ version = "0.1.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",
+ "cymule-runtime",
  "serde",
  "serde_json",
 ]
@@ -224,6 +226,7 @@ version = "0.1.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",
+ "cymule-evolution",
  "cymule-resource",
  "cymule-runtime",
  "cymule-virtual",

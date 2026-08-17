@@ -18,6 +18,10 @@
   scope; nested scopes retain the current definition, invocation, and input.
 - Wait completion, lease acquisition, outbox claims, occurrence recording, and
   snapshot publication must be idempotent and fenced.
+- Event-prefix compaction retains an authenticated Machine base and full suffix
+  under one CAS. Keep cumulative receipt lineage, exact compacted identities,
+  old command receipts, and the suffix parent closure; receipt loss reopens to
+  the committed base and stale writers do not alter it.
 - Higher profiles that couple a logical lease to journal state must preview the
   exact next lease and use `checkpoint_lease_journals`; acquiring a lease and
   appending its claim/renewal in separate CAS revisions is invalid. Receipt loss
@@ -69,6 +73,9 @@
 - Higher-profile result/evidence Artifacts use `checkpoint_artifact_journals`.
   The proposed Machine may add only the explicitly listed Artifacts; reject
   Plans, Events, commands, or unrelated Artifact changes before CAS.
+- A higher-profile input delivery that also publishes its Artifact and records
+  typed provenance uses `checkpoint_input_wait_journals`; Artifact, journal
+  records, input wait, and Continuation readiness must never split across CAS.
 - Reference in-memory synchronization is adapter-local and non-blocking.
   Contention must surface as a CAS conflict rather than waiting on a mutex.
 - Concrete storage belongs under `plugins/` and must pass this crate's shared

@@ -1,3 +1,4 @@
+use cymule_evolution::EvolutionCommand;
 use cymule_virtual::{
     RegionMigrationCommand, RegionMigrationReceipt, VirtualClaimCommand, VirtualClaimReceipt,
     VirtualCompactionCommand, VirtualCompactionReceipt, VirtualLeaseRenewalCommand,
@@ -5,6 +6,21 @@ use cymule_virtual::{
     VirtualRehydrationCommand, VirtualRehydrationReceipt, VirtualRunWeightCommand,
     VirtualRunWeightReceipt, WorkOccurrence, WorkResolutionCommand,
 };
+
+/// Transport-neutral M4 live-evolution control interface.
+///
+/// Implementations submit the closed command envelope to durable Rust
+/// authority. SDK transports never resolve `latest`, run migration or shadow
+/// plugins, count observations, or decide promotion locally.
+pub trait EvolutionControl {
+    /// Transport or remote-control error.
+    type Error;
+    /// Transport-specific typed response or receipt union.
+    type Response;
+
+    /// Submit one idempotent, versioned M4 command.
+    fn submit(&mut self, command: &EvolutionCommand) -> Result<Self::Response, Self::Error>;
+}
 
 /// Transport-neutral query and control interface for M3 virtual work.
 ///

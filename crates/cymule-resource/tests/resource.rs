@@ -1,12 +1,18 @@
 //! Fault-oriented resource descriptor, resolver, store, and handoff tests.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, Definition, Expression, Machine, PlanCandidate,
     Region, sha256_bytes,
 };
-use cymule_durable::{DurableCoordinator, MemoryStore};
+use cymule_durable::{
+    Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
+    DurableState, DurableStore, MemoryStore, StoreCommit, StoredState, WaitCondition, WaitKind,
+    WaitState,
+};
 use cymule_resource::{
     ArtifactResolver, ArtifactStore, InlineData, ResourceCandidate, ResourceChunk, ResourceClient,
     ResourceError, ResourceHandle, ResourceHandoff, ResourceHandoffController, ResourceIntegrity,
@@ -14,6 +20,32 @@ use cymule_resource::{
     ResourceWriteIntent, ResourceWriteSession, ResourceWriter,
 };
 use serde_json::json;
+
+#[derive(Clone)]
+struct LostHandoffReceiptStore {
+    inner: MemoryStore,
+    armed: Arc<AtomicBool>,
+}
+
+impl DurableStore for LostHandoffReceiptStore {
+    fn load(&mut self) -> DurableResult<Option<StoredState>> {
+        self.inner.load()
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        expected_revision: Option<&str>,
+        next: &DurableState,
+    ) -> DurableResult<StoreCommit> {
+        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        if self.armed.swap(false, Ordering::SeqCst) {
+            return Err(DurableError::Substrate(
+                "simulated lost handoff activation receipt".to_owned(),
+            ));
+        }
+        Ok(commit)
+    }
+}
 
 fn external_candidate(
     shape: ResourceShape,
@@ -507,4 +539,124 @@ fn run_to_run_handoff_is_idempotent_conflict_checked_and_reopenable() {
     let incoming =
         ResourceHandoffController::incoming(&reopened, "run:consumer").expect("handoff replays");
     assert_eq!(incoming, vec![handoff]);
+}
+
+#[test]
+fn resource_handoff_atomically_activates_matching_input_wait() {
+    let machine = machine_with_runs();
+    let consumer_plan = machine.projection().runs["run:consumer"]
+        .current_plan
+        .clone();
+    let armed = Arc::new(AtomicBool::new(false));
+    let store = LostHandoffReceiptStore {
+        inner: MemoryStore::new(),
+        armed: armed.clone(),
+    };
+    let mut coordinator = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    coordinator
+        .put_continuation(Continuation {
+            run_id: "run:consumer".to_owned(),
+            plan_id: consumer_plan,
+            binding_context: "binding:resource-test/1".to_owned(),
+            frames: Vec::new(),
+            state: None,
+            wait_set: BTreeSet::new(),
+            scope_stack: vec![cymule_core::ROOT_SCOPE_ID.to_owned()],
+            effect_obligations: BTreeSet::new(),
+            authority_leases: BTreeSet::new(),
+            budget: BTreeMap::new(),
+            causal_frontier: BTreeSet::new(),
+            epoch: 0,
+            status: ContinuationStatus::Ready,
+        })
+        .expect("Continuation stores");
+    coordinator
+        .register_wait(WaitCondition {
+            wait_id: "wait:resource-input".to_owned(),
+            run_id: "run:consumer".to_owned(),
+            kind: WaitKind::Input {
+                correlation: "input.dataset".to_owned(),
+                schema: json!({}),
+            },
+            consume_once: true,
+            state: WaitState::Pending,
+            result: None,
+        })
+        .expect("input wait registers");
+    let handoff = ResourceHandoff {
+        handoff_version: cymule_resource::RESOURCE_HANDOFF_VERSION.to_owned(),
+        transfer_id: "transfer:input-activation".to_owned(),
+        from_run: "run:producer".to_owned(),
+        to_run: "run:consumer".to_owned(),
+        slot: "input.dataset".to_owned(),
+        resource: ResourceCandidate::text("producer output")
+            .seal()
+            .expect("Resource seals"),
+    };
+    armed.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        ResourceHandoffController::activate_input(
+            &mut coordinator,
+            &handoff,
+            "wait:resource-input"
+        ),
+        Err(ResourceError::Persistence(message))
+            if message.contains("simulated lost handoff activation receipt")
+    ));
+    let store = coordinator.into_store();
+    let mut coordinator = DurableCoordinator::open(store).expect("lost receipt state reopens");
+    let activation = ResourceHandoffController::activate_input(
+        &mut coordinator,
+        &handoff,
+        "wait:resource-input",
+    )
+    .expect("handoff activation retry replays");
+    let state = coordinator.state().expect("state reads");
+    assert_eq!(
+        state.waits["wait:resource-input"].result.as_ref(),
+        Some(&activation.result)
+    );
+    assert_eq!(
+        state.continuations["run:consumer"].status,
+        ContinuationStatus::Ready
+    );
+    assert_eq!(
+        ResourceHandoffController::incoming(&coordinator, "run:consumer")
+            .expect("incoming handoff replays"),
+        vec![handoff.clone()]
+    );
+    let artifact = coordinator
+        .restore_machine()
+        .expect("Machine restores")
+        .artifact(&activation.result)
+        .expect("input Artifact exists")
+        .clone();
+    assert_eq!(
+        serde_json::from_slice::<ResourceHandle>(&artifact.bytes).expect("Resource Handle decodes"),
+        handoff.resource
+    );
+    assert_eq!(
+        ResourceHandoffController::activate_input(
+            &mut coordinator,
+            &handoff,
+            "wait:resource-input"
+        )
+        .expect("activation retry is idempotent"),
+        activation
+    );
+
+    let store = coordinator.into_store();
+    let reopened = DurableCoordinator::open(store).expect("store reopens");
+    assert_eq!(
+        reopened.state().expect("state reads").waits["wait:resource-input"].state,
+        WaitState::Completed
+    );
+    reopened
+        .restore_machine()
+        .expect("reopened Machine restores")
+        .verify_replay()
+        .expect("reopened Machine replays");
 }
