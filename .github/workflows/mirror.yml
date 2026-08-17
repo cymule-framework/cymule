@@ -30,13 +30,18 @@ jobs:
           git clone --quiet --depth=1 "$authenticated_url" "$RUNNER_TEMP/source"
 
       - name: Build public snapshot
+        env:
+          SOURCE_URL: ${{ secrets.CYMULE_SOURCE_URL }}
         run: |
           mkdir "$RUNNER_TEMP/snapshot"
           git -C "$RUNNER_TEMP/source" archive --format=tar HEAD |
             tar -xf - -C "$RUNNER_TEMP/snapshot"
           rm -rf "$RUNNER_TEMP/snapshot/.gitlab"
           rm -f "$RUNNER_TEMP/snapshot/.gitlab-ci.yml"
-          if grep -R -n -E 'git\.f\.cv|cymule-framework/cymule' "$RUNNER_TEMP/snapshot"; then
+          source_location=${SOURCE_URL#https://}
+          source_host=${source_location%%/*}
+          source_path=${source_location#*/}
+          if grep -R -n -F -e "$source_host" -e "$source_path" "$RUNNER_TEMP/snapshot"; then
             echo "public snapshot contains a private repository reference" >&2
             exit 2
           fi
