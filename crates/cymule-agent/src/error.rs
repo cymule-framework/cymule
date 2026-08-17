@@ -16,6 +16,8 @@ pub enum AgentError {
     Host(String),
     /// Durable interaction storage failed or was temporarily unavailable.
     Persistence(String),
+    /// A started or ambiguous host occurrence requires explicit recovery.
+    RecoveryRequired(String),
 }
 
 impl Display for AgentError {
@@ -28,6 +30,9 @@ impl Display for AgentError {
             Self::NotFound(message) => write!(formatter, "not_found: {message}"),
             Self::Host(message) => write!(formatter, "host_failed: {message}"),
             Self::Persistence(message) => write!(formatter, "persistence_failed: {message}"),
+            Self::RecoveryRequired(message) => {
+                write!(formatter, "recovery_required: {message}")
+            }
         }
     }
 }

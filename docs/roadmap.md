@@ -43,9 +43,11 @@ Status: partial.
   idempotent append, and projection replay after reopen are implemented;
 - Agent updates can use the same M1 whole-state CAS through typed durable
   application journal records;
+- all six replaceable agent host boundaries persist request-digested,
+  binding-pinned occurrences and fail closed after ambiguous receipt loss;
 - a bounded reference turn driver passes context-model-tool-model end-to-end
   tests;
-- host-occurrence integration, input suspension/resume, workspace scope
+- host-occurrence reconciliation, input suspension/resume, workspace scope
   semantics, streaming finalization, protocol adapters, debugger queries, and
   evidence views remain proposed.
 

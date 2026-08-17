@@ -158,9 +158,11 @@ intent. Compensation is a separately admitted effect.
 A Plan changes semantic meaning. A Binding Context changes realization defaults
 for future occurrences. Every persisted occurrence must pin an immutable
 binding at admission. Embedded M0 persists this for Attempts and Effect Intents,
-including reconciliation. M1 defines canonical component occurrence records;
-automatic recording by every runtime call path and model/context occurrences
-remain M1/M2 integration work.
+including reconciliation. M1 defines canonical component occurrence records.
+The partial M2 reference driver automatically records context, model,
+permission, tool, elicitation, and workspace calls as request-digested,
+binding-pinned occurrences. Nested M1 runtime call paths and explicit recovery
+of ambiguous M2 occurrences remain integration work.
 
 Changing a default MUST NOT rewrite an admitted occurrence. If its original
 binding is unavailable, the occurrence enters an explicit unavailable or

@@ -6,4 +6,6 @@
   and corresponding Rust deserialization and semantic-validation tests.
 - Keep semantic validation in the Rust kernel. JSON Schema validates wire shape;
   it does not replace transition or authority rules.
-
+- `agent-protocol.schema.json` owns the frozen M2 AgentUpdate and host-occurrence
+  wire shape. A binding or lifecycle change must update its fixture, Rust
+  validation, profile documentation, and future SDK interaction clients.

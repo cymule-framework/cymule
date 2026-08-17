@@ -71,6 +71,28 @@ def main() -> int:
         }
     )
 
+    agent_validator = Draft202012Validator(
+        by_title["Cymule Agent Protocol cymule.agent/1"], registry=registry
+    )
+    agent_occurrence = load(root / "tests/fixtures/agent-occurrence.json")
+    agent_validator.validate(agent_occurrence)
+    agent_validator.validate(
+        {
+            "type": "state",
+            "update_id": "update:fixture:1",
+            "state": "requires_action",
+            "stop_reason": None,
+        }
+    )
+    malformed_occurrence = dict(agent_occurrence)
+    malformed_occurrence["provider"] = "must-not-enter-agent-occurrence"
+    try:
+        agent_validator.validate(malformed_occurrence)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("Agent schema accepted an unknown provider field")
+
     malformed = dict(candidate)
     malformed["provider"] = "must-not-enter-canonical-plan"
     try:
