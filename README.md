@@ -355,6 +355,7 @@ See [Architecture](docs/architecture.md) and the
 | Durable effect policies | Implemented foundation | Nested commit gates, eager observation binding, explicit caller release, exact outbox deltas, and ambiguity reconciliation. |
 | Large virtual work M3 | Implemented | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker recovery, M1 checkpoints, and four SDK controls. |
 | Virtual work control | Implemented | Binding-pinned attempts, work/lease fencing, explicit recovery, closed dispositions, and four SDK transport interfaces. |
+| Live evolution M4 | Partial | Deterministic Plan diff/DAG, future rollout, durable occurrence pins, safe-point migration receipts, shadow evidence, and rollback. |
 | Agent interaction plugin | Optional, partial | Rust plugin with Session, occurrence, input, workspace, and stream conformance tests. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
 | JSON Schema contracts | Implemented | Draft 2020-12 Plan and protocol schemas. |
@@ -413,8 +414,9 @@ Implemented today:
 - capacity-slot worker leases with atomic M1 claims, renewal, pre-expiry result
   fencing, explicit post-expiry recovery, lost-receipt reopen, and four-language
   scheduling/Run-weight controls;
-- immutable Plan evolution DAGs, impact cones, canaries, rollback pins,
-  migration receipts, and shadow evidence.
+- deterministic Plan diff and immutable evolution DAGs, impact cones, canaries,
+  rollback pins, safe-point migration receipts, and shadow evidence, with M1
+  checkpoint lineage, stale-CAS rollback, and lost-acknowledgement replay.
 
 Not yet claimed:
 
@@ -425,8 +427,8 @@ Not yet claimed:
   matrix;
 - production resource resolver/store plugins and automatic interpreter
   activation of incoming handoffs;
-- automatic live-evolution diffing, shadow execution, observation gates, and
-  mixed-version dispatch;
+- sealed reusable definition/subflow dependency relinking, shadow execution,
+  observation gates, promotion, and complete mixed-version dispatch;
 - distributed ownership, consensus, scheduling, and failover;
 - strong untrusted-code or multi-tenant isolation;
 - provider-level exactly-once guarantees;

@@ -13,7 +13,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | Large Virtual Graph M3 | Implemented | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker slot leases/recovery, four SDK controls, and restore |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
-| Live Evolution | Partial | Plan DAG, impact, occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; runtime rollout automation remains |
+| Live Evolution | Partial | deterministic Plan diff, Plan DAG, impact, M1 durable controls, mixed-version occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; reusable subflow relinking and rollout automation remain |
 
 The M0 rows do not claim persistence. The partial M1 implementation does prove
 single-domain durable wait and nested-scope resumption, exact replay of recorded
