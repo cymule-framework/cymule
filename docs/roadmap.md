@@ -22,8 +22,10 @@ Status: partial.
 - provider-neutral durable state CAS, full Continuation data, waits, leases,
   outbox, component occurrences, and snapshot records are implemented;
 - memory and atomic directory-store adapters pass reopen and stale-writer tests;
-- resumable interpretation, timer/signal activation, atomic event-plus-outbox,
-  and dispatch crash-window recovery remain proposed;
+- sequential component/wait execution resumes after process reopen and replays
+  recorded component outputs without reinvocation;
+- nested scope/effect resumption, timer/signal activation, atomic
+  event-plus-outbox, and dispatch crash-window recovery remain proposed;
 - process-level crash injection for every effect window;
 - snapshot compaction and suffix rehydration;
 - canonical component-call occurrences and exact execution replay without

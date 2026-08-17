@@ -13,6 +13,8 @@ domains described in `docs/specification.md`.
 - Add the first M1 durable profile foundation: portable Machine snapshots,
   whole-state CAS, full Continuations, durable waits, leases, effect outbox,
   component occurrences, snapshot records, and an atomic directory adapter.
+- Add resumable sequential call/wait execution with process reopen, Attempt
+  epoch advancement, and exact component-result replay.
 
 ## [0.1.0] - 2026-08-16
 

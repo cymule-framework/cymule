@@ -24,6 +24,12 @@ impl<S: DurableStore> DurableCoordinator<S> {
 
     /// Initialize an empty durable state from a semantic Machine.
     pub fn initialize(mut self, machine: &Machine) -> DurableResult<Self> {
+        self.initialize_in_place(machine)?;
+        Ok(self)
+    }
+
+    /// Initialize an empty coordinator without consuming it.
+    pub fn initialize_in_place(&mut self, machine: &Machine) -> DurableResult<String> {
         if self.stored.is_some() {
             return Err(DurableError::IllegalTransition(
                 "durable store is already initialized".to_owned(),
@@ -32,10 +38,10 @@ impl<S: DurableStore> DurableCoordinator<S> {
         let state = DurableState::new(machine.snapshot());
         let commit = self.store.compare_and_swap(None, &state)?;
         self.stored = Some(StoredState {
-            revision: commit.revision,
+            revision: commit.revision.clone(),
             state,
         });
-        Ok(self)
+        Ok(commit.revision)
     }
 
     /// Current verified state.
@@ -51,6 +57,11 @@ impl<S: DurableStore> DurableCoordinator<S> {
         self.stored.as_ref().map(|stored| stored.revision.as_str())
     }
 
+    /// Restore the current semantic Machine from canonical durable inputs.
+    pub fn restore_machine(&self) -> DurableResult<Machine> {
+        Machine::restore(self.state()?.machine.clone()).map_err(Into::into)
+    }
+
     /// Persist the current semantic Machine snapshot.
     pub fn persist_machine(&mut self, machine: &Machine) -> DurableResult<String> {
         self.mutate(|state| state.machine = machine.snapshot())
@@ -62,6 +73,103 @@ impl<S: DurableStore> DurableCoordinator<S> {
             state
                 .continuations
                 .insert(continuation.run_id.clone(), continuation);
+        })
+    }
+
+    /// Atomically persist a Machine safe point, Continuation, and optional
+    /// component occurrence.
+    pub fn checkpoint(
+        &mut self,
+        machine: &Machine,
+        continuation: Continuation,
+        occurrence: Option<ComponentOccurrence>,
+    ) -> DurableResult<String> {
+        self.mutate_checked(|state| {
+            state.machine = machine.snapshot();
+            if let Some(occurrence) = occurrence {
+                match state.component_occurrences.get(&occurrence.occurrence_id) {
+                    Some(existing) if existing == &occurrence => {}
+                    Some(_) => {
+                        return Err(DurableError::IllegalTransition(format!(
+                            "component occurrence {} has conflicting content",
+                            occurrence.occurrence_id
+                        )));
+                    }
+                    None => {
+                        state
+                            .component_occurrences
+                            .insert(occurrence.occurrence_id.clone(), occurrence);
+                    }
+                }
+            }
+            state
+                .continuations
+                .insert(continuation.run_id.clone(), continuation);
+            Ok(())
+        })
+    }
+
+    /// Atomically persist the safe point and register its durable wait.
+    pub fn park(
+        &mut self,
+        machine: &Machine,
+        mut continuation: Continuation,
+        wait: WaitCondition,
+    ) -> DurableResult<String> {
+        self.mutate_checked(|state| {
+            state.machine = machine.snapshot();
+            match state.waits.get(&wait.wait_id) {
+                Some(existing) if existing == &wait => {}
+                Some(_) => {
+                    return Err(DurableError::IllegalTransition(format!(
+                        "wait {} already exists with different semantics",
+                        wait.wait_id
+                    )));
+                }
+                None => {
+                    state.waits.insert(wait.wait_id.clone(), wait.clone());
+                }
+            }
+            continuation.wait_set.insert(wait.wait_id);
+            continuation.status = ContinuationStatus::Waiting;
+            state
+                .continuations
+                .insert(continuation.run_id.clone(), continuation);
+            Ok(())
+        })
+    }
+
+    /// Store a wait result artifact and ready its Continuation atomically.
+    pub fn complete_wait_with_machine(
+        &mut self,
+        machine: &Machine,
+        wait_id: &str,
+        result: cymule_core::ArtifactRef,
+    ) -> DurableResult<String> {
+        self.mutate_checked(|state| {
+            state.machine = machine.snapshot();
+            let wait = state
+                .waits
+                .get_mut(wait_id)
+                .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
+            if wait.state == WaitState::Completed && wait.result.as_ref() == Some(&result) {
+                return Ok(());
+            }
+            if wait.state != WaitState::Pending {
+                return Err(DurableError::IllegalTransition(format!(
+                    "wait {wait_id} is not pending"
+                )));
+            }
+            wait.state = WaitState::Completed;
+            wait.result = Some(result);
+            let continuation = state.continuations.get_mut(&wait.run_id).ok_or_else(|| {
+                DurableError::NotFound(format!("continuation {} does not exist", wait.run_id))
+            })?;
+            continuation.wait_set.remove(wait_id);
+            if continuation.wait_set.is_empty() {
+                continuation.status = ContinuationStatus::Ready;
+            }
+            Ok(())
         })
     }
 
