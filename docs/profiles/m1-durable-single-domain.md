@@ -10,6 +10,8 @@ Status: partial.
 - typed, self-validating higher-profile journals committed by the same M1 CAS,
   allowing M2-M4 state to share one durable authority without entering the
   semantic kernel;
+- atomic multi-journal checkpoints with conflict-before-CAS rollback, used when
+  one higher-profile transition publishes several typed projections;
 - complete typed Continuation fields for frame, state, waits, scopes,
   obligations, leases, budget, causal frontier, and epoch;
 - idempotent wait registration/completion;

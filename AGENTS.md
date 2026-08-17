@@ -36,6 +36,9 @@ Use this precedence order when guidance conflicts:
   not claim that the external world has settled.
 - An ambiguous dispatch becomes `unknown` and follows reconciliation. Never turn
   it into a fresh semantic intent or silently redispatch it.
+- Transport completion, progress notifications, and streamed chunks are not
+  canonical output. Only explicit, identity-checked finalization may publish a
+  Message, Tool result, Artifact, or Resource to durable projections.
 - Public mutation enters through typed commands with idempotent IDs and causal
   preconditions. Raw canonical event append is internal only.
 - Prefer optimistic CAS, immutable records, idempotency, fencing epochs, and

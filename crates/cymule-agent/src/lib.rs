@@ -8,6 +8,7 @@ mod interaction;
 mod journal;
 mod model;
 mod recovery;
+mod stream;
 mod workspace;
 
 pub use driver::AgentTurnDriver;
@@ -26,4 +27,9 @@ pub use model::{
     WorkspaceReceipt,
 };
 pub use recovery::AgentRecoveryController;
+pub use stream::{
+    AGENT_STREAM_CHUNK_LIMIT, AGENT_STREAM_SCHEMA, AgentStreamCheckpoint, AgentStreamChunk,
+    AgentStreamController, AgentStreamProjection, AgentStreamRecord, AgentStreamState,
+    AgentStreamTarget,
+};
 pub use workspace::{WorkspaceScopeCheckpoint, WorkspaceScopeController, WorkspaceScopeRequest};

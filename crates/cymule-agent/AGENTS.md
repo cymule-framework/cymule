@@ -14,6 +14,12 @@
   their opaque IDs and extensions without making them canonical authority.
 - Session updates are idempotent ordered projections over durable occurrences.
   Streaming chunks are not durable output until explicitly finalized.
+- Stream open/chunk/abort records live in a separate M1 journal. Finalization
+  must atomically append the terminal stream record and the exact Message/Tool
+  `AgentUpdate` through a multi-journal CAS. Chunks never appear in the Session
+  projection, and finalized message identity is immutable.
+- Large streamed content should finalize to a verified `ResourceHandle` block;
+  do not accumulate unbounded provider bytes in Session messages.
 - Journal adapters persist accepted updates before the in-process projection is
   advanced. Reopen by replaying the journal; never treat an in-memory Session as
   durable authority. Adapter-local exclusion must be non-blocking and must

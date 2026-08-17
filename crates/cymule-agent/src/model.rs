@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use cymule_core::{ArtifactRef, canonical_digest};
+use cymule_resource::ResourceHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -25,6 +26,8 @@ pub enum ContentBlock {
         uri: String,
         mime_type: Option<String>,
     },
+    /// Provider-neutral cross-Run Resource Handle.
+    ResourceHandle { resource: ResourceHandle },
 }
 
 /// Message author role.
@@ -230,10 +233,17 @@ impl AgentSession {
         let update_id = update.update_id().to_owned();
         match update {
             AgentUpdate::Message { message, .. } => {
-                if !self.messages.contains_key(&message.message_id) {
+                if let Some(current) = self.messages.get(&message.message_id) {
+                    if current != &message {
+                        return Err(AgentError::IllegalTransition(format!(
+                            "message {} changed finalized content",
+                            message.message_id
+                        )));
+                    }
+                } else {
                     self.message_order.push(message.message_id.clone());
+                    self.messages.insert(message.message_id.clone(), message);
                 }
-                self.messages.insert(message.message_id.clone(), message);
             }
             AgentUpdate::State {
                 state, stop_reason, ..

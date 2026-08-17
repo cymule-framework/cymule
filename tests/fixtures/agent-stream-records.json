@@ -1,0 +1,40 @@
+[
+  {
+    "record": "opened",
+    "stream_id": "stream:fixture:1",
+    "session_id": "session:fixture",
+    "target": {
+      "kind": "message",
+      "message_id": "message:fixture:1",
+      "role": "agent"
+    }
+  },
+  {
+    "record": "chunk",
+    "stream_id": "stream:fixture:1",
+    "session_id": "session:fixture",
+    "chunk": {
+      "sequence": 0,
+      "content": [
+        { "type": "text", "text": "hello" }
+      ]
+    }
+  },
+  {
+    "record": "finalized",
+    "stream_id": "stream:fixture:1",
+    "session_id": "session:fixture",
+    "content_digest": "57e90e6cb7aff1276e78399ad62cee581909f0d4944c24801d529c141c23a241",
+    "update": {
+      "type": "message",
+      "update_id": "update:stream:fixture:1:finalized",
+      "message": {
+        "message_id": "message:fixture:1",
+        "role": "agent",
+        "content": [
+          { "type": "text", "text": "hello" }
+        ]
+      }
+    }
+  }
+]

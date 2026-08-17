@@ -62,10 +62,13 @@ Status: partial.
 - workspace overlay commit/abort is coupled to scope closure, Effect
   obligations, outbox state, typed occurrences, Machine, and Continuation under
   the M1 CAS, with receipt-loss and reconciliation fault tests;
+- identified Agent streams stage contiguous chunks outside Session authority,
+  atomically finalize Message/Tool output through M1 multi-journal CAS, and pass
+  receipt-loss/reopen plus four-SDK Rust-reducer tests;
 - a bounded reference turn driver passes context-model-tool-model end-to-end
   tests;
-- streaming finalization, protocol adapters, cross-language interaction
-  clients, debugger queries, and evidence views remain proposed.
+- protocol adapters, remaining cross-language Session clients, debugger
+  queries, and evidence views remain proposed.
 
 ## M3 - Large virtual work
 

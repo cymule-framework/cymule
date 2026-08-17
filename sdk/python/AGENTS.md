@@ -9,3 +9,5 @@
 - Resource builders preserve exact wire names and send candidates to the Rust
   engine. Do not add a Python Resource ID implementation or accept credentials
   in public URL helpers.
+- Agent stream records remain plain versioned wire data. Python must not infer
+  finality, reorder chunks, or implement the authoritative content digest.

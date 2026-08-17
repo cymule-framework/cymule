@@ -81,3 +81,41 @@ func TestResourceSealsThroughRustEngine(t *testing.T) {
 		t.Fatalf("unexpected integrity kind %q", resource.Integrity.Kind)
 	}
 }
+
+func TestAgentStreamIsReducedByRustEngine(t *testing.T) {
+	enginePath := os.Getenv("CYMULE_BIN")
+	if enginePath == "" {
+		t.Skip("Agent stream engine conformance is not configured")
+	}
+	records := []AgentStreamRecord{
+		{
+			Record: "opened", StreamID: "stream:go:1", SessionID: "session:go",
+			Target: &AgentStreamTarget{Kind: "message", MessageID: "message:go:1", Role: "agent"},
+		},
+		{
+			Record: "chunk", StreamID: "stream:go:1", SessionID: "session:go",
+			Chunk: &AgentStreamChunk{
+				Sequence: 0,
+				Content:  []AgentContentBlock{{"type": "text", "text": "hello"}},
+			},
+		},
+		{
+			Record: "finalized", StreamID: "stream:go:1", SessionID: "session:go",
+			ContentDigest: "57e90e6cb7aff1276e78399ad62cee581909f0d4944c24801d529c141c23a241",
+			Update: &AgentStreamFinalUpdate{
+				Type: "message", UpdateID: "update:stream:go:1:finalized",
+				Message: &AgentMessage{
+					MessageID: "message:go:1", Role: "agent",
+					Content: []AgentContentBlock{{"type": "text", "text": "hello"}},
+				},
+			},
+		},
+	}
+	stream, err := (CliEngine{Executable: enginePath}).VerifyAgentStream(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stream.State != "finalized" || len(stream.Chunks) != 1 {
+		t.Fatalf("unexpected stream projection: %#v", stream)
+	}
+}

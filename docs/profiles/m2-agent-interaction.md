@@ -54,13 +54,21 @@ Status: partial.
 - workspace fault tests for successful commit/abort, exact replay, explicit
   non-application, provider failure, CAS receipt loss, process reopen, and
   reconciliation without redispatch;
+- `cymule.agent-stream/1` open/chunk/finalized/aborted records with stable
+  message/tool targets, contiguous chunk identity, immutable final content, and
+  Resource Handle blocks for large output;
+- M1 multi-journal finalization that keeps staging chunks out of the Session and
+  atomically publishes the terminal stream plus exact Message/Tool update;
+- fault tests for duplicate/conflicting/out-of-order chunks, abort, stale CAS,
+  lost finalization receipt, reopen, immutable message identity, and tool output;
+- TypeScript, Python, Rust, and Go stream wire clients that validate/reduce
+  through the real Rust Engine rather than implementing SDK reducers;
 - deterministic fake-host end-to-end tests;
 - adapter boundaries for ACP, MCP, A2A, editors, and model providers.
 
 ## Remaining completion gates
 
-- streaming chunk staging and finalized durable content;
-- ACP/MCP/A2A adapters and cross-language SDK interaction clients;
+- ACP/MCP/A2A adapters and remaining cross-language Session control/query clients;
 - cancellation, refusal, host failure, and restart-level fault suites;
 - field-complete Session projection schema and removal of incubation rustdoc
   allowances.
@@ -80,3 +88,8 @@ behavior already represented by the frozen elicitation and host-occurrence
 fields. Workspace scope integration composes those existing fields with M0
 scope/effect semantics and M1 application-journal/outbox records. These changes
 alter no frozen wire shape or version while M2 remains partial.
+
+Streaming introduces independent `cymule.agent-stream/1` records. The additive
+Resource Handle content block and Engine verification request are emitted only
+by callers using the new surface; existing AgentUpdate/occurrence record domains
+remain unchanged while the M2 profile is still partial.
