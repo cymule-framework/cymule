@@ -189,10 +189,10 @@ pub enum WaitKind {
         /// Correlation key supplied by an external signal producer.
         key: String,
     },
-    /// Logical deadline supplied by the clock substrate.
+    /// Logical timer identity resolved by a clock substrate.
     Timer {
-        /// Logical clock deadline.
-        deadline: u64,
+        /// Stable timer identity.
+        timer_id: String,
     },
     /// Typed user or external input.
     Input {

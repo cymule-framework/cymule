@@ -15,11 +15,13 @@ Status: partial.
 - canonical component occurrence inputs, outputs, binding, and revision;
 - portable snapshot metadata;
 - shared-memory CAS reference and atomic directory-store adapter;
+- resumable sequential `call`/`wait` interpretation with process reopen, epoch
+  advance, and component-result replay without reinvocation;
 - reopen, interrupted-staging, stale-writer, stale-claim, and idempotency tests.
 
 ## Remaining completion gates
 
-- resumable interpreter integration for every structured IR operation;
+- resumable interpreter integration for nested scopes and effects;
 - timer and signal activation workers;
 - atomic semantic event plus outbox publication;
 - component-result replay without reinvoking plugins;

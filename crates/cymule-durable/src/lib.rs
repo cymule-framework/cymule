@@ -2,11 +2,13 @@
 
 mod coordinator;
 mod error;
+mod executor;
 mod model;
 mod store;
 
 pub use coordinator::DurableCoordinator;
 pub use error::{DurableError, DurableResult};
+pub use executor::{DriveOutcome, ResumableRuntime};
 pub use model::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableState,
     EffectDispatch, FrameState, OutboxState, SnapshotRecord, StoredState, WaitCondition, WaitKind,
