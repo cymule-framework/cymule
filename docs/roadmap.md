@@ -24,8 +24,10 @@ Status: partial.
 - memory and atomic directory-store adapters pass reopen and stale-writer tests;
 - sequential component/wait execution resumes after process reopen and replays
   recorded component outputs without reinvocation;
-- nested scope/effect resumption, timer/signal activation, atomic
-  event-plus-outbox, and dispatch crash-window recovery remain proposed;
+- root commit-gated effects persist outbox claims before provider execution and
+  reconcile rather than redispatch after crash ambiguity;
+- nested scope and non-commit-gated effect resumption, timer/signal activation,
+  atomic event-plus-outbox, and remaining dispatch crash windows are proposed;
 - process-level crash injection for every effect window;
 - snapshot compaction and suffix rehydration;
 - canonical component-call occurrences and exact execution replay without

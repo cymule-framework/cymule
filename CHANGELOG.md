@@ -28,6 +28,9 @@ domains described in `docs/specification.md`.
 - Add the M4 evolution foundation with immutable Plan DAG edges, impact cones,
   occurrence pins, deterministic canary and rollback, safe-point migration
   receipts, shadow evidence, and cycle/fault tests.
+- Add resumable commit-gated effect execution with fenced outbox claims and a
+  crash-after-provider-application test proving recovery reconciles without
+  redispatch.
 
 ## [0.1.0] - 2026-08-16
 

@@ -109,6 +109,101 @@ impl<S: DurableStore> DurableCoordinator<S> {
         })
     }
 
+    /// Atomically persist an admitted/prepared Effect and its outbox entry.
+    pub fn checkpoint_effect_enqueue(
+        &mut self,
+        machine: &Machine,
+        continuation: Continuation,
+        dispatch: EffectDispatch,
+    ) -> DurableResult<String> {
+        self.mutate_checked(|state| {
+            state.machine = machine.snapshot();
+            match state.outbox.get(&dispatch.intent_id) {
+                Some(existing) if existing == &dispatch => {}
+                Some(_) => {
+                    return Err(DurableError::IllegalTransition(format!(
+                        "effect {} already has a different outbox entry",
+                        dispatch.intent_id
+                    )));
+                }
+                None => {
+                    state.outbox.insert(dispatch.intent_id.clone(), dispatch);
+                }
+            }
+            state
+                .continuations
+                .insert(continuation.run_id.clone(), continuation);
+            Ok(())
+        })
+    }
+
+    /// Atomically persist `DispatchStarted` and the fenced outbox claim.
+    pub fn checkpoint_effect_claim(
+        &mut self,
+        machine: &Machine,
+        intent_id: &str,
+        owner: &str,
+        lease_epoch: u64,
+    ) -> DurableResult<String> {
+        self.mutate_checked(|state| {
+            let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
+                DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
+            })?;
+            if dispatch.state != OutboxState::Pending {
+                return Err(DurableError::IllegalTransition(format!(
+                    "effect {intent_id} is not pending"
+                )));
+            }
+            dispatch.state = OutboxState::Claimed;
+            dispatch.claim_owner = Some(owner.to_owned());
+            dispatch.claim_epoch = lease_epoch;
+            state.machine = machine.snapshot();
+            Ok(())
+        })
+    }
+
+    /// Atomically persist an effect observation/reconciliation and outbox
+    /// settlement under the exact original claim.
+    pub fn checkpoint_effect_settlement(
+        &mut self,
+        machine: &Machine,
+        intent_id: &str,
+        owner: &str,
+        lease_epoch: u64,
+        outcome: OutboxState,
+        result: Option<cymule_core::ArtifactRef>,
+    ) -> DurableResult<String> {
+        self.mutate_checked(|state| {
+            if !matches!(
+                outcome,
+                OutboxState::Applied | OutboxState::NotApplied | OutboxState::Unknown
+            ) {
+                return Err(DurableError::Validation(
+                    "settlement must be applied, not_applied, or unknown".to_owned(),
+                ));
+            }
+            let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
+                DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
+            })?;
+            if dispatch.state != OutboxState::Claimed
+                || dispatch.claim_owner.as_deref() != Some(owner)
+                || dispatch.claim_epoch != lease_epoch
+            {
+                return Err(DurableError::Conflict {
+                    expected: Some(format!("{owner}:{lease_epoch}")),
+                    current: dispatch
+                        .claim_owner
+                        .as_ref()
+                        .map(|current| format!("{current}:{}", dispatch.claim_epoch)),
+                });
+            }
+            dispatch.state = outcome;
+            dispatch.result = result;
+            state.machine = machine.snapshot();
+            Ok(())
+        })
+    }
+
     /// Atomically persist the safe point and register its durable wait.
     pub fn park(
         &mut self,

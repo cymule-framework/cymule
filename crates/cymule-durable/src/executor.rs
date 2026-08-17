@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cymule_core::{
-    COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus, Expression, Machine,
-    Operation, PlanCandidate, ROOT_SCOPE_ID, SealedPlan, WaitSpec, canonical_bytes, content_id,
+    COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus, DispatchPolicy,
+    EffectTransition, Expression, Machine, MutationKind, Operation, PlanCandidate, ROOT_SCOPE_ID,
+    ReconciliationResolution, SealedPlan, WaitSpec, WorldOutcome, canonical_bytes, content_id,
+    effect_intent_id,
 };
 use cymule_runtime::{ExecutionResult, PluginHost, PluginManifest, PluginRequest, PluginResponse};
 use serde::Serialize;
@@ -10,7 +12,8 @@ use serde_json::Value;
 
 use crate::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
-    DurableResult, DurableStore, FrameState, WaitCondition, WaitKind, WaitState,
+    DurableResult, DurableStore, EffectDispatch, FrameState, OutboxState, WaitCondition, WaitKind,
+    WaitState,
 };
 
 /// Result of driving one Run until its next durable boundary.
@@ -20,6 +23,11 @@ pub enum DriveOutcome {
     Suspended {
         /// Stable wait identity used to deliver completion.
         wait_id: String,
+    },
+    /// Effect outcome remains unknown and requires later reconciliation.
+    ReconciliationRequired {
+        /// Original structural effect intent.
+        intent_id: String,
     },
     /// Run reached a terminal Result.
     Completed(ExecutionResult),
@@ -127,6 +135,12 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
         self.drive(&run_id)
     }
 
+    /// Resume an existing ready/running Run after process reopen or a recoverable
+    /// adapter failure.
+    pub fn resume(&mut self, run_id: &str) -> DurableResult<DriveOutcome> {
+        self.drive(run_id)
+    }
+
     /// Access durable state for inspection.
     pub const fn coordinator(&self) -> &DurableCoordinator<S> {
         &self.coordinator
@@ -166,14 +180,24 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
 
             let Some(step) = definition.body.steps.get(frame.next_step) else {
                 let value = evaluate(&machine, &definition.body.result, &input, &frame.locals)?;
-                submit(
-                    &mut machine,
-                    run_id,
-                    format!("{run_id}:commit-root:{}", continuation.epoch),
-                    Command::CommitScope {
-                        scope_id: ROOT_SCOPE_ID.to_owned(),
-                    },
-                )?;
+                if machine.projection().runs[run_id].scopes[ROOT_SCOPE_ID].status
+                    == cymule_core::ScopeStatus::Open
+                {
+                    submit(
+                        &mut machine,
+                        run_id,
+                        format!("{run_id}:commit-root:{}", continuation.epoch),
+                        Command::CommitScope {
+                            scope_id: ROOT_SCOPE_ID.to_owned(),
+                        },
+                    )?;
+                    self.coordinator
+                        .checkpoint(&machine, continuation.clone(), None)?;
+                }
+                if let Some(outcome) = self.dispatch_outbox(run_id)? {
+                    return Ok(outcome);
+                }
+                machine = self.coordinator.restore_machine()?;
                 yield_attempt(&mut machine, run_id, continuation.epoch)?;
                 let result_ref = machine.put_artifact("cymule.result/1", canonical_bytes(&value)?);
                 submit(
@@ -299,7 +323,112 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     self.coordinator.park(&machine, continuation, condition)?;
                     return Ok(DriveOutcome::Suspended { wait_id });
                 }
-                Operation::Effect { .. } | Operation::Scope { .. } => {
+                Operation::Effect {
+                    effect,
+                    input: expression,
+                    occurrence,
+                    bind,
+                } => {
+                    if bind.is_some() {
+                        return Err(DurableError::Validation(
+                            "commit-gated durable effects cannot bind inside the open scope"
+                                .to_owned(),
+                        ));
+                    }
+                    let contract = plan
+                        .candidate
+                        .effects
+                        .iter()
+                        .find(|contract| contract.id == *effect)
+                        .ok_or_else(|| {
+                            DurableError::Validation(format!("effect contract {effect} is missing"))
+                        })?;
+                    if contract.profile.mutation != MutationKind::Mutating
+                        || contract.profile.dispatch != DispatchPolicy::OnScopeCommit
+                    {
+                        return Err(DurableError::Validation(
+                            "resumable M1 currently requires mutating on_scope_commit effects"
+                                .to_owned(),
+                        ));
+                    }
+                    let value = evaluate(&machine, expression, &input, &frame.locals)?;
+                    let args =
+                        machine.put_artifact("cymule.effect-args/1", canonical_bytes(&value)?);
+                    let implementation = self.manifest.effects.get(effect).ok_or_else(|| {
+                        DurableError::Validation(format!(
+                            "plugin does not implement effect {effect}"
+                        ))
+                    })?;
+                    let occurrence_binding = format!(
+                        "binding:{}/effect/{}/{}",
+                        self.manifest.implementation_id,
+                        effect,
+                        implementation.implementation_revision
+                    );
+                    let intent_id = effect_intent_id(
+                        run_id,
+                        &plan.candidate.entry,
+                        &step.id,
+                        ROOT_SCOPE_ID,
+                        continuation.epoch,
+                        occurrence,
+                        &args,
+                        "cymule.effect-schema/1",
+                    )?;
+                    submit(
+                        &mut machine,
+                        run_id,
+                        format!("{run_id}:effect-propose:{}", step.id),
+                        Command::ProposeEffect {
+                            scope_id: ROOT_SCOPE_ID.to_owned(),
+                            invocation_id: plan.candidate.entry.clone(),
+                            site_id: step.id.clone(),
+                            occurrence: occurrence.clone(),
+                            operation: effect.clone(),
+                            args: args.clone(),
+                            occurrence_binding: occurrence_binding.clone(),
+                        },
+                    )?;
+                    let response = self
+                        .plugin
+                        .invoke(PluginRequest::PrepareEffect {
+                            operation: effect.clone(),
+                            intent_id: intent_id.clone(),
+                            input: value,
+                        })
+                        .map_err(|error| DurableError::Substrate(error.to_string()))?;
+                    if response != PluginResponse::Prepared {
+                        return Err(DurableError::Substrate(format!(
+                            "effect {effect} prepare returned {response:?}"
+                        )));
+                    }
+                    submit(
+                        &mut machine,
+                        run_id,
+                        format!("{run_id}:effect-prepare:{}", step.id),
+                        Command::TransitionEffect {
+                            intent_id: intent_id.clone(),
+                            transition: EffectTransition::Prepare,
+                        },
+                    )?;
+                    frame.next_step += 1;
+                    self.coordinator.checkpoint_effect_enqueue(
+                        &machine,
+                        continuation,
+                        EffectDispatch {
+                            intent_id,
+                            run_id: run_id.to_owned(),
+                            operation: effect.clone(),
+                            input: args,
+                            occurrence_binding,
+                            state: OutboxState::Pending,
+                            claim_epoch: 0,
+                            claim_owner: None,
+                            result: None,
+                        },
+                    )?;
+                }
+                Operation::Scope { .. } => {
                     return Err(DurableError::Validation(format!(
                         "resumable M1 interpreter does not yet support step {}",
                         step.id
@@ -307,6 +436,183 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 }
             }
         }
+    }
+
+    fn dispatch_outbox(&mut self, run_id: &str) -> DurableResult<Option<DriveOutcome>> {
+        let entries: Vec<EffectDispatch> = self
+            .coordinator
+            .state()?
+            .outbox
+            .values()
+            .filter(|dispatch| {
+                dispatch.run_id == run_id
+                    && matches!(dispatch.state, OutboxState::Pending | OutboxState::Claimed)
+            })
+            .cloned()
+            .collect();
+        for entry in entries {
+            let mut machine = self.coordinator.restore_machine()?;
+            let input = read_value(&machine, &entry.input)?;
+            let (owner, claim_epoch) = if entry.state == OutboxState::Pending {
+                let owner = "dispatcher:durable-runtime";
+                let lease = self.coordinator.acquire_lease(
+                    &format!("effect:{}", entry.intent_id),
+                    owner,
+                    self.coordinator.state()?.continuations[run_id].epoch,
+                    1,
+                )?;
+                submit(
+                    &mut machine,
+                    run_id,
+                    format!("{run_id}:effect-authorize:{}", entry.intent_id),
+                    Command::TransitionEffect {
+                        intent_id: entry.intent_id.clone(),
+                        transition: EffectTransition::AuthorizeRelease,
+                    },
+                )?;
+                submit(
+                    &mut machine,
+                    run_id,
+                    format!("{run_id}:effect-dispatch-start:{}", entry.intent_id),
+                    Command::TransitionEffect {
+                        intent_id: entry.intent_id.clone(),
+                        transition: EffectTransition::StartDispatch,
+                    },
+                )?;
+                self.coordinator.checkpoint_effect_claim(
+                    &machine,
+                    &entry.intent_id,
+                    owner,
+                    lease.epoch,
+                )?;
+                let response = self
+                    .plugin
+                    .invoke(PluginRequest::DispatchEffect {
+                        operation: entry.operation.clone(),
+                        intent_id: entry.intent_id.clone(),
+                        input: input.clone(),
+                    })
+                    .map_err(|error| DurableError::Substrate(error.to_string()))?;
+                let PluginResponse::EffectResult { outcome, value } = response else {
+                    return Err(DurableError::Substrate(format!(
+                        "effect {} dispatch returned {response:?}",
+                        entry.operation
+                    )));
+                };
+                if outcome != WorldOutcome::Unknown {
+                    submit(
+                        &mut machine,
+                        run_id,
+                        format!("{run_id}:effect-observe:{}", entry.intent_id),
+                        Command::TransitionEffect {
+                            intent_id: entry.intent_id.clone(),
+                            transition: EffectTransition::Observe(outcome),
+                        },
+                    )?;
+                    let result = value
+                        .map(|value| {
+                            canonical_bytes(&value)
+                                .map(|bytes| machine.put_artifact("cymule.effect-result/1", bytes))
+                        })
+                        .transpose()?;
+                    self.coordinator.checkpoint_effect_settlement(
+                        &machine,
+                        &entry.intent_id,
+                        owner,
+                        lease.epoch,
+                        if outcome == WorldOutcome::Applied {
+                            OutboxState::Applied
+                        } else {
+                            OutboxState::NotApplied
+                        },
+                        result,
+                    )?;
+                    continue;
+                }
+                submit(
+                    &mut machine,
+                    run_id,
+                    format!("{run_id}:effect-unknown:{}", entry.intent_id),
+                    Command::TransitionEffect {
+                        intent_id: entry.intent_id.clone(),
+                        transition: EffectTransition::Observe(WorldOutcome::Unknown),
+                    },
+                )?;
+                self.coordinator.checkpoint(
+                    &machine,
+                    self.coordinator.state()?.continuations[run_id].clone(),
+                    None,
+                )?;
+                (owner.to_owned(), lease.epoch)
+            } else {
+                let owner = entry.claim_owner.clone().ok_or_else(|| {
+                    DurableError::Validation("claimed effect has no owner".to_owned())
+                })?;
+                let effect = &machine.projection().runs[run_id].effects[&entry.intent_id];
+                if effect.outcome == WorldOutcome::Unobserved {
+                    submit(
+                        &mut machine,
+                        run_id,
+                        format!("{run_id}:effect-recovery-unknown:{}", entry.intent_id),
+                        Command::TransitionEffect {
+                            intent_id: entry.intent_id.clone(),
+                            transition: EffectTransition::Observe(WorldOutcome::Unknown),
+                        },
+                    )?;
+                }
+                (owner, entry.claim_epoch)
+            };
+
+            let response = self
+                .plugin
+                .invoke(PluginRequest::ReconcileEffect {
+                    operation: entry.operation.clone(),
+                    intent_id: entry.intent_id.clone(),
+                    input,
+                })
+                .map_err(|error| DurableError::Substrate(error.to_string()))?;
+            let PluginResponse::ReconciliationResult { resolution, value } = response else {
+                return Err(DurableError::Substrate(format!(
+                    "effect {} reconciliation returned {response:?}",
+                    entry.operation
+                )));
+            };
+            submit(
+                &mut machine,
+                run_id,
+                format!("{run_id}:effect-reconcile:{}", entry.intent_id),
+                Command::TransitionEffect {
+                    intent_id: entry.intent_id.clone(),
+                    transition: EffectTransition::Reconcile(resolution),
+                },
+            )?;
+            let result = value
+                .map(|value| {
+                    canonical_bytes(&value)
+                        .map(|bytes| machine.put_artifact("cymule.effect-result/1", bytes))
+                })
+                .transpose()?;
+            let settled = match resolution {
+                ReconciliationResolution::ResolvedApplied => OutboxState::Applied,
+                ReconciliationResolution::ResolvedNotApplied => OutboxState::NotApplied,
+                ReconciliationResolution::StillUnknown
+                | ReconciliationResolution::GovernanceRequired => OutboxState::Unknown,
+            };
+            self.coordinator.checkpoint_effect_settlement(
+                &machine,
+                &entry.intent_id,
+                &owner,
+                claim_epoch,
+                settled,
+                result,
+            )?;
+            if settled == OutboxState::Unknown {
+                return Ok(Some(DriveOutcome::ReconciliationRequired {
+                    intent_id: entry.intent_id,
+                }));
+            }
+        }
+        Ok(None)
     }
 }
 

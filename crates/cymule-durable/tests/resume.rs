@@ -5,17 +5,68 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cymule_core::{
-    ComponentContract, Definition, Expression, Operation, PlanCandidate, Region, Step, WaitSpec,
+    ComponentContract, Definition, DispatchPolicy, EffectContract, EffectProfile, Expression,
+    MutationKind, Operation, PlanCandidate, ReconciliationMode, Region, Step, WaitSpec,
 };
 use cymule_durable::{DriveOutcome, MemoryStore, ResumableRuntime};
 use cymule_runtime::{
-    PLUGIN_VERSION, PluginHost, PluginManifest, PluginOperation, PluginRequest, PluginResponse,
-    RuntimeError, RuntimeResult,
+    PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginOperation, PluginRequest,
+    PluginResponse, RuntimeError, RuntimeResult,
 };
 use serde_json::json;
 
 struct CountingPlugin {
     calls: Arc<AtomicUsize>,
+}
+
+struct CrashAfterApplyPlugin {
+    dispatches: Arc<AtomicUsize>,
+    reconciliations: Arc<AtomicUsize>,
+    crash_after_apply: bool,
+}
+
+impl PluginHost for CrashAfterApplyPlugin {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        match request {
+            PluginRequest::Describe => Ok(PluginResponse::Manifest {
+                manifest: PluginManifest {
+                    plugin_version: PLUGIN_VERSION.to_owned(),
+                    implementation_id: "effect-recovery-test@1".to_owned(),
+                    components: BTreeMap::new(),
+                    effects: BTreeMap::from([(
+                        "test.capture".to_owned(),
+                        PluginEffect {
+                            implementation_revision: "1".to_owned(),
+                            can_reconcile: true,
+                        },
+                    )]),
+                },
+            }),
+            PluginRequest::PrepareEffect { .. } => Ok(PluginResponse::Prepared),
+            PluginRequest::DispatchEffect { .. } => {
+                self.dispatches.fetch_add(1, Ordering::SeqCst);
+                if self.crash_after_apply {
+                    Err(RuntimeError::Io(
+                        "simulated crash after provider application".to_owned(),
+                    ))
+                } else {
+                    Err(RuntimeError::Plugin(
+                        "recovery must not redispatch the original intent".to_owned(),
+                    ))
+                }
+            }
+            PluginRequest::ReconcileEffect { input, .. } => {
+                self.reconciliations.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::ReconciliationResult {
+                    resolution: cymule_core::ReconciliationResolution::ResolvedApplied,
+                    value: Some(input),
+                })
+            }
+            request @ PluginRequest::Call { .. } => Err(RuntimeError::Plugin(format!(
+                "unsupported effect recovery request: {request:?}"
+            ))),
+        }
+    }
 }
 
 impl PluginHost for CountingPlugin {
@@ -92,6 +143,46 @@ fn candidate() -> PlanCandidate {
     }
 }
 
+fn effect_candidate() -> PlanCandidate {
+    PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "recover_unknown_effect".to_owned(),
+        entry: "main".to_owned(),
+        components: Vec::new(),
+        effects: vec![EffectContract {
+            id: "test.capture".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            profile: EffectProfile {
+                mutation: MutationKind::Mutating,
+                dispatch: DispatchPolicy::OnScopeCommit,
+                reconciliation: ReconciliationMode::Queryable,
+                keyed_idempotency: true,
+                irreversible: false,
+            },
+            requirements: BTreeMap::new(),
+        }],
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: vec![Step {
+                    id: "effect.capture".to_owned(),
+                    operation: Operation::Effect {
+                        effect: "test.capture".to_owned(),
+                        input: Expression::Input,
+                        occurrence: "primary".to_owned(),
+                        bind: None,
+                    },
+                }],
+                result: Expression::Input,
+            },
+        }],
+        metadata: BTreeMap::new(),
+    }
+}
+
 #[test]
 fn process_reopen_resumes_after_wait_without_reinvoking_component() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -135,4 +226,49 @@ fn process_reopen_resumes_after_wait_without_reinvoking_component() {
             .len(),
         1
     );
+}
+
+#[test]
+fn crash_after_provider_application_reconciles_without_redispatch() {
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let reconciliations = Arc::new(AtomicUsize::new(0));
+    let mut runtime = ResumableRuntime::open(
+        MemoryStore::new(),
+        CrashAfterApplyPlugin {
+            dispatches: dispatches.clone(),
+            reconciliations: reconciliations.clone(),
+            crash_after_apply: true,
+        },
+    )
+    .expect("runtime opens");
+    assert!(
+        runtime
+            .start(
+                effect_candidate(),
+                &json!({"value": 1}),
+                "run:effect-recovery"
+            )
+            .is_err()
+    );
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+
+    let (store, _) = runtime.into_parts();
+    let mut reopened = ResumableRuntime::open(
+        store,
+        CrashAfterApplyPlugin {
+            dispatches: dispatches.clone(),
+            reconciliations: reconciliations.clone(),
+            crash_after_apply: false,
+        },
+    )
+    .expect("runtime reopens");
+    let DriveOutcome::Completed(result) = reopened
+        .resume("run:effect-recovery")
+        .expect("recovery reconciles and completes")
+    else {
+        panic!("recovered Run should complete");
+    };
+    assert_eq!(result.value, json!({"value": 1}));
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(reconciliations.load(Ordering::SeqCst), 1);
 }

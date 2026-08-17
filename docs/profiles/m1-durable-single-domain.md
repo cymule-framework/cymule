@@ -17,11 +17,16 @@ Status: partial.
 - shared-memory CAS reference and atomic directory-store adapter;
 - resumable sequential `call`/`wait` interpretation with process reopen, epoch
   advance, and component-result replay without reinvocation;
+- commit-gated root effects with atomic outbox enqueue, fenced
+  `DispatchStarted`, settlement, and reconciliation recovery;
+- crash-after-provider-application tests proving restart performs reconciliation
+  without a second dispatch;
 - reopen, interrupted-staging, stale-writer, stale-claim, and idempotency tests.
 
 ## Remaining completion gates
 
-- resumable interpreter integration for nested scopes and effects;
+- resumable interpreter integration for nested scopes, observational eager
+  effects, and explicit-release effects;
 - timer and signal activation workers;
 - atomic semantic event plus outbox publication;
 - component-result replay without reinvoking plugins;
