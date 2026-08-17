@@ -1,0 +1,396 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/agent-protocol.schema.json",
+  "title": "Cymule Agent Protocol cymule.agent/1",
+  "oneOf": [
+    { "$ref": "#/$defs/agentUpdate" },
+    { "$ref": "#/$defs/hostOccurrence" }
+  ],
+  "$defs": {
+    "nonEmpty": { "type": "string", "minLength": 1 },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "kind"],
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/nonEmpty" },
+        "kind": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "contentBlock": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "text"],
+          "properties": {
+            "type": { "const": "text" },
+            "text": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "value"],
+          "properties": {
+            "type": { "const": "json" },
+            "value": true
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "artifact"],
+          "properties": {
+            "type": { "const": "artifact" },
+            "artifact": { "$ref": "#/$defs/artifactRef" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "uri", "mime_type"],
+          "properties": {
+            "type": { "const": "resource" },
+            "uri": { "$ref": "#/$defs/nonEmpty" },
+            "mime_type": {
+              "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+            }
+          }
+        }
+      ]
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "role", "content"],
+      "properties": {
+        "message_id": { "$ref": "#/$defs/nonEmpty" },
+        "role": { "enum": ["user", "agent", "tool", "system"] },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/contentBlock" } }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["used", "capacity", "cost"],
+      "properties": {
+        "used": { "type": "integer", "minimum": 0 },
+        "capacity": { "type": "integer", "minimum": 0 },
+        "cost": true
+      }
+    },
+    "toolRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool_call_id", "operation", "input"],
+      "properties": {
+        "tool_call_id": { "$ref": "#/$defs/nonEmpty" },
+        "operation": { "$ref": "#/$defs/nonEmpty" },
+        "input": true
+      }
+    },
+    "toolResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool_call_id", "content", "occurrence_binding"],
+      "properties": {
+        "tool_call_id": { "$ref": "#/$defs/nonEmpty" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/contentBlock" } },
+        "occurrence_binding": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "contextRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "messages", "budget"],
+      "properties": {
+        "session_id": { "$ref": "#/$defs/nonEmpty" },
+        "messages": { "type": "array", "items": { "$ref": "#/$defs/message" } },
+        "budget": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "contextSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_id", "content", "occurrence_binding"],
+      "properties": {
+        "snapshot_id": { "$ref": "#/$defs/nonEmpty" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/contentBlock" } },
+        "occurrence_binding": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "modelRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "context", "tools"],
+      "properties": {
+        "session_id": { "$ref": "#/$defs/nonEmpty" },
+        "context": { "$ref": "#/$defs/contextSnapshot" },
+        "tools": { "type": "array", "items": { "$ref": "#/$defs/nonEmpty" }, "uniqueItems": true }
+      }
+    },
+    "modelResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message", "tool_requests", "occurrence_binding", "usage"],
+      "properties": {
+        "message": { "$ref": "#/$defs/message" },
+        "tool_requests": { "type": "array", "items": { "$ref": "#/$defs/toolRequest" } },
+        "occurrence_binding": { "$ref": "#/$defs/nonEmpty" },
+        "usage": { "$ref": "#/$defs/usage" }
+      }
+    },
+    "permissionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "tool", "options"],
+      "properties": {
+        "request_id": { "$ref": "#/$defs/nonEmpty" },
+        "tool": { "$ref": "#/$defs/toolRequest" },
+        "options": { "type": "array", "items": { "$ref": "#/$defs/nonEmpty" }, "uniqueItems": true }
+      }
+    },
+    "permissionResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "occurrence_binding"],
+      "properties": {
+        "decision": { "enum": ["allow_once", "deny"] },
+        "occurrence_binding": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "elicitationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "schema", "prompt"],
+      "properties": {
+        "request_id": { "$ref": "#/$defs/nonEmpty" },
+        "schema": true,
+        "prompt": { "type": "array", "items": { "$ref": "#/$defs/contentBlock" } }
+      }
+    },
+    "elicitationResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "accepted", "value", "occurrence_binding"],
+      "properties": {
+        "request_id": { "$ref": "#/$defs/nonEmpty" },
+        "accepted": { "type": "boolean" },
+        "value": true,
+        "occurrence_binding": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "workspaceChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["change_id", "overlay", "commit"],
+      "properties": {
+        "change_id": { "$ref": "#/$defs/nonEmpty" },
+        "overlay": { "$ref": "#/$defs/artifactRef" },
+        "commit": { "type": "boolean" }
+      }
+    },
+    "workspaceReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["change_id", "committed", "evidence", "occurrence_binding"],
+      "properties": {
+        "change_id": { "$ref": "#/$defs/nonEmpty" },
+        "committed": { "type": "boolean" },
+        "evidence": { "$ref": "#/$defs/artifactRef" },
+        "occurrence_binding": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "hostRequest": {
+      "oneOf": [
+        { "$ref": "#/$defs/contextHostRequest" },
+        { "$ref": "#/$defs/modelHostRequest" },
+        { "$ref": "#/$defs/permissionHostRequest" },
+        { "$ref": "#/$defs/toolHostRequest" },
+        { "$ref": "#/$defs/elicitationHostRequest" },
+        { "$ref": "#/$defs/workspaceHostRequest" }
+      ]
+    },
+    "contextHostRequest": { "$ref": "#/$defs/contextHostRequestObject" },
+    "contextHostRequestObject": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "request"],
+      "properties": { "kind": { "const": "context" }, "request": { "$ref": "#/$defs/contextRequest" } }
+    },
+    "modelHostRequest": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "request"],
+      "properties": { "kind": { "const": "model" }, "request": { "$ref": "#/$defs/modelRequest" } }
+    },
+    "permissionHostRequest": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "request"],
+      "properties": { "kind": { "const": "permission" }, "request": { "$ref": "#/$defs/permissionRequest" } }
+    },
+    "toolHostRequest": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "request"],
+      "properties": { "kind": { "const": "tool" }, "request": { "$ref": "#/$defs/toolRequest" } }
+    },
+    "elicitationHostRequest": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "request"],
+      "properties": { "kind": { "const": "elicitation" }, "request": { "$ref": "#/$defs/elicitationRequest" } }
+    },
+    "workspaceHostRequest": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "request"],
+      "properties": { "kind": { "const": "workspace" }, "request": { "$ref": "#/$defs/workspaceChange" } }
+    },
+    "hostResponse": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "response"],
+          "properties": { "kind": { "const": "context" }, "response": { "$ref": "#/$defs/contextSnapshot" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "response"],
+          "properties": { "kind": { "const": "model" }, "response": { "$ref": "#/$defs/modelResponse" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "response"],
+          "properties": { "kind": { "const": "permission" }, "response": { "$ref": "#/$defs/permissionResponse" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "response"],
+          "properties": { "kind": { "const": "tool" }, "response": { "$ref": "#/$defs/toolResponse" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "response"],
+          "properties": { "kind": { "const": "elicitation" }, "response": { "$ref": "#/$defs/elicitationResponse" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "response"],
+          "properties": { "kind": { "const": "workspace" }, "response": { "$ref": "#/$defs/workspaceReceipt" } }
+        }
+      ]
+    },
+    "hostOccurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "occurrence_id", "session_id", "request", "request_digest", "state",
+        "response", "occurrence_binding", "failure"
+      ],
+      "properties": {
+        "occurrence_id": { "$ref": "#/$defs/nonEmpty" },
+        "session_id": { "$ref": "#/$defs/nonEmpty" },
+        "request": { "$ref": "#/$defs/hostRequest" },
+        "request_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "state": { "enum": ["prepared", "started", "completed", "unknown"] },
+        "response": { "oneOf": [{ "$ref": "#/$defs/hostResponse" }, { "type": "null" }] },
+        "occurrence_binding": {
+          "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }]
+        },
+        "failure": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "completed" } } },
+          "then": {
+            "properties": {
+              "response": { "$ref": "#/$defs/hostResponse" },
+              "occurrence_binding": { "$ref": "#/$defs/nonEmpty" },
+              "failure": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "state": { "const": "unknown" } } },
+          "then": {
+            "properties": {
+              "response": { "type": "null" },
+              "occurrence_binding": { "type": "null" },
+              "failure": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "agentUpdate": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "update_id", "message"],
+          "properties": {
+            "type": { "const": "message" }, "update_id": { "$ref": "#/$defs/nonEmpty" },
+            "message": { "$ref": "#/$defs/message" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "update_id", "state", "stop_reason"],
+          "properties": {
+            "type": { "const": "state" }, "update_id": { "$ref": "#/$defs/nonEmpty" },
+            "state": { "enum": ["idle", "running", "requires_action", "closed"] },
+            "stop_reason": {
+              "oneOf": [
+                { "enum": ["end_turn", "cancelled", "refusal", "error"] },
+                { "type": "null" }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "update_id", "plan"],
+          "properties": {
+            "type": { "const": "plan" }, "update_id": { "$ref": "#/$defs/nonEmpty" },
+            "plan": { "$ref": "#/$defs/agentPlan" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "update_id", "tool"],
+          "properties": {
+            "type": { "const": "tool" }, "update_id": { "$ref": "#/$defs/nonEmpty" },
+            "tool": { "$ref": "#/$defs/toolCall" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "update_id", "usage"],
+          "properties": {
+            "type": { "const": "usage" }, "update_id": { "$ref": "#/$defs/nonEmpty" },
+            "usage": { "$ref": "#/$defs/usage" }
+          }
+        }
+      ]
+    },
+    "agentPlan": {
+      "type": "object", "additionalProperties": false, "required": ["plan_id", "entries"],
+      "properties": {
+        "plan_id": { "$ref": "#/$defs/nonEmpty" },
+        "entries": { "type": "array", "items": { "$ref": "#/$defs/agentPlanEntry" } }
+      }
+    },
+    "agentPlanEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["entry_id", "content", "status"],
+      "properties": {
+        "entry_id": { "$ref": "#/$defs/nonEmpty" },
+        "content": { "type": "string" },
+        "status": { "enum": ["pending", "in_progress", "completed", "cancelled"] }
+      }
+    },
+    "toolCall": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tool_call_id", "operation", "status", "input", "output", "locations"],
+      "properties": {
+        "tool_call_id": { "$ref": "#/$defs/nonEmpty" },
+        "operation": { "$ref": "#/$defs/nonEmpty" },
+        "status": {
+          "enum": ["pending", "awaiting_permission", "in_progress", "completed", "failed", "cancelled"]
+        },
+        "input": true,
+        "output": {
+          "oneOf": [
+            { "type": "array", "items": { "$ref": "#/$defs/contentBlock" } },
+            { "type": "null" }
+          ]
+        },
+        "locations": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

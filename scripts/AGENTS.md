@@ -5,6 +5,8 @@
 - Do not hide skipped coverage. Optional-tool skips must print the exact reason.
 - Cross-language tests must use freshly built Rust binaries and a Plan ID sealed
   from the checked-in shared fixture.
+- Schema verification covers every `schemas/*.schema.json` file and must include
+  positive and unknown-field rejection cases for each public protocol family.
 - Keep host-native verification reproducible and avoid container-only workflows.
 - GitHub publication builds a snapshot on top of the prior public GitHub commit.
   Never push private source ancestry or remote configuration.

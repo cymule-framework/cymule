@@ -298,24 +298,28 @@ fn valid_tool_transition(previous: ToolCallStatus, next: ToolCallStatus) -> bool
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextRequest {
     pub session_id: String,
     pub messages: Vec<AgentMessage>,
     pub budget: u64,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextSnapshot {
     pub snapshot_id: String,
     pub content: Vec<ContentBlock>,
     pub occurrence_binding: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelRequest {
     pub session_id: String,
     pub context: ContextSnapshot,
     pub tools: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelResponse {
     pub message: AgentMessage,
     pub tool_requests: Vec<ToolRequest>,
@@ -323,6 +327,7 @@ pub struct ModelResponse {
     pub usage: Usage,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PermissionRequest {
     pub request_id: String,
     pub tool: ToolRequest,
@@ -334,39 +339,378 @@ pub enum PermissionDecision {
     AllowOnce,
     Deny,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionResponse {
+    pub decision: PermissionDecision,
+    pub occurrence_binding: String,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolRequest {
     pub tool_call_id: String,
     pub operation: String,
     pub input: Value,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolResponse {
     pub tool_call_id: String,
     pub content: Vec<ContentBlock>,
     pub occurrence_binding: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ElicitationRequest {
     pub request_id: String,
     pub schema: Value,
     pub prompt: Vec<ContentBlock>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ElicitationResponse {
     pub request_id: String,
     pub accepted: bool,
     pub value: Option<Value>,
+    pub occurrence_binding: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceChange {
     pub change_id: String,
     pub overlay: ArtifactRef,
     pub commit: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceReceipt {
     pub change_id: String,
     pub committed: bool,
     pub evidence: ArtifactRef,
+    pub occurrence_binding: String,
+}
+
+/// Kind of replaceable host interaction recorded as a durable occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentHostCallKind {
+    Context,
+    Model,
+    Permission,
+    Tool,
+    Elicitation,
+    Workspace,
+}
+
+/// Typed request admitted at one agent host occurrence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "request", rename_all = "snake_case")]
+pub enum AgentHostRequest {
+    Context(ContextRequest),
+    Model(ModelRequest),
+    Permission(PermissionRequest),
+    Tool(ToolRequest),
+    Elicitation(ElicitationRequest),
+    Workspace(WorkspaceChange),
+}
+
+impl AgentHostRequest {
+    /// Closed request kind used for response matching.
+    pub const fn kind(&self) -> AgentHostCallKind {
+        match self {
+            Self::Context(_) => AgentHostCallKind::Context,
+            Self::Model(_) => AgentHostCallKind::Model,
+            Self::Permission(_) => AgentHostCallKind::Permission,
+            Self::Tool(_) => AgentHostCallKind::Tool,
+            Self::Elicitation(_) => AgentHostCallKind::Elicitation,
+            Self::Workspace(_) => AgentHostCallKind::Workspace,
+        }
+    }
+}
+
+/// Typed response durably retained for exact host-call replay.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "response", rename_all = "snake_case")]
+pub enum AgentHostResponse {
+    Context(ContextSnapshot),
+    Model(ModelResponse),
+    Permission(PermissionResponse),
+    Tool(ToolResponse),
+    Elicitation(ElicitationResponse),
+    Workspace(WorkspaceReceipt),
+}
+
+impl AgentHostResponse {
+    /// Closed response kind used for request matching.
+    pub const fn kind(&self) -> AgentHostCallKind {
+        match self {
+            Self::Context(_) => AgentHostCallKind::Context,
+            Self::Model(_) => AgentHostCallKind::Model,
+            Self::Permission(_) => AgentHostCallKind::Permission,
+            Self::Tool(_) => AgentHostCallKind::Tool,
+            Self::Elicitation(_) => AgentHostCallKind::Elicitation,
+            Self::Workspace(_) => AgentHostCallKind::Workspace,
+        }
+    }
+
+    /// Immutable implementation binding returned by the host adapter.
+    pub fn occurrence_binding(&self) -> &str {
+        match self {
+            Self::Context(response) => &response.occurrence_binding,
+            Self::Model(response) => &response.occurrence_binding,
+            Self::Permission(response) => &response.occurrence_binding,
+            Self::Tool(response) => &response.occurrence_binding,
+            Self::Elicitation(response) => &response.occurrence_binding,
+            Self::Workspace(response) => &response.occurrence_binding,
+        }
+    }
+}
+
+/// Durable lifecycle for one host interaction occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentHostOccurrenceState {
+    Prepared,
+    Started,
+    Completed,
+    Unknown,
+}
+
+impl AgentHostOccurrenceState {
+    /// Stable record-key component.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Started => "started",
+            Self::Completed => "completed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Persisted host interaction with an immutable request and binding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHostOccurrence {
+    pub occurrence_id: String,
+    pub session_id: String,
+    pub request: AgentHostRequest,
+    pub request_digest: String,
+    pub state: AgentHostOccurrenceState,
+    pub response: Option<AgentHostResponse>,
+    pub occurrence_binding: Option<String>,
+    pub failure: Option<String>,
+}
+
+impl AgentHostOccurrence {
+    /// Admit an immutable host request before any provider call begins.
+    pub fn prepare(
+        occurrence_id: impl Into<String>,
+        session_id: impl Into<String>,
+        request: AgentHostRequest,
+    ) -> AgentResult<Self> {
+        let request_digest = canonical_digest(&request)
+            .map_err(|error| AgentError::Validation(error.to_string()))?;
+        let occurrence = Self {
+            occurrence_id: occurrence_id.into(),
+            session_id: session_id.into(),
+            request,
+            request_digest,
+            state: AgentHostOccurrenceState::Prepared,
+            response: None,
+            occurrence_binding: None,
+            failure: None,
+        };
+        occurrence.validate()?;
+        Ok(occurrence)
+    }
+
+    /// Mark that the host invocation may now have happened.
+    pub fn start(&self) -> AgentResult<Self> {
+        self.successor(AgentHostOccurrenceState::Started, None, None)
+    }
+
+    /// Commit a typed response and immutable occurrence binding.
+    pub fn complete(&self, response: AgentHostResponse) -> AgentResult<Self> {
+        let binding = response.occurrence_binding().to_owned();
+        self.successor(
+            AgentHostOccurrenceState::Completed,
+            Some(response),
+            Some(binding),
+        )
+    }
+
+    /// Record an ambiguous host result without authorizing redispatch.
+    pub fn mark_unknown(&self, failure: impl Into<String>) -> AgentResult<Self> {
+        let next = Self {
+            occurrence_id: self.occurrence_id.clone(),
+            session_id: self.session_id.clone(),
+            request: self.request.clone(),
+            request_digest: self.request_digest.clone(),
+            state: AgentHostOccurrenceState::Unknown,
+            response: None,
+            occurrence_binding: None,
+            failure: Some(failure.into()),
+        };
+        self.validate_successor(&next)?;
+        Ok(next)
+    }
+
+    /// Stable idempotency key for this lifecycle transition.
+    pub fn transition_id(&self) -> String {
+        format!("{}:{}", self.occurrence_id, self.state.as_str())
+    }
+
+    /// Verify the complete occurrence snapshot.
+    pub fn validate(&self) -> AgentResult<()> {
+        if self.occurrence_id.is_empty() || self.session_id.is_empty() {
+            return Err(AgentError::Validation(
+                "host occurrence and Session identities must not be empty".to_owned(),
+            ));
+        }
+        let expected = canonical_digest(&self.request)
+            .map_err(|error| AgentError::Validation(error.to_string()))?;
+        if self.request_digest != expected {
+            return Err(AgentError::Validation(format!(
+                "host occurrence {} request digest does not match",
+                self.occurrence_id
+            )));
+        }
+        match self.state {
+            AgentHostOccurrenceState::Prepared | AgentHostOccurrenceState::Started => {
+                if self.response.is_some()
+                    || self.occurrence_binding.is_some()
+                    || self.failure.is_some()
+                {
+                    return Err(AgentError::Validation(
+                        "prepared or started occurrence cannot contain an outcome".to_owned(),
+                    ));
+                }
+            }
+            AgentHostOccurrenceState::Completed => {
+                let response = self.response.as_ref().ok_or_else(|| {
+                    AgentError::Validation(
+                        "completed occurrence requires a typed response".to_owned(),
+                    )
+                })?;
+                if response.kind() != self.request.kind() {
+                    return Err(AgentError::Validation(
+                        "host response kind does not match its request".to_owned(),
+                    ));
+                }
+                match (&self.request, response) {
+                    (AgentHostRequest::Tool(request), AgentHostResponse::Tool(response))
+                        if request.tool_call_id != response.tool_call_id =>
+                    {
+                        return Err(AgentError::Validation(
+                            "tool response identity does not match its request".to_owned(),
+                        ));
+                    }
+                    (
+                        AgentHostRequest::Elicitation(request),
+                        AgentHostResponse::Elicitation(response),
+                    ) if request.request_id != response.request_id => {
+                        return Err(AgentError::Validation(
+                            "elicitation response identity does not match its request".to_owned(),
+                        ));
+                    }
+                    (
+                        AgentHostRequest::Workspace(request),
+                        AgentHostResponse::Workspace(response),
+                    ) if request.change_id != response.change_id => {
+                        return Err(AgentError::Validation(
+                            "workspace receipt identity does not match its request".to_owned(),
+                        ));
+                    }
+                    _ => {}
+                }
+                let binding = self.occurrence_binding.as_deref().ok_or_else(|| {
+                    AgentError::Validation(
+                        "completed occurrence requires an immutable binding".to_owned(),
+                    )
+                })?;
+                if binding.is_empty() || binding != response.occurrence_binding() {
+                    return Err(AgentError::Validation(
+                        "host occurrence binding does not match its response".to_owned(),
+                    ));
+                }
+                if self.failure.is_some() {
+                    return Err(AgentError::Validation(
+                        "completed occurrence cannot contain a failure".to_owned(),
+                    ));
+                }
+            }
+            AgentHostOccurrenceState::Unknown => {
+                if self.response.is_some() || self.occurrence_binding.is_some() {
+                    return Err(AgentError::Validation(
+                        "unknown occurrence cannot claim a response or binding".to_owned(),
+                    ));
+                }
+                if self.failure.as_deref().is_none_or(str::is_empty) {
+                    return Err(AgentError::Validation(
+                        "unknown occurrence requires failure evidence".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify that `next` is a legal immutable transition from this snapshot.
+    pub fn validate_successor(&self, next: &Self) -> AgentResult<()> {
+        self.validate()?;
+        next.validate()?;
+        if self == next {
+            return Ok(());
+        }
+        if self.occurrence_id != next.occurrence_id
+            || self.session_id != next.session_id
+            || self.request != next.request
+            || self.request_digest != next.request_digest
+        {
+            return Err(AgentError::IllegalTransition(
+                "host occurrence identity or request changed".to_owned(),
+            ));
+        }
+        if matches!(
+            (self.state, next.state),
+            (
+                AgentHostOccurrenceState::Prepared,
+                AgentHostOccurrenceState::Started
+            ) | (
+                AgentHostOccurrenceState::Started,
+                AgentHostOccurrenceState::Completed | AgentHostOccurrenceState::Unknown
+            ) | (
+                AgentHostOccurrenceState::Unknown,
+                AgentHostOccurrenceState::Completed
+            )
+        ) {
+            Ok(())
+        } else {
+            Err(AgentError::IllegalTransition(format!(
+                "host occurrence {} cannot transition from {:?} to {:?}",
+                self.occurrence_id, self.state, next.state
+            )))
+        }
+    }
+
+    fn successor(
+        &self,
+        state: AgentHostOccurrenceState,
+        response: Option<AgentHostResponse>,
+        occurrence_binding: Option<String>,
+    ) -> AgentResult<Self> {
+        let next = Self {
+            occurrence_id: self.occurrence_id.clone(),
+            session_id: self.session_id.clone(),
+            request: self.request.clone(),
+            request_digest: self.request_digest.clone(),
+            state,
+            response,
+            occurrence_binding,
+            failure: None,
+        };
+        self.validate_successor(&next)?;
+        Ok(next)
+    }
 }

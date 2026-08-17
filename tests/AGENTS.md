@@ -7,4 +7,5 @@
   plugin, not mocks.
 - Add fault-oriented tests for semantic changes, especially stale commands,
   fencing, scope closure, ambiguous effects, reconciliation, and replay.
-
+- Agent occurrence fixtures must pass both Draft 2020-12 shape validation and
+  Rust request-digest/lifecycle validation. Provider names never enter them.

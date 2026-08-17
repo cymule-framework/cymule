@@ -9,7 +9,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | Semantic Interpreter M0 | Implemented | frozen IR, canonical stores, admission, reducer, exact state replay |
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
 | Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, wait, lease, outbox, occurrence replay, directory reopen, and ambiguous-effect reconciliation; nested scopes and the full crash matrix remain |
-| Agent Interaction | Partial | typed Session updates, host interfaces, M1-backed journal replay, and model-tool-model reference loop; host occurrence recovery and protocol adapters remain |
+| Agent Interaction | Partial | typed Session updates, M1-backed replay, binding-pinned host occurrences, receipt-loss redispatch prevention, and model-tool-model loop; occurrence recovery and protocol adapters remain |
 | Large Virtual Graph | Partial | bounded virtual regions, cursors, fair capability claims, parked index, fencing, and snapshot restore; durable compaction remains |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |

@@ -1,6 +1,6 @@
 use crate::{
     AgentResult, ContextRequest, ContextSnapshot, ElicitationRequest, ElicitationResponse,
-    ModelRequest, ModelResponse, PermissionDecision, PermissionRequest, ToolRequest, ToolResponse,
+    ModelRequest, ModelResponse, PermissionRequest, PermissionResponse, ToolRequest, ToolResponse,
     WorkspaceChange, WorkspaceReceipt,
 };
 
@@ -14,7 +14,7 @@ pub trait AgentHost {
 
     /// Obtain user/policy authorization separately from tool availability.
     fn request_permission(&mut self, request: PermissionRequest)
-    -> AgentResult<PermissionDecision>;
+    -> AgentResult<PermissionResponse>;
 
     /// Execute one authorized typed tool occurrence.
     fn invoke_tool(&mut self, request: ToolRequest) -> AgentResult<ToolResponse>;

@@ -296,7 +296,8 @@ Implemented today:
   component occurrence replay;
 - process reopen after a durable wait without reinvoking a recorded component;
 - ambiguous mutating-effect recovery by reconciliation without redispatch;
-- typed agent interactions with M1-backed Session journal replay;
+- typed agent interactions with M1-backed Session journal replay and
+  binding-pinned host-call occurrences that block ambiguous redispatch;
 - bounded virtual work with deterministic fairness and portable snapshots;
 - immutable Plan evolution DAGs, impact cones, canaries, rollback pins,
   migration receipts, and shadow evidence.

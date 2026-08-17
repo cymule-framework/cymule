@@ -1,13 +1,14 @@
 //! End-to-end agent interaction and reducer tests.
 
 use cymule_agent::{
-    AgentError, AgentHost, AgentJournal, AgentMessage, AgentResult, AgentSession, AgentState,
-    AgentTurnDriver, AgentUpdate, ContentBlock, ContextRequest, ContextSnapshot,
-    ElicitationRequest, ElicitationResponse, MemoryAgentJournal, MessageRole, ModelRequest,
-    ModelResponse, PermissionDecision, PermissionRequest, SessionStopReason, ToolCall,
-    ToolCallStatus, ToolRequest, ToolResponse, Usage, WorkspaceChange, WorkspaceReceipt,
+    AgentError, AgentHost, AgentHostOccurrenceState, AgentHostRequest, AgentJournal, AgentMessage,
+    AgentOccurrenceStore, AgentResult, AgentSession, AgentState, AgentTurnDriver, AgentUpdate,
+    ContentBlock, ContextRequest, ContextSnapshot, ElicitationRequest, ElicitationResponse,
+    MemoryAgentJournal, MessageRole, ModelRequest, ModelResponse, PermissionDecision,
+    PermissionRequest, PermissionResponse, SessionStopReason, ToolCall, ToolCallStatus,
+    ToolRequest, ToolResponse, Usage, WorkspaceChange, WorkspaceReceipt,
 };
-use cymule_core::Machine;
+use cymule_core::{ArtifactRef, Machine, canonical_digest};
 use cymule_durable::{DurableCoordinator, MemoryStore};
 use serde_json::json;
 
@@ -56,8 +57,11 @@ impl AgentHost for FakeHost {
     fn request_permission(
         &mut self,
         _request: PermissionRequest,
-    ) -> AgentResult<PermissionDecision> {
-        Ok(PermissionDecision::AllowOnce)
+    ) -> AgentResult<PermissionResponse> {
+        Ok(PermissionResponse {
+            decision: PermissionDecision::AllowOnce,
+            occurrence_binding: "binding:permission/1".to_owned(),
+        })
     }
 
     fn invoke_tool(&mut self, request: ToolRequest) -> AgentResult<ToolResponse> {
@@ -71,12 +75,22 @@ impl AgentHost for FakeHost {
         })
     }
 
-    fn elicit(&mut self, _request: ElicitationRequest) -> AgentResult<ElicitationResponse> {
-        Err(AgentError::Host("not used".to_owned()))
+    fn elicit(&mut self, request: ElicitationRequest) -> AgentResult<ElicitationResponse> {
+        Ok(ElicitationResponse {
+            request_id: request.request_id,
+            accepted: true,
+            value: Some(json!({"answer": "yes"})),
+            occurrence_binding: "binding:elicitation/1".to_owned(),
+        })
     }
 
-    fn apply_workspace(&mut self, _change: WorkspaceChange) -> AgentResult<WorkspaceReceipt> {
-        Err(AgentError::Host("not used".to_owned()))
+    fn apply_workspace(&mut self, change: WorkspaceChange) -> AgentResult<WorkspaceReceipt> {
+        Ok(WorkspaceReceipt {
+            change_id: change.change_id,
+            committed: change.commit,
+            evidence: change.overlay,
+            occurrence_binding: "binding:workspace/1".to_owned(),
+        })
     }
 }
 
@@ -96,6 +110,45 @@ fn usage(used: u64) -> Usage {
         capacity: 100,
         cost: None,
     }
+}
+
+#[test]
+fn frozen_agent_occurrence_fixture_matches_the_rust_contract() {
+    let occurrence: cymule_agent::AgentHostOccurrence = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/agent-occurrence.json"
+    ))
+    .expect("fixture deserializes");
+    assert_eq!(
+        occurrence.request_digest,
+        canonical_digest(&occurrence.request).expect("request hashes")
+    );
+    occurrence
+        .validate()
+        .expect("fixture is semantically valid");
+    assert_eq!(occurrence.state, AgentHostOccurrenceState::Completed);
+}
+
+#[test]
+fn host_occurrence_rejects_mismatched_response_identity() {
+    let prepared = cymule_agent::AgentHostOccurrence::prepare(
+        "occurrence:tool:mismatch",
+        "session:mismatch",
+        AgentHostRequest::Tool(ToolRequest {
+            tool_call_id: "tool:expected".to_owned(),
+            operation: "workspace.read".to_owned(),
+            input: json!({}),
+        }),
+    )
+    .expect("occurrence prepares");
+    let started = prepared.start().expect("occurrence starts");
+    assert!(matches!(
+        started.complete(cymule_agent::AgentHostResponse::Tool(ToolResponse {
+            tool_call_id: "tool:different".to_owned(),
+            content: Vec::new(),
+            occurrence_binding: "binding:tool/1".to_owned(),
+        })),
+        Err(AgentError::Validation(_))
+    ));
 }
 
 #[test]
@@ -185,6 +238,22 @@ fn durable_turn_reopens_to_the_same_projection() {
     let expected = driver.session().clone();
     drop(driver);
 
+    let mut inspection = journal.clone();
+    let occurrences = inspection
+        .load_occurrences("session:durable")
+        .expect("occurrences replay");
+    assert_eq!(occurrences.len(), 6);
+    assert!(
+        occurrences
+            .iter()
+            .all(|occurrence| occurrence.state == AgentHostOccurrenceState::Completed)
+    );
+    assert!(
+        occurrences
+            .iter()
+            .all(|occurrence| occurrence.occurrence_binding.is_some())
+    );
+
     let reopened = AgentTurnDriver::resume("session:durable", FakeHost::default(), journal)
         .expect("journal replays");
     assert_eq!(reopened.session(), &expected);
@@ -220,6 +289,57 @@ fn m1_cas_journal_reopens_the_agent_projection() {
     assert_eq!(reopened.session(), &expected);
 }
 
+#[test]
+fn elicitation_and_workspace_calls_are_pinned_occurrences() {
+    let journal = MemoryAgentJournal::default();
+    let mut driver =
+        AgentTurnDriver::resume("session:surfaces", FakeHost::default(), journal.clone())
+            .expect("journal opens");
+    let response = driver
+        .elicit(ElicitationRequest {
+            request_id: "elicitation:1".to_owned(),
+            schema: json!({"type": "object"}),
+            prompt: vec![ContentBlock::Text {
+                text: "Continue?".to_owned(),
+            }],
+        })
+        .expect("elicitation completes");
+    assert!(response.accepted);
+    let receipt = driver
+        .apply_workspace(WorkspaceChange {
+            change_id: "workspace:1".to_owned(),
+            overlay: ArtifactRef {
+                artifact_id: "sha256:overlay".to_owned(),
+                kind: "workspace/overlay".to_owned(),
+            },
+            commit: true,
+        })
+        .expect("workspace change completes");
+    assert!(receipt.committed);
+    drop(driver);
+
+    let mut inspection = journal;
+    let occurrences = inspection
+        .load_occurrences("session:surfaces")
+        .expect("occurrences replay");
+    assert_eq!(occurrences.len(), 2);
+    assert!(
+        occurrences
+            .iter()
+            .all(|occurrence| occurrence.state == AgentHostOccurrenceState::Completed)
+    );
+    assert!(
+        occurrences
+            .iter()
+            .any(|occurrence| matches!(&occurrence.request, AgentHostRequest::Elicitation(_)))
+    );
+    assert!(
+        occurrences
+            .iter()
+            .any(|occurrence| matches!(&occurrence.request, AgentHostRequest::Workspace(_)))
+    );
+}
+
 #[derive(Default)]
 struct FailingToolHost;
 
@@ -248,8 +368,11 @@ impl AgentHost for FailingToolHost {
     fn request_permission(
         &mut self,
         _request: PermissionRequest,
-    ) -> AgentResult<PermissionDecision> {
-        Ok(PermissionDecision::AllowOnce)
+    ) -> AgentResult<PermissionResponse> {
+        Ok(PermissionResponse {
+            decision: PermissionDecision::AllowOnce,
+            occurrence_binding: "binding:permission/1".to_owned(),
+        })
     }
 
     fn invoke_tool(&mut self, _request: ToolRequest) -> AgentResult<ToolResponse> {
@@ -267,7 +390,7 @@ impl AgentHost for FailingToolHost {
 
 #[test]
 fn host_failure_preserves_the_last_accepted_interaction_state() {
-    let journal = MemoryAgentJournal::default();
+    let mut journal = MemoryAgentJournal::default();
     let mut driver = AgentTurnDriver::resume("session:crash", FailingToolHost, journal.clone())
         .expect("journal opens");
     assert!(matches!(
@@ -280,14 +403,28 @@ fn host_failure_preserves_the_last_accepted_interaction_state() {
     ));
     drop(driver);
 
-    let reopened = AgentTurnDriver::resume("session:crash", FailingToolHost, journal)
-        .expect("partial journal replays");
-    assert_eq!(reopened.session().state, AgentState::Running);
+    let session = AgentSession::replay(
+        "session:crash",
+        journal.load("session:crash").expect("updates replay"),
+    )
+    .expect("partial projection rebuilds");
+    assert_eq!(session.state, AgentState::Running);
     assert_eq!(
-        reopened.session().tools["tool:crash"].status,
+        session.tools["tool:crash"].status,
         ToolCallStatus::InProgress
     );
-    assert_eq!(reopened.session().ordered_messages().count(), 2);
+    assert_eq!(session.ordered_messages().count(), 2);
+    let occurrences = journal
+        .load_occurrences("session:crash")
+        .expect("occurrences replay");
+    assert!(occurrences.iter().any(|occurrence| {
+        occurrence.state == AgentHostOccurrenceState::Unknown
+            && occurrence.occurrence_id.starts_with("occurrence:tool:")
+    }));
+    assert!(matches!(
+        AgentTurnDriver::resume("session:crash", FailingToolHost, journal),
+        Err(AgentError::RecoveryRequired(_))
+    ));
 }
 
 #[derive(Default)]
@@ -299,6 +436,22 @@ impl AgentJournal for RejectingJournal {
     }
 
     fn append(&mut self, _session_id: &str, _update: &AgentUpdate) -> AgentResult<()> {
+        Err(AgentError::Persistence("unavailable".to_owned()))
+    }
+}
+
+impl AgentOccurrenceStore for RejectingJournal {
+    fn load_occurrences(
+        &mut self,
+        _session_id: &str,
+    ) -> AgentResult<Vec<cymule_agent::AgentHostOccurrence>> {
+        Ok(Vec::new())
+    }
+
+    fn record_occurrence(
+        &mut self,
+        _occurrence: &cymule_agent::AgentHostOccurrence,
+    ) -> AgentResult<()> {
         Err(AgentError::Persistence("unavailable".to_owned()))
     }
 }
@@ -349,4 +502,69 @@ fn journal_rejects_conflicting_reuse_without_an_extra_record() {
         journal.load("session:journal").expect("load succeeds"),
         vec![running]
     );
+}
+
+#[derive(Clone, Default)]
+struct FailAfterToolResultJournal {
+    inner: MemoryAgentJournal,
+}
+
+impl AgentJournal for FailAfterToolResultJournal {
+    fn load(&mut self, session_id: &str) -> AgentResult<Vec<AgentUpdate>> {
+        self.inner.load(session_id)
+    }
+
+    fn append(&mut self, session_id: &str, update: &AgentUpdate) -> AgentResult<()> {
+        self.inner.append(session_id, update)
+    }
+}
+
+impl AgentOccurrenceStore for FailAfterToolResultJournal {
+    fn load_occurrences(
+        &mut self,
+        session_id: &str,
+    ) -> AgentResult<Vec<cymule_agent::AgentHostOccurrence>> {
+        self.inner.load_occurrences(session_id)
+    }
+
+    fn record_occurrence(
+        &mut self,
+        occurrence: &cymule_agent::AgentHostOccurrence,
+    ) -> AgentResult<()> {
+        if occurrence.state == AgentHostOccurrenceState::Completed
+            && matches!(&occurrence.request, AgentHostRequest::Tool(_))
+        {
+            return Err(AgentError::Persistence(
+                "simulated loss before tool receipt commit".to_owned(),
+            ));
+        }
+        self.inner.record_occurrence(occurrence)
+    }
+}
+
+#[test]
+fn tool_result_without_a_durable_receipt_is_never_redispatched() {
+    let journal = FailAfterToolResultJournal::default();
+    let mut driver =
+        AgentTurnDriver::resume("session:receipt-loss", FakeHost::default(), journal.clone())
+            .expect("journal opens");
+    assert!(matches!(
+        driver.run_turn(
+            message(
+                "message:user:receipt-loss",
+                MessageRole::User,
+                "Inspect the README",
+            ),
+            &["workspace.read".to_owned()],
+            100,
+        ),
+        Err(AgentError::Persistence(_))
+    ));
+    let (host, _, _) = driver.into_durable_parts();
+    assert_eq!(host.tool_calls, 1);
+
+    assert!(matches!(
+        AgentTurnDriver::resume("session:receipt-loss", FakeHost::default(), journal),
+        Err(AgentError::RecoveryRequired(_))
+    ));
 }

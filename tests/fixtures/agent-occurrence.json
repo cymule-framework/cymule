@@ -1,0 +1,26 @@
+{
+  "occurrence_id": "occurrence:tool:1",
+  "session_id": "session:fixture",
+  "request": {
+    "kind": "tool",
+    "request": {
+      "tool_call_id": "tool:read",
+      "operation": "workspace.read",
+      "input": { "path": "README.md" }
+    }
+  },
+  "request_digest": "b4bde8218bea58f17ffcb3403eed66af78592514fb279df103391af90cabbfcd",
+  "state": "completed",
+  "response": {
+    "kind": "tool",
+    "response": {
+      "tool_call_id": "tool:read",
+      "content": [
+        { "type": "json", "value": { "exists": true } }
+      ],
+      "occurrence_binding": "binding:tool/1"
+    }
+  },
+  "occurrence_binding": "binding:tool/1",
+  "failure": null
+}

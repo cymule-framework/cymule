@@ -16,21 +16,28 @@ Status: partial.
   idempotent durable update append, and full projection replay after reopen;
 - an M1 `DurableCoordinator` journal integration that commits agent updates
   through the same whole-state CAS authority as Continuations and waits;
+- typed host occurrences for context, model, permission, tool, elicitation, and
+  workspace calls with immutable request digests and occurrence bindings;
+- `prepared -> started -> completed | unknown` persistence through both the
+  in-memory journal and M1 whole-state CAS, including retained typed responses;
+- restart rejection for unresolved occurrences and a receipt-loss fault test
+  proving a completed provider call is not automatically redispatched;
 - non-blocking in-memory reference journal with conflicting update identity
   rejection;
+- frozen Draft 2020-12 wire schema and a Rust-validated occurrence fixture;
 - deterministic fake-host end-to-end tests;
 - adapter boundaries for ACP, MCP, A2A, editors, and model providers.
 
 ## Remaining completion gates
 
-- durable occurrence records for every context, model, permission, tool,
-  elicitation, and workspace host call;
+- explicit reconciliation/cancellation commands for `started` and `unknown`
+  host occurrences and continuation from retained completed responses;
 - explicit input-required suspension/resume through durable waits;
 - workspace overlay commit/abort integration with scope obligations;
 - streaming chunk staging and finalized durable content;
 - ACP/MCP/A2A adapters and cross-language SDK interaction clients;
 - cancellation, refusal, host failure, and restart-level fault suites;
-- field-complete frozen M2 JSON Schemas and removal of incubation rustdoc
+- field-complete Session projection schema and removal of incubation rustdoc
   allowances.
 
 Capability advertisement, authentication, permission, credential access, and
