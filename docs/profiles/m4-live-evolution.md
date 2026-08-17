@@ -5,6 +5,8 @@ Status: partial.
 ## Implemented foundation
 
 - immutable sealed Plan nodes and content-addressed parent/child patch edges;
+- deterministic structural Plan diff over IR version, entry, component,
+  effect, and definition contracts, lowered into reviewed patch operations;
 - declared patch operations with review/compiler evidence artifacts;
 - cycle rejection and portable Plan DAG snapshots;
 - conservative impact cones over changed stable targets, active Continuation
@@ -12,21 +14,28 @@ Status: partial.
 - future-only rollout decisions for shadow, deterministic canary, active, and
   rolled-back modes;
 - immutable Plan assignment per admitted occurrence across later decisions;
+- M1-backed evolution checkpoints with explicit parent lineage and idempotent
+  replay for Plan edges, rollout decisions, mixed-version occurrence pins,
+  migrations, and shadow evidence;
 - safe-point-only state migration receipts with input/output/evidence artifacts;
 - idempotent shadow comparison evidence;
-- tests for DAG cycles, active impact, deterministic pins, rollback without
-  history rewrite, safe-point migration, and snapshot restore.
+- tests for DAG cycles, deterministic diff, active impact, deterministic pins,
+  rollback without history rewrite, safe-point migration, snapshot restore,
+  stale CAS rollback, and lost-checkpoint receipt reopen.
 
 ## Remaining completion gates
 
-- automatic structural Plan diff and patch application/lowering;
+- reusable definition/subflow references, sealed dependency edges, reverse
+  dependency impact, and transitive dependent Plan relinking;
+- patch application/lowering from reviewed operations into a new sealed Plan;
 - impact over nested wait/scope/tool/model state and virtual regions;
 - migration adapter registry with schema compatibility and transformed state;
 - shadow execution driver and comparison policies;
 - rollout observation gates, canary promotion, automatic rollback decisions,
   and mixed-version runtime dispatch;
-- durable persistence through M1 and cross-language evolution control clients;
-- restart/crash tests during migration, rollout, and rollback.
+- cross-language evolution control clients;
+- restart/crash tests during migration, promotion, and rollback beyond the
+  implemented occurrence-pin receipt-loss boundary.
 
 Rollback is a new future-selection decision. It never removes a child Plan,
 migration receipt, shadow result, released effect, or historical occurrence pin.

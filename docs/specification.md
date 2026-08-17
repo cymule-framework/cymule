@@ -449,6 +449,30 @@ Changing a default MUST NOT rewrite an admitted occurrence. If its original
 binding is unavailable, the occurrence enters an explicit unavailable or
 governance path.
 
+### 12.1 Semantic Plan evolution
+
+A semantic update creates a new immutable Plan node and a content-addressed
+edge from its reviewed base. Structural diff is deterministic evidence for that
+edge; it does not mutate or alias the parent. Reusable definitions and subflows
+MUST resolve to immutable semantic dependency edges when a Plan is sealed. An
+updated dependency creates a new child and, when selected, newly linked
+dependent Plan commits. A sealed Plan MUST NOT contain an ambient `latest`
+pointer whose later resolution can change its meaning.
+
+Future calls may select a compatible new child Plan under an admitted rollout.
+An already materialized invocation remains pinned to its original Plan. A
+yielded Continuation changes Plan only at a semantic safe point with state and
+contract migration evidence plus an epoch advance. Parent and child may execute
+different Plan commits only when a checked cross-version adapter is total over
+reachable input/state, preserves output contracts, does not widen effects or
+authority, and maps failure, cancellation, budget, and ownership semantics.
+
+M4 durable controls checkpoint the complete evolution reducer through an M1
+application journal with explicit parent lineage. Plan-edge admission, future
+rollout, occurrence selection, migration, shadow evidence, promotion, and
+rollback MUST survive stale CAS and lost acknowledgement without changing an
+existing occurrence pin or creating a second decision.
+
 ## 13. Replay
 
 - **Exact state replay** reduces recorded events and artifacts without external

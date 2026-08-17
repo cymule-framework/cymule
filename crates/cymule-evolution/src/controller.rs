@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use cymule_core::{ArtifactRef, SealedPlan, content_id};
+use cymule_core::{ArtifactRef, SealedPlan, canonical_digest, content_id};
 use cymule_durable::Continuation;
+use serde::Serialize;
 
 use crate::{
     EvolutionError, EvolutionResult, EvolutionSnapshot, ImpactCone, MigrationReceipt,
@@ -109,6 +110,29 @@ impl EvolutionController {
             .incoming
             .insert(edge_id);
         Ok(edge)
+    }
+
+    /// Diff two sealed Plans and add the resulting immutable edge.
+    pub fn add_diff_edge(
+        &mut self,
+        from_plan: &str,
+        child: &SealedPlan,
+        evidence: ArtifactRef,
+    ) -> EvolutionResult<PlanEdge> {
+        let parent = self
+            .snapshot
+            .plans
+            .get(from_plan)
+            .ok_or_else(|| EvolutionError::NotFound(format!("parent Plan {from_plan} is missing")))?
+            .plan
+            .clone();
+        let operations = diff_plans(&parent, child)?;
+        if operations.is_empty() {
+            return Err(EvolutionError::Validation(
+                "Plan edge contains no semantic change".to_owned(),
+            ));
+        }
+        self.add_edge(from_plan, child, operations, evidence)
     }
 
     /// Compute conservative impact over active Continuations and released effects.
@@ -322,6 +346,100 @@ impl EvolutionController {
         complete.insert(plan_id.to_owned());
         cyclic
     }
+}
+
+/// Compute a deterministic conservative diff between two sealed Plans.
+pub fn diff_plans(from: &SealedPlan, to: &SealedPlan) -> EvolutionResult<Vec<PatchOperation>> {
+    from.verify()?;
+    to.verify()?;
+    let mut operations = Vec::new();
+    if from.candidate.ir_version != to.candidate.ir_version {
+        operations.push(PatchOperation {
+            kind: "replace".to_owned(),
+            target: "ir_version".to_owned(),
+            before: Some(canonical_digest(&from.candidate.ir_version)?),
+            after: Some(canonical_digest(&to.candidate.ir_version)?),
+        });
+    }
+    if from.candidate.entry != to.candidate.entry {
+        operations.push(PatchOperation {
+            kind: "replace".to_owned(),
+            target: "entry".to_owned(),
+            before: Some(canonical_digest(&from.candidate.entry)?),
+            after: Some(canonical_digest(&to.candidate.entry)?),
+        });
+    }
+    diff_named(
+        "component",
+        &from.candidate.components,
+        &to.candidate.components,
+        |component| &component.id,
+        &mut operations,
+    )?;
+    diff_named(
+        "effect",
+        &from.candidate.effects,
+        &to.candidate.effects,
+        |effect| &effect.id,
+        &mut operations,
+    )?;
+    diff_named(
+        "definition",
+        &from.candidate.definitions,
+        &to.candidate.definitions,
+        |definition| &definition.id,
+        &mut operations,
+    )?;
+    operations.sort_by(|left, right| {
+        left.target
+            .cmp(&right.target)
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
+    Ok(operations)
+}
+
+fn diff_named<T: Serialize>(
+    prefix: &str,
+    from: &[T],
+    to: &[T],
+    identity: impl Fn(&T) -> &String,
+    operations: &mut Vec<PatchOperation>,
+) -> EvolutionResult<()> {
+    let before: BTreeMap<&str, &T> = from
+        .iter()
+        .map(|value| (identity(value).as_str(), value))
+        .collect();
+    let after: BTreeMap<&str, &T> = to
+        .iter()
+        .map(|value| (identity(value).as_str(), value))
+        .collect();
+    for key in before
+        .keys()
+        .chain(after.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+    {
+        let old = before.get(key).copied();
+        let new = after.get(key).copied();
+        let old_digest = old.map(canonical_digest).transpose()?;
+        let new_digest = new.map(canonical_digest).transpose()?;
+        if old_digest == new_digest {
+            continue;
+        }
+        operations.push(PatchOperation {
+            kind: match (old, new) {
+                (None, Some(_)) => "add",
+                (Some(_), None) => "remove",
+                (Some(_), Some(_)) => "replace",
+                (None, None) => unreachable!("key came from at least one Plan"),
+            }
+            .to_owned(),
+            target: format!("{prefix}:{key}"),
+            before: old_digest,
+            after: new_digest,
+        });
+    }
+    Ok(())
 }
 
 impl Default for EvolutionController {

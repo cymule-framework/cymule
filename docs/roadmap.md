@@ -118,9 +118,12 @@ Status: partial.
   conservative impact cones, deterministic future-only canaries, rollback,
   safe-point migration receipts, shadow evidence, and portable snapshots are
   implemented;
-- automatic Plan diff/application, schema migration adapters, shadow execution,
-  observation gates, promotion, mixed-version runtime dispatch, durable control,
-  and crash tests remain proposed.
+- deterministic structural Plan diff, M1 durable checkpoint lineage,
+  mixed-version occurrence pinning, stale-CAS rollback, and lost-receipt reopen
+  are implemented;
+- reusable definition/subflow dependency relinking, patch application, schema
+  migration adapters, shadow execution, observation gates, promotion,
+  cross-language controls, and the remaining crash matrix remain proposed.
 
 ## M5 - Isolation and federation
 
