@@ -2,13 +2,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use cymule_core::{
     ComponentContract, Definition, DispatchPolicy, EffectContract, EffectProfile, Expression,
-    MutationKind, Operation, PlanCandidate, ReconciliationMode, Region, Step, WaitSpec,
+    MutationKind, Operation, PlanCandidate, ReconciliationMode, ReconciliationResolution, Region,
+    Step, WaitSpec, WorldOutcome,
 };
-use cymule_durable::{DriveOutcome, MemoryStore, ResumableRuntime, WaitActivationSource};
+use cymule_durable::{
+    DriveOutcome, DurableError, DurableResult, DurableState, DurableStore, MemoryStore,
+    OutboxState, ResumableRuntime, StoreCommit, StoredState, WaitActivationSource,
+};
 use cymule_runtime::{
     PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginOperation, PluginRequest,
     PluginResponse, RuntimeError, RuntimeResult,
@@ -24,6 +28,118 @@ struct CrashAfterApplyPlugin {
     reconciliations: Arc<AtomicUsize>,
     crash_after_apply: bool,
     unknown_reconciliations: usize,
+}
+
+#[derive(Clone, Copy)]
+enum ReceiptLossStage {
+    Enqueue,
+    ScopeCommit,
+    Claim,
+    Applied,
+    Unknown,
+}
+
+#[derive(Clone)]
+struct StageReceiptLossStore {
+    inner: MemoryStore,
+    stage: ReceiptLossStage,
+    lost: Arc<AtomicBool>,
+}
+
+impl DurableStore for StageReceiptLossStore {
+    fn load(&mut self) -> DurableResult<Option<StoredState>> {
+        self.inner.load()
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        expected_revision: Option<&str>,
+        next: &DurableState,
+    ) -> DurableResult<StoreCommit> {
+        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        let reached = next.outbox.values().any(|dispatch| {
+            matches!(
+                (self.stage, dispatch.state),
+                (ReceiptLossStage::Enqueue, OutboxState::Pending)
+                    | (ReceiptLossStage::Claim, OutboxState::Claimed)
+                    | (ReceiptLossStage::Applied, OutboxState::Applied)
+                    | (ReceiptLossStage::Unknown, OutboxState::Unknown)
+            )
+        }) || matches!(self.stage, ReceiptLossStage::ScopeCommit)
+            && next
+                .outbox
+                .values()
+                .any(|dispatch| dispatch.state == OutboxState::Pending)
+            && next.machine.events.last().is_some_and(|event| {
+                matches!(
+                    &event.payload,
+                    cymule_core::EventPayload::ScopeCommitted { .. }
+                )
+            });
+        if reached && !self.lost.swap(true, Ordering::SeqCst) {
+            return Err(DurableError::Substrate(
+                "simulated receipt loss after durable effect stage".to_owned(),
+            ));
+        }
+        Ok(commit)
+    }
+}
+
+struct StagePlugin {
+    prepares: Arc<AtomicUsize>,
+    dispatches: Arc<AtomicUsize>,
+    reconciliations: Arc<AtomicUsize>,
+    dispatch_outcome: WorldOutcome,
+    reconciliation: ReconciliationResolution,
+    lose_first_prepare_response: bool,
+}
+
+impl PluginHost for StagePlugin {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        match request {
+            PluginRequest::Describe => Ok(PluginResponse::Manifest {
+                manifest: PluginManifest {
+                    plugin_version: PLUGIN_VERSION.to_owned(),
+                    implementation_id: "effect-stage-test@1".to_owned(),
+                    components: BTreeMap::new(),
+                    effects: BTreeMap::from([(
+                        "test.capture".to_owned(),
+                        PluginEffect {
+                            implementation_revision: "1".to_owned(),
+                            can_reconcile: true,
+                        },
+                    )]),
+                },
+            }),
+            PluginRequest::PrepareEffect { .. } => {
+                let attempt = self.prepares.fetch_add(1, Ordering::SeqCst) + 1;
+                if self.lose_first_prepare_response && attempt == 1 {
+                    return Err(RuntimeError::Io(
+                        "simulated lost response after external prepare".to_owned(),
+                    ));
+                }
+                Ok(PluginResponse::Prepared)
+            }
+            PluginRequest::DispatchEffect { input, .. } => {
+                self.dispatches.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::EffectResult {
+                    outcome: self.dispatch_outcome,
+                    value: (self.dispatch_outcome == WorldOutcome::Applied).then_some(input),
+                })
+            }
+            PluginRequest::ReconcileEffect { input, .. } => {
+                self.reconciliations.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::ReconciliationResult {
+                    resolution: self.reconciliation,
+                    value: (self.reconciliation == ReconciliationResolution::ResolvedApplied)
+                        .then_some(input),
+                })
+            }
+            request @ PluginRequest::Call { .. } => Err(RuntimeError::Plugin(format!(
+                "unsupported stage test request: {request:?}"
+            ))),
+        }
+    }
 }
 
 impl PluginHost for CrashAfterApplyPlugin {
@@ -457,4 +573,131 @@ fn unknown_outbox_reconciles_after_another_process_reopen_without_redispatch() {
     assert_eq!(result.value, json!({"value": 2}));
     assert_eq!(dispatches.load(Ordering::SeqCst), 1);
     assert_eq!(reconciliations.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn effect_stage_receipt_loss_reopens_without_duplicate_world_effects() {
+    let cases = [
+        (
+            ReceiptLossStage::Enqueue,
+            WorldOutcome::Applied,
+            ReconciliationResolution::ResolvedApplied,
+            1,
+            0,
+        ),
+        (
+            ReceiptLossStage::Claim,
+            WorldOutcome::Applied,
+            ReconciliationResolution::ResolvedNotApplied,
+            0,
+            1,
+        ),
+        (
+            ReceiptLossStage::ScopeCommit,
+            WorldOutcome::Applied,
+            ReconciliationResolution::ResolvedApplied,
+            1,
+            0,
+        ),
+        (
+            ReceiptLossStage::Applied,
+            WorldOutcome::Applied,
+            ReconciliationResolution::ResolvedApplied,
+            1,
+            0,
+        ),
+        (
+            ReceiptLossStage::Unknown,
+            WorldOutcome::Unknown,
+            ReconciliationResolution::ResolvedApplied,
+            1,
+            1,
+        ),
+    ];
+    for (
+        index,
+        (stage, dispatch_outcome, reconciliation, expected_dispatches, expected_reconciliations),
+    ) in cases.into_iter().enumerate()
+    {
+        let lost = Arc::new(AtomicBool::new(false));
+        let store = StageReceiptLossStore {
+            inner: MemoryStore::new(),
+            stage,
+            lost: lost.clone(),
+        };
+        let prepares = Arc::new(AtomicUsize::new(0));
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let reconciliations = Arc::new(AtomicUsize::new(0));
+        let plugin = || StagePlugin {
+            prepares: prepares.clone(),
+            dispatches: dispatches.clone(),
+            reconciliations: reconciliations.clone(),
+            dispatch_outcome,
+            reconciliation,
+            lose_first_prepare_response: false,
+        };
+        let run_id = format!("run:effect-stage-receipt-loss:{index}");
+        let mut runtime = ResumableRuntime::open(store.clone(), plugin()).expect("runtime opens");
+        assert!(
+            runtime
+                .start(effect_candidate(), &json!({"value": index}), &run_id)
+                .is_err()
+        );
+        assert!(lost.load(Ordering::SeqCst));
+        let (store, _) = runtime.into_parts();
+        let mut reopened = ResumableRuntime::open(store, plugin()).expect("runtime reopens");
+        let DriveOutcome::Completed(result) = reopened
+            .resume(&run_id)
+            .expect("receipt-loss recovery completes")
+        else {
+            panic!("receipt-loss recovery should complete");
+        };
+        assert_eq!(result.value, json!({"value": index}));
+        assert_eq!(prepares.load(Ordering::SeqCst), 1);
+        assert_eq!(dispatches.load(Ordering::SeqCst), expected_dispatches);
+        assert_eq!(
+            reconciliations.load(Ordering::SeqCst),
+            expected_reconciliations
+        );
+    }
+}
+
+#[test]
+fn lost_prepare_response_reuses_the_same_intent_before_dispatch() {
+    let prepares = Arc::new(AtomicUsize::new(0));
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let reconciliations = Arc::new(AtomicUsize::new(0));
+    let plugin = || StagePlugin {
+        prepares: prepares.clone(),
+        dispatches: dispatches.clone(),
+        reconciliations: reconciliations.clone(),
+        dispatch_outcome: WorldOutcome::Applied,
+        reconciliation: ReconciliationResolution::ResolvedApplied,
+        lose_first_prepare_response: true,
+    };
+    let mut runtime = ResumableRuntime::open(MemoryStore::new(), plugin()).expect("runtime opens");
+    assert!(
+        runtime
+            .start(
+                effect_candidate(),
+                &json!({"value": "prepared-once"}),
+                "run:lost-prepare-response",
+            )
+            .is_err()
+    );
+    assert_eq!(prepares.load(Ordering::SeqCst), 1);
+    assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+    let (store, _) = runtime.into_parts();
+
+    let mut reopened = ResumableRuntime::open(store, plugin()).expect("runtime reopens");
+    let DriveOutcome::Completed(result) = reopened
+        .resume("run:lost-prepare-response")
+        .expect("idempotent prepare retry completes")
+    else {
+        panic!("prepare retry should complete");
+    };
+    assert_eq!(result.value, json!({"value": "prepared-once"}));
+    assert_eq!(prepares.load(Ordering::SeqCst), 2);
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(reconciliations.load(Ordering::SeqCst), 0);
 }

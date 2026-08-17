@@ -34,6 +34,12 @@ The local suite verifies:
 - scope commit closes internal state and transfers obligations exactly once;
 - effect transitions reject illegal jumps;
 - dispatch ambiguity becomes `unknown`, never a fresh intent;
+- prepare response loss retries the same structural intent; effect enqueue,
+  scope commit, dispatch-start claim, Applied/Unknown observation, and
+  reconciliation receipt loss reopen without duplicate provider dispatch;
+- effect/outbox checkpoints reject unrelated canonical Events, commands,
+  Artifacts, or Plan changes, and `Unknown` Event plus outbox state commit in one
+  CAS;
 - reconciliation retains the original occurrence binding;
 - identical signal/timer activation redelivery returns the original durable
   decision, source mismatch and conflicting ID reuse fail, one signal token

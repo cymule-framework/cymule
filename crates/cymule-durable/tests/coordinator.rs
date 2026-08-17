@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cymule_core::{
-    COMMAND_VERSION, Command, CommandEnvelope, Definition, Expression, Machine, PlanCandidate,
-    Region,
+    COMMAND_VERSION, Command, CommandEnvelope, Definition, DispatchPolicy, EffectContract,
+    EffectProfile, EffectTransition, Expression, Machine, MutationKind, PlanCandidate,
+    ROOT_SCOPE_ID, ReconciliationMode, Region, WorldOutcome, effect_intent_id,
 };
 use cymule_durable::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
@@ -48,6 +49,121 @@ fn machine_with_run() -> (Machine, String) {
         })
         .expect("run starts");
     (machine, plan.plan_id)
+}
+
+fn submit(machine: &mut Machine, run_id: &str, command_id: &str, command: Command) {
+    let precondition = machine.projection().runs[run_id].precondition_token();
+    machine
+        .submit(CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: command_id.to_owned(),
+            actor: "actor:test".to_owned(),
+            run_id: run_id.to_owned(),
+            expected_precondition: Some(precondition),
+            command,
+        })
+        .expect("command submits");
+}
+
+fn prepared_effect_transition() -> (Machine, Machine, Continuation, EffectDispatch) {
+    let mut machine = Machine::new();
+    let plan = machine
+        .seal_plan(PlanCandidate {
+            ir_version: cymule_core::IR_VERSION.to_owned(),
+            name: "effect_delta_test".to_owned(),
+            entry: "main".to_owned(),
+            components: Vec::new(),
+            effects: vec![EffectContract {
+                id: "example.effect".to_owned(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                profile: EffectProfile {
+                    mutation: MutationKind::Mutating,
+                    dispatch: DispatchPolicy::OnScopeCommit,
+                    reconciliation: ReconciliationMode::Queryable,
+                    keyed_idempotency: true,
+                    irreversible: false,
+                },
+                requirements: BTreeMap::new(),
+            }],
+            definitions: vec![Definition {
+                id: "main".to_owned(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                body: Region {
+                    steps: Vec::new(),
+                    result: Expression::Literal { value: json!(null) },
+                },
+            }],
+            metadata: BTreeMap::new(),
+        })
+        .expect("plan seals");
+    machine
+        .submit(CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: "command:effect-run-start".to_owned(),
+            actor: "actor:test".to_owned(),
+            run_id: "run:effect-delta".to_owned(),
+            expected_precondition: None,
+            command: Command::StartRun {
+                plan_id: plan.plan_id.clone(),
+                binding_context: "binding:test".to_owned(),
+            },
+        })
+        .expect("Run starts");
+    let base = machine.clone();
+    let args = machine.put_artifact("cymule.effect-args/1", b"{}".to_vec());
+    let binding = "binding:effect/test@1".to_owned();
+    let intent_id = effect_intent_id(
+        "run:effect-delta",
+        "main",
+        "effect.site",
+        ROOT_SCOPE_ID,
+        0,
+        "primary",
+        &args,
+        "cymule.effect-schema/1",
+    )
+    .expect("effect intent derives");
+    submit(
+        &mut machine,
+        "run:effect-delta",
+        "command:effect-propose",
+        Command::ProposeEffect {
+            scope_id: ROOT_SCOPE_ID.to_owned(),
+            invocation_id: "main".to_owned(),
+            site_id: "effect.site".to_owned(),
+            occurrence: "primary".to_owned(),
+            operation: "example.effect".to_owned(),
+            args: args.clone(),
+            occurrence_binding: binding.clone(),
+        },
+    );
+    submit(
+        &mut machine,
+        "run:effect-delta",
+        "command:effect-prepare",
+        Command::TransitionEffect {
+            intent_id: intent_id.clone(),
+            transition: EffectTransition::Prepare,
+        },
+    );
+    (
+        base,
+        machine,
+        continuation(plan.plan_id),
+        EffectDispatch {
+            intent_id,
+            run_id: "run:effect-delta".to_owned(),
+            operation: "example.effect".to_owned(),
+            input: args,
+            occurrence_binding: binding,
+            state: OutboxState::Pending,
+            claim_epoch: 0,
+            claim_owner: None,
+            result: None,
+        },
+    )
 }
 
 fn continuation(plan_id: String) -> Continuation {
@@ -596,6 +712,168 @@ fn previewed_lease_and_higher_profile_record_share_one_cas() {
             .len(),
         1
     );
+}
+
+#[test]
+fn effect_outbox_stages_reject_unrelated_canonical_machine_changes() {
+    let (base, prepared, continuation, dispatch) = prepared_effect_transition();
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("store opens")
+        .initialize(&base)
+        .expect("store initializes");
+
+    let mut unrelated_enqueue = prepared.clone();
+    submit(
+        &mut unrelated_enqueue,
+        "run:effect-delta",
+        "command:unrelated-enqueue-fact",
+        Command::RecordFact {
+            key: "unrelated.enqueue".to_owned(),
+            value: "invalid".to_owned(),
+        },
+    );
+    assert!(matches!(
+        coordinator.checkpoint_effect_enqueue(
+            &unrelated_enqueue,
+            continuation.clone(),
+            dispatch.clone(),
+        ),
+        Err(DurableError::Validation(_))
+    ));
+    assert!(coordinator.state().expect("state").outbox.is_empty());
+    assert_eq!(
+        coordinator
+            .restore_machine()
+            .expect("Machine restores")
+            .snapshot(),
+        base.snapshot()
+    );
+
+    coordinator
+        .checkpoint_effect_enqueue(&prepared, continuation.clone(), dispatch.clone())
+        .expect("exact prepared Effect and outbox enqueue atomically");
+    let mut committed = prepared.clone();
+    submit(
+        &mut committed,
+        "run:effect-delta",
+        "command:effect-scope-commit",
+        Command::CommitScope {
+            scope_id: ROOT_SCOPE_ID.to_owned(),
+        },
+    );
+    coordinator
+        .checkpoint(&committed, continuation.clone(), None)
+        .expect("scope commit checkpoints");
+    let lease = coordinator
+        .acquire_lease("effect:delta", "worker:effect", 1, 10)
+        .expect("effect lease acquires");
+    let mut claimed = committed.clone();
+    submit(
+        &mut claimed,
+        "run:effect-delta",
+        "command:effect-authorize",
+        Command::TransitionEffect {
+            intent_id: dispatch.intent_id.clone(),
+            transition: EffectTransition::AuthorizeRelease,
+        },
+    );
+    submit(
+        &mut claimed,
+        "run:effect-delta",
+        "command:effect-start-dispatch",
+        Command::TransitionEffect {
+            intent_id: dispatch.intent_id.clone(),
+            transition: EffectTransition::StartDispatch,
+        },
+    );
+    let mut unrelated_claim = claimed.clone();
+    submit(
+        &mut unrelated_claim,
+        "run:effect-delta",
+        "command:unrelated-claim-fact",
+        Command::RecordFact {
+            key: "unrelated.claim".to_owned(),
+            value: "invalid".to_owned(),
+        },
+    );
+    assert!(matches!(
+        coordinator.checkpoint_effect_claim(
+            &unrelated_claim,
+            &dispatch.intent_id,
+            "worker:effect",
+            lease.epoch,
+        ),
+        Err(DurableError::Validation(_))
+    ));
+    assert_eq!(
+        coordinator.state().expect("state").outbox[&dispatch.intent_id].state,
+        OutboxState::Pending
+    );
+    assert_eq!(
+        coordinator
+            .restore_machine()
+            .expect("Machine restores")
+            .snapshot(),
+        committed.snapshot()
+    );
+    coordinator
+        .checkpoint_effect_claim(&claimed, &dispatch.intent_id, "worker:effect", lease.epoch)
+        .expect("exact release and dispatch-start claim atomically");
+
+    let mut observed = claimed.clone();
+    submit(
+        &mut observed,
+        "run:effect-delta",
+        "command:effect-observe-applied",
+        Command::TransitionEffect {
+            intent_id: dispatch.intent_id.clone(),
+            transition: EffectTransition::Observe(WorldOutcome::Applied),
+        },
+    );
+    let result = observed.put_artifact("cymule.effect-result/1", b"result".to_vec());
+    let mut unrelated_settlement = observed.clone();
+    submit(
+        &mut unrelated_settlement,
+        "run:effect-delta",
+        "command:unrelated-settlement-fact",
+        Command::RecordFact {
+            key: "unrelated.settlement".to_owned(),
+            value: "invalid".to_owned(),
+        },
+    );
+    assert!(matches!(
+        coordinator.checkpoint_effect_settlement(
+            &unrelated_settlement,
+            &dispatch.intent_id,
+            "worker:effect",
+            lease.epoch,
+            OutboxState::Applied,
+            Some(result.clone()),
+        ),
+        Err(DurableError::Validation(_))
+    ));
+    assert_eq!(
+        coordinator.state().expect("state").outbox[&dispatch.intent_id].state,
+        OutboxState::Claimed
+    );
+    assert_eq!(
+        coordinator
+            .restore_machine()
+            .expect("Machine restores")
+            .snapshot(),
+        claimed.snapshot()
+    );
+    coordinator
+        .checkpoint_effect_settlement(
+            &observed,
+            &dispatch.intent_id,
+            "worker:effect",
+            lease.epoch,
+            OutboxState::Applied,
+            Some(result),
+        )
+        .expect("exact observation and outbox settlement atomically");
 }
 
 #[test]

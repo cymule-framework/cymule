@@ -10,5 +10,7 @@
 - Preserve closed effect, scope, attempt, and Run state machines. Illegal jumps
   fail closed.
 - Do not add a provider name or transport detail to IR, events, or projections.
+- `MachineSnapshot::command_digests` exposes only stable validation evidence for
+  durable exact-delta checks. Keep the private command-record representation and
+  reduction semantics inside this core.
 - Changes here require specification, schema, conformance, and SDK review.
-

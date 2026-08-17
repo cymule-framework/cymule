@@ -36,6 +36,10 @@ Use this precedence order when guidance conflicts:
   not claim that the external world has settled.
 - An ambiguous dispatch becomes `unknown` and follows reconciliation. Never turn
   it into a fresh semantic intent or silently redispatch it.
+- Durable Effect stages validate an exact canonical Machine delta against their
+  outbox mutation. Enqueue, dispatch-start claim, observation, and reconciliation
+  may not carry unrelated Plans, Events, commands, or Artifacts; `Unknown` Event
+  and outbox state commit together.
 - External signal and timer delivery is an identified durable activation, not a
   direct worker wake-up. Match the Plan-declared source, commit the activation
   receipt with wait results and Continuation readiness, and advance the epoch

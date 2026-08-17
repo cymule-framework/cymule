@@ -47,8 +47,17 @@ Status: partial.
   advance, and component-result replay without reinvocation;
 - commit-gated root effects with atomic outbox enqueue, fenced
   `DispatchStarted`, settlement, and reconciliation recovery;
+- stage-specific canonical delta validation that permits only the exact effect
+  Events, command receipts, and input/result Artifacts corresponding to enqueue,
+  claim, observation, or reconciliation; unrelated Machine changes fail before
+  CAS;
+- atomic `Unknown` observation Event plus outbox publication, including the
+  recovery path from a committed `DispatchStarted` claim;
 - crash-after-provider-application tests proving one or more restarts perform
   reconciliation without a second dispatch;
+- fault tests for lost prepare response and lost durable receipts after enqueue,
+  root scope commit, dispatch-start claim, Applied settlement, and Unknown
+  observation, with exact prepare/dispatch/reconcile call counts across reopen;
 - reopen, interrupted-staging, stale-writer, stale-claim, and idempotency tests.
 
 ## Remaining completion gates
@@ -56,8 +65,8 @@ Status: partial.
 - resumable interpreter integration for nested scopes, observational eager
   effects, and explicit-release effects;
 - bounded timer and signal source drivers plus parked-index selection;
-- atomic semantic event plus outbox publication;
-- crash injection at every prepare/commit/dispatch/receipt window;
+- nested/eager/explicit-release effect integration and its corresponding crash
+  windows;
 - snapshot compaction and suffix rehydration;
 - all SDK control/query surfaces and restart-level end-to-end tests;
 - production resolver/store plugins and durable activation from incoming

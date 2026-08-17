@@ -404,6 +404,20 @@ original claim across any number of process reopens. `still_unknown` MUST NOT
 redispatch it, and a later applied or not-applied observation MUST be admissible
 without changing identity. Compensation is a separately admitted effect.
 
+For the durable single-domain profile, each outbox stage MUST validate an exact
+Machine delta. Enqueue admits only the matching `EffectProposed`, `Prepare`, and
+optional same-scope `ScopeCommitted` Events plus the input Artifact; claim
+admits only `AuthorizeRelease` and
+`StartDispatch`; settlement admits one matching observation or reconciliation
+Event plus its declared result Artifact. Plans, existing command receipts,
+unrelated Artifacts, and unrelated Events MUST remain byte-identical.
+`Unknown` observation and the outbox `unknown` state MUST share one CAS.
+
+`PrepareEffect` response loss may repeat preparation only with the same
+structural intent ID, immutable binding, and input. Adapters MUST make this
+operation idempotent. A committed `DispatchStarted` with no authoritative
+outcome enters reconciliation after reopen and MUST NOT redispatch.
+
 ## 12. Binding evolution
 
 A Plan changes semantic meaning. A Binding Context changes realization defaults
