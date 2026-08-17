@@ -170,4 +170,23 @@ func TestVirtualWorkQueryAndControlFixturesStayExact(t *testing.T) {
 	if !reflect.DeepEqual(actual, expected) {
 		t.Fatalf("control differs from shared fixture: %#v", actual)
 	}
+	migrationPath := os.Getenv("CYMULE_VIRTUAL_MIGRATION_FIXTURE")
+	if migrationPath == "" {
+		t.Skip("virtual region migration SDK conformance is not configured")
+	}
+	migrationBytes, err := os.ReadFile(migrationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var migrationFixture RegionMigrationCommand
+	if err := json.Unmarshal(migrationBytes, &migrationFixture); err != nil {
+		t.Fatal(err)
+	}
+	migration := MigrateRegions(
+		"command:migration:fixture-split",
+		migrationFixture.Plan,
+	)
+	if !reflect.DeepEqual(migration, migrationFixture) {
+		t.Fatalf("migration differs from shared fixture: %#v", migration)
+	}
 }

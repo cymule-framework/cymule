@@ -103,9 +103,62 @@ export interface WorkResolutionCommand {
   resolution: WorkResolution;
 }
 
+export interface VirtualCursor {
+  version: string;
+  position: string;
+  exhausted: boolean;
+}
+
+export interface VirtualRegion {
+  region_id: string;
+  run_id: string;
+  source: string;
+  cursor: VirtualCursor;
+  estimated_total: number | null;
+}
+
+export type RegionMigrationKind = "split" | "merge";
+
+export interface RegionMigrationRequest {
+  migration_id: string;
+  kind: RegionMigrationKind;
+  source_region_ids: string[];
+  target_count: number;
+  migration_binding: string;
+}
+
+export interface RegionMigrationPlan {
+  migration_version: "cymule.virtual-region-migration/1";
+  migration_id: string;
+  kind: RegionMigrationKind;
+  expected_sources: Record<string, VirtualCursor>;
+  targets: VirtualRegion[];
+  migration_binding: string;
+  coverage_evidence: ArtifactRef;
+}
+
+export interface RegionMigrationReceipt {
+  plan: RegionMigrationPlan;
+  retired_regions: string[];
+  active_targets: string[];
+}
+
+export interface RegionMigrationCommand {
+  control_version: "cymule.virtual-region-migration-control/1";
+  command_id: string;
+  plan: RegionMigrationPlan;
+}
+
+export interface RegionMigrator {
+  readonly binding: string;
+  plan(request: RegionMigrationRequest, sources: VirtualRegion[]): Promise<RegionMigrationPlan>;
+  verify(plan: RegionMigrationPlan): Promise<void>;
+}
+
 export interface VirtualWorkControl {
   occurrence(occurrenceId: string): Promise<WorkOccurrence | null>;
   resolve(command: WorkResolutionCommand): Promise<WorkOccurrence>;
+  migrate(command: RegionMigrationCommand): Promise<RegionMigrationReceipt>;
 }
 
 export type Expression =
@@ -378,6 +431,17 @@ export class VirtualWorkControlBuilder {
       resolution: "cancelled",
       reason,
     });
+  }
+
+  static migration(commandId: string, plan: RegionMigrationPlan): RegionMigrationCommand {
+    if (commandId.length === 0) {
+      throw new Error("virtual region migration requires a command identity");
+    }
+    return {
+      control_version: "cymule.virtual-region-migration-control/1",
+      command_id: commandId,
+      plan,
+    };
   }
 
   private static build(

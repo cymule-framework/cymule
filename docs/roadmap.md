@@ -80,10 +80,13 @@ Status: partial.
 - integer weighted-deficit selection accounts for item cost, durable priority
   aging prevents fixed-priority starvation, and region round-robin preserves
   visibility under a one-item frontier;
+- opaque cursor split/merge uses pinned adapter verification and coverage
+  evidence, atomically retires sources/activates targets, preserves historical
+  work identity, and exposes four-language control contracts;
 - million-item tests prove bounded frontiers, fairness, park/wake, stale-owner
   rejection, and restore behavior;
-- partition migration, subtree compaction, partial rehydration, scheduling
-  control clients, and multi-worker crash matrices remain proposed.
+- subtree compaction, partial rehydration, scheduling control clients, and
+  multi-worker crash matrices remain proposed.
 
 ## M4 - Live evolution
 

@@ -21,8 +21,10 @@ CYMULE_TEST_PLUGIN="$ROOT/target/debug/cymule-test-adapter"
 CYMULE_WAIT_ACTIVATION_FIXTURE="$ROOT/tests/fixtures/wait-activation.json"
 CYMULE_VIRTUAL_OCCURRENCE_FIXTURE="$ROOT/tests/fixtures/virtual-work-occurrence.json"
 CYMULE_VIRTUAL_CONTROL_FIXTURE="$ROOT/tests/fixtures/virtual-work-control.json"
+CYMULE_VIRTUAL_MIGRATION_FIXTURE="$ROOT/tests/fixtures/virtual-region-migration-control.json"
 export CYMULE_BIN CYMULE_TEST_PLUGIN CYMULE_WAIT_ACTIVATION_FIXTURE
 export CYMULE_VIRTUAL_OCCURRENCE_FIXTURE CYMULE_VIRTUAL_CONTROL_FIXTURE
+export CYMULE_VIRTUAL_MIGRATION_FIXTURE
 
 echo "== Frozen schemas and semantic rejection =="
 uv run --project sdk/python --frozen python "$ROOT/scripts/validate_schemas.py" "$ROOT" "$CYMULE_BIN"

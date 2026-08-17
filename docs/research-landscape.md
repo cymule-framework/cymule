@@ -127,6 +127,12 @@ standards.
   savepoints and requires serializer/schema evidence for M4 migration.
 - [Flink state schema evolution](https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/datastream/fault-tolerance/serialization/schema_evolution/)
   demonstrates why key migrations and serializer compatibility must fail closed.
+- [Flink keyed state](https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/stateful-stream-processing/)
+  uses bounded key groups as the atomic redistribution unit, and
+  [Flink savepoints](https://nightlies.apache.org/flink/flink-docs-stable/docs/learn-flink/fault_tolerance/)
+  preserve source positions with state during rescaling. Cymule similarly
+  requires checkpointed source coverage, but delegates opaque cursor partition
+  proof to the selected source adapter instead of defining key groups in core.
 - [Restate versioning](https://docs.restate.dev/services/versioning) keeps
   deployments immutable and pins in-flight invocations while new work advances.
   This informs Cymule's occurrence binding and Plan/Binding separation.

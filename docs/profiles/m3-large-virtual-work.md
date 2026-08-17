@@ -45,12 +45,19 @@ Status: partial.
   writer fault test proving neither side partially commits;
 - M1 reopen of scheduling policy, Run weights/deficits, dispatch sequence,
   ready age, and last selections with identical next-claim evidence;
+- provider-neutral `RegionMigrator` planning and verification for opaque cursor
+  split/merge, with exact source preconditions and pinned migration binding;
+- atomic source retirement, target activation, coverage Artifact, receipt, and
+  scheduler checkpoint, while historical/materialized work keeps old region IDs;
+- split-then-merge lineage, stale cursor, unverified evidence, target conflict,
+  stale CAS, reopen, and historical command-replay tests;
+- shared Rust, TypeScript, Python, and Go migration plan/control contracts that
+  never interpret cursor positions;
 - million-item source tests proving an eight-item bounded frontier, fairness,
   parking, waking, fencing, and restart behavior.
 
 ## Remaining completion gates
 
-- partition split/merge and cursor migration;
 - subtree completion summaries, compaction certificates, and partial
   rehydration;
 - multi-worker crash tests and scheduling/partition SDK control interfaces.
@@ -66,4 +73,7 @@ envelope. Work lifecycle adds independent `cymule.virtual-work-occurrence/1`
 and `cymule.virtual-work-control/1` domains; SDKs expose their closed wire types
 and transport interfaces but do not reduce scheduler state. Additive scheduling
 policy, integer weight/deficit, dispatch-sequence, and ready-age fields remain
-inside the partial `cymule.virtual-checkpoint/1` domain.
+inside the partial `cymule.virtual-checkpoint/1` domain. Region topology adds
+independent `cymule.virtual-region-migration/1` and
+`cymule.virtual-region-migration-control/1` domains; receipts and retired lineage
+remain in the same M3 checkpoint.

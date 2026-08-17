@@ -4,6 +4,16 @@
   or ready-queue cardinality.
 - `RegionSource` is the provider boundary. Never encode a database query,
   object-store listing, queue, or partition product in virtual-work semantics.
+- `RegionMigrator` owns opaque cursor split/merge and MUST verify coverage under
+  the pinned migration binding before apply. Framework code checks exact source
+  cursors, cardinality, Run/source authority, IDs, and evidence retention; it
+  never parses cursor positions.
+- Migration retires source regions instead of deleting them. Existing ready,
+  active, parked, known, and occurrence records retain the old region ID. New
+  targets cover only future materialization.
+- Migration command replay retains the original receipt after later checkpoints.
+  Conflicting command/migration IDs, stale cursors, unverified evidence, target
+  collisions, or stale CAS retire nothing.
 - Cursors are immutable logical progress tokens returned by a source and stored
   before more work is requested.
 - `cymule.virtual-checkpoint/1` records persist cursor and complete bounded

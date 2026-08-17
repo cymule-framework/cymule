@@ -1,4 +1,6 @@
-use cymule_virtual::{WorkOccurrence, WorkResolutionCommand};
+use cymule_virtual::{
+    RegionMigrationCommand, RegionMigrationReceipt, WorkOccurrence, WorkResolutionCommand,
+};
 
 /// Transport-neutral query and control interface for M3 virtual work.
 ///
@@ -13,4 +15,10 @@ pub trait VirtualWorkControl {
 
     /// Submit one idempotent, owner/epoch-preconditioned work resolution.
     fn resolve(&mut self, command: &WorkResolutionCommand) -> Result<WorkOccurrence, Self::Error>;
+
+    /// Submit one idempotent adapter-produced split or merge plan.
+    fn migrate(
+        &mut self,
+        command: &RegionMigrationCommand,
+    ) -> Result<RegionMigrationReceipt, Self::Error>;
 }

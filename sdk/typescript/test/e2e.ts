@@ -96,4 +96,14 @@ test("TypeScript virtual work query and control fixtures stay exact", () => {
     },
   );
   assert.deepEqual(command, JSON.parse(readFileSync(controlPath, "utf8")));
+  const migrationPath = process.env.CYMULE_VIRTUAL_MIGRATION_FIXTURE;
+  if (migrationPath === undefined) return;
+  const migrationFixture = JSON.parse(readFileSync(migrationPath, "utf8"));
+  assert.deepEqual(
+    VirtualWorkControlBuilder.migration(
+      "command:migration:fixture-split",
+      migrationFixture.plan,
+    ),
+    migrationFixture,
+  );
 });

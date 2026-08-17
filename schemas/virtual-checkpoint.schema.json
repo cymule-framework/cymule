@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "checkpoint_version", "checkpoint_id", "parent_checkpoint", "snapshot",
-    "control", "receipt_occurrence_id"
+    "control", "receipt_occurrence_id", "migration_control", "receipt_migration_id"
   ],
   "properties": {
     "checkpoint_version": { "const": "cymule.virtual-checkpoint/1" },
@@ -19,6 +19,12 @@
       "oneOf": [{ "$ref": "#/$defs/controlCommand" }, { "type": "null" }]
     },
     "receipt_occurrence_id": {
+      "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }]
+    },
+    "migration_control": {
+      "oneOf": [{ "$ref": "#/$defs/migrationControlCommand" }, { "type": "null" }]
+    },
+    "receipt_migration_id": {
       "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }]
     }
   },
@@ -247,6 +253,70 @@
         "resolution": { "$ref": "#/$defs/resolution" }
       }
     },
+    "migrationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["migration_id", "kind", "source_region_ids", "target_count", "migration_binding"],
+      "properties": {
+        "migration_id": { "$ref": "#/$defs/nonEmpty" },
+        "kind": { "enum": ["split", "merge"] },
+        "source_region_ids": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmpty" }
+        },
+        "target_count": { "type": "integer", "minimum": 1 },
+        "migration_binding": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "migrationPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "migration_version", "migration_id", "kind", "expected_sources", "targets",
+        "migration_binding", "coverage_evidence"
+      ],
+      "properties": {
+        "migration_version": { "const": "cymule.virtual-region-migration/1" },
+        "migration_id": { "$ref": "#/$defs/nonEmpty" },
+        "kind": { "enum": ["split", "merge"] },
+        "expected_sources": {
+          "type": "object", "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/cursor" }
+        },
+        "targets": {
+          "type": "array", "minItems": 1,
+          "items": { "$ref": "#/$defs/region" }
+        },
+        "migration_binding": { "$ref": "#/$defs/nonEmpty" },
+        "coverage_evidence": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "migrationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan", "retired_regions", "active_targets"],
+      "properties": {
+        "plan": { "$ref": "#/$defs/migrationPlan" },
+        "retired_regions": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmpty" }
+        },
+        "active_targets": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmpty" }
+        }
+      }
+    },
+    "migrationControlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control_version", "command_id", "plan"],
+      "properties": {
+        "control_version": { "const": "cymule.virtual-region-migration-control/1" },
+        "command_id": { "$ref": "#/$defs/nonEmpty" },
+        "plan": { "$ref": "#/$defs/migrationPlan" }
+      }
+    },
     "snapshot": {
       "type": "object",
       "additionalProperties": false,
@@ -254,7 +324,7 @@
         "scheduling_policy", "regions", "ready", "active", "parked", "known", "last_run",
         "last_region",
         "claim_epochs", "occurrences", "run_weights", "run_deficits", "dispatch_sequence",
-        "ready_since"
+        "ready_since", "retired_regions", "migrations"
       ],
       "properties": {
         "scheduling_policy": { "$ref": "#/$defs/schedulingPolicy" },
@@ -288,6 +358,14 @@
         "ready_since": {
           "type": "object",
           "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "retired_regions": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/nonEmpty" }
+        },
+        "migrations": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/migrationReceipt" }
         }
       }
     }

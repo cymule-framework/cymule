@@ -12,9 +12,11 @@ use cymule_durable::{
 };
 use cymule_virtual::{
     DurableVirtualController, FrontierLimits, MaterializedPage, ParkReason, ParkedWork,
-    RegionSource, SchedulingPolicy, VIRTUAL_WORK_CONTROL_VERSION, VirtualCheckpoint, VirtualCursor,
-    VirtualError, VirtualRegion, VirtualResult, VirtualScheduler, WorkItem, WorkOccurrenceState,
-    WorkResolution, WorkResolutionCommand,
+    RegionMigrationCommand, RegionMigrationKind, RegionMigrationPlan, RegionMigrationRequest,
+    RegionMigrator, RegionSource, SchedulingPolicy, VIRTUAL_REGION_MIGRATION_CONTROL_VERSION,
+    VIRTUAL_REGION_MIGRATION_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualCheckpoint,
+    VirtualCursor, VirtualError, VirtualRegion, VirtualResult, VirtualScheduler, WorkItem,
+    WorkOccurrenceState, WorkResolution, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -28,6 +30,12 @@ struct FairSource {
 }
 
 struct PriorityAgingSource;
+
+struct TestRegionMigrator {
+    evidence: ArtifactRef,
+    corrupt_binding: bool,
+    binding: String,
+}
 
 impl RegionSource for MillionItemSource {
     fn materialize(
@@ -176,6 +184,59 @@ impl RegionSource for PriorityAgingSource {
                 exhausted: end == 100,
             },
         })
+    }
+}
+
+impl RegionMigrator for TestRegionMigrator {
+    fn binding(&self) -> &str {
+        &self.binding
+    }
+
+    fn plan(
+        &mut self,
+        request: &RegionMigrationRequest,
+        sources: &[VirtualRegion],
+    ) -> VirtualResult<RegionMigrationPlan> {
+        let source = sources.first().expect("migration has sources");
+        Ok(RegionMigrationPlan {
+            migration_version: VIRTUAL_REGION_MIGRATION_VERSION.to_owned(),
+            migration_id: request.migration_id.clone(),
+            kind: request.kind,
+            expected_sources: sources
+                .iter()
+                .map(|region| (region.region_id.clone(), region.cursor.clone()))
+                .collect(),
+            targets: (0..request.target_count)
+                .map(|index| VirtualRegion {
+                    region_id: format!("{}:target:{index}", request.migration_id),
+                    run_id: source.run_id.clone(),
+                    source: source.source.clone(),
+                    cursor: VirtualCursor {
+                        version: "migration/1".to_owned(),
+                        position: index.to_string(),
+                        exhausted: false,
+                    },
+                    estimated_total: None,
+                })
+                .collect(),
+            migration_binding: if self.corrupt_binding {
+                "binding:migrator/corrupt".to_owned()
+            } else {
+                self.binding.clone()
+            },
+            coverage_evidence: self.evidence.clone(),
+        })
+    }
+
+    fn verify(&mut self, plan: &RegionMigrationPlan) -> VirtualResult<()> {
+        if plan.coverage_evidence != self.evidence
+            || plan.migration_binding == "binding:migrator/corrupt"
+        {
+            return Err(VirtualError::Source(
+                "migration coverage evidence or binding did not verify".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -545,6 +606,328 @@ fn priority_aging_prevents_starvation_under_continuous_high_priority_arrivals() 
             .expect("high priority work replenishes");
     }
     assert_eq!(low_claimed_at, Some(7));
+}
+
+#[test]
+fn region_split_merge_retires_sources_without_rewriting_materialized_work() {
+    let mut scheduler = VirtualScheduler::new(limits()).expect("scheduler creates");
+    scheduler
+        .register(region("region:a", "run:a"))
+        .expect("region registers");
+    scheduler.fill(&mut MillionItemSource).expect("fills");
+    let historical_work: BTreeSet<String> = scheduler.snapshot().ready["run:a"]
+        .iter()
+        .map(|item| item.work_id.clone())
+        .collect();
+    let evidence = ArtifactRef {
+        artifact_id: "artifact:migration:split-evidence".to_owned(),
+        kind: "example/migration-evidence".to_owned(),
+    };
+    let request = RegionMigrationRequest {
+        migration_id: "migration:split:a".to_owned(),
+        kind: RegionMigrationKind::Split,
+        source_region_ids: BTreeSet::from(["region:a".to_owned()]),
+        target_count: 2,
+        migration_binding: "binding:migrator/1".to_owned(),
+    };
+    assert!(matches!(
+        scheduler.plan_migration(
+            &mut TestRegionMigrator {
+                evidence: evidence.clone(),
+                corrupt_binding: true,
+                binding: "binding:migrator/1".to_owned(),
+            },
+            &request,
+        ),
+        Err(VirtualError::Source(_))
+    ));
+    let plan = scheduler
+        .plan_migration(
+            &mut TestRegionMigrator {
+                evidence: evidence.clone(),
+                corrupt_binding: false,
+                binding: "binding:migrator/1".to_owned(),
+            },
+            &request,
+        )
+        .expect("split plans");
+    let before_unverified = scheduler.snapshot();
+    assert!(matches!(
+        scheduler.migrate(
+            &mut TestRegionMigrator {
+                evidence: ArtifactRef {
+                    artifact_id: "artifact:migration:wrong-evidence".to_owned(),
+                    kind: "example/migration-evidence".to_owned(),
+                },
+                corrupt_binding: false,
+                binding: "binding:migrator/1".to_owned(),
+            },
+            &plan,
+        ),
+        Err(VirtualError::Source(_))
+    ));
+    assert_eq!(scheduler.snapshot(), before_unverified);
+    let mut verifier = TestRegionMigrator {
+        evidence: evidence.clone(),
+        corrupt_binding: false,
+        binding: "binding:migrator/1".to_owned(),
+    };
+    let receipt = scheduler
+        .migrate(&mut verifier, &plan)
+        .expect("split applies");
+    assert_eq!(
+        receipt.retired_regions,
+        BTreeSet::from(["region:a".to_owned()])
+    );
+    assert_eq!(receipt.active_targets.len(), 2);
+    assert_eq!(
+        scheduler
+            .migrate(&mut verifier, &plan)
+            .expect("split replay is idempotent"),
+        receipt
+    );
+    assert_eq!(
+        scheduler.snapshot().retired_regions["region:a"],
+        "migration:split:a"
+    );
+    assert_eq!(
+        scheduler.snapshot().ready["run:a"]
+            .iter()
+            .map(|item| item.work_id.clone())
+            .collect::<BTreeSet<_>>(),
+        historical_work
+    );
+    assert!(
+        scheduler.snapshot().ready["run:a"]
+            .iter()
+            .all(|item| item.region_id == "region:a")
+    );
+    let mut conflicting = plan;
+    conflicting.targets[0].cursor.position = "different".to_owned();
+    assert!(matches!(
+        scheduler.migrate(&mut verifier, &conflicting),
+        Err(VirtualError::Conflict(_))
+    ));
+
+    let split_targets = receipt.active_targets;
+    let merge_request = RegionMigrationRequest {
+        migration_id: "migration:merge:a".to_owned(),
+        kind: RegionMigrationKind::Merge,
+        source_region_ids: split_targets.clone(),
+        target_count: 1,
+        migration_binding: "binding:migrator/1".to_owned(),
+    };
+    let merge_evidence = ArtifactRef {
+        artifact_id: "artifact:migration:merge-evidence".to_owned(),
+        kind: "example/migration-evidence".to_owned(),
+    };
+    let merge_plan = scheduler
+        .plan_migration(
+            &mut TestRegionMigrator {
+                evidence: merge_evidence.clone(),
+                corrupt_binding: false,
+                binding: "binding:migrator/1".to_owned(),
+            },
+            &merge_request,
+        )
+        .expect("merge plans");
+    let merged = scheduler
+        .migrate(
+            &mut TestRegionMigrator {
+                evidence: merge_evidence,
+                corrupt_binding: false,
+                binding: "binding:migrator/1".to_owned(),
+            },
+            &merge_plan,
+        )
+        .expect("merge applies");
+    assert_eq!(merged.retired_regions, split_targets);
+    assert_eq!(merged.active_targets.len(), 1);
+    VirtualScheduler::restore(limits(), scheduler.snapshot()).expect("migration history restores");
+}
+
+#[test]
+fn cursor_change_rejects_migration_without_partial_retirement() {
+    let mut scheduler = VirtualScheduler::new(limits()).expect("scheduler creates");
+    scheduler
+        .register(region("region:stale", "run:stale"))
+        .expect("region registers");
+    let request = RegionMigrationRequest {
+        migration_id: "migration:stale".to_owned(),
+        kind: RegionMigrationKind::Split,
+        source_region_ids: BTreeSet::from(["region:stale".to_owned()]),
+        target_count: 2,
+        migration_binding: "binding:migrator/1".to_owned(),
+    };
+    let stale_evidence = ArtifactRef {
+        artifact_id: "artifact:migration:stale".to_owned(),
+        kind: "example/migration-evidence".to_owned(),
+    };
+    let plan = scheduler
+        .plan_migration(
+            &mut TestRegionMigrator {
+                evidence: stale_evidence.clone(),
+                corrupt_binding: false,
+                binding: "binding:migrator/1".to_owned(),
+            },
+            &request,
+        )
+        .expect("migration plans");
+    scheduler
+        .fill(&mut MillionItemSource)
+        .expect("cursor advances");
+    let before = scheduler.snapshot();
+    assert!(matches!(
+        scheduler.migrate(
+            &mut TestRegionMigrator {
+                evidence: stale_evidence,
+                corrupt_binding: false,
+                binding: "binding:migrator/1".to_owned(),
+            },
+            &plan,
+        ),
+        Err(VirtualError::Conflict(_))
+    ));
+    assert_eq!(scheduler.snapshot(), before);
+    assert!(scheduler.snapshot().retired_regions.is_empty());
+    assert!(scheduler.snapshot().migrations.is_empty());
+}
+
+#[test]
+fn durable_region_migration_reopens_and_stale_cas_retires_nothing() {
+    let mut machine = Machine::new();
+    let store = MemoryStore::new();
+    let mut current = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let mut scheduler = VirtualScheduler::new(limits()).expect("scheduler creates");
+    scheduler
+        .register(region("region:durable-migration", "run:migration"))
+        .expect("region registers");
+    DurableVirtualController::fill_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &mut MillionItemSource,
+        "journal:virtual",
+        "virtual:migration:fill",
+    )
+    .expect("source cursor checkpoints");
+    let mut stale = DurableCoordinator::open(store.clone()).expect("stale view opens");
+    let mut stale_scheduler = DurableVirtualController::load(&stale, "journal:virtual", limits())
+        .expect("stale scheduler restores");
+
+    let evidence = machine.put_artifact(
+        "example/migration-evidence",
+        b"complete non-overlapping split".to_vec(),
+    );
+    let request = RegionMigrationRequest {
+        migration_id: "migration:durable-split".to_owned(),
+        kind: RegionMigrationKind::Split,
+        source_region_ids: BTreeSet::from(["region:durable-migration".to_owned()]),
+        target_count: 2,
+        migration_binding: "binding:migrator/durable@1".to_owned(),
+    };
+    let plan = scheduler
+        .plan_migration(
+            &mut TestRegionMigrator {
+                evidence: evidence.clone(),
+                corrupt_binding: false,
+                binding: "binding:migrator/durable@1".to_owned(),
+            },
+            &request,
+        )
+        .expect("migration plans");
+    let command = RegionMigrationCommand {
+        control_version: VIRTUAL_REGION_MIGRATION_CONTROL_VERSION.to_owned(),
+        command_id: "command:migration:durable-split".to_owned(),
+        plan,
+    };
+    let mut verifier = TestRegionMigrator {
+        evidence: evidence.clone(),
+        corrupt_binding: false,
+        binding: "binding:migrator/durable@1".to_owned(),
+    };
+    let receipt = DurableVirtualController::migrate_command_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &mut verifier,
+        &machine,
+        &command,
+        "journal:virtual",
+    )
+    .expect("migration checkpoints");
+    assert_eq!(receipt.active_targets.len(), 2);
+
+    let stale_before = stale_scheduler.snapshot();
+    assert!(matches!(
+        DurableVirtualController::migrate_command_and_checkpoint(
+            &mut stale,
+            &mut stale_scheduler,
+            &mut verifier,
+            &machine,
+            &command,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Durable(_))
+    ));
+    assert_eq!(stale_scheduler.snapshot(), stale_before);
+    assert!(stale_scheduler.snapshot().retired_regions.is_empty());
+
+    let mut reopened = DurableCoordinator::open(store).expect("store reopens");
+    let mut restored = DurableVirtualController::load(&reopened, "journal:virtual", limits())
+        .expect("scheduler restores");
+    assert_eq!(
+        restored
+            .migration("migration:durable-split")
+            .expect("receipt restores"),
+        &receipt
+    );
+    assert!(
+        reopened
+            .restore_machine()
+            .expect("Machine restores")
+            .artifact(&evidence)
+            .is_some()
+    );
+    restored
+        .set_run_weight("run:migration", 2)
+        .expect("later control updates");
+    DurableVirtualController::checkpoint(
+        &mut reopened,
+        &restored,
+        "journal:virtual",
+        "virtual:migration:later-checkpoint",
+    )
+    .expect("later checkpoint commits");
+    let before_replay = restored.snapshot();
+    assert_eq!(
+        DurableVirtualController::migrate_command_and_checkpoint(
+            &mut reopened,
+            &mut restored,
+            &mut verifier,
+            &machine,
+            &command,
+            "journal:virtual",
+        )
+        .expect("historical migration receipt replays"),
+        receipt
+    );
+    assert_eq!(restored.snapshot(), before_replay);
+    let mut conflicting = command;
+    conflicting.plan.targets[0].cursor.position = "different".to_owned();
+    assert!(matches!(
+        DurableVirtualController::migrate_command_and_checkpoint(
+            &mut reopened,
+            &mut restored,
+            &mut verifier,
+            &machine,
+            &conflicting,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Conflict(_))
+    ));
+    assert_eq!(restored.snapshot(), before_replay);
 }
 
 #[test]

@@ -22,3 +22,6 @@
   Scheduling policy, integer Run weights/deficits, dispatch sequence, ready age,
   and last selections are checkpoint authority; derived parked indexes remain
   omitted.
+  Region migration definitions preserve opaque source cursors, split/merge
+  cardinality, pinned adapter binding, coverage evidence, retirement lineage,
+  and command receipts.

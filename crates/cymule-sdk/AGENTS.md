@@ -13,3 +13,6 @@
 - `VirtualWorkControl` is transport-neutral. Preserve stable command and
   occurrence IDs, immutable binding, owner, and epoch; SDK transports never
   implement retry/failure reduction locally.
+- Region migration clients preserve opaque cursors, exact source preconditions,
+  pinned migration binding, and coverage evidence. SDKs never split cursor
+  strings or infer partition coverage.

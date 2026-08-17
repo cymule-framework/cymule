@@ -174,3 +174,11 @@ processes and avoids a clock or floating-point dependency. The guarantee applies
 to materialized, capability-compatible backlogs. `RegionSource` visibility is a
 separate deterministic round-robin layer because Cymule cannot know an item's
 cost before the source returns it.
+
+Region topology changes also stay behind the source boundary. A pinned
+`RegionMigrator` receives exact active source snapshots and produces opaque
+replacement cursors plus a coverage-evidence Artifact. The adapter verifies the
+plan again at admission. One M1 checkpoint then retires sources, activates
+targets, retains evidence and receipt, and leaves all already materialized work
+on its historical region identity. No database partition, Kafka offset, object
+prefix, or range syntax enters framework state.

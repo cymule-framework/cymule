@@ -7,8 +7,9 @@ use cymule_durable::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ClaimedWork, FrontierLimits, RegionSource, VIRTUAL_WORK_CONTROL_VERSION, VirtualError,
-    VirtualResult, VirtualScheduler, VirtualSnapshot, WorkOccurrence, WorkResolution,
+    ClaimedWork, FrontierLimits, RegionMigrationCommand, RegionMigrationReceipt, RegionMigrator,
+    RegionSource, VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION,
+    VirtualError, VirtualResult, VirtualScheduler, VirtualSnapshot, WorkOccurrence, WorkResolution,
     WorkResolutionCommand,
 };
 
@@ -33,6 +34,12 @@ pub struct VirtualCheckpoint {
     /// Occurrence receipt returned by the control command.
     #[serde(default)]
     pub receipt_occurrence_id: Option<String>,
+    /// Region migration command committed by this checkpoint, when any.
+    #[serde(default)]
+    pub migration_control: Option<RegionMigrationCommand>,
+    /// Migration receipt returned by the region control command.
+    #[serde(default)]
+    pub receipt_migration_id: Option<String>,
 }
 
 /// M1 journal integration for the M3 virtual scheduler.
@@ -191,6 +198,54 @@ impl DurableVirtualController {
         Ok(occurrence)
     }
 
+    /// Apply one adapter-produced split/merge command and atomically checkpoint
+    /// coverage evidence, source retirement, targets, and receipt.
+    pub fn migrate_command_and_checkpoint<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        scheduler: &mut VirtualScheduler,
+        migrator: &mut impl RegionMigrator,
+        machine: &Machine,
+        command: &RegionMigrationCommand,
+        journal_id: &str,
+    ) -> VirtualResult<RegionMigrationReceipt> {
+        if command.control_version != VIRTUAL_REGION_MIGRATION_CONTROL_VERSION
+            || command.command_id.is_empty()
+            || command.plan.migration_id.is_empty()
+        {
+            return Err(VirtualError::Validation(
+                "virtual region migration command is malformed".to_owned(),
+            ));
+        }
+        if let Some(receipt) =
+            replay_migration_receipt(coordinator, scheduler, journal_id, command)?
+        {
+            return Ok(receipt);
+        }
+        let before = scheduler.clone();
+        let receipt = scheduler.migrate(migrator, &command.plan)?;
+        let record = match migration_checkpoint_record(coordinator, scheduler, journal_id, command)
+        {
+            Ok(record) => record,
+            Err(error) => {
+                *scheduler = before;
+                return Err(error);
+            }
+        };
+        let batch = JournalBatch {
+            journal_id: journal_id.to_owned(),
+            records: vec![record],
+        };
+        if let Err(error) = coordinator.checkpoint_artifact_journals(
+            machine,
+            &BTreeSet::from([command.plan.coverage_evidence.clone()]),
+            &[batch],
+        ) {
+            *scheduler = before;
+            return Err(durable_error(error));
+        }
+        Ok(receipt)
+    }
+
     /// Atomically admit one M1 wait activation and publish the exact M3 parked
     /// work wake-up produced by its selected wait IDs.
     pub fn activate_and_wake<S: DurableStore>(
@@ -248,7 +303,10 @@ fn checkpoint_record<S: DurableStore>(
             )));
         }
         let checkpoint = decode_checkpoint(existing)?;
-        if checkpoint.control.is_some() || checkpoint.snapshot != scheduler.snapshot() {
+        if checkpoint.control.is_some()
+            || checkpoint.migration_control.is_some()
+            || checkpoint.snapshot != scheduler.snapshot()
+        {
             return Err(VirtualError::Conflict(format!(
                 "virtual checkpoint {checkpoint_id} already has different state"
             )));
@@ -262,6 +320,8 @@ fn checkpoint_record<S: DurableStore>(
         snapshot: scheduler.snapshot(),
         control: None,
         receipt_occurrence_id: None,
+        migration_control: None,
+        receipt_migration_id: None,
     };
     let payload = serde_json::to_value(checkpoint)
         .map_err(|error| VirtualError::Validation(error.to_string()))?;
@@ -294,6 +354,8 @@ fn control_checkpoint_record<S: DurableStore>(
         snapshot: scheduler.snapshot(),
         control: Some(command.clone()),
         receipt_occurrence_id: Some(occurrence_id.to_owned()),
+        migration_control: None,
+        receipt_migration_id: None,
     };
     let payload = serde_json::to_value(checkpoint)
         .map_err(|error| VirtualError::Validation(error.to_string()))?;
@@ -338,6 +400,77 @@ fn replay_control_receipt<S: DurableStore>(
     Ok(Some(occurrence.clone()))
 }
 
+fn migration_checkpoint_record<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &RegionMigrationCommand,
+) -> VirtualResult<JournalRecord> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    if records
+        .iter()
+        .any(|record| record.record_id == command.command_id)
+    {
+        return Err(VirtualError::Conflict(format!(
+            "virtual region migration command {} already exists without a replayable receipt",
+            command.command_id
+        )));
+    }
+    let checkpoint = VirtualCheckpoint {
+        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
+        checkpoint_id: command.command_id.clone(),
+        parent_checkpoint: records.last().map(|record| record.record_id.clone()),
+        snapshot: scheduler.snapshot(),
+        control: None,
+        receipt_occurrence_id: None,
+        migration_control: Some(command.clone()),
+        receipt_migration_id: Some(command.plan.migration_id.clone()),
+    };
+    let payload = serde_json::to_value(checkpoint)
+        .map_err(|error| VirtualError::Validation(error.to_string()))?;
+    JournalRecord::new(&command.command_id, VIRTUAL_CHECKPOINT_SCHEMA, payload)
+        .map_err(durable_error)
+}
+
+fn replay_migration_receipt<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &RegionMigrationCommand,
+) -> VirtualResult<Option<RegionMigrationReceipt>> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    let Some(record) = records
+        .iter()
+        .find(|record| record.record_id == command.command_id)
+    else {
+        return Ok(None);
+    };
+    let checkpoint = decode_checkpoint(record)?;
+    if checkpoint.migration_control.as_ref() != Some(command) {
+        return Err(VirtualError::Conflict(format!(
+            "virtual region migration command {} was reused with different semantics",
+            command.command_id
+        )));
+    }
+    let migration_id = checkpoint.receipt_migration_id.ok_or_else(|| {
+        VirtualError::Validation(format!(
+            "virtual region migration command {} has no receipt",
+            command.command_id
+        ))
+    })?;
+    let receipt = scheduler.migration(&migration_id).ok_or_else(|| {
+        VirtualError::Validation(format!(
+            "virtual region migration command {} receipt is unavailable",
+            command.command_id
+        ))
+    })?;
+    Ok(Some(receipt.clone()))
+}
+
 fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint> {
     if record.schema != VIRTUAL_CHECKPOINT_SCHEMA {
         return Err(VirtualError::Validation(format!(
@@ -352,6 +485,12 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
     {
         return Err(VirtualError::Validation(format!(
             "virtual checkpoint {} identity or version does not match its record",
+            record.record_id
+        )));
+    }
+    if checkpoint.control.is_some() && checkpoint.migration_control.is_some() {
+        return Err(VirtualError::Validation(format!(
+            "virtual checkpoint {} contains two control commands",
             record.record_id
         )));
     }
@@ -381,6 +520,40 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
         _ => {
             return Err(VirtualError::Validation(format!(
                 "virtual checkpoint {} has a partial control receipt",
+                record.record_id
+            )));
+        }
+    }
+    match (
+        &checkpoint.migration_control,
+        &checkpoint.receipt_migration_id,
+    ) {
+        (None, None) => {}
+        (Some(command), Some(migration_id)) => {
+            let receipt = checkpoint
+                .snapshot
+                .migrations
+                .get(migration_id)
+                .ok_or_else(|| {
+                    VirtualError::Validation(format!(
+                        "virtual checkpoint {} migration receipt is missing",
+                        record.record_id
+                    ))
+                })?;
+            if command.control_version != VIRTUAL_REGION_MIGRATION_CONTROL_VERSION
+                || command.command_id != record.record_id
+                || command.plan.migration_id != *migration_id
+                || receipt.plan != command.plan
+            {
+                return Err(VirtualError::Validation(format!(
+                    "virtual checkpoint {} migration receipt does not match its command",
+                    record.record_id
+                )));
+            }
+        }
+        _ => {
+            return Err(VirtualError::Validation(format!(
+                "virtual checkpoint {} has a partial migration receipt",
                 record.record_id
             )));
         }

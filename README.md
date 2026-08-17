@@ -351,7 +351,7 @@ See [Architecture](docs/architecture.md) and the
 | Go SDK | Implemented | Builder and engine client. |
 | Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, M1 handoff journal. |
 | Durable wait activation | Implemented foundation | Identified signal/timer records, consume-once admission, reopen-safe epoch advance, and four SDK wire validation. |
-| Large virtual work | Partial | Bounded materialization, weighted cost fairness, priority aging, M1 checkpoints, exact parked index, and fencing. |
+| Large virtual work | Partial | Bounded materialization, weighted fairness, priority aging, verified cursor split/merge, M1 checkpoints, and fencing. |
 | Virtual work control | Implemented foundation | Binding-pinned attempts, closed retry/failure/cancel dispositions, and four SDK transport interfaces. |
 | Agent interaction plugin | Optional, partial | Rust plugin with Session, occurrence, input, workspace, and stream conformance tests. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
@@ -399,6 +399,8 @@ Implemented today:
   cancellation records;
 - deterministic weighted Run fairness and priority aging without wall-clock or
   floating-point scheduler state;
+- adapter-verified opaque cursor split/merge with durable retirement lineage and
+  coverage evidence;
 - immutable Plan evolution DAGs, impact cones, canaries, rollback pins,
   migration receipts, and shadow evidence.
 

@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 pub const VIRTUAL_WORK_OCCURRENCE_VERSION: &str = "cymule.virtual-work-occurrence/1";
 /// Provider-neutral virtual work control command version.
 pub const VIRTUAL_WORK_CONTROL_VERSION: &str = "cymule.virtual-work-control/1";
+/// Provider-neutral virtual region migration version.
+pub const VIRTUAL_REGION_MIGRATION_VERSION: &str = "cymule.virtual-region-migration/1";
+/// Provider-neutral virtual region migration control version.
+pub const VIRTUAL_REGION_MIGRATION_CONTROL_VERSION: &str =
+    "cymule.virtual-region-migration-control/1";
 
 /// Opaque provider-neutral durable cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +226,76 @@ pub struct WorkResolutionCommand {
     pub resolution: WorkResolution,
 }
 
+/// Closed virtual-region topology migration kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegionMigrationKind {
+    /// Retire one region and replace it with two or more regions.
+    Split,
+    /// Retire two or more regions and replace them with one region.
+    Merge,
+}
+
+/// Caller request given to a replaceable region migration adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegionMigrationRequest {
+    /// Stable migration identity.
+    pub migration_id: String,
+    /// Desired split or merge transition.
+    pub kind: RegionMigrationKind,
+    /// Exact active source region IDs.
+    pub source_region_ids: BTreeSet<String>,
+    /// Desired number of target regions.
+    pub target_count: usize,
+    /// Immutable adapter binding selected for this migration occurrence.
+    pub migration_binding: String,
+}
+
+/// Adapter-produced opaque cursor migration with coverage evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegionMigrationPlan {
+    /// Migration schema and semantic version.
+    pub migration_version: String,
+    /// Stable migration identity.
+    pub migration_id: String,
+    /// Split or merge topology transition.
+    pub kind: RegionMigrationKind,
+    /// Exact source cursors observed by the migration adapter.
+    pub expected_sources: BTreeMap<String, VirtualCursor>,
+    /// Replacement regions covering the remaining source domain.
+    pub targets: Vec<VirtualRegion>,
+    /// Immutable adapter binding that produced and can verify this plan.
+    pub migration_binding: String,
+    /// Immutable proof or attestation of non-overlapping complete coverage.
+    pub coverage_evidence: ArtifactRef,
+}
+
+/// Durable receipt retaining one applied region migration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegionMigrationReceipt {
+    /// Exact applied plan.
+    pub plan: RegionMigrationPlan,
+    /// Retired source region IDs.
+    pub retired_regions: BTreeSet<String>,
+    /// Newly active target region IDs.
+    pub active_targets: BTreeSet<String>,
+}
+
+/// Idempotent control command applying an adapter-produced migration plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegionMigrationCommand {
+    /// Control command schema and semantic version.
+    pub control_version: String,
+    /// Stable caller-generated idempotency identity.
+    pub command_id: String,
+    /// Exact adapter-produced plan.
+    pub plan: RegionMigrationPlan,
+}
+
 /// Materialization and active-work bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -298,4 +373,10 @@ pub struct VirtualSnapshot {
     /// Dispatch sequence when each currently ready work item became eligible.
     #[serde(default)]
     pub ready_since: BTreeMap<String, u64>,
+    /// Retired region ID to the migration that replaced it.
+    #[serde(default)]
+    pub retired_regions: BTreeMap<String, String>,
+    /// Applied migration receipts keyed by stable migration ID.
+    #[serde(default)]
+    pub migrations: BTreeMap<String, RegionMigrationReceipt>,
 }

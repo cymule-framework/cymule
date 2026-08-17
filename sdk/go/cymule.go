@@ -290,10 +290,68 @@ type WorkResolutionCommand struct {
 	Resolution     WorkResolution `json:"resolution"`
 }
 
+// VirtualCursor is an opaque provider-owned logical source position.
+type VirtualCursor struct {
+	Version   string `json:"version"`
+	Position  string `json:"position"`
+	Exhausted bool   `json:"exhausted"`
+}
+
+// VirtualRegion is one active or retired virtual source region.
+type VirtualRegion struct {
+	RegionID       string        `json:"region_id"`
+	RunID          string        `json:"run_id"`
+	Source         string        `json:"source"`
+	Cursor         VirtualCursor `json:"cursor"`
+	EstimatedTotal *uint64       `json:"estimated_total"`
+}
+
+// RegionMigrationRequest is passed to a replaceable cursor migration adapter.
+type RegionMigrationRequest struct {
+	MigrationID      string   `json:"migration_id"`
+	Kind             string   `json:"kind"`
+	SourceRegionIDs  []string `json:"source_region_ids"`
+	TargetCount      uint64   `json:"target_count"`
+	MigrationBinding string   `json:"migration_binding"`
+}
+
+// RegionMigrationPlan replaces exact source cursors with evidenced targets.
+type RegionMigrationPlan struct {
+	MigrationVersion string                   `json:"migration_version"`
+	MigrationID      string                   `json:"migration_id"`
+	Kind             string                   `json:"kind"`
+	ExpectedSources  map[string]VirtualCursor `json:"expected_sources"`
+	Targets          []VirtualRegion          `json:"targets"`
+	MigrationBinding string                   `json:"migration_binding"`
+	CoverageEvidence ArtifactRef              `json:"coverage_evidence"`
+}
+
+// RegionMigrationCommand applies one adapter-produced plan idempotently.
+type RegionMigrationCommand struct {
+	ControlVersion string              `json:"control_version"`
+	CommandID      string              `json:"command_id"`
+	Plan           RegionMigrationPlan `json:"plan"`
+}
+
+// RegionMigrationReceipt retains retirement and target activation evidence.
+type RegionMigrationReceipt struct {
+	Plan           RegionMigrationPlan `json:"plan"`
+	RetiredRegions []string            `json:"retired_regions"`
+	ActiveTargets  []string            `json:"active_targets"`
+}
+
+// RegionMigrator is a replaceable opaque-cursor split/merge adapter.
+type RegionMigrator interface {
+	Binding() string
+	Plan(request RegionMigrationRequest, sources []VirtualRegion) (RegionMigrationPlan, error)
+	Verify(plan RegionMigrationPlan) error
+}
+
 // VirtualWorkControl is a transport-neutral occurrence query/control boundary.
 type VirtualWorkControl interface {
 	Occurrence(occurrenceID string) (*WorkOccurrence, error)
 	Resolve(command WorkResolutionCommand) (WorkOccurrence, error)
+	Migrate(command RegionMigrationCommand) (RegionMigrationReceipt, error)
 }
 
 // SucceedWork creates a terminal-success control command.
@@ -329,6 +387,15 @@ func CancelWork(commandID, workID, owner string, epoch uint64, reason ArtifactRe
 	return workResolutionCommand(commandID, workID, owner, epoch, WorkResolution{
 		Kind: "cancelled", CancelReason: &reason,
 	})
+}
+
+// MigrateRegions wraps one adapter-produced split/merge plan in a stable command.
+func MigrateRegions(commandID string, plan RegionMigrationPlan) RegionMigrationCommand {
+	return RegionMigrationCommand{
+		ControlVersion: "cymule.virtual-region-migration-control/1",
+		CommandID:      commandID,
+		Plan:           plan,
+	}
 }
 
 func workResolutionCommand(commandID, workID, owner string, epoch uint64, resolution WorkResolution) WorkResolutionCommand {

@@ -49,6 +49,9 @@ Use this precedence order when guidance conflicts:
 - Weighted fairness applies to materialized, capability-compatible backlogged
   Runs. Persist integer weights, deficits, dispatch sequence, and ready age;
   region materialization uses a separate round-robin visibility guarantee.
+- Region split/merge treats cursors as opaque. A pinned migration adapter must
+  verify coverage evidence before one CAS retires sources and activates targets;
+  old regions and already materialized work remain historical authority.
 - Public mutation enters through typed commands with idempotent IDs and causal
   preconditions. Raw canonical event append is internal only.
 - Prefer optimistic CAS, immutable records, idempotency, fencing epochs, and

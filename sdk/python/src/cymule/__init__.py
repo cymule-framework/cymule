@@ -42,12 +42,84 @@ class WorkResolutionCommand(TypedDict):
     resolution: WorkResolution
 
 
+class VirtualCursor(TypedDict):
+    """Opaque provider-owned region cursor."""
+
+    version: str
+    position: str
+    exhausted: bool
+
+
+class VirtualRegion(TypedDict):
+    """One active or retired virtual source region."""
+
+    region_id: str
+    run_id: str
+    source: str
+    cursor: VirtualCursor
+    estimated_total: int | None
+
+
+class RegionMigrationRequest(TypedDict):
+    """Caller request for an opaque-cursor split or merge plan."""
+
+    migration_id: str
+    kind: str
+    source_region_ids: list[str]
+    target_count: int
+    migration_binding: str
+
+
+class RegionMigrationPlan(TypedDict):
+    """Adapter-produced split/merge plan with coverage evidence."""
+
+    migration_version: str
+    migration_id: str
+    kind: str
+    expected_sources: dict[str, VirtualCursor]
+    targets: list[VirtualRegion]
+    migration_binding: str
+    coverage_evidence: ArtifactRef
+
+
+class RegionMigrationCommand(TypedDict):
+    """Idempotent region migration control command."""
+
+    control_version: str
+    command_id: str
+    plan: RegionMigrationPlan
+
+
+class RegionMigrationReceipt(TypedDict):
+    """Durable source retirement and target activation receipt."""
+
+    plan: RegionMigrationPlan
+    retired_regions: list[str]
+    active_targets: list[str]
+
+
+class RegionMigrator(Protocol):
+    """Replaceable opaque-cursor split/merge adapter."""
+
+    def binding(self) -> str: ...
+
+    def plan(
+        self,
+        request: RegionMigrationRequest,
+        sources: list[VirtualRegion],
+    ) -> RegionMigrationPlan: ...
+
+    def verify(self, plan: RegionMigrationPlan) -> None: ...
+
+
 class VirtualWorkControl(Protocol):
     """Transport-neutral M3 occurrence query and control interface."""
 
     def occurrence(self, occurrence_id: str) -> WorkOccurrence | None: ...
 
     def resolve(self, command: WorkResolutionCommand) -> WorkOccurrence: ...
+
+    def migrate(self, command: RegionMigrationCommand) -> RegionMigrationReceipt: ...
 
 
 class FlowBuilder:
@@ -355,6 +427,19 @@ class VirtualWorkControlBuilder:
         )
 
     @staticmethod
+    def migration(
+        command_id: str,
+        plan: RegionMigrationPlan,
+    ) -> RegionMigrationCommand:
+        if not command_id:
+            raise ValueError("virtual region migration requires a command identity")
+        return {
+            "control_version": "cymule.virtual-region-migration-control/1",
+            "command_id": command_id,
+            "plan": copy.deepcopy(plan),
+        }
+
+    @staticmethod
     def _build(
         command_id: str,
         work_id: str,
@@ -444,9 +529,16 @@ __all__ = [
     "FlowBuilder",
     "Json",
     "ParkReason",
+    "RegionMigrationCommand",
+    "RegionMigrationPlan",
+    "RegionMigrationReceipt",
+    "RegionMigrationRequest",
+    "RegionMigrator",
     "ResourceBuilder",
     "VirtualWorkControl",
     "VirtualWorkControlBuilder",
+    "VirtualCursor",
+    "VirtualRegion",
     "WorkOccurrence",
     "WorkResolution",
     "WorkResolutionCommand",

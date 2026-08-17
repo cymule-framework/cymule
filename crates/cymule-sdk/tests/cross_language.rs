@@ -5,7 +5,8 @@ use std::env;
 
 use cymule_sdk::{
     CliEngine, DispatchPolicy, EffectProfile, Engine, Expression, FlowBuilder, MutationKind,
-    ReconciliationMode, ResourceCandidate, WaitActivation, WorkOccurrence, WorkResolutionCommand,
+    ReconciliationMode, RegionMigrationCommand, ResourceCandidate, WaitActivation, WorkOccurrence,
+    WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -102,4 +103,10 @@ fn rust_virtual_work_query_and_control_fixtures_are_typed() {
     .expect("virtual work control deserializes");
     assert_eq!(command.work_id, occurrence.work_id);
     assert_eq!(command.epoch, occurrence.epoch);
+    let migration: RegionMigrationCommand = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/virtual-region-migration-control.json"
+    ))
+    .expect("virtual region migration control deserializes");
+    assert_eq!(migration.plan.expected_sources.len(), 1);
+    assert_eq!(migration.plan.targets.len(), 2);
 }

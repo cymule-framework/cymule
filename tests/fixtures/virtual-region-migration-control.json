@@ -1,0 +1,45 @@
+{
+  "control_version": "cymule.virtual-region-migration-control/1",
+  "command_id": "command:migration:fixture-split",
+  "plan": {
+    "migration_version": "cymule.virtual-region-migration/1",
+    "migration_id": "migration:fixture-split",
+    "kind": "split",
+    "expected_sources": {
+      "region:fixture": {
+        "version": "fixture/1",
+        "position": "0",
+        "exhausted": false
+      }
+    },
+    "targets": [
+      {
+        "region_id": "region:fixture:left",
+        "run_id": "run:fixture",
+        "source": "fixture.range",
+        "cursor": {
+          "version": "fixture-partition/1",
+          "position": "left:0",
+          "exhausted": false
+        },
+        "estimated_total": null
+      },
+      {
+        "region_id": "region:fixture:right",
+        "run_id": "run:fixture",
+        "source": "fixture.range",
+        "cursor": {
+          "version": "fixture-partition/1",
+          "position": "right:0",
+          "exhausted": false
+        },
+        "estimated_total": null
+      }
+    ],
+    "migration_binding": "binding:migrator/fixture@1",
+    "coverage_evidence": {
+      "artifact_id": "sha256:123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+      "kind": "example/migration-evidence"
+    }
+  }
+}

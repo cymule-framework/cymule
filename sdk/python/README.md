@@ -22,3 +22,5 @@ still performs source matching and consume-once admission through CAS.
 `VirtualWorkControl` describes occurrence queries and fenced resolution
 commands independently of transport. `VirtualWorkControlBuilder` provides
 success, retry, failure, and cancellation command helpers.
+Region migration commands wrap adapter-produced split/merge plans; cursor
+partitioning and coverage proof stay outside the SDK.
