@@ -33,11 +33,15 @@ Status: partial.
 
 ## M2 - Agent and script integration
 
-Status: proposed.
+Status: partial.
 
-- context snapshots and typed model/tool effects;
-- workspace overlays and human input;
-- debugger query protocol and evidence views.
+- typed content, Session updates, Plans, tool lifecycle, context/model/tool,
+  permission, elicitation, and workspace interfaces are implemented;
+- a bounded reference turn driver passes context-model-tool-model end-to-end
+  tests;
+- durable occurrence integration, input suspension/resume, workspace scope
+  semantics, streaming finalization, protocol adapters, debugger queries, and
+  evidence views remain proposed.
 
 ## M3 - Large virtual work
 

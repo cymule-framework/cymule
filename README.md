@@ -310,6 +310,7 @@ See [Conformance](docs/conformance.md) for precise profile claims and
 
 ```text
 crates/cymule-core      trusted Rust semantic kernel
+crates/cymule-agent     provider-neutral M2 agent interaction contracts
 crates/cymule-durable   provider-neutral M1 persistence and recovery contracts
 crates/cymule-runtime   embedded interpreter and plugin host
 crates/cymule-sdk       native Rust authoring and engine facade
