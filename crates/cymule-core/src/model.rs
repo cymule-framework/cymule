@@ -743,7 +743,7 @@ impl Projection {
                 let attempt = run.attempts.get_mut(attempt_id).ok_or_else(|| {
                     CoreError::NotFound(format!("attempt {attempt_id} does not exist"))
                 })?;
-                if !attempt.active || attempt.epoch != *epoch || run.epoch != *epoch {
+                if !attempt.active || attempt.epoch != *epoch {
                     return Err(CoreError::IllegalTransition(format!(
                         "attempt {attempt_id} is stale or inactive"
                     )));
