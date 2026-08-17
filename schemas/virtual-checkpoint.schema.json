@@ -6,7 +6,9 @@
   "additionalProperties": false,
   "required": [
     "checkpoint_version", "checkpoint_id", "parent_checkpoint", "snapshot",
-    "control", "receipt_occurrence_id", "migration_control", "receipt_migration_id"
+    "control", "receipt_occurrence_id", "migration_control", "receipt_migration_id",
+    "compaction_control", "receipt_compaction_id", "rehydration_control",
+    "receipt_rehydration_id"
   ],
   "properties": {
     "checkpoint_version": { "const": "cymule.virtual-checkpoint/1" },
@@ -25,6 +27,18 @@
       "oneOf": [{ "$ref": "#/$defs/migrationControlCommand" }, { "type": "null" }]
     },
     "receipt_migration_id": {
+      "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }]
+    },
+    "compaction_control": {
+      "oneOf": [{ "$ref": "#/$defs/compactionControlCommand" }, { "type": "null" }]
+    },
+    "receipt_compaction_id": {
+      "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }]
+    },
+    "rehydration_control": {
+      "oneOf": [{ "$ref": "#/$defs/rehydrationControlCommand" }, { "type": "null" }]
+    },
+    "receipt_rehydration_id": {
       "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }]
     }
   },
@@ -317,6 +331,189 @@
         "plan": { "$ref": "#/$defs/migrationPlan" }
       }
     },
+    "terminalState": {
+      "enum": ["succeeded", "failed", "cancelled"]
+    },
+    "archivedWorkIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["work_id", "region_id", "run_id", "max_epoch", "terminal_state"],
+      "properties": {
+        "work_id": { "$ref": "#/$defs/nonEmpty" },
+        "region_id": { "$ref": "#/$defs/nonEmpty" },
+        "run_id": { "$ref": "#/$defs/nonEmpty" },
+        "max_epoch": { "type": "integer", "minimum": 1 },
+        "terminal_state": { "$ref": "#/$defs/terminalState" }
+      }
+    },
+    "compactedWorkIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "work_id", "region_id", "run_id", "max_epoch", "terminal_state", "certificate_id"
+      ],
+      "properties": {
+        "work_id": { "$ref": "#/$defs/nonEmpty" },
+        "region_id": { "$ref": "#/$defs/nonEmpty" },
+        "run_id": { "$ref": "#/$defs/nonEmpty" },
+        "max_epoch": { "type": "integer", "minimum": 1 },
+        "terminal_state": { "$ref": "#/$defs/terminalState" },
+        "certificate_id": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "archiveManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_version", "region_id", "run_id", "source_causal_cut",
+        "occurrences", "work_index"
+      ],
+      "properties": {
+        "manifest_version": { "const": "cymule.virtual-archive-manifest/1" },
+        "region_id": { "$ref": "#/$defs/nonEmpty" },
+        "run_id": { "$ref": "#/$defs/nonEmpty" },
+        "source_causal_cut": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmpty" }
+        },
+        "occurrences": {
+          "type": "object", "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/occurrence" }
+        },
+        "work_index": {
+          "type": "object", "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/archivedWorkIndex" }
+        }
+      }
+    },
+    "completionSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "region_id", "run_id", "occurrence_count", "work_count", "succeeded_count",
+        "failed_count", "cancelled_count", "output_digest", "evidence_digest",
+        "retained_debug_index_digest"
+      ],
+      "properties": {
+        "region_id": { "$ref": "#/$defs/nonEmpty" },
+        "run_id": { "$ref": "#/$defs/nonEmpty" },
+        "occurrence_count": { "type": "integer", "minimum": 1 },
+        "work_count": { "type": "integer", "minimum": 1 },
+        "succeeded_count": { "type": "integer", "minimum": 0 },
+        "failed_count": { "type": "integer", "minimum": 0 },
+        "cancelled_count": { "type": "integer", "minimum": 0 },
+        "output_digest": { "$ref": "#/$defs/nonEmpty" },
+        "evidence_digest": { "$ref": "#/$defs/nonEmpty" },
+        "retained_debug_index_digest": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "replayAvailability": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["status"],
+          "properties": { "status": { "const": "exact" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["status", "missing"],
+          "properties": {
+            "status": { "const": "projection_only" },
+            "missing": { "type": "array", "items": { "$ref": "#/$defs/nonEmpty" } }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["status", "reason"],
+          "properties": {
+            "status": { "const": "unavailable" },
+            "reason": { "$ref": "#/$defs/nonEmpty" }
+          }
+        }
+      ]
+    },
+    "compactionCertificate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "certificate_version", "certificate_id", "source_causal_cut", "summary",
+        "summary_state_digest", "unresolved_obligations", "retained_occurrence_bindings",
+        "replay_availability", "rehydration_manifest", "compactor_binding", "compactor_revision"
+      ],
+      "properties": {
+        "certificate_version": { "const": "cymule.virtual-compaction-certificate/1" },
+        "certificate_id": { "$ref": "#/$defs/nonEmpty" },
+        "source_causal_cut": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmpty" }
+        },
+        "summary": { "$ref": "#/$defs/completionSummary" },
+        "summary_state_digest": { "$ref": "#/$defs/nonEmpty" },
+        "unresolved_obligations": {
+          "type": "array", "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmpty" }
+        },
+        "retained_occurrence_bindings": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmpty" }
+        },
+        "replay_availability": { "$ref": "#/$defs/replayAvailability" },
+        "rehydration_manifest": { "$ref": "#/$defs/artifact" },
+        "compactor_binding": { "$ref": "#/$defs/nonEmpty" },
+        "compactor_revision": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "compactionControlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_version", "command_id", "region_id", "source_causal_cut",
+        "compactor_binding", "compactor_revision"
+      ],
+      "properties": {
+        "control_version": { "const": "cymule.virtual-compaction-control/1" },
+        "command_id": { "$ref": "#/$defs/nonEmpty" },
+        "region_id": { "$ref": "#/$defs/nonEmpty" },
+        "source_causal_cut": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmpty" }
+        },
+        "compactor_binding": { "$ref": "#/$defs/nonEmpty" },
+        "compactor_revision": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "compactionReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "certificate"],
+      "properties": {
+        "command": { "$ref": "#/$defs/compactionControlCommand" },
+        "certificate": { "$ref": "#/$defs/compactionCertificate" }
+      }
+    },
+    "rehydrationControlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control_version", "command_id", "certificate_id", "occurrence_ids"],
+      "properties": {
+        "control_version": { "const": "cymule.virtual-rehydration-control/1" },
+        "command_id": { "$ref": "#/$defs/nonEmpty" },
+        "certificate_id": { "$ref": "#/$defs/nonEmpty" },
+        "occurrence_ids": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmpty" }
+        }
+      }
+    },
+    "rehydrationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "restored_occurrence_ids"],
+      "properties": {
+        "command": { "$ref": "#/$defs/rehydrationControlCommand" },
+        "restored_occurrence_ids": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmpty" }
+        }
+      }
+    },
     "snapshot": {
       "type": "object",
       "additionalProperties": false,
@@ -324,7 +521,9 @@
         "scheduling_policy", "regions", "ready", "active", "parked", "known", "last_run",
         "last_region",
         "claim_epochs", "occurrences", "run_weights", "run_deficits", "dispatch_sequence",
-        "ready_since", "retired_regions", "migrations"
+        "ready_since", "retired_regions", "migrations", "compactions",
+        "compaction_receipts", "compacted_work", "compacted_regions",
+        "rehydration_receipts"
       ],
       "properties": {
         "scheduling_policy": { "$ref": "#/$defs/schedulingPolicy" },
@@ -366,6 +565,26 @@
         "migrations": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/migrationReceipt" }
+        },
+        "compactions": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/compactionCertificate" }
+        },
+        "compaction_receipts": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/compactionReceipt" }
+        },
+        "compacted_work": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/compactedWorkIndex" }
+        },
+        "compacted_regions": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/nonEmpty" }
+        },
+        "rehydration_receipts": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/rehydrationReceipt" }
         }
       }
     }

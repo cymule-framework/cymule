@@ -106,4 +106,25 @@ test("TypeScript virtual work query and control fixtures stay exact", () => {
     ),
     migrationFixture,
   );
+  const compactionPath = process.env.CYMULE_VIRTUAL_COMPACTION_FIXTURE;
+  const rehydrationPath = process.env.CYMULE_VIRTUAL_REHYDRATION_FIXTURE;
+  if (compactionPath === undefined || rehydrationPath === undefined) return;
+  assert.deepEqual(
+    VirtualWorkControlBuilder.compaction(
+      "command:compaction:fixture",
+      "region:fixture",
+      ["virtual:fixture:terminal"],
+      "binding:archive/fixture@1",
+      "compactor:fixture/1",
+    ),
+    JSON.parse(readFileSync(compactionPath, "utf8")),
+  );
+  assert.deepEqual(
+    VirtualWorkControlBuilder.rehydration(
+      "command:rehydration:fixture",
+      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      [occurrence.occurrence_id],
+    ),
+    JSON.parse(readFileSync(rehydrationPath, "utf8")),
+  );
 });

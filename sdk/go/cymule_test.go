@@ -189,4 +189,43 @@ func TestVirtualWorkQueryAndControlFixturesStayExact(t *testing.T) {
 	if !reflect.DeepEqual(migration, migrationFixture) {
 		t.Fatalf("migration differs from shared fixture: %#v", migration)
 	}
+	compactionPath := os.Getenv("CYMULE_VIRTUAL_COMPACTION_FIXTURE")
+	rehydrationPath := os.Getenv("CYMULE_VIRTUAL_REHYDRATION_FIXTURE")
+	if compactionPath == "" || rehydrationPath == "" {
+		t.Skip("virtual archive SDK conformance is not configured")
+	}
+	compactionBytes, err := os.ReadFile(compactionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compactionFixture VirtualCompactionCommand
+	if err := json.Unmarshal(compactionBytes, &compactionFixture); err != nil {
+		t.Fatal(err)
+	}
+	compaction := CompactVirtualRegion(
+		"command:compaction:fixture",
+		"region:fixture",
+		[]string{"virtual:fixture:terminal"},
+		"binding:archive/fixture@1",
+		"compactor:fixture/1",
+	)
+	if !reflect.DeepEqual(compaction, compactionFixture) {
+		t.Fatalf("compaction differs from shared fixture: %#v", compaction)
+	}
+	rehydrationBytes, err := os.ReadFile(rehydrationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rehydrationFixture VirtualRehydrationCommand
+	if err := json.Unmarshal(rehydrationBytes, &rehydrationFixture); err != nil {
+		t.Fatal(err)
+	}
+	rehydration := RehydrateVirtualOccurrences(
+		"command:rehydration:fixture",
+		"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		[]string{occurrence.OccurrenceID},
+	)
+	if !reflect.DeepEqual(rehydration, rehydrationFixture) {
+		t.Fatalf("rehydration differs from shared fixture: %#v", rehydration)
+	}
 }

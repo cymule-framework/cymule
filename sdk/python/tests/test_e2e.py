@@ -126,6 +126,33 @@ class EndToEndTest(unittest.TestCase):
             ),
             migration_fixture,
         )
+        compaction_path = os.environ.get("CYMULE_VIRTUAL_COMPACTION_FIXTURE")
+        rehydration_path = os.environ.get("CYMULE_VIRTUAL_REHYDRATION_FIXTURE")
+        if compaction_path is None or rehydration_path is None:
+            self.skipTest("virtual archive SDK conformance is not configured")
+        with open(compaction_path, encoding="utf-8") as source:
+            self.assertEqual(
+                VirtualWorkControlBuilder.compaction(
+                    "command:compaction:fixture",
+                    "region:fixture",
+                    ["virtual:fixture:terminal"],
+                    "binding:archive/fixture@1",
+                    "compactor:fixture/1",
+                ),
+                json.load(source),
+            )
+        with open(rehydration_path, encoding="utf-8") as source:
+            self.assertEqual(
+                VirtualWorkControlBuilder.rehydration(
+                    "command:rehydration:fixture",
+                    (
+                        "sha256:0123456789abcdef0123456789abcdef"
+                        "0123456789abcdef0123456789abcdef"
+                    ),
+                    [occurrence["occurrence_id"]],
+                ),
+                json.load(source),
+            )
 
 
 if __name__ == "__main__":

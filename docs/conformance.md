@@ -10,7 +10,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
 | Durable Single Domain | Partial | snapshot/restore, CAS, Continuation, identified signal/timer activation, lease, outbox, occurrence replay, Resource handoff, directory-store reopen, and ambiguous-effect reconciliation; nested scopes and the full crash matrix remain |
 | Optional Agent Interaction plugin | Partial plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces; not a framework profile |
-| Large Virtual Graph | Partial | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, priority aging, verified cursor split/merge, four SDK work/migration controls, fencing, and restore; compaction remains |
+| Large Virtual Graph | Partial | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, priority aging, verified cursor split/merge, certified cold compaction/partial rehydration, four SDK controls, fencing, and restore; multi-worker crash/scheduling control remain |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
 | Live Evolution | Partial | Plan DAG, impact, occurrence pins, deterministic canary/rollback, safe-point migration receipts, and shadow evidence; runtime rollout automation remains |
@@ -63,6 +63,14 @@ The local suite verifies:
   split-merge lineage reopens, and old commands return original receipts;
 - TypeScript, Python, Rust, and Go parse the same opaque-cursor migration command
   without implementing cursor partitioning or coverage validation;
+- an exhausted completed region compacts exact occurrence history to a
+  content-addressed manifest, retains its terminal fence/binding certificate,
+  survives M1 reopen, and restores only requested occurrence IDs;
+- injected archive put/get failures, manifest tampering, and stale compaction
+  CAS restore neither partial scheduler state nor partial Machine state; a
+  later identical command returns its original receipt;
+- TypeScript, Python, Rust, and Go construct the same compaction and rehydration
+  commands without computing a manifest or certificate;
 - M3 claim/result checkpoints survive reopen, stale CAS rolls back scheduler
   state, and result/evidence Artifacts commit with occurrence state;
 - TypeScript, Python, Rust, and Go parse one occurrence fixture and construct one

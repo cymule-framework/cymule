@@ -17,3 +17,6 @@
   or decide retry policy.
 - Region migration types preserve opaque cursor maps, pinned adapter binding,
   and coverage evidence. Python clients never split cursor strings locally.
+- Archive protocols expose immutable bytes without provider locators in semantic
+  commands. Compaction/rehydration builders preserve the pinned binding, causal
+  cut, certificate, and exact occurrence selection; Rust validates them.

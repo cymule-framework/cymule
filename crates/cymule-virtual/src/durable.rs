@@ -8,9 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ClaimedWork, FrontierLimits, RegionMigrationCommand, RegionMigrationReceipt, RegionMigrator,
-    RegionSource, VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION,
-    VirtualError, VirtualResult, VirtualScheduler, VirtualSnapshot, WorkOccurrence, WorkResolution,
-    WorkResolutionCommand,
+    RegionSource, VIRTUAL_COMPACTION_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_CONTROL_VERSION,
+    VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive,
+    VirtualCompactionCommand, VirtualCompactionReceipt, VirtualError, VirtualRehydrationCommand,
+    VirtualRehydrationReceipt, VirtualResult, VirtualScheduler, VirtualSnapshot, WorkOccurrence,
+    WorkResolution, WorkResolutionCommand, virtual_archive_record,
 };
 
 /// Versioned M3 scheduler checkpoint stored in an M1 application journal.
@@ -40,6 +42,18 @@ pub struct VirtualCheckpoint {
     /// Migration receipt returned by the region control command.
     #[serde(default)]
     pub receipt_migration_id: Option<String>,
+    /// Region compaction command committed by this checkpoint, when any.
+    #[serde(default)]
+    pub compaction_control: Option<VirtualCompactionCommand>,
+    /// Compaction certificate returned by the control command.
+    #[serde(default)]
+    pub receipt_compaction_id: Option<String>,
+    /// Partial rehydration command committed by this checkpoint, when any.
+    #[serde(default)]
+    pub rehydration_control: Option<VirtualRehydrationCommand>,
+    /// Rehydration command receipt identity.
+    #[serde(default)]
+    pub receipt_rehydration_id: Option<String>,
 }
 
 /// M1 journal integration for the M3 virtual scheduler.
@@ -246,6 +260,135 @@ impl DurableVirtualController {
         Ok(receipt)
     }
 
+    /// Archive one completed region and atomically checkpoint its verified
+    /// certificate plus manifest Artifact through the M1 journal CAS.
+    pub fn compact_command_and_checkpoint<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        scheduler: &mut VirtualScheduler,
+        archive: &mut impl VirtualArchive,
+        machine: &mut Machine,
+        command: &VirtualCompactionCommand,
+        journal_id: &str,
+    ) -> VirtualResult<VirtualCompactionReceipt> {
+        if let Some(receipt) =
+            replay_compaction_receipt(coordinator, scheduler, journal_id, command)?
+        {
+            return Ok(receipt);
+        }
+        let journal_head = coordinator
+            .journal_records(journal_id)
+            .map_err(durable_error)?
+            .last()
+            .map(|record| record.record_id.clone())
+            .ok_or_else(|| {
+                VirtualError::Validation(
+                    "durable compaction requires an existing virtual checkpoint".to_owned(),
+                )
+            })?;
+        if !command.source_causal_cut.contains(&journal_head) {
+            return Err(VirtualError::Conflict(format!(
+                "compaction causal cut does not include current checkpoint {journal_head}"
+            )));
+        }
+        let scheduler_before = scheduler.clone();
+        let machine_before = machine.clone();
+        let receipt = scheduler.compact(archive, command)?;
+        let bytes = match archive.get(&receipt.certificate.rehydration_manifest) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                *scheduler = scheduler_before;
+                return Err(error);
+            }
+        };
+        let manifest: crate::VirtualArchiveManifest = match serde_json::from_slice(&bytes) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                *scheduler = scheduler_before;
+                return Err(VirtualError::Source(error.to_string()));
+            }
+        };
+        let record = match virtual_archive_record(&manifest) {
+            Ok(record) => record,
+            Err(error) => {
+                *scheduler = scheduler_before;
+                return Err(error);
+            }
+        };
+        if record.reference != receipt.certificate.rehydration_manifest || record.bytes != bytes {
+            *scheduler = scheduler_before;
+            return Err(VirtualError::Source(
+                "archive manifest changed before its durable checkpoint".to_owned(),
+            ));
+        }
+        let stored = machine.put_artifact(record.reference.kind.clone(), record.bytes);
+        if stored != record.reference {
+            *scheduler = scheduler_before;
+            *machine = machine_before;
+            return Err(VirtualError::Validation(
+                "archive manifest Artifact identity is inconsistent".to_owned(),
+            ));
+        }
+        let checkpoint = match compaction_checkpoint_record(
+            coordinator,
+            scheduler,
+            journal_id,
+            command,
+            &receipt.certificate.certificate_id,
+        ) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                *scheduler = scheduler_before;
+                *machine = machine_before;
+                return Err(error);
+            }
+        };
+        let batch = JournalBatch {
+            journal_id: journal_id.to_owned(),
+            records: vec![checkpoint],
+        };
+        if let Err(error) = coordinator.checkpoint_artifact_journals(
+            machine,
+            &BTreeSet::from([receipt.certificate.rehydration_manifest.clone()]),
+            &[batch],
+        ) {
+            *scheduler = scheduler_before;
+            *machine = machine_before;
+            return Err(durable_error(error));
+        }
+        Ok(receipt)
+    }
+
+    /// Restore selected archived occurrence records and checkpoint the exact
+    /// selection through the M1 journal CAS.
+    pub fn rehydrate_command_and_checkpoint<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        scheduler: &mut VirtualScheduler,
+        archive: &mut impl VirtualArchive,
+        command: &VirtualRehydrationCommand,
+        journal_id: &str,
+    ) -> VirtualResult<VirtualRehydrationReceipt> {
+        if let Some(receipt) =
+            replay_rehydration_receipt(coordinator, scheduler, journal_id, command)?
+        {
+            return Ok(receipt);
+        }
+        let before = scheduler.clone();
+        let receipt = scheduler.rehydrate(archive, command)?;
+        let record =
+            match rehydration_checkpoint_record(coordinator, scheduler, journal_id, command) {
+                Ok(record) => record,
+                Err(error) => {
+                    *scheduler = before;
+                    return Err(error);
+                }
+            };
+        if let Err(error) = coordinator.append_journal_record(journal_id, record) {
+            *scheduler = before;
+            return Err(durable_error(error));
+        }
+        Ok(receipt)
+    }
+
     /// Atomically admit one M1 wait activation and publish the exact M3 parked
     /// work wake-up produced by its selected wait IDs.
     pub fn activate_and_wake<S: DurableStore>(
@@ -305,6 +448,8 @@ fn checkpoint_record<S: DurableStore>(
         let checkpoint = decode_checkpoint(existing)?;
         if checkpoint.control.is_some()
             || checkpoint.migration_control.is_some()
+            || checkpoint.compaction_control.is_some()
+            || checkpoint.rehydration_control.is_some()
             || checkpoint.snapshot != scheduler.snapshot()
         {
             return Err(VirtualError::Conflict(format!(
@@ -322,6 +467,10 @@ fn checkpoint_record<S: DurableStore>(
         receipt_occurrence_id: None,
         migration_control: None,
         receipt_migration_id: None,
+        compaction_control: None,
+        receipt_compaction_id: None,
+        rehydration_control: None,
+        receipt_rehydration_id: None,
     };
     let payload = serde_json::to_value(checkpoint)
         .map_err(|error| VirtualError::Validation(error.to_string()))?;
@@ -356,6 +505,10 @@ fn control_checkpoint_record<S: DurableStore>(
         receipt_occurrence_id: Some(occurrence_id.to_owned()),
         migration_control: None,
         receipt_migration_id: None,
+        compaction_control: None,
+        receipt_compaction_id: None,
+        rehydration_control: None,
+        receipt_rehydration_id: None,
     };
     let payload = serde_json::to_value(checkpoint)
         .map_err(|error| VirtualError::Validation(error.to_string()))?;
@@ -427,6 +580,10 @@ fn migration_checkpoint_record<S: DurableStore>(
         receipt_occurrence_id: None,
         migration_control: Some(command.clone()),
         receipt_migration_id: Some(command.plan.migration_id.clone()),
+        compaction_control: None,
+        receipt_compaction_id: None,
+        rehydration_control: None,
+        receipt_rehydration_id: None,
     };
     let payload = serde_json::to_value(checkpoint)
         .map_err(|error| VirtualError::Validation(error.to_string()))?;
@@ -471,6 +628,164 @@ fn replay_migration_receipt<S: DurableStore>(
     Ok(Some(receipt.clone()))
 }
 
+fn compaction_checkpoint_record<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &VirtualCompactionCommand,
+    certificate_id: &str,
+) -> VirtualResult<JournalRecord> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    if records
+        .iter()
+        .any(|record| record.record_id == command.command_id)
+    {
+        return Err(VirtualError::Conflict(format!(
+            "virtual compaction command {} already exists without a replayable receipt",
+            command.command_id
+        )));
+    }
+    let checkpoint = VirtualCheckpoint {
+        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
+        checkpoint_id: command.command_id.clone(),
+        parent_checkpoint: records.last().map(|record| record.record_id.clone()),
+        snapshot: scheduler.snapshot(),
+        control: None,
+        receipt_occurrence_id: None,
+        migration_control: None,
+        receipt_migration_id: None,
+        compaction_control: Some(command.clone()),
+        receipt_compaction_id: Some(certificate_id.to_owned()),
+        rehydration_control: None,
+        receipt_rehydration_id: None,
+    };
+    let payload = serde_json::to_value(checkpoint)
+        .map_err(|error| VirtualError::Validation(error.to_string()))?;
+    JournalRecord::new(&command.command_id, VIRTUAL_CHECKPOINT_SCHEMA, payload)
+        .map_err(durable_error)
+}
+
+fn replay_compaction_receipt<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &VirtualCompactionCommand,
+) -> VirtualResult<Option<VirtualCompactionReceipt>> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    let Some(record) = records
+        .iter()
+        .find(|record| record.record_id == command.command_id)
+    else {
+        return Ok(None);
+    };
+    let checkpoint = decode_checkpoint(record)?;
+    if checkpoint.compaction_control.as_ref() != Some(command) {
+        return Err(VirtualError::Conflict(format!(
+            "virtual compaction command {} was reused with different semantics",
+            command.command_id
+        )));
+    }
+    let certificate_id = checkpoint.receipt_compaction_id.ok_or_else(|| {
+        VirtualError::Validation(format!(
+            "virtual compaction command {} has no certificate receipt",
+            command.command_id
+        ))
+    })?;
+    let receipt = scheduler
+        .snapshot()
+        .compaction_receipts
+        .get(&command.command_id)
+        .filter(|receipt| receipt.certificate.certificate_id == certificate_id)
+        .cloned()
+        .ok_or_else(|| {
+            VirtualError::Validation(format!(
+                "virtual compaction command {} receipt is unavailable",
+                command.command_id
+            ))
+        })?;
+    Ok(Some(receipt))
+}
+
+fn rehydration_checkpoint_record<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &VirtualRehydrationCommand,
+) -> VirtualResult<JournalRecord> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    if records
+        .iter()
+        .any(|record| record.record_id == command.command_id)
+    {
+        return Err(VirtualError::Conflict(format!(
+            "virtual rehydration command {} already exists without a replayable receipt",
+            command.command_id
+        )));
+    }
+    let checkpoint = VirtualCheckpoint {
+        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
+        checkpoint_id: command.command_id.clone(),
+        parent_checkpoint: records.last().map(|record| record.record_id.clone()),
+        snapshot: scheduler.snapshot(),
+        control: None,
+        receipt_occurrence_id: None,
+        migration_control: None,
+        receipt_migration_id: None,
+        compaction_control: None,
+        receipt_compaction_id: None,
+        rehydration_control: Some(command.clone()),
+        receipt_rehydration_id: Some(command.command_id.clone()),
+    };
+    let payload = serde_json::to_value(checkpoint)
+        .map_err(|error| VirtualError::Validation(error.to_string()))?;
+    JournalRecord::new(&command.command_id, VIRTUAL_CHECKPOINT_SCHEMA, payload)
+        .map_err(durable_error)
+}
+
+fn replay_rehydration_receipt<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    command: &VirtualRehydrationCommand,
+) -> VirtualResult<Option<VirtualRehydrationReceipt>> {
+    let records = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?;
+    let Some(record) = records
+        .iter()
+        .find(|record| record.record_id == command.command_id)
+    else {
+        return Ok(None);
+    };
+    let checkpoint = decode_checkpoint(record)?;
+    if checkpoint.rehydration_control.as_ref() != Some(command)
+        || checkpoint.receipt_rehydration_id.as_deref() != Some(command.command_id.as_str())
+    {
+        return Err(VirtualError::Conflict(format!(
+            "virtual rehydration command {} was reused with different semantics",
+            command.command_id
+        )));
+    }
+    let receipt = scheduler
+        .snapshot()
+        .rehydration_receipts
+        .get(&command.command_id)
+        .cloned()
+        .ok_or_else(|| {
+            VirtualError::Validation(format!(
+                "virtual rehydration command {} receipt is unavailable",
+                command.command_id
+            ))
+        })?;
+    Ok(Some(receipt))
+}
+
 fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint> {
     if record.schema != VIRTUAL_CHECKPOINT_SCHEMA {
         return Err(VirtualError::Validation(format!(
@@ -488,9 +803,18 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
             record.record_id
         )));
     }
-    if checkpoint.control.is_some() && checkpoint.migration_control.is_some() {
+    let control_count = [
+        checkpoint.control.is_some(),
+        checkpoint.migration_control.is_some(),
+        checkpoint.compaction_control.is_some(),
+        checkpoint.rehydration_control.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if control_count > 1 {
         return Err(VirtualError::Validation(format!(
-            "virtual checkpoint {} contains two control commands",
+            "virtual checkpoint {} contains multiple control commands",
             record.record_id
         )));
     }
@@ -554,6 +878,74 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
         _ => {
             return Err(VirtualError::Validation(format!(
                 "virtual checkpoint {} has a partial migration receipt",
+                record.record_id
+            )));
+        }
+    }
+    match (
+        &checkpoint.compaction_control,
+        &checkpoint.receipt_compaction_id,
+    ) {
+        (None, None) => {}
+        (Some(command), Some(certificate_id)) => {
+            let receipt = checkpoint
+                .snapshot
+                .compaction_receipts
+                .get(&command.command_id)
+                .ok_or_else(|| {
+                    VirtualError::Validation(format!(
+                        "virtual checkpoint {} compaction receipt is missing",
+                        record.record_id
+                    ))
+                })?;
+            if command.control_version != VIRTUAL_COMPACTION_CONTROL_VERSION
+                || command.command_id != record.record_id
+                || receipt.command != *command
+                || receipt.certificate.certificate_id != *certificate_id
+            {
+                return Err(VirtualError::Validation(format!(
+                    "virtual checkpoint {} compaction receipt does not match its command",
+                    record.record_id
+                )));
+            }
+        }
+        _ => {
+            return Err(VirtualError::Validation(format!(
+                "virtual checkpoint {} has a partial compaction receipt",
+                record.record_id
+            )));
+        }
+    }
+    match (
+        &checkpoint.rehydration_control,
+        &checkpoint.receipt_rehydration_id,
+    ) {
+        (None, None) => {}
+        (Some(command), Some(receipt_id)) => {
+            let receipt = checkpoint
+                .snapshot
+                .rehydration_receipts
+                .get(receipt_id)
+                .ok_or_else(|| {
+                    VirtualError::Validation(format!(
+                        "virtual checkpoint {} rehydration receipt is missing",
+                        record.record_id
+                    ))
+                })?;
+            if command.control_version != VIRTUAL_REHYDRATION_CONTROL_VERSION
+                || command.command_id != record.record_id
+                || receipt_id != &command.command_id
+                || receipt.command != *command
+            {
+                return Err(VirtualError::Validation(format!(
+                    "virtual checkpoint {} rehydration receipt does not match its command",
+                    record.record_id
+                )));
+            }
+        }
+        _ => {
+            return Err(VirtualError::Validation(format!(
+                "virtual checkpoint {} has a partial rehydration receipt",
                 record.record_id
             )));
         }

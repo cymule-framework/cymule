@@ -188,6 +188,32 @@ def main() -> int:
         registry=registry,
     )
     migration_validator.validate(migration_control)
+    compaction_control = load(
+        root / "tests/fixtures/virtual-compaction-control.json"
+    )
+    compaction_validator = Draft202012Validator(
+        {
+            "$ref": (
+                "https://cymule.dev/schemas/virtual-checkpoint.schema.json"
+                "#/$defs/compactionControlCommand"
+            )
+        },
+        registry=registry,
+    )
+    compaction_validator.validate(compaction_control)
+    rehydration_control = load(
+        root / "tests/fixtures/virtual-rehydration-control.json"
+    )
+    rehydration_validator = Draft202012Validator(
+        {
+            "$ref": (
+                "https://cymule.dev/schemas/virtual-checkpoint.schema.json"
+                "#/$defs/rehydrationControlCommand"
+            )
+        },
+        registry=registry,
+    )
+    rehydration_validator.validate(rehydration_control)
     malformed_virtual = dict(virtual_checkpoint)
     malformed_virtual["provider"] = "must-not-enter-virtual-checkpoint"
     try:
@@ -220,6 +246,22 @@ def main() -> int:
         pass
     else:
         raise AssertionError("virtual region migration accepted a provider field")
+    malformed_compaction = dict(compaction_control)
+    malformed_compaction["provider"] = "must-not-enter-virtual-compaction"
+    try:
+        compaction_validator.validate(malformed_compaction)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("virtual compaction accepted a provider field")
+    malformed_rehydration = dict(rehydration_control)
+    malformed_rehydration["provider"] = "must-not-enter-virtual-rehydration"
+    try:
+        rehydration_validator.validate(malformed_rehydration)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("virtual rehydration accepted a provider field")
 
     credential_url = {
         "resource_version": "cymule.resource/1",

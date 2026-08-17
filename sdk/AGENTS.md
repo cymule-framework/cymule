@@ -17,4 +17,8 @@
 - Region migration contracts preserve exact source cursors, target descriptors,
   migration binding, and evidence across languages. No SDK interprets cursor
   positions or certifies coverage.
+- Archive contracts expose immutable byte storage and typed compaction/
+  rehydration controls only. SDKs preserve causal cuts, certificate identity,
+  replay availability, and exact occurrence selections; Rust verifies content
+  identity and performs M1/M3 admission.
 - Avoid runtime dependencies unless they materially improve correctness.

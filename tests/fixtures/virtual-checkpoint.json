@@ -37,10 +37,19 @@
     "dispatch_sequence": 0,
     "ready_since": {},
     "retired_regions": {},
-    "migrations": {}
+    "migrations": {},
+    "compactions": {},
+    "compaction_receipts": {},
+    "compacted_work": {},
+    "compacted_regions": {},
+    "rehydration_receipts": {}
   },
   "control": null,
   "receipt_occurrence_id": null,
   "migration_control": null,
-  "receipt_migration_id": null
+  "receipt_migration_id": null,
+  "compaction_control": null,
+  "receipt_compaction_id": null,
+  "rehydration_control": null,
+  "receipt_rehydration_id": null
 }

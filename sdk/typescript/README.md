@@ -35,6 +35,9 @@ commands without choosing a scheduler or worker transport.
 The same interface accepts adapter-produced region split/merge plans with
 opaque cursor preconditions and coverage evidence; SDK code never partitions
 cursor strings itself.
+It also carries completed-region compaction and exact-occurrence rehydration
+commands. `VirtualArchive` is only an immutable byte seam; the Rust controller
+computes and verifies manifest and certificate identity before M1 admission.
 
 The package is published from GitHub Actions with npm trusted publishing and
 provenance. The Rust Engine remains the semantic authority.

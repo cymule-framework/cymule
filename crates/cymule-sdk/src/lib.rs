@@ -18,9 +18,14 @@ pub use cymule_resource::{
 };
 pub use cymule_runtime::ExecutionResult;
 pub use cymule_virtual::{
-    ParkReason, RegionMigrationCommand, RegionMigrationKind, RegionMigrationPlan,
-    RegionMigrationReceipt, RegionMigrationRequest, RegionMigrator,
+    ArchivedWorkIndex, CompactedWorkIndex, ParkReason, RegionMigrationCommand, RegionMigrationKind,
+    RegionMigrationPlan, RegionMigrationReceipt, RegionMigrationRequest, RegionMigrator,
+    VIRTUAL_ARCHIVE_MANIFEST_KIND, VIRTUAL_ARCHIVE_MANIFEST_VERSION,
+    VIRTUAL_COMPACTION_CERTIFICATE_VERSION, VIRTUAL_COMPACTION_CONTROL_VERSION,
     VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_VERSION,
-    VIRTUAL_WORK_CONTROL_VERSION, VIRTUAL_WORK_OCCURRENCE_VERSION, WorkOccurrence,
+    VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION,
+    VIRTUAL_WORK_OCCURRENCE_VERSION, VirtualArchive, VirtualArchiveManifest,
+    VirtualCompactionCertificate, VirtualCompactionCommand, VirtualCompactionReceipt,
+    VirtualCompletionSummary, VirtualRehydrationCommand, VirtualRehydrationReceipt, WorkOccurrence,
     WorkOccurrenceState, WorkResolution, WorkResolutionCommand,
 };

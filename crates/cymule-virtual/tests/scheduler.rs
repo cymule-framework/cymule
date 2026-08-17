@@ -13,10 +13,12 @@ use cymule_durable::{
 use cymule_virtual::{
     DurableVirtualController, FrontierLimits, MaterializedPage, ParkReason, ParkedWork,
     RegionMigrationCommand, RegionMigrationKind, RegionMigrationPlan, RegionMigrationRequest,
-    RegionMigrator, RegionSource, SchedulingPolicy, VIRTUAL_REGION_MIGRATION_CONTROL_VERSION,
-    VIRTUAL_REGION_MIGRATION_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualCheckpoint,
-    VirtualCursor, VirtualError, VirtualRegion, VirtualResult, VirtualScheduler, WorkItem,
-    WorkOccurrenceState, WorkResolution, WorkResolutionCommand,
+    RegionMigrator, RegionSource, SchedulingPolicy, VIRTUAL_COMPACTION_CONTROL_VERSION,
+    VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_VERSION,
+    VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive,
+    VirtualCheckpoint, VirtualCompactionCommand, VirtualCursor, VirtualError, VirtualRegion,
+    VirtualRehydrationCommand, VirtualResult, VirtualScheduler, WorkItem, WorkOccurrenceState,
+    WorkResolution, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -30,6 +32,16 @@ struct FairSource {
 }
 
 struct PriorityAgingSource;
+
+struct CompletedSource;
+
+#[derive(Default)]
+struct MemoryArchive {
+    binding: String,
+    records: BTreeMap<ArtifactRef, Vec<u8>>,
+    calls: usize,
+    fail_at: Option<usize>,
+}
 
 struct TestRegionMigrator {
     evidence: ArtifactRef,
@@ -184,6 +196,78 @@ impl RegionSource for PriorityAgingSource {
                 exhausted: end == 100,
             },
         })
+    }
+}
+
+impl RegionSource for CompletedSource {
+    fn materialize(
+        &mut self,
+        region: &VirtualRegion,
+        _limit: usize,
+    ) -> VirtualResult<MaterializedPage> {
+        Ok(MaterializedPage {
+            items: if region.cursor.exhausted {
+                Vec::new()
+            } else {
+                vec![WorkItem {
+                    work_id: format!("{}:complete", region.region_id),
+                    region_id: region.region_id.clone(),
+                    run_id: region.run_id.clone(),
+                    payload: ArtifactRef {
+                        artifact_id: "artifact:completed-input".to_owned(),
+                        kind: "example/work".to_owned(),
+                    },
+                    capability: Some("cpu".to_owned()),
+                    priority: 0,
+                    cost: 1,
+                }]
+            },
+            next_cursor: VirtualCursor {
+                version: region.cursor.version.clone(),
+                position: "complete".to_owned(),
+                exhausted: true,
+            },
+        })
+    }
+}
+
+impl VirtualArchive for MemoryArchive {
+    fn binding(&self) -> &str {
+        &self.binding
+    }
+
+    fn put(&mut self, reference: &ArtifactRef, bytes: &[u8]) -> VirtualResult<()> {
+        self.calls += 1;
+        if self.fail_at == Some(self.calls) {
+            return Err(VirtualError::Source(format!(
+                "injected archive failure at operation {}",
+                self.calls
+            )));
+        }
+        match self.records.get(reference) {
+            Some(existing) if existing != bytes => Err(VirtualError::Source(
+                "archive reference already contains different bytes".to_owned(),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                self.records.insert(reference.clone(), bytes.to_vec());
+                Ok(())
+            }
+        }
+    }
+
+    fn get(&mut self, reference: &ArtifactRef) -> VirtualResult<Vec<u8>> {
+        self.calls += 1;
+        if self.fail_at == Some(self.calls) {
+            return Err(VirtualError::Source(format!(
+                "injected archive failure at operation {}",
+                self.calls
+            )));
+        }
+        self.records
+            .get(reference)
+            .cloned()
+            .ok_or_else(|| VirtualError::Source("archive record is missing".to_owned()))
     }
 }
 
@@ -1674,4 +1758,317 @@ fn weighted_fairness_and_aging_accounting_survive_m1_reopen() {
         .expect("restored work");
     assert_eq!(restored_claim.item.work_id, expected_claim.item.work_id);
     assert_eq!(restored.snapshot(), original.snapshot());
+}
+
+fn completed_scheduler() -> (VirtualScheduler, String) {
+    let mut scheduler = VirtualScheduler::new(limits()).expect("scheduler creates");
+    scheduler
+        .register(region("region:completed", "run:completed"))
+        .expect("region registers");
+    assert_eq!(
+        scheduler.fill(&mut CompletedSource).expect("source fills"),
+        1
+    );
+    let claim = scheduler
+        .claim(
+            "worker:completed",
+            "binding:worker/completed",
+            &BTreeSet::from(["cpu".to_owned()]),
+        )
+        .expect("claim succeeds")
+        .expect("work exists");
+    scheduler
+        .succeed(
+            &claim.item.work_id,
+            "worker:completed",
+            claim.epoch,
+            ArtifactRef {
+                artifact_id: "artifact:completed-output".to_owned(),
+                kind: "example/result".to_owned(),
+            },
+        )
+        .expect("work succeeds");
+    (scheduler, claim.occurrence_id)
+}
+
+fn compaction_command(command_id: &str) -> VirtualCompactionCommand {
+    VirtualCompactionCommand {
+        control_version: VIRTUAL_COMPACTION_CONTROL_VERSION.to_owned(),
+        command_id: command_id.to_owned(),
+        region_id: "region:completed".to_owned(),
+        source_causal_cut: BTreeSet::from(["virtual:completed:result".to_owned()]),
+        compactor_binding: "binding:archive/memory@1".to_owned(),
+        compactor_revision: "compactor:test/1".to_owned(),
+    }
+}
+
+#[test]
+fn completed_region_compacts_and_partially_rehydrates_exact_history() {
+    let (mut scheduler, occurrence_id) = completed_scheduler();
+    let original = scheduler
+        .occurrence(&occurrence_id)
+        .expect("occurrence exists")
+        .clone();
+    let mut archive = MemoryArchive {
+        binding: "binding:archive/memory@1".to_owned(),
+        ..MemoryArchive::default()
+    };
+    let command = compaction_command("command:compact:completed");
+    let receipt = scheduler
+        .compact(&mut archive, &command)
+        .expect("region compacts");
+    assert_eq!(receipt.certificate.summary.occurrence_count, 1);
+    assert_eq!(receipt.certificate.summary.work_count, 1);
+    assert_eq!(receipt.certificate.summary.succeeded_count, 1);
+    assert!(scheduler.occurrence(&occurrence_id).is_none());
+    assert_eq!(scheduler.snapshot().compacted_work.len(), 1);
+    assert_eq!(
+        scheduler
+            .compact(&mut archive, &command)
+            .expect("compaction receipt replays"),
+        receipt
+    );
+    VirtualScheduler::restore(limits(), scheduler.snapshot()).expect("cold snapshot restores");
+
+    let rehydration = VirtualRehydrationCommand {
+        control_version: VIRTUAL_REHYDRATION_CONTROL_VERSION.to_owned(),
+        command_id: "command:rehydrate:completed".to_owned(),
+        certificate_id: receipt.certificate.certificate_id.clone(),
+        occurrence_ids: BTreeSet::from([occurrence_id.clone()]),
+    };
+    let rehydrated = scheduler
+        .rehydrate(&mut archive, &rehydration)
+        .expect("selected history rehydrates");
+    assert_eq!(
+        rehydrated.restored_occurrence_ids,
+        BTreeSet::from([occurrence_id.clone()])
+    );
+    assert_eq!(scheduler.occurrence(&occurrence_id), Some(&original));
+    assert_eq!(
+        scheduler
+            .rehydrate(&mut archive, &rehydration)
+            .expect("rehydration receipt replays"),
+        rehydrated
+    );
+    VirtualScheduler::restore(limits(), scheduler.snapshot())
+        .expect("rehydrated snapshot restores");
+}
+
+#[test]
+fn compaction_rejects_hot_or_unanchored_history_without_archive_write() {
+    let mut hot = VirtualScheduler::new(limits()).expect("scheduler creates");
+    hot.register(region("region:completed", "run:completed"))
+        .expect("region registers");
+    hot.fill(&mut CompletedSource).expect("source fills");
+    let hot_before = hot.snapshot();
+    let mut archive = MemoryArchive {
+        binding: "binding:archive/memory@1".to_owned(),
+        ..MemoryArchive::default()
+    };
+    assert!(matches!(
+        hot.compact(&mut archive, &compaction_command("command:compact:hot")),
+        Err(VirtualError::Conflict(_))
+    ));
+    assert_eq!(hot.snapshot(), hot_before);
+    assert_eq!(archive.calls, 0);
+
+    let (mut completed, _) = completed_scheduler();
+    let completed_before = completed.snapshot();
+    let mut unanchored = compaction_command("command:compact:unanchored");
+    unanchored.source_causal_cut.clear();
+    assert!(matches!(
+        completed.compact(&mut archive, &unanchored),
+        Err(VirtualError::Validation(_))
+    ));
+    assert_eq!(completed.snapshot(), completed_before);
+    assert_eq!(archive.calls, 0);
+}
+
+#[test]
+fn archive_fault_sweep_never_partially_mutates_scheduler() {
+    for failure_operation in 1..=3 {
+        let (mut scheduler, occurrence_id) = completed_scheduler();
+        let before_compaction = scheduler.snapshot();
+        let mut archive = MemoryArchive {
+            binding: "binding:archive/memory@1".to_owned(),
+            fail_at: Some(failure_operation),
+            ..MemoryArchive::default()
+        };
+        let command = compaction_command(&format!("command:compact:fault:{failure_operation}"));
+        let result = scheduler.compact(&mut archive, &command);
+        if failure_operation <= 2 {
+            assert!(matches!(result, Err(VirtualError::Source(_))));
+            assert_eq!(scheduler.snapshot(), before_compaction);
+            assert_eq!(
+                scheduler.occurrence(&occurrence_id),
+                before_compaction.occurrences.get(&occurrence_id)
+            );
+            continue;
+        }
+        let receipt = result.expect("put and readback precede the third injected operation");
+        let before_rehydration = scheduler.snapshot();
+        let rehydration = VirtualRehydrationCommand {
+            control_version: VIRTUAL_REHYDRATION_CONTROL_VERSION.to_owned(),
+            command_id: format!("command:rehydrate:fault:{failure_operation}"),
+            certificate_id: receipt.certificate.certificate_id,
+            occurrence_ids: BTreeSet::from([occurrence_id]),
+        };
+        assert!(matches!(
+            scheduler.rehydrate(&mut archive, &rehydration),
+            Err(VirtualError::Source(_))
+        ));
+        assert_eq!(scheduler.snapshot(), before_rehydration);
+    }
+}
+
+#[test]
+fn tampered_archive_bytes_fail_closed_before_rehydration() {
+    let (mut scheduler, occurrence_id) = completed_scheduler();
+    let mut archive = MemoryArchive {
+        binding: "binding:archive/memory@1".to_owned(),
+        ..MemoryArchive::default()
+    };
+    let receipt = scheduler
+        .compact(&mut archive, &compaction_command("command:compact:tamper"))
+        .expect("region compacts");
+    archive.records.insert(
+        receipt.certificate.rehydration_manifest.clone(),
+        br#"{"manifest_version":"tampered"}"#.to_vec(),
+    );
+    let before = scheduler.snapshot();
+    let command = VirtualRehydrationCommand {
+        control_version: VIRTUAL_REHYDRATION_CONTROL_VERSION.to_owned(),
+        command_id: "command:rehydrate:tamper".to_owned(),
+        certificate_id: receipt.certificate.certificate_id,
+        occurrence_ids: BTreeSet::from([occurrence_id]),
+    };
+    assert!(matches!(
+        scheduler.rehydrate(&mut archive, &command),
+        Err(VirtualError::Source(_))
+    ));
+    assert_eq!(scheduler.snapshot(), before);
+}
+
+#[test]
+fn durable_compaction_and_partial_rehydration_reopen_without_stale_partial_commit() {
+    let mut machine = Machine::new();
+    let store = MemoryStore::new();
+    let mut current = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let (mut scheduler, occurrence_id) = completed_scheduler();
+    DurableVirtualController::checkpoint(
+        &mut current,
+        &scheduler,
+        "journal:virtual",
+        "virtual:completed:result",
+    )
+    .expect("completed frontier checkpoints");
+    let mut stale = DurableCoordinator::open(store.clone()).expect("stale view opens");
+    let mut stale_scheduler = DurableVirtualController::load(&stale, "journal:virtual", limits())
+        .expect("stale scheduler restores");
+    let stale_before = stale_scheduler.snapshot();
+    let stale_machine_before = machine.clone();
+    let mut archive = MemoryArchive {
+        binding: "binding:archive/memory@1".to_owned(),
+        ..MemoryArchive::default()
+    };
+    let mut stale_cut = compaction_command("command:compact:stale-cut");
+    stale_cut.source_causal_cut = BTreeSet::from(["virtual:older".to_owned()]);
+    let before_stale_cut = scheduler.snapshot();
+    assert!(matches!(
+        DurableVirtualController::compact_command_and_checkpoint(
+            &mut current,
+            &mut scheduler,
+            &mut archive,
+            &mut machine,
+            &stale_cut,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Conflict(_))
+    ));
+    assert_eq!(scheduler.snapshot(), before_stale_cut);
+    assert_eq!(archive.calls, 0);
+    let command = compaction_command("command:compact:durable");
+    let receipt = DurableVirtualController::compact_command_and_checkpoint(
+        &mut current,
+        &mut scheduler,
+        &mut archive,
+        &mut machine,
+        &command,
+        "journal:virtual",
+    )
+    .expect("compaction checkpoints");
+    assert!(
+        machine
+            .artifact(&receipt.certificate.rehydration_manifest)
+            .is_some()
+    );
+
+    let mut stale_machine = stale_machine_before;
+    assert!(matches!(
+        DurableVirtualController::compact_command_and_checkpoint(
+            &mut stale,
+            &mut stale_scheduler,
+            &mut archive,
+            &mut stale_machine,
+            &command,
+            "journal:virtual",
+        ),
+        Err(VirtualError::Durable(_))
+    ));
+    assert_eq!(stale_scheduler.snapshot(), stale_before);
+    assert!(
+        stale_machine
+            .artifact(&receipt.certificate.rehydration_manifest)
+            .is_none()
+    );
+
+    drop(current);
+    let mut reopened = DurableCoordinator::open(store.clone()).expect("store reopens");
+    let mut restored = DurableVirtualController::load(&reopened, "journal:virtual", limits())
+        .expect("cold scheduler restores");
+    assert!(restored.occurrence(&occurrence_id).is_none());
+    assert!(
+        reopened
+            .restore_machine()
+            .expect("Machine restores")
+            .artifact(&receipt.certificate.rehydration_manifest)
+            .is_some()
+    );
+
+    let rehydration = VirtualRehydrationCommand {
+        control_version: VIRTUAL_REHYDRATION_CONTROL_VERSION.to_owned(),
+        command_id: "command:rehydrate:durable".to_owned(),
+        certificate_id: receipt.certificate.certificate_id.clone(),
+        occurrence_ids: BTreeSet::from([occurrence_id.clone()]),
+    };
+    DurableVirtualController::rehydrate_command_and_checkpoint(
+        &mut reopened,
+        &mut restored,
+        &mut archive,
+        &rehydration,
+        "journal:virtual",
+    )
+    .expect("partial rehydration checkpoints");
+    assert!(restored.occurrence(&occurrence_id).is_some());
+    drop(reopened);
+
+    let mut reopened = DurableCoordinator::open(store).expect("store reopens again");
+    let mut restored_again = DurableVirtualController::load(&reopened, "journal:virtual", limits())
+        .expect("rehydrated scheduler restores");
+    assert!(restored_again.occurrence(&occurrence_id).is_some());
+    assert_eq!(
+        DurableVirtualController::compact_command_and_checkpoint(
+            &mut reopened,
+            &mut restored_again,
+            &mut archive,
+            &mut machine,
+            &command,
+            "journal:virtual",
+        )
+        .expect("durable compaction receipt replays without a new write"),
+        receipt
+    );
 }

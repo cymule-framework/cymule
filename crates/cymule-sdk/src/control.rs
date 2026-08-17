@@ -1,5 +1,7 @@
 use cymule_virtual::{
-    RegionMigrationCommand, RegionMigrationReceipt, WorkOccurrence, WorkResolutionCommand,
+    RegionMigrationCommand, RegionMigrationReceipt, VirtualCompactionCommand,
+    VirtualCompactionReceipt, VirtualRehydrationCommand, VirtualRehydrationReceipt, WorkOccurrence,
+    WorkResolutionCommand,
 };
 
 /// Transport-neutral query and control interface for M3 virtual work.
@@ -21,4 +23,16 @@ pub trait VirtualWorkControl {
         &mut self,
         command: &RegionMigrationCommand,
     ) -> Result<RegionMigrationReceipt, Self::Error>;
+
+    /// Submit one idempotent completed-region compaction request.
+    fn compact(
+        &mut self,
+        command: &VirtualCompactionCommand,
+    ) -> Result<VirtualCompactionReceipt, Self::Error>;
+
+    /// Restore selected exact occurrences from one verified manifest.
+    fn rehydrate(
+        &mut self,
+        command: &VirtualRehydrationCommand,
+    ) -> Result<VirtualRehydrationReceipt, Self::Error>;
 }

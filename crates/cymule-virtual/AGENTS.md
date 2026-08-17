@@ -14,6 +14,15 @@
 - Migration command replay retains the original receipt after later checkpoints.
   Conflicting command/migration IDs, stale cursors, unverified evidence, target
   collisions, or stale CAS retire nothing.
+- A completed region may move exact occurrence records to a `VirtualArchive`
+  only when exhausted or retired and free of ready, active, and parked work.
+  The framework computes the manifest Artifact, summary digests, certificate
+  identity, terminal fence index, retained bindings, and replay classification;
+  an archive plugin only stores/loads exact immutable bytes.
+- Compaction failure may leave an unreferenced immutable archive object but MUST
+  roll back scheduler and M1 state. Rehydration verifies bytes, Artifact ID,
+  manifest digest, certificate, work index, causal cut, and binding before
+  restoring only the requested occurrence IDs.
 - Cursors are immutable logical progress tokens returned by a source and stored
   before more work is requested.
 - `cymule.virtual-checkpoint/1` records persist cursor and complete bounded

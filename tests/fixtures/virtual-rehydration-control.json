@@ -1,0 +1,8 @@
+{
+  "control_version": "cymule.virtual-rehydration-control/1",
+  "command_id": "command:rehydration:fixture",
+  "certificate_id": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "occurrence_ids": [
+    "sha256:e5195c71618aad53a091450520d0bbc02c559042a40a91215f3451324d89a941"
+  ]
+}

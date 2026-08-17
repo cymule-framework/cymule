@@ -98,6 +98,81 @@ class RegionMigrationReceipt(TypedDict):
     active_targets: list[str]
 
 
+class VirtualCompletionSummary(TypedDict):
+    """Bounded projection of one completed virtual region."""
+
+    region_id: str
+    run_id: str
+    occurrence_count: int
+    work_count: int
+    succeeded_count: int
+    failed_count: int
+    cancelled_count: int
+    output_digest: str
+    evidence_digest: str
+    retained_debug_index_digest: str
+
+
+class VirtualCompactionCertificate(TypedDict):
+    """Verified witness retaining exact archived-history interpretation data."""
+
+    certificate_version: str
+    certificate_id: str
+    source_causal_cut: list[str]
+    summary: VirtualCompletionSummary
+    summary_state_digest: str
+    unresolved_obligations: list[str]
+    retained_occurrence_bindings: list[str]
+    replay_availability: dict[str, Any]
+    rehydration_manifest: ArtifactRef
+    compactor_binding: str
+    compactor_revision: str
+
+
+class VirtualCompactionCommand(TypedDict):
+    """Idempotent completed-region compaction request."""
+
+    control_version: str
+    command_id: str
+    region_id: str
+    source_causal_cut: list[str]
+    compactor_binding: str
+    compactor_revision: str
+
+
+class VirtualCompactionReceipt(TypedDict):
+    """Durable compaction command and verified certificate."""
+
+    command: VirtualCompactionCommand
+    certificate: VirtualCompactionCertificate
+
+
+class VirtualRehydrationCommand(TypedDict):
+    """Idempotent exact occurrence-selection request."""
+
+    control_version: str
+    command_id: str
+    certificate_id: str
+    occurrence_ids: list[str]
+
+
+class VirtualRehydrationReceipt(TypedDict):
+    """Exact occurrence identities restored into the hot projection."""
+
+    command: VirtualRehydrationCommand
+    restored_occurrence_ids: list[str]
+
+
+class VirtualArchive(Protocol):
+    """Replaceable immutable byte archive for completed virtual history."""
+
+    def binding(self) -> str: ...
+
+    def put(self, reference: ArtifactRef, data: bytes) -> None: ...
+
+    def get(self, reference: ArtifactRef) -> bytes: ...
+
+
 class RegionMigrator(Protocol):
     """Replaceable opaque-cursor split/merge adapter."""
 
@@ -120,6 +195,10 @@ class VirtualWorkControl(Protocol):
     def resolve(self, command: WorkResolutionCommand) -> WorkOccurrence: ...
 
     def migrate(self, command: RegionMigrationCommand) -> RegionMigrationReceipt: ...
+
+    def compact(self, command: VirtualCompactionCommand) -> VirtualCompactionReceipt: ...
+
+    def rehydrate(self, command: VirtualRehydrationCommand) -> VirtualRehydrationReceipt: ...
 
 
 class FlowBuilder:
@@ -437,6 +516,54 @@ class VirtualWorkControlBuilder:
             "control_version": "cymule.virtual-region-migration-control/1",
             "command_id": command_id,
             "plan": copy.deepcopy(plan),
+        }
+
+    @staticmethod
+    def compaction(
+        command_id: str,
+        region_id: str,
+        source_causal_cut: list[str],
+        compactor_binding: str,
+        compactor_revision: str,
+    ) -> VirtualCompactionCommand:
+        """Build one completed-region compaction command."""
+        causal_cut = sorted(set(source_causal_cut))
+        if (
+            not command_id
+            or not region_id
+            or not causal_cut
+            or not compactor_binding
+            or not compactor_revision
+        ):
+            raise ValueError(
+                "virtual compaction requires identities, a causal cut, binding, and revision"
+            )
+        return {
+            "control_version": "cymule.virtual-compaction-control/1",
+            "command_id": command_id,
+            "region_id": region_id,
+            "source_causal_cut": causal_cut,
+            "compactor_binding": compactor_binding,
+            "compactor_revision": compactor_revision,
+        }
+
+    @staticmethod
+    def rehydration(
+        command_id: str,
+        certificate_id: str,
+        occurrence_ids: list[str],
+    ) -> VirtualRehydrationCommand:
+        """Build one exact occurrence-selection rehydration command."""
+        occurrences = sorted(set(occurrence_ids))
+        if not command_id or not certificate_id or not occurrences:
+            raise ValueError(
+                "virtual rehydration requires command, certificate, and occurrence identities"
+            )
+        return {
+            "control_version": "cymule.virtual-rehydration-control/1",
+            "command_id": command_id,
+            "certificate_id": certificate_id,
+            "occurrence_ids": occurrences,
         }
 
     @staticmethod

@@ -340,6 +340,79 @@ type RegionMigrationReceipt struct {
 	ActiveTargets  []string            `json:"active_targets"`
 }
 
+// ReplayAvailability reports exact, projection-only, or unavailable replay.
+type ReplayAvailability struct {
+	Status  string   `json:"status"`
+	Missing []string `json:"missing,omitempty"`
+	Reason  string   `json:"reason,omitempty"`
+}
+
+// VirtualCompletionSummary is one bounded completed-region projection.
+type VirtualCompletionSummary struct {
+	RegionID                 string `json:"region_id"`
+	RunID                    string `json:"run_id"`
+	OccurrenceCount          uint64 `json:"occurrence_count"`
+	WorkCount                uint64 `json:"work_count"`
+	SucceededCount           uint64 `json:"succeeded_count"`
+	FailedCount              uint64 `json:"failed_count"`
+	CancelledCount           uint64 `json:"cancelled_count"`
+	OutputDigest             string `json:"output_digest"`
+	EvidenceDigest           string `json:"evidence_digest"`
+	RetainedDebugIndexDigest string `json:"retained_debug_index_digest"`
+}
+
+// VirtualCompactionCertificate authenticates exact cold occurrence history.
+type VirtualCompactionCertificate struct {
+	CertificateVersion         string                   `json:"certificate_version"`
+	CertificateID              string                   `json:"certificate_id"`
+	SourceCausalCut            []string                 `json:"source_causal_cut"`
+	Summary                    VirtualCompletionSummary `json:"summary"`
+	SummaryStateDigest         string                   `json:"summary_state_digest"`
+	UnresolvedObligations      []string                 `json:"unresolved_obligations"`
+	RetainedOccurrenceBindings []string                 `json:"retained_occurrence_bindings"`
+	ReplayAvailability         ReplayAvailability       `json:"replay_availability"`
+	RehydrationManifest        ArtifactRef              `json:"rehydration_manifest"`
+	CompactorBinding           string                   `json:"compactor_binding"`
+	CompactorRevision          string                   `json:"compactor_revision"`
+}
+
+// VirtualCompactionCommand requests one idempotent completed-region archive.
+type VirtualCompactionCommand struct {
+	ControlVersion    string   `json:"control_version"`
+	CommandID         string   `json:"command_id"`
+	RegionID          string   `json:"region_id"`
+	SourceCausalCut   []string `json:"source_causal_cut"`
+	CompactorBinding  string   `json:"compactor_binding"`
+	CompactorRevision string   `json:"compactor_revision"`
+}
+
+// VirtualCompactionReceipt retains the command and verified certificate.
+type VirtualCompactionReceipt struct {
+	Command     VirtualCompactionCommand     `json:"command"`
+	Certificate VirtualCompactionCertificate `json:"certificate"`
+}
+
+// VirtualRehydrationCommand selects exact archived occurrences to restore.
+type VirtualRehydrationCommand struct {
+	ControlVersion string   `json:"control_version"`
+	CommandID      string   `json:"command_id"`
+	CertificateID  string   `json:"certificate_id"`
+	OccurrenceIDs  []string `json:"occurrence_ids"`
+}
+
+// VirtualRehydrationReceipt records exact restored occurrence identities.
+type VirtualRehydrationReceipt struct {
+	Command               VirtualRehydrationCommand `json:"command"`
+	RestoredOccurrenceIDs []string                  `json:"restored_occurrence_ids"`
+}
+
+// VirtualArchive is a replaceable immutable byte archive.
+type VirtualArchive interface {
+	Binding() string
+	Put(reference ArtifactRef, data []byte) error
+	Get(reference ArtifactRef) ([]byte, error)
+}
+
 // RegionMigrator is a replaceable opaque-cursor split/merge adapter.
 type RegionMigrator interface {
 	Binding() string
@@ -352,6 +425,8 @@ type VirtualWorkControl interface {
 	Occurrence(occurrenceID string) (*WorkOccurrence, error)
 	Resolve(command WorkResolutionCommand) (WorkOccurrence, error)
 	Migrate(command RegionMigrationCommand) (RegionMigrationReceipt, error)
+	Compact(command VirtualCompactionCommand) (VirtualCompactionReceipt, error)
+	Rehydrate(command VirtualRehydrationCommand) (VirtualRehydrationReceipt, error)
 }
 
 // SucceedWork creates a terminal-success control command.
@@ -395,6 +470,28 @@ func MigrateRegions(commandID string, plan RegionMigrationPlan) RegionMigrationC
 		ControlVersion: "cymule.virtual-region-migration-control/1",
 		CommandID:      commandID,
 		Plan:           plan,
+	}
+}
+
+// CompactVirtualRegion creates one completed-region compaction command.
+func CompactVirtualRegion(commandID, regionID string, sourceCausalCut []string, compactorBinding, compactorRevision string) VirtualCompactionCommand {
+	return VirtualCompactionCommand{
+		ControlVersion:    "cymule.virtual-compaction-control/1",
+		CommandID:         commandID,
+		RegionID:          regionID,
+		SourceCausalCut:   uniqueSorted(sourceCausalCut),
+		CompactorBinding:  compactorBinding,
+		CompactorRevision: compactorRevision,
+	}
+}
+
+// RehydrateVirtualOccurrences creates one exact archived-occurrence selection.
+func RehydrateVirtualOccurrences(commandID, certificateID string, occurrenceIDs []string) VirtualRehydrationCommand {
+	return VirtualRehydrationCommand{
+		ControlVersion: "cymule.virtual-rehydration-control/1",
+		CommandID:      commandID,
+		CertificateID:  certificateID,
+		OccurrenceIDs:  uniqueSorted(occurrenceIDs),
 	}
 }
 

@@ -12,4 +12,7 @@
   and disposition identity. Do not implement retry classification in the SDK.
 - Region migration structs retain opaque source cursors, pinned adapter binding,
   and coverage evidence. Never partition cursor strings in Go client code.
+- Archive and compaction structs retain exact wire fields. Go adapters store
+  immutable bytes only; they do not recompute certificate or manifest identity,
+  and rehydration never widens the requested occurrence set.
 - Run `gofmt` and `go test ./...` for every change.

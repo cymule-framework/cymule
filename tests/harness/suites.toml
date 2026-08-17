@@ -1,0 +1,120 @@
+schema_version = 1
+
+[suites.docs]
+description = "Validate repository-local documentation references."
+lane = "meta"
+tools = []
+commands = [["python3", "scripts/validate_docs.py"]]
+
+[suites.harness]
+description = "Validate change routing and harness behavior."
+lane = "meta"
+tools = []
+commands = [["python3", "-m", "unittest", "discover", "-s", "tests/harness", "-p", "test_*.py"]]
+
+[suites.rust-workspace]
+description = "Run formatting, static analysis, tests, and documentation for the Rust workspace."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-rust.sh"]]
+
+[suites.rust-durable]
+description = "Run M1 durability and its direct durable consumers."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-rust.sh", "cymule-durable", "cymule-directory-store", "cymule-virtual", "cymule-agent"]]
+
+[suites.rust-virtual]
+description = "Run M3 bounded scheduling, migration, compaction, and fault tests."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-rust.sh", "cymule-virtual"]]
+
+[suites.rust-evolution]
+description = "Run M4 evolution semantics and fault tests."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-rust.sh", "cymule-evolution"]]
+
+[suites.rust-resource]
+description = "Run provider-neutral Resource semantics."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-rust.sh", "cymule-resource"]]
+
+[suites.rust-agent-plugin]
+description = "Run the optional Agent interaction plugin fault suite."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-rust.sh", "cymule-agent"]]
+
+[suites.rust-directory-plugin]
+description = "Run the atomic directory-store adapter suite."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-rust.sh", "cymule-directory-store"]]
+
+[suites.protocol]
+description = "Build the engine and validate frozen schemas and semantic rejection."
+lane = "protocol"
+tools = ["rust", "uv"]
+commands = [["./scripts/verify-protocol.sh"]]
+
+[suites.sdk-rust]
+description = "Run the Rust SDK against the freshly built Rust engine."
+lane = "sdk-rust"
+tools = ["rust"]
+commands = [["./scripts/verify-sdk.sh", "rust"]]
+
+[suites.sdk-typescript]
+description = "Run the TypeScript SDK against the freshly built Rust engine."
+lane = "sdk-typescript"
+tools = ["rust", "node"]
+commands = [["./scripts/verify-sdk.sh", "typescript"]]
+
+[suites.sdk-python]
+description = "Run the Python SDK against the freshly built Rust engine."
+lane = "sdk-python"
+tools = ["rust", "uv"]
+commands = [["./scripts/verify-sdk.sh", "python"]]
+
+[suites.sdk-go]
+description = "Run the Go SDK against the freshly built Rust engine."
+lane = "sdk-go"
+tools = ["rust", "go"]
+commands = [["./scripts/verify-sdk.sh", "go"]]
+
+[suites.example]
+description = "Run the user quick-start example through success and reconciliation."
+lane = "protocol"
+tools = ["rust"]
+commands = [["./scripts/verify-example.sh"]]
+
+[suites.package-typescript]
+description = "Build and dry-pack both public TypeScript package names."
+lane = "package-typescript"
+tools = ["node"]
+commands = [["./scripts/verify-typescript-package.sh"]]
+
+[suites.mlir]
+description = "Run the optional MLIR workbench smoke test when the pinned toolchain exists."
+lane = "workbench"
+tools = []
+commands = [["./compiler/mlir/verify.sh"]]
+
+[suites.full]
+description = "Run every required Cymule verification family."
+abstract = true
+requires = [
+  "docs",
+  "harness",
+  "rust-workspace",
+  "protocol",
+  "sdk-rust",
+  "sdk-typescript",
+  "sdk-python",
+  "sdk-go",
+  "example",
+  "package-typescript",
+  "mlir",
+]

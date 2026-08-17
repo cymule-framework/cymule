@@ -149,6 +149,70 @@ export interface RegionMigrationCommand {
   plan: RegionMigrationPlan;
 }
 
+export type ReplayAvailability =
+  | { status: "exact" }
+  | { status: "projection_only"; missing: string[] }
+  | { status: "unavailable"; reason: string };
+
+export interface VirtualCompletionSummary {
+  region_id: string;
+  run_id: string;
+  occurrence_count: number;
+  work_count: number;
+  succeeded_count: number;
+  failed_count: number;
+  cancelled_count: number;
+  output_digest: string;
+  evidence_digest: string;
+  retained_debug_index_digest: string;
+}
+
+export interface VirtualCompactionCertificate {
+  certificate_version: "cymule.virtual-compaction-certificate/1";
+  certificate_id: string;
+  source_causal_cut: string[];
+  summary: VirtualCompletionSummary;
+  summary_state_digest: string;
+  unresolved_obligations: string[];
+  retained_occurrence_bindings: string[];
+  replay_availability: ReplayAvailability;
+  rehydration_manifest: ArtifactRef;
+  compactor_binding: string;
+  compactor_revision: string;
+}
+
+export interface VirtualCompactionCommand {
+  control_version: "cymule.virtual-compaction-control/1";
+  command_id: string;
+  region_id: string;
+  source_causal_cut: string[];
+  compactor_binding: string;
+  compactor_revision: string;
+}
+
+export interface VirtualCompactionReceipt {
+  command: VirtualCompactionCommand;
+  certificate: VirtualCompactionCertificate;
+}
+
+export interface VirtualRehydrationCommand {
+  control_version: "cymule.virtual-rehydration-control/1";
+  command_id: string;
+  certificate_id: string;
+  occurrence_ids: string[];
+}
+
+export interface VirtualRehydrationReceipt {
+  command: VirtualRehydrationCommand;
+  restored_occurrence_ids: string[];
+}
+
+export interface VirtualArchive {
+  readonly binding: string;
+  put(reference: ArtifactRef, bytes: Uint8Array): Promise<void>;
+  get(reference: ArtifactRef): Promise<Uint8Array>;
+}
+
 export interface RegionMigrator {
   readonly binding: string;
   plan(request: RegionMigrationRequest, sources: VirtualRegion[]): Promise<RegionMigrationPlan>;
@@ -159,6 +223,8 @@ export interface VirtualWorkControl {
   occurrence(occurrenceId: string): Promise<WorkOccurrence | null>;
   resolve(command: WorkResolutionCommand): Promise<WorkOccurrence>;
   migrate(command: RegionMigrationCommand): Promise<RegionMigrationReceipt>;
+  compact(command: VirtualCompactionCommand): Promise<VirtualCompactionReceipt>;
+  rehydrate(command: VirtualRehydrationCommand): Promise<VirtualRehydrationReceipt>;
 }
 
 export type Expression =
@@ -441,6 +507,50 @@ export class VirtualWorkControlBuilder {
       control_version: "cymule.virtual-region-migration-control/1",
       command_id: commandId,
       plan,
+    };
+  }
+
+  static compaction(
+    commandId: string,
+    regionId: string,
+    sourceCausalCut: string[],
+    compactorBinding: string,
+    compactorRevision: string,
+  ): VirtualCompactionCommand {
+    const causalCut = [...new Set(sourceCausalCut)].sort();
+    if (
+      commandId.length === 0 ||
+      regionId.length === 0 ||
+      causalCut.length === 0 ||
+      compactorBinding.length === 0 ||
+      compactorRevision.length === 0
+    ) {
+      throw new Error("virtual compaction requires identities, a causal cut, binding, and revision");
+    }
+    return {
+      control_version: "cymule.virtual-compaction-control/1",
+      command_id: commandId,
+      region_id: regionId,
+      source_causal_cut: causalCut,
+      compactor_binding: compactorBinding,
+      compactor_revision: compactorRevision,
+    };
+  }
+
+  static rehydration(
+    commandId: string,
+    certificateId: string,
+    occurrenceIds: string[],
+  ): VirtualRehydrationCommand {
+    const occurrences = [...new Set(occurrenceIds)].sort();
+    if (commandId.length === 0 || certificateId.length === 0 || occurrences.length === 0) {
+      throw new Error("virtual rehydration requires command, certificate, and occurrence identities");
+    }
+    return {
+      control_version: "cymule.virtual-rehydration-control/1",
+      command_id: commandId,
+      certificate_id: certificateId,
+      occurrence_ids: occurrences,
     };
   }
 
