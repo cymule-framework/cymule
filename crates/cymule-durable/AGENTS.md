@@ -9,12 +9,19 @@
   ambient time.
 - Wait completion, lease acquisition, outbox claims, occurrence recording, and
   snapshot publication must be idempotent and fenced.
+- `unknown` outbox entries remain active reconciliation work under their
+  original claim. Reopen must query them again and may settle them as applied or
+  not applied; it must never redispatch the original Effect or reuse one command
+  ID for different reconciliation decisions.
 - Higher profiles may append typed, self-validating records through
   `application_journals` so they share the M1 CAS authority. M1 stores only the
   versioned envelope; the owning profile validates and reduces its payload.
 - A higher-profile state projection coupled to a wait must use the atomic
   journal-plus-wait checkpoints. Separate CAS commits may not claim one logical
   suspension or completion.
+- Higher-profile host calls coupled to a semantic Effect must use the atomic
+  journal-plus-effect checkpoints so Machine, Continuation, outbox, and typed
+  lifecycle records cannot acknowledge different sides of one transition.
 - Reference in-memory synchronization is adapter-local and non-blocking.
   Contention must surface as a CAS conflict rather than waiting on a mutex.
 - Concrete storage belongs under `plugins/` and must pass this crate's shared

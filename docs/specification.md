@@ -61,6 +61,24 @@ invalid. A writer MUST validate the semantic schema before hashing.
 `PlanId` identifies a sealed plan. `EventId` identifies the event payload and
 causal parents. `ArtifactId` identifies artifact type metadata and bytes.
 
+### 5.1 Cross-Run resource values (proposed)
+
+M1 will extend Artifact exchange with a versioned provider-neutral resource
+descriptor. A resource has a logical shape (`inline`, `object`, `collection`,
+`directory`, or `snapshot`), media type, optional byte size, and replay
+evidence. Inline text/JSON/bytes are content-addressed directly. External
+objects, directory manifests, sandbox snapshots, remote-drive items, and URL
+content MUST carry either a content digest or an immutable provider version to
+qualify for exact replay.
+
+Resolver locators and access grants are realization data, not Plan semantics.
+Credentials MUST NOT enter a descriptor, Artifact, Event, Continuation, or IR.
+A mutable locator without immutable evidence MAY be passed between Runs as a
+live reference, but replay availability MUST be downgraded until a resolver
+materializes and verifies stable content. Collections and directories use
+immutable manifests of child descriptors rather than assuming one provider's
+listing or path semantics.
+
 ## 6. Frozen IR
 
 `cymule.ir/1` contains:
@@ -148,6 +166,20 @@ world-effect requirements into an `EffectObligationSet`. Scope closure does not
 claim that a provider action is applied. Run completion policy decides whether
 unresolved obligations block the Result.
 
+An M2 workspace commit MUST reference an immutable overlay Artifact and a
+Plan-declared Effect whose profile is mutating, `on_scope_commit`, queryable,
+and keyed-idempotent. The binding-pinned workspace occurrence, committed scope,
+transferred obligation, pending outbox entry, Machine snapshot, and
+Continuation MUST enter the same M1 CAS authority before dispatch. The outbox
+claim, `DispatchStarted` transition, and typed `started` occurrence MUST also be
+atomic. Provider settlement MUST atomically update the Effect outcome,
+obligation, outbox, retained occurrence, Machine, and Continuation.
+
+An M2 workspace abort MUST leave the scope open until the original binding
+returns or reconciliation recovers a typed receipt proving the overlay was not
+committed. An ambiguous or explicitly not-applied abort MUST NOT close the
+scope. A replacement cleanup attempt requires a new occurrence identity.
+
 ## 11. Effects
 
 Effect identity is structural:
@@ -167,7 +199,10 @@ reconciliation: not-required | pending | resolved | governance-required
 
 After dispatch ambiguity, the original intent becomes `unknown`. It MUST keep
 its original occurrence binding and reconciler. It MUST NOT become a fresh
-intent. Compensation is a separately admitted effect.
+intent. An `unknown` outbox entry remains eligible for reconciliation under its
+original claim across any number of process reopens. `still_unknown` MUST NOT
+redispatch it, and a later applied or not-applied observation MUST be admissible
+without changing identity. Compensation is a separately admitted effect.
 
 ## 12. Binding evolution
 

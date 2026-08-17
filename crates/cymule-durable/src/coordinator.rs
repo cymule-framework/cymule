@@ -137,6 +137,55 @@ impl<S: DurableStore> DurableCoordinator<S> {
         })
     }
 
+    /// Atomically persist a Machine safe point, Continuation, higher-profile
+    /// records, and one newly enqueued Effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid records or dispatch state, conflicting
+    /// identity, stale CAS revision, or store failure.
+    pub fn checkpoint_journal_effect_enqueue(
+        &mut self,
+        machine: &Machine,
+        continuation: Continuation,
+        journal_id: &str,
+        records: &[JournalRecord],
+        dispatch: EffectDispatch,
+    ) -> DurableResult<String> {
+        validate_journal_batch(journal_id, records)?;
+        if dispatch.state != OutboxState::Pending
+            || dispatch.claim_owner.is_some()
+            || dispatch.claim_epoch != 0
+            || dispatch.result.is_some()
+        {
+            return Err(DurableError::Validation(
+                "new effect dispatch must be unclaimed and pending".to_owned(),
+            ));
+        }
+        self.mutate_checked(|state| {
+            state.machine = machine.snapshot();
+            for record in records {
+                append_journal_record(state, journal_id, record.clone())?;
+            }
+            match state.outbox.get(&dispatch.intent_id) {
+                Some(existing) if existing == &dispatch => {}
+                Some(_) => {
+                    return Err(DurableError::IllegalTransition(format!(
+                        "effect {} already has a different outbox entry",
+                        dispatch.intent_id
+                    )));
+                }
+                None => {
+                    state.outbox.insert(dispatch.intent_id.clone(), dispatch);
+                }
+            }
+            state
+                .continuations
+                .insert(continuation.run_id.clone(), continuation);
+            Ok(())
+        })
+    }
+
     /// Atomically persist `DispatchStarted` and the fenced outbox claim.
     pub fn checkpoint_effect_claim(
         &mut self,
@@ -158,6 +207,53 @@ impl<S: DurableStore> DurableCoordinator<S> {
             dispatch.claim_owner = Some(owner.to_owned());
             dispatch.claim_epoch = lease_epoch;
             state.machine = machine.snapshot();
+            Ok(())
+        })
+    }
+
+    /// Atomically persist `DispatchStarted`, a fenced outbox claim, and the
+    /// owning higher-profile lifecycle records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid claim, missing or non-pending Effect,
+    /// invalid records, stale CAS revision, or store failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint_journal_effect_claim(
+        &mut self,
+        machine: &Machine,
+        continuation: Continuation,
+        journal_id: &str,
+        records: &[JournalRecord],
+        intent_id: &str,
+        owner: &str,
+        lease_epoch: u64,
+    ) -> DurableResult<String> {
+        validate_journal_batch(journal_id, records)?;
+        if owner.is_empty() {
+            return Err(DurableError::Validation(
+                "effect claim owner must not be empty".to_owned(),
+            ));
+        }
+        self.mutate_checked(|state| {
+            let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
+                DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
+            })?;
+            if dispatch.state != OutboxState::Pending {
+                return Err(DurableError::IllegalTransition(format!(
+                    "effect {intent_id} is not pending"
+                )));
+            }
+            dispatch.state = OutboxState::Claimed;
+            dispatch.claim_owner = Some(owner.to_owned());
+            dispatch.claim_epoch = lease_epoch;
+            state.machine = machine.snapshot();
+            for record in records {
+                append_journal_record(state, journal_id, record.clone())?;
+            }
+            state
+                .continuations
+                .insert(continuation.run_id.clone(), continuation);
             Ok(())
         })
     }
@@ -185,7 +281,9 @@ impl<S: DurableStore> DurableCoordinator<S> {
             let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
                 DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
             })?;
-            if dispatch.state != OutboxState::Claimed
+            let already_settled = dispatch.state == outcome && dispatch.result == result;
+            if !already_settled
+                && !matches!(dispatch.state, OutboxState::Claimed | OutboxState::Unknown)
                 || dispatch.claim_owner.as_deref() != Some(owner)
                 || dispatch.claim_epoch != lease_epoch
             {
@@ -200,6 +298,94 @@ impl<S: DurableStore> DurableCoordinator<S> {
             dispatch.state = outcome;
             dispatch.result = result;
             state.machine = machine.snapshot();
+            Ok(())
+        })
+    }
+
+    /// Atomically persist an Effect observation, outbox settlement,
+    /// Continuation obligation projection, and higher-profile lifecycle
+    /// records under the original claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid outcome, missing or mismatched claim,
+    /// invalid records, stale CAS revision, or store failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint_journal_effect_settlement(
+        &mut self,
+        machine: &Machine,
+        continuation: Continuation,
+        journal_id: &str,
+        records: &[JournalRecord],
+        intent_id: &str,
+        owner: &str,
+        lease_epoch: u64,
+        outcome: OutboxState,
+        result: Option<cymule_core::ArtifactRef>,
+    ) -> DurableResult<String> {
+        validate_journal_batch(journal_id, records)?;
+        if !matches!(
+            outcome,
+            OutboxState::Applied | OutboxState::NotApplied | OutboxState::Unknown
+        ) {
+            return Err(DurableError::Validation(
+                "settlement must be applied, not_applied, or unknown".to_owned(),
+            ));
+        }
+        self.mutate_checked(|state| {
+            let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
+                DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
+            })?;
+            let already_settled = dispatch.state == outcome && dispatch.result == result;
+            if !already_settled
+                && !matches!(dispatch.state, OutboxState::Claimed | OutboxState::Unknown)
+                || dispatch.claim_owner.as_deref() != Some(owner)
+                || dispatch.claim_epoch != lease_epoch
+            {
+                return Err(DurableError::Conflict {
+                    expected: Some(format!("{owner}:{lease_epoch}")),
+                    current: dispatch
+                        .claim_owner
+                        .as_ref()
+                        .map(|current| format!("{current}:{}", dispatch.claim_epoch)),
+                });
+            }
+            dispatch.state = outcome;
+            dispatch.result = result;
+            state.machine = machine.snapshot();
+            for record in records {
+                append_journal_record(state, journal_id, record.clone())?;
+            }
+            state
+                .continuations
+                .insert(continuation.run_id.clone(), continuation);
+            Ok(())
+        })
+    }
+
+    /// Atomically persist a Machine safe point, Continuation, and
+    /// higher-profile lifecycle records without dispatching an Effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid records, stale CAS revision, invalid state,
+    /// or store failure.
+    pub fn checkpoint_machine_journal(
+        &mut self,
+        machine: &Machine,
+        continuation: Continuation,
+        journal_id: &str,
+        records: &[JournalRecord],
+    ) -> DurableResult<String> {
+        validate_journal_batch(journal_id, records)?;
+        self.mutate_checked(|state| {
+            state.machine = machine.snapshot();
+            for record in records {
+                append_journal_record(state, journal_id, record.clone())?;
+            }
+            state
+                .continuations
+                .insert(continuation.run_id.clone(), continuation);
             Ok(())
         })
     }
@@ -423,7 +609,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             if dispatch.state == outcome && dispatch.result == result {
                 return Ok(());
             }
-            if dispatch.state != OutboxState::Claimed
+            if !matches!(dispatch.state, OutboxState::Claimed | OutboxState::Unknown)
                 || dispatch.claim_owner.as_deref() != Some(owner)
                 || dispatch.claim_epoch != lease_epoch
             {

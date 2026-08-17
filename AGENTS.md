@@ -19,6 +19,12 @@ Use this precedence order when guidance conflicts:
 - Canonical truth consists of sealed plans, causal events, and immutable
   artifacts. Views, indexes, graphs, attention items, and schedulers are
   rebuildable projections.
+- Cross-Run resources use provider-neutral, versioned descriptors. Keep content
+  identity, media/kind, shape, and replay evidence separate from resolver
+  locators and access grants. Never persist credentials in an Artifact or claim
+  exact replay for a mutable external locator without immutable version or
+  content evidence. Concrete object stores, drives, sandboxes, and URL fetchers
+  belong behind resolver/store plugins.
 - Plans describe meaning and requirements. Runtime bindings describe concrete
   realization. Never place provider names, credentials, endpoints, or deployment
   topology in canonical plan semantics.

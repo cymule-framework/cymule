@@ -46,12 +46,19 @@ Status: partial.
 - fault tests proving the interaction controller replays a retained response,
   consumes a reconciled response, and never redispatches after an unresolved
   call or a lost completion receipt;
+- `WorkspaceScopeController` commit integration that atomically couples the
+  binding-pinned workspace occurrence, Plan-declared mutating Effect, scope
+  closure, transferred obligation, outbox, Machine snapshot, and Continuation;
+- workspace abort integration that leaves the scope open across ambiguity and
+  closes it only after a retained receipt proves the overlay was not committed;
+- workspace fault tests for successful commit/abort, exact replay, explicit
+  non-application, provider failure, CAS receipt loss, process reopen, and
+  reconciliation without redispatch;
 - deterministic fake-host end-to-end tests;
 - adapter boundaries for ACP, MCP, A2A, editors, and model providers.
 
 ## Remaining completion gates
 
-- workspace overlay commit/abort integration with scope obligations;
 - streaming chunk staging and finalized durable content;
 - ACP/MCP/A2A adapters and cross-language SDK interaction clients;
 - cancellation, refusal, host failure, and restart-level fault suites;
@@ -70,5 +77,6 @@ code with a retained response.
 
 Version decision: schema enforcement and the interaction controller complete
 behavior already represented by the frozen elicitation and host-occurrence
-fields. They change neither the wire shape nor the `agent-protocol` schema
-version while M2 remains partial.
+fields. Workspace scope integration composes those existing fields with M0
+scope/effect semantics and M1 application-journal/outbox records. These changes
+alter no frozen wire shape or version while M2 remains partial.
