@@ -5,4 +5,8 @@
 - Do not depend on object insertion order for identity; the Rust engine performs
   canonicalization and sealing.
 - Use discriminated unions for IR and Engine protocol types.
-
+- The public npm package name is `cymule`. Changes to exports, files, engine
+  requirements, or minimum Node versions require a package dry-run and release
+  workflow review.
+- npm publication uses GitHub Actions trusted publishing with provenance. Never
+  add a long-lived npm token to repository or organization secrets.

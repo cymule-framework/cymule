@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -11,8 +12,9 @@ use cymule_core::{
 };
 use cymule_directory_store::DirectoryStore;
 use cymule_durable::{
-    Continuation, ContinuationStatus, DurableCoordinator, DurableError, FrameState,
+    Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableStore, FrameState,
 };
+use fs4::FileExt;
 use serde_json::json;
 
 static DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -23,6 +25,23 @@ fn test_directory() -> PathBuf {
         "cymule-directory-store-{}-{sequence}",
         std::process::id()
     ))
+}
+
+#[test]
+fn writer_contention_returns_immediately_as_conflict() {
+    let directory = test_directory();
+    let mut store = DirectoryStore::open(&directory).expect("opens");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(directory.join("state.lock"))
+        .expect("lock opens");
+    FileExt::lock(&lock).expect("test holds writer claim");
+    assert!(matches!(store.load(), Err(DurableError::Conflict { .. })));
+    drop(lock);
+    fs::remove_dir_all(directory).expect("test directory removes");
 }
 
 fn machine_with_run() -> (Machine, String) {

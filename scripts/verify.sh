@@ -52,6 +52,12 @@ echo "== TypeScript SDK end-to-end =="
 pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir sdk/typescript run build
 pnpm --dir sdk/typescript test
+node sdk/typescript/scripts/prepare-package.mjs \
+  cymule "$ROOT/.cache/npm-cymule"
+node sdk/typescript/scripts/prepare-package.mjs \
+  '@cymule/sdk' "$ROOT/.cache/npm-cymule-sdk"
+npm pack --dry-run --json "$ROOT/.cache/npm-cymule" >/dev/null
+npm pack --dry-run --json "$ROOT/.cache/npm-cymule-sdk" >/dev/null
 
 echo "== Python SDK end-to-end =="
 uv run --project sdk/python --frozen python -m unittest discover -s "$ROOT/sdk/python/tests"

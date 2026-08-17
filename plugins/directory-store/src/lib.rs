@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use cymule_durable::{
     DurableError, DurableResult, DurableState, DurableStore, StoreCommit, StoredState,
 };
-use fs4::FileExt;
+use fs4::{FileExt, TryLockError};
 
 /// Local directory store using one locked, atomically replaced state file.
 #[derive(Debug, Clone)]
@@ -36,7 +36,7 @@ impl DirectoryStore {
         self.root.join("state.next")
     }
 
-    fn lock(&self) -> DurableResult<File> {
+    fn writer_claim(&self) -> DurableResult<File> {
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -44,7 +44,16 @@ impl DirectoryStore {
             .write(true)
             .open(self.root.join("state.lock"))
             .map_err(substrate)?;
-        FileExt::lock(&lock).map_err(substrate)?;
+        match FileExt::try_lock(&lock) {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(DurableError::Conflict {
+                    expected: Some("writer_available".to_owned()),
+                    current: Some("writer_active".to_owned()),
+                });
+            }
+            Err(TryLockError::Error(error)) => return Err(substrate(error)),
+        }
         Ok(lock)
     }
 
@@ -63,7 +72,7 @@ impl DirectoryStore {
 
 impl DurableStore for DirectoryStore {
     fn load(&mut self) -> DurableResult<Option<StoredState>> {
-        let _lock = self.lock()?;
+        let _claim = self.writer_claim()?;
         self.read_unlocked()
     }
 
@@ -72,7 +81,7 @@ impl DurableStore for DirectoryStore {
         expected_revision: Option<&str>,
         next: &DurableState,
     ) -> DurableResult<StoreCommit> {
-        let _lock = self.lock()?;
+        let _claim = self.writer_claim()?;
         let current = self.read_unlocked()?;
         let current_revision = current.as_ref().map(|stored| stored.revision.clone());
         if expected_revision != current_revision.as_deref() {

@@ -109,7 +109,7 @@ import {
   CliEngine,
   FlowBuilder,
   type EffectProfile,
-} from "@cymule/sdk";
+} from "cymule";
 
 const captureProfile: EffectProfile = {
   mutation: "mutating",
@@ -314,6 +314,7 @@ crates/cymule-agent     provider-neutral M2 agent interaction contracts
 crates/cymule-durable   provider-neutral M1 persistence and recovery contracts
 crates/cymule-runtime   embedded interpreter and plugin host
 crates/cymule-sdk       native Rust authoring and engine facade
+crates/cymule-virtual   provider-neutral M3 bounded virtual-work scheduler
 crates/cymule-cli       command-line and JSON engine boundary
 sdk/typescript          TypeScript SDK
 sdk/python              Python SDK

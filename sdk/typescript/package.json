@@ -1,6 +1,6 @@
 {
-  "name": "@cymule/sdk",
-  "version": "0.1.0",
+  "name": "cymule",
+  "version": "0.1.1",
   "description": "TypeScript authoring and engine client SDK for Cymule",
   "repository": {
     "type": "git",
@@ -10,12 +10,21 @@
   "homepage": "https://github.com/cymule-framework/cymule#readme",
   "bugs": "https://github.com/cymule-framework/cymule/issues",
   "type": "module",
+  "sideEffects": false,
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
-  "files": ["dist", "README.md"],
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "files": ["dist/src", "README.md"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test dist/test/e2e.js"
+    "test": "node --test dist/test/e2e.js",
+    "prepack": "pnpm run build",
+    "prepare:package": "node scripts/prepare-package.mjs"
   },
   "devDependencies": {
     "@types/node": "26.0.0",
@@ -24,5 +33,10 @@
   "engines": {
     "node": ">=22"
   },
-  "license": "MIT OR Apache-2.0"
+  "license": "MIT OR Apache-2.0",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  }
 }
