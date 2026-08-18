@@ -17,5 +17,12 @@
 - `publish-npm.yml` is the only npm publication authority for both `cymule` and
   `@cymule/sdk`. A local npm command may run `pack --dry-run`, but never
   `publish`.
+- Scheduled mirror runs must no-op when the rewritten source tip already equals
+  public `main`. A changed PAT-backed push emits the standard CI event; do not
+  dispatch a duplicate CI run manually.
+- Manual npm release dispatch verifies the complete repository before creating
+  a missing public tag. Package matrix jobs are independently retryable, skip
+  immutable versions already present in npm, and create the GitHub Release only
+  after both package names succeed.
 - Do not add private hosting URLs, internal project IDs, credentials, runner
   names, or private CI metadata under `.github/`.
