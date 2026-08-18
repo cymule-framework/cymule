@@ -13,9 +13,10 @@ pub use cymule_core::{
 };
 pub use cymule_durable::{WAIT_ACTIVATION_VERSION, WaitActivation, WaitActivationSource};
 pub use cymule_evolution::{
-    EVOLUTION_CONTROL_VERSION, EvolutionCommand, GateOutcome, MigrationAdapterDescriptor,
-    MigrationCapabilityChange, MigrationOutput, MigrationPreservation, MigrationReceipt,
-    MigrationRequest, MigrationStateCoverage, ObservationOutcome, PlanPatch, ReferenceStrategy,
+    EVOLUTION_CONTROL_VERSION, EvolutionCommand, GateOutcome, MIGRATION_SAFE_POINT_VERSION,
+    MigrationAdapterDescriptor, MigrationCapabilityChange, MigrationOutput, MigrationPreservation,
+    MigrationReceipt, MigrationRequest, MigrationSafePoint, MigrationStateCoverage,
+    ObservationOutcome, PlanPatch, ReferenceStrategy, RestartReceipt, RestartRequest,
     RolloutDecision, RolloutEvaluation, RolloutGate, RolloutMode, RolloutObservation,
     RolloutTransition, ShadowBindingMode, ShadowComparison, ShadowDriverDescriptor,
     ShadowEffectMode, ShadowOutput, ShadowRequest, SubflowReference,

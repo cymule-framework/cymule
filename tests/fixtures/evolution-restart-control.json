@@ -1,0 +1,22 @@
+{
+  "control_version": "cymule.evolution-control/2",
+  "command_id": "command:evolution:fixture:restart",
+  "operation": "restart_under_new_plan",
+  "request": {
+    "restart_id": "restart:fixture:1",
+    "source_run": "run:fixture:source",
+    "replacement_run": "run:fixture:replacement",
+    "from_plan": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "to_plan": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "safe_point_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "source_epoch": 7,
+    "input": {
+      "artifact_id": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "kind": "cymule.input/1"
+    },
+    "evidence": {
+      "artifact_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "kind": "cymule.restart-evidence/1"
+    }
+  }
+}

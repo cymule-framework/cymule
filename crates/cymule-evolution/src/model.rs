@@ -116,6 +116,10 @@ pub struct MigrationReceipt {
     pub from_plan: String,
     /// Target Plan.
     pub to_plan: String,
+    /// Verified source Continuation safe-point proof.
+    pub safe_point_id: String,
+    /// Source Attempt fence at that cut.
+    pub source_epoch: u64,
     /// Pinned migration adapter identity.
     pub adapter_id: String,
     /// Pinned migration adapter revision.
@@ -130,6 +134,41 @@ pub struct MigrationReceipt {
     pub output_state: ArtifactRef,
     /// Schema/migration evidence.
     pub evidence: ArtifactRef,
+}
+
+/// Request to abandon one quiescent Run lineage and start a replacement under
+/// an exact new Plan without interpreting old state under new semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestartRequest {
+    /// Stable restart/idempotency identity.
+    pub restart_id: String,
+    /// Quiescent source Run.
+    pub source_run: String,
+    /// Caller-assigned replacement Run identity.
+    pub replacement_run: String,
+    /// Exact source Plan.
+    pub from_plan: String,
+    /// Exact target Plan selected for the replacement.
+    pub to_plan: String,
+    /// Verified source Continuation safe-point proof.
+    pub safe_point_id: String,
+    /// Source Attempt fence at that cut.
+    pub source_epoch: u64,
+    /// Explicit replacement input; old state is not reinterpreted implicitly.
+    pub input: ArtifactRef,
+    /// Policy or operator evidence authorizing the restart.
+    pub evidence: ArtifactRef,
+}
+
+/// Immutable authorization receipt for `restart_under_new_plan`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestartReceipt {
+    /// Exact admitted request.
+    pub request: RestartRequest,
+    /// Exact target Plan returned to the runtime for new-Run initialization.
+    pub target_plan: SealedPlan,
 }
 
 /// Evidence comparing shadow and authoritative results.
@@ -273,6 +312,9 @@ pub struct EvolutionSnapshot {
     pub occurrence_plans: BTreeMap<String, String>,
     /// Migration receipts keyed by migration ID.
     pub migrations: BTreeMap<String, MigrationReceipt>,
+    /// Restart authorizations keyed by restart ID.
+    #[serde(default)]
+    pub restarts: BTreeMap<String, RestartReceipt>,
     /// Shadow comparisons keyed by comparison ID.
     pub shadows: BTreeMap<String, ShadowComparison>,
     /// Rollout observations keyed by observation ID.

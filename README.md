@@ -95,18 +95,25 @@ authoring convenience, never a runtime pointer:
 
 1. Cymule resolves the complete acyclic module dependency closure.
 2. It records every selected revision and seals them into a new immutable Plan.
-3. Publishing a compatible leaf revision relinks affected future parent Plans.
+3. Publishing a compatible leaf revision relinks affected future parent Plans;
+   a newly reachable component, effect, wait, capability, or authority
+   requirement blocks automatic takeover and retains the prior head.
 4. Existing Runs and occurrences keep their original Plan; history is not
    rewritten.
 5. New work can advance through shadow, deterministic canary, promotion, or
    rollback decisions backed by immutable observations.
 
-When state must cross Plan versions, a pinned migration plugin supplies the
-transformed Artifact and evidence at an explicit safe point. Shadow execution,
+When state must cross Plan versions, Cymule derives a content-addressed proof
+from a ready, root-scoped durable Continuation with no waits, effect obligations,
+or authority leases. A pinned migration plugin supplies the transformed
+Artifact and evidence only after that proof matches durable authority. An
+explicit `restart_under_new_plan` authorization can instead start a distinct
+replacement Run under an exact Plan without reinterpreting old state.
+Shadow execution,
 metrics, deployment, and traffic movement are also replaceable plugins; Cymule
 owns only their contracts, immutable receipts, and deterministic admission
 rules. TypeScript, Python, Rust, and Go expose the same
-`cymule.evolution-control/1` transport commands without duplicating the Rust
+`cymule.evolution-control/2` transport commands without duplicating the Rust
 controller.
 
 ## Five-minute quick start

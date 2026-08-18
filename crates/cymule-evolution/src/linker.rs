@@ -4,19 +4,20 @@ use cymule_core::{Definition, Operation, PlanCandidate, Region, SealedPlan, cont
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{EvolutionError, EvolutionResult};
+use crate::{EvolutionError, EvolutionResult, analyze_relink};
 
 /// Immutable reusable-definition revision domain.
 pub const SUBFLOW_REVISION_VERSION: &str = "cymule.subflow-revision/2";
 
 /// Portable registry snapshot schema and semantic version.
-pub const DEFINITION_REGISTRY_VERSION: &str = "cymule.definition-registry/1";
+pub const DEFINITION_REGISTRY_VERSION: &str = "cymule.definition-registry/2";
 
 /// Resolution strategy retained by an unsealed parent template.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "strategy", rename_all = "snake_case")]
 pub enum ReferenceStrategy {
     /// Resolve the newest revision whose declared contract remains compatible.
+    #[default]
     LatestCompatible,
     /// Resolve one exact immutable revision.
     Pinned {
@@ -57,7 +58,26 @@ pub struct SubflowReference {
     /// Contract expected by parent result consumers.
     pub output_schema: Value,
     /// Future link resolution policy.
+    #[serde(default)]
     pub strategy: ReferenceStrategy,
+}
+
+impl SubflowReference {
+    /// Construct a logical reference with the safe default strategy.
+    pub fn latest_compatible(
+        logical_ref: impl Into<String>,
+        local_definition: impl Into<String>,
+        input_schema: Value,
+        output_schema: Value,
+    ) -> Self {
+        Self {
+            logical_ref: logical_ref.into(),
+            local_definition: local_definition.into(),
+            input_schema,
+            output_schema,
+            strategy: ReferenceStrategy::LatestCompatible,
+        }
+    }
 }
 
 /// Unsealed parent source plus its logical reusable-definition references.
@@ -183,15 +203,45 @@ impl DefinitionRegistry {
         }
         registry.revisions = snapshot.revisions.clone();
 
-        for template in snapshot.templates.values() {
-            registry.register_template(template.clone())?;
-        }
-        if registry.current_links != snapshot.current_links {
+        if snapshot.templates.len() != snapshot.current_links.len() {
             return Err(EvolutionError::Validation(
-                "definition registry current links do not match deterministic resolution"
-                    .to_owned(),
+                "definition registry must retain one current link per template".to_owned(),
             ));
         }
+        for template in snapshot.templates.values() {
+            validate_template_shape(template)?;
+            for reference in &template.references {
+                registry
+                    .reverse_dependencies
+                    .entry(reference.logical_ref.clone())
+                    .or_default()
+                    .insert(template.template_id.clone());
+            }
+            registry
+                .templates
+                .insert(template.template_id.clone(), template.clone());
+        }
+        for (template_id, current) in &snapshot.current_links {
+            let template = snapshot.templates.get(template_id).ok_or_else(|| {
+                EvolutionError::Validation(format!(
+                    "current link {template_id} has no registered template"
+                ))
+            })?;
+            if current.template_id != *template_id
+                || registry.link_exact(template, &current.resolved_revisions)? != *current
+            {
+                return Err(EvolutionError::Validation(format!(
+                    "current link {template_id} does not match its exact revisions"
+                )));
+            }
+            let latest = registry.link(template)?;
+            if latest != *current && analyze_relink(&current.plan, &latest.plan)?.is_compatible() {
+                return Err(EvolutionError::Validation(format!(
+                    "current link {template_id} did not advance to a compatible head"
+                )));
+            }
+        }
+        registry.current_links = snapshot.current_links.clone();
 
         for (plan_id, linked) in &snapshot.link_history {
             if linked.plan.plan_id != *plan_id {
@@ -305,31 +355,8 @@ impl DefinitionRegistry {
 
     /// Register a parent template and link its current exact dependencies.
     pub fn register_template(&mut self, template: PlanTemplate) -> EvolutionResult<LinkedPlan> {
-        validate_name("template", &template.template_id)?;
+        validate_template_shape(&template)?;
         let template_id = template.template_id.clone();
-        let mut logical_refs = BTreeSet::new();
-        let mut local_definitions: BTreeSet<String> = template
-            .candidate
-            .definitions
-            .iter()
-            .map(|definition| definition.id.clone())
-            .collect();
-        for reference in &template.references {
-            validate_name("subflow reference", &reference.logical_ref)?;
-            validate_name("local definition", &reference.local_definition)?;
-            if !logical_refs.insert(reference.logical_ref.clone()) {
-                return Err(EvolutionError::Validation(format!(
-                    "template {} repeats subflow reference {}",
-                    template.template_id, reference.logical_ref
-                )));
-            }
-            if !local_definitions.insert(reference.local_definition.clone()) {
-                return Err(EvolutionError::Validation(format!(
-                    "template {} repeats local definition {}",
-                    template.template_id, reference.local_definition
-                )));
-            }
-        }
         match self.templates.get(&template.template_id) {
             Some(existing) if existing != &template => {
                 return Err(EvolutionError::Conflict(format!(
@@ -367,6 +394,12 @@ impl DefinitionRegistry {
             EvolutionError::NotFound(format!("template {template_id} is missing"))
         })?;
         let linked = self.link(&template)?;
+        if let Some(current) = self.current_links.get(template_id)
+            && current.plan.plan_id != linked.plan.plan_id
+            && !analyze_relink(&current.plan, &linked.plan)?.is_compatible()
+        {
+            return Ok(current.clone());
+        }
         self.link_history
             .insert(linked.plan.plan_id.clone(), linked.clone());
         self.current_links
@@ -627,6 +660,34 @@ fn validate_module_references(
             return Err(EvolutionError::Validation(format!(
                 "reusable module {logical_ref} repeats local definition {}",
                 reference.local_definition
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_template_shape(template: &PlanTemplate) -> EvolutionResult<()> {
+    validate_name("template", &template.template_id)?;
+    let mut logical_refs = BTreeSet::new();
+    let mut local_definitions: BTreeSet<String> = template
+        .candidate
+        .definitions
+        .iter()
+        .map(|definition| definition.id.clone())
+        .collect();
+    for reference in &template.references {
+        validate_name("subflow reference", &reference.logical_ref)?;
+        validate_name("local definition", &reference.local_definition)?;
+        if !logical_refs.insert(reference.logical_ref.clone()) {
+            return Err(EvolutionError::Validation(format!(
+                "template {} repeats subflow reference {}",
+                template.template_id, reference.logical_ref
+            )));
+        }
+        if !local_definitions.insert(reference.local_definition.clone()) {
+            return Err(EvolutionError::Validation(format!(
+                "template {} repeats local definition {}",
+                template.template_id, reference.local_definition
             )));
         }
     }

@@ -1,7 +1,110 @@
-use cymule_core::ArtifactRef;
+use cymule_core::{ArtifactRef, ROOT_SCOPE_ID, canonical_digest, content_id};
+use cymule_durable::{Continuation, ContinuationStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::{EvolutionResult, ShadowComparison};
+
+/// Frozen proof domain for an M4 migration-safe Continuation cut.
+pub const MIGRATION_SAFE_POINT_VERSION: &str = "cymule.migration-safe-point/1";
+
+/// Verified source Continuation cut at which state migration may execute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationSafePoint {
+    /// Proof schema and semantic version.
+    pub safe_point_version: String,
+    /// Content-addressed proof identity.
+    pub safe_point_id: String,
+    /// Exact durable Run.
+    pub run_id: String,
+    /// Exact source Plan.
+    pub plan_id: String,
+    /// Source Attempt fence.
+    pub epoch: u64,
+    /// Optional state Artifact at the cut.
+    pub state: Option<ArtifactRef>,
+    /// Digest of the complete persisted Continuation.
+    pub continuation_digest: String,
+}
+
+impl MigrationSafePoint {
+    /// Derive a proof only from a quiescent, root-scoped Continuation.
+    pub fn derive(continuation: &Continuation) -> EvolutionResult<Self> {
+        if continuation.status != ContinuationStatus::Ready
+            || continuation.frames.is_empty()
+            || !continuation.wait_set.is_empty()
+            || continuation.scope_stack != [ROOT_SCOPE_ID]
+            || !continuation.effect_obligations.is_empty()
+            || !continuation.authority_leases.is_empty()
+        {
+            return Err(crate::EvolutionError::Conflict(
+                "migration requires a ready root-scoped Continuation without waits, obligations, or leases"
+                    .to_owned(),
+            ));
+        }
+        let continuation_digest = canonical_digest(continuation)?;
+        let safe_point_id = content_id(
+            MIGRATION_SAFE_POINT_VERSION,
+            &(
+                continuation.run_id.as_str(),
+                continuation.plan_id.as_str(),
+                continuation.epoch,
+                &continuation.state,
+                &continuation_digest,
+            ),
+        )?;
+        Ok(Self {
+            safe_point_version: MIGRATION_SAFE_POINT_VERSION.to_owned(),
+            safe_point_id,
+            run_id: continuation.run_id.clone(),
+            plan_id: continuation.plan_id.clone(),
+            epoch: continuation.epoch,
+            state: continuation.state.clone(),
+            continuation_digest,
+        })
+    }
+
+    /// Re-derive and compare this proof against current durable authority.
+    pub fn verify_continuation(&self, continuation: &Continuation) -> EvolutionResult<()> {
+        self.verify()?;
+        let expected = Self::derive(continuation)?;
+        if self != &expected {
+            return Err(crate::EvolutionError::Conflict(
+                "migration safe-point proof does not match the durable Continuation".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Verify the proof envelope independently of durable lookup.
+    pub fn verify(&self) -> EvolutionResult<()> {
+        if self.safe_point_version != MIGRATION_SAFE_POINT_VERSION
+            || self.run_id.is_empty()
+            || self.plan_id.is_empty()
+            || self.continuation_digest.len() != 64
+        {
+            return Err(crate::EvolutionError::Validation(
+                "migration safe-point proof is malformed".to_owned(),
+            ));
+        }
+        let expected_id = content_id(
+            MIGRATION_SAFE_POINT_VERSION,
+            &(
+                self.run_id.as_str(),
+                self.plan_id.as_str(),
+                self.epoch,
+                &self.state,
+                &self.continuation_digest,
+            ),
+        )?;
+        if self.safe_point_id != expected_id {
+            return Err(crate::EvolutionError::Validation(
+                "migration safe-point identity does not match its content".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// State domain covered by a migration implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +168,10 @@ pub struct MigrationRequest {
     pub from_plan: String,
     /// Exact target Plan.
     pub to_plan: String,
+    /// Verified source Continuation cut.
+    pub safe_point_id: String,
+    /// Source Attempt fence at that cut.
+    pub source_epoch: u64,
     /// Immutable source-state artifact.
     pub input_state: ArtifactRef,
 }

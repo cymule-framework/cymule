@@ -58,6 +58,32 @@ func TestEvolutionControlValidatesThroughRust(t *testing.T) {
 	if !reflect.DeepEqual(verified, command) {
 		t.Fatalf("Rust engine changed evolution command: %#v", verified)
 	}
+	restartPath := os.Getenv("CYMULE_EVOLUTION_RESTART_FIXTURE")
+	if restartPath == "" {
+		t.Skip("evolution restart conformance is not configured")
+	}
+	restartBytes, err := os.ReadFile(restartPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restartExpected EvolutionCommand
+	if err := json.Unmarshal(restartBytes, &restartExpected); err != nil {
+		t.Fatal(err)
+	}
+	restart := RestartEvolutionRun(
+		"command:evolution:fixture:restart",
+		*restartExpected.Restart,
+	)
+	if !reflect.DeepEqual(restart, restartExpected) {
+		t.Fatalf("restart command differs from shared fixture: %#v", restart)
+	}
+	restartVerified, err := (CliEngine{Executable: enginePath}).VerifyEvolutionCommand(restart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(restartVerified, restart) {
+		t.Fatalf("Rust engine changed restart command: %#v", restartVerified)
+	}
 }
 
 func TestCrossLanguageEndToEnd(t *testing.T) {

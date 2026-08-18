@@ -63,6 +63,11 @@ executor. Checked migration and shadow traits are plugin seams; the controller
 validates pinned descriptors, records immutable Artifact evidence, and applies
 deterministic rollout gates. It returns one exact selected Plan for dispatch but
 does not own a worker, Agent loop, metric backend, traffic router, or sandbox.
+Automatic module relinking scans only the entry-reachable definition closure;
+new component/effect/wait surfaces or changed provider-neutral requirements
+retain the old future head. Durable migration revalidates a proof derived from
+the current Continuation. Restart authorization returns an exact Plan for a new
+Run but still leaves process or Agent-loop execution to the owning runtime.
 
 MLIR is optional and remains outside the kernel. The partial workbench currently
 syntax-checks an experimental generic-operation form and documents its mapping

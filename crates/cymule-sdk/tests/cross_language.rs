@@ -172,9 +172,10 @@ fn rust_virtual_work_query_and_control_fixtures_are_typed() {
 
 #[test]
 fn rust_evolution_control_validates_through_the_cli() {
-    let (Ok(engine_path), Ok(fixture_path)) = (
+    let (Ok(engine_path), Ok(fixture_path), Ok(restart_path)) = (
         env::var("CYMULE_BIN"),
         env::var("CYMULE_EVOLUTION_CONTROL_FIXTURE"),
+        env::var("CYMULE_EVOLUTION_RESTART_FIXTURE"),
     ) else {
         return;
     };
@@ -183,9 +184,19 @@ fn rust_evolution_control_validates_through_the_cli() {
             .expect("evolution command deserializes");
     command.verify().expect("command verifies locally");
     assert_eq!(
-        CliEngine::new(engine_path)
+        CliEngine::new(&engine_path)
             .verify_evolution_command(&command)
             .expect("Rust engine verifies M4 command"),
         command
+    );
+    let restart: EvolutionCommand =
+        serde_json::from_str(&std::fs::read_to_string(restart_path).expect("fixture reads"))
+            .expect("restart command deserializes");
+    restart.verify().expect("restart command verifies locally");
+    assert_eq!(
+        CliEngine::new(&engine_path)
+            .verify_evolution_command(&restart)
+            .expect("Rust engine verifies restart command"),
+        restart
     );
 }

@@ -36,6 +36,8 @@
 - Every SDK constructs the same closed M4 gate command and submits it to the
   Rust verifier. Stateful linking, migration/shadow plugin calls, observation
   gates, and lost-receipt recovery remain in the Rust evolution fault suite.
+- Every SDK also constructs the same `/2` replacement-Run restart command with
+  exact safe-point proof, source epoch, distinct Run IDs, input, and evidence.
 - Schema verification covers every `schemas/*.schema.json` file and must include
   positive and unknown-field rejection cases for each public protocol family.
 - Keep host-native verification reproducible and avoid container-only workflows.
@@ -62,3 +64,6 @@
 - `verify-analysis.sh` owns scheduled/manual coverage and mutation witnesses.
   Keep their exact tool versions in `analysis.yml`, their measured floors in the
   script, and their artifacts separate from normal lane reports.
+- Keep core mutation and the bounded M4 evolution mutation as separate suites.
+  The M4 filter owns compatibility, safe-point, relink-admission, and restart
+  laws; expand it deliberately when a new M4 admission law becomes normative.

@@ -38,6 +38,19 @@ class EndToEndTest(unittest.TestCase):
         with open(fixture_path, encoding="utf-8") as source:
             self.assertEqual(command, json.load(source))
         self.assertEqual(CliEngine(engine_path).verify_evolution_command(command), command)
+        restart_path = os.environ.get("CYMULE_EVOLUTION_RESTART_FIXTURE")
+        if restart_path is None:
+            self.skipTest("evolution restart conformance is not configured")
+        with open(restart_path, encoding="utf-8") as source:
+            restart_expected = json.load(source)
+        restart = EvolutionControlBuilder.restart_under_new_plan(
+            "command:evolution:fixture:restart",
+            restart_expected["request"],
+        )
+        self.assertEqual(restart, restart_expected)
+        self.assertEqual(
+            CliEngine(engine_path).verify_evolution_command(restart), restart
+        )
 
     def test_python_candidate_seals_and_executes(self) -> None:
         engine_path = os.environ.get("CYMULE_BIN")

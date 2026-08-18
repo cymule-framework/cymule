@@ -15,6 +15,9 @@ Status: implemented for the provider-neutral single-domain profile.
   resolution, exact-schema compatibility, reusable modules, acyclic transitive
   dependency resolution and relinking into new immutable parent Plans, pinned
   references, and retained historical links;
+- strict reachable-surface admission that retains the previous future head when
+  a candidate adds a component, effect, wait, capability/authority requirement,
+  or changes an already reachable contract;
 - portable registry snapshots that verify revision identities, sequences,
   exact current/history links, and rebuild derived dependency indexes;
 - M1-journal-backed registry publication and template linking with explicit
@@ -34,12 +37,17 @@ Status: implemented for the provider-neutral single-domain profile.
 - pinned migration-adapter contracts that require total reachable-state
   coverage, failure/cancellation and budget/ownership preservation, and no
   authority/effect widening before plugin invocation;
+- content-addressed migration safe-point proofs derived from and revalidated
+  against ready root-scoped durable Continuations without waits, obligations,
+  or authority leases;
+- first-class `restart_under_new_plan` authorization for a distinct replacement
+  Run and exact target Plan, without implicit old-state reinterpretation;
 - pinned shadow-driver contracts that require target mutation suppression and
   immutable occurrence bindings, with idempotent comparison evidence;
 - immutable rollout observations tied to occurrence Plan pins, deterministic
   evidence gates, and auditable future-only promotion/rollback transitions;
 - exact selected-Plan return for mixed-version runtime dispatch;
-- frozen `cymule.evolution-control/1` command union, schema, Rust verifier, and
+- frozen `cymule.evolution-control/2` command union, schema, Rust verifier, and
   TypeScript, Python, Rust, and Go transport interfaces/builders;
 - tests for DAG and reusable-module cycles, deterministic diff, active impact,
   transitive executable relinking, deterministic pins, rollback without
