@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import email.utils
 import hashlib
 import json
+import math
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -27,6 +30,16 @@ USER_AGENT = "cymule-release/1 (https://github.com/cymule-framework/cymule)"
 REGISTRY_API = "https://crates.io/api/v1"
 STATIC_REGISTRY = "https://static.crates.io/crates"
 MAX_CRATE_BYTES = 10 * 1024 * 1024
+MAX_NEW_CRATE_RATE_LIMIT_WAIT_SECONDS = 15 * 60
+MAX_NEW_CRATE_RATE_LIMIT_RETRIES = 2
+NEW_CRATE_RATE_LIMIT_MARKERS = (
+    "status 429 Too Many Requests",
+    "You have published too many new crates in a short period of time.",
+)
+NEW_CRATE_RETRY_PATTERN = re.compile(
+    r"Please try again after "
+    r"([A-Za-z]{3}, \d{1,2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT)"
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -419,6 +432,57 @@ def require_release_checkout(version: str) -> None:
         raise ValueError(f"crate publication requires exact tag v{version}, found {tag}")
 
 
+def new_crate_rate_limit_delay(output: str, *, now: float | None = None) -> int | None:
+    """Return a bounded retry delay only for crates.io's explicit new-name limit."""
+
+    if not all(marker in output for marker in NEW_CRATE_RATE_LIMIT_MARKERS):
+        return None
+    match = NEW_CRATE_RETRY_PATTERN.search(output)
+    if match is None:
+        raise ValueError("crates.io new-crate rate limit omitted a retry timestamp")
+    retry_at = email.utils.parsedate_to_datetime(match.group(1))
+    current = time.time() if now is None else now
+    delay = max(5, math.ceil(retry_at.timestamp() - current) + 5)
+    if delay > MAX_NEW_CRATE_RATE_LIMIT_WAIT_SECONDS:
+        raise ValueError(
+            f"crates.io requested an excessive new-crate retry delay of {delay} seconds"
+        )
+    return delay
+
+
+def publish_crate(crate: str) -> None:
+    """Publish one crate, retrying only crates.io's bounded new-name limit."""
+
+    command = ["cargo", "publish", "--package", crate]
+    for attempt in range(MAX_NEW_CRATE_RATE_LIMIT_RETRIES + 1):
+        print("+", " ".join(command), flush=True)
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        if result.returncode == 0:
+            return
+        output = result.stdout + result.stderr
+        delay = new_crate_rate_limit_delay(output)
+        if delay is None or attempt == MAX_NEW_CRATE_RATE_LIMIT_RETRIES:
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                command,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
+        print(
+            f"crates.io limited new crate names; retrying {crate} in {delay} seconds",
+            flush=True,
+        )
+        time.sleep(delay)
+
+
 def publish(version: str) -> None:
     """Publish or exactly replay every crate in dependency order."""
 
@@ -439,7 +503,7 @@ def publish(version: str) -> None:
             expected = sha256(archive)
             observed = registry_checksum(crate.name, version)
             if observed is None:
-                run(["cargo", "publish", "--package", crate.name])
+                publish_crate(crate.name)
                 outcome = "published"
             elif observed == expected:
                 outcome = "retained"

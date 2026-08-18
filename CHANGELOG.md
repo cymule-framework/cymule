@@ -17,6 +17,8 @@ domains described in `docs/specification.md`.
   adapter without introducing Agent Loop semantics into the framework.
 - Split every plugin family into independently routed Rust verification suites
   and extend the ordered crates.io release catalog.
+- Make first-publication recovery honor crates.io's bounded new-crate rate-limit
+  timestamp without retrying unrelated registry failures.
 
 ## [0.1.3] - 2026-08-18
 
