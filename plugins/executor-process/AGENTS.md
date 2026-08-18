@@ -9,6 +9,9 @@
   the intent to `unknown`; never retry dispatch inside this plugin.
 - Validate the response through the frozen `cymule.plugin/1` types. Stderr is
   diagnostic only and must not become a result channel.
+- Conformance process fixtures must consume the complete request before writing
+  a response. An early child exit that closes stdin is a failed dispatch, even
+  if the child happened to emit response-shaped bytes; do not suppress EPIPE.
 - No process pool, Agent Loop, shell interpretation, sandbox policy, or network
   authority belongs in this crate. Higher-isolation executors are separate
   plugins.
