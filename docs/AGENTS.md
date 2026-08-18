@@ -14,8 +14,9 @@
   traffic movement, deployments, shadow sandboxes, schema transformation code,
   and Agent/session controllers explicitly outside the profile.
 - `releasing.md` is the publication runbook. Keep package names, dependency
-  order, immutable retry checks, first-release bootstrap, trusted publishing,
-  and credential-removal gates aligned with live workflows and scripts.
+  order, immutable retry checks, OIDC-only trusted publishing, new-name
+  ownership gates, and credential-removal requirements aligned with live
+  workflows and scripts.
 - `plugins.md` is the current user-facing adapter catalog. Keep implementation
   status, limitations, mature foundations, and RocksDB/P1 guidance aligned with
   live crates and focused suites.

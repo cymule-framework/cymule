@@ -62,10 +62,10 @@ Dispatch `publish-npm.yml` with the version first. That workflow verifies the
 public commit, creates the missing immutable `v<version>` tag, publishes both
 npm names with provenance, and creates the GitHub Release.
 
-Then dispatch `publish-crates.yml` against the same version using `trusted`
-authentication. It checks out the exact annotated tag, repeats complete
-verification, requests a short-lived crates.io token through GitHub OIDC, and
-publishes in catalog dependency order. For each crate it:
+Then dispatch `publish-crates.yml` against the same version. It checks out the
+exact annotated tag, repeats complete verification, requests a short-lived
+crates.io token through GitHub OIDC, and publishes in catalog dependency order.
+For each crate it:
 
 1. runs Cargo's full package verification;
 2. computes the candidate archive SHA-256;
@@ -85,24 +85,12 @@ If crates.io returns its explicit new-crate-name 429 with a server retry time,
 the publisher waits only until that bounded timestamp and retries. It does not
 retry authentication, checksum, malformed-limit, or other registry failures.
 
-## First publication bootstrap
+## New crate names
 
-crates.io requires an owner token before the first version of a new crate name;
-trusted publishers can be attached only after ownership exists. For that one
-release:
-
-1. create a short-expiry crates.io token with only the authority required to
-   create the new crate names;
-2. store it temporarily as the GitHub Actions secret
-   `CRATES_IO_BOOTSTRAP_TOKEN` in the `crates-io` GitHub Environment;
-3. dispatch `publish-crates.yml` with `bootstrap` authentication;
-4. configure every published crate to trust repository
-   `cymule-framework/cymule`, workflow `publish-crates.yml`, and environment
-   `crates-io`;
-5. rerun the workflow with `trusted` authentication to verify OIDC recovery;
-6. delete the bootstrap secret and remove the bootstrap workflow branch in the
-   next reviewed commit.
-
-Never retain the owner token as a normal publication fallback. A trusted
-publishing failure is a release failure, not permission to silently use the
-bootstrap credential.
+The normal workflow is OIDC-only and can publish only names that already trust
+repository `cymule-framework/cymule`, workflow `publish-crates.yml`, and
+environment `crates-io`. crates.io ownership for a new name must be established
+through a separate reviewed, time-bounded GitHub Actions change. Configure and
+verify its trusted publisher, revoke the temporary credential, and remove the
+temporary path before completing that release. Never add a registry-token
+fallback to `publish-crates.yml`.

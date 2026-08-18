@@ -32,12 +32,10 @@
   reviewed controller script while the exact immutable tag owns every manifest,
   catalog, source file, package archive, and checksum. Never move a tag or let
   controller files replace release payload files.
-- crates.io requires an owner token for the first version of a new crate name.
-  The bootstrap branch is temporary first-release machinery: use only a
-  short-expiry token stored as `CRATES_IO_BOOTSTRAP_TOKEN`, configure every
-  crate for the pinned trusted-publishing workflow and `crates-io` Environment
-  immediately afterward, then remove both the secret and bootstrap branch.
-  Normal releases use OIDC only.
+- `publish-crates.yml` is OIDC-only and may never accept a registry-token
+  fallback. A future new crate name requires a separate reviewed, temporary
+  Actions change to establish ownership; configure its trusted publisher and
+  remove that path before the normal release workflow can publish it.
 - Scheduled mirror runs must no-op when the rewritten source tip already equals
   public `main`. A changed PAT-backed push emits the standard CI event; do not
   dispatch a duplicate CI run manually.
