@@ -92,3 +92,7 @@
   response with a parseable server retry timestamp. Bound both delay and retry
   count; authentication, checksum, malformed-limit, and other failures remain
   immediate hard failures.
+- `CYMULE_RELEASE_WORKSPACE` is the GitHub-only immutable-tag payload root used
+  by a newer reviewed controller. Require an absolute path and resolve every
+  catalog, manifest, package, Git check, report, and consumer operation under
+  that root; control checkout files must never become release payload bytes.

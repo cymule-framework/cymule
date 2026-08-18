@@ -24,7 +24,17 @@ import urllib.parse
 import urllib.request
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+CONTROL_ROOT = pathlib.Path(__file__).resolve().parents[1]
+CONFIGURED_RELEASE_WORKSPACE = os.environ.get("CYMULE_RELEASE_WORKSPACE")
+if CONFIGURED_RELEASE_WORKSPACE is not None and not pathlib.Path(
+    CONFIGURED_RELEASE_WORKSPACE
+).is_absolute():
+    raise ValueError("CYMULE_RELEASE_WORKSPACE must be an absolute path")
+ROOT = (
+    pathlib.Path(CONFIGURED_RELEASE_WORKSPACE).resolve()
+    if CONFIGURED_RELEASE_WORKSPACE is not None
+    else CONTROL_ROOT
+)
 CATALOG_PATH = ROOT / "scripts" / "crates-release.toml"
 USER_AGENT = "cymule-release/1 (https://github.com/cymule-framework/cymule)"
 REGISTRY_API = "https://crates.io/api/v1"

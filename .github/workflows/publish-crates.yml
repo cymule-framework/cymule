@@ -32,10 +32,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
+          path: control
+          persist-credentials: false
+
+      - uses: actions/checkout@v7.0.1
+        with:
+          path: release
           ref: v${{ inputs.version }}
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release controller identity
+        working-directory: control
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Verify immutable release identity
+        working-directory: release
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
@@ -56,20 +68,21 @@ jobs:
         with:
           node-version: 26.7.0
           cache: pnpm
-          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+          cache-dependency-path: release/sdk/typescript/pnpm-lock.yaml
 
       - uses: actions/setup-go@v7.0.0
         with:
           go-version: 1.26.5
-          cache-dependency-path: sdk/go/go.mod
+          cache-dependency-path: release/sdk/go/go.mod
 
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: 0.7.2
           enable-cache: true
-          cache-dependency-glob: sdk/python/uv.lock
+          cache-dependency-glob: release/sdk/python/uv.lock
 
       - name: Verify complete repository and package bytes
+        working-directory: release
         run: ./scripts/verify.sh
 
       - name: Acquire short-lived crates.io token
@@ -87,26 +100,29 @@ jobs:
         if: inputs.authentication == 'trusted'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release
           RELEASE_VERSION: ${{ inputs.version }}
-        run: python3 scripts/crates_release.py publish --version "$RELEASE_VERSION"
+        run: python3 control/scripts/crates_release.py publish --version "$RELEASE_VERSION"
 
       - name: Bootstrap first crate versions through Actions
         if: inputs.authentication == 'bootstrap'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release
           RELEASE_VERSION: ${{ inputs.version }}
-        run: python3 scripts/crates_release.py publish --version "$RELEASE_VERSION"
+        run: python3 control/scripts/crates_release.py publish --version "$RELEASE_VERSION"
 
       - name: Verify fresh crates.io consumers
         env:
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release
           RELEASE_VERSION: ${{ inputs.version }}
-        run: python3 scripts/crates_release.py verify-registry --version "$RELEASE_VERSION"
+        run: python3 control/scripts/crates_release.py verify-registry --version "$RELEASE_VERSION"
 
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: crates-release-${{ inputs.version }}
           path: |
-            .cache/crates-package/${{ inputs.version }}/report.json
-            .cache/crates-release/${{ inputs.version }}/publish.json
+            release/.cache/crates-package/${{ inputs.version }}/report.json
+            release/.cache/crates-release/${{ inputs.version }}/publish.json
           if-no-files-found: warn

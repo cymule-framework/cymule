@@ -19,6 +19,8 @@ domains described in `docs/specification.md`.
   and extend the ordered crates.io release catalog.
 - Make first-publication recovery honor crates.io's bounded new-crate rate-limit
   timestamp without retrying unrelated registry failures.
+- Separate the current release controller from immutable tag payloads so an old
+  partial release can use reviewed recovery logic without changing its bytes.
 
 ## [0.1.3] - 2026-08-18
 

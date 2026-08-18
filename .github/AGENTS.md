@@ -28,6 +28,10 @@
   the exact public release tag, follows `scripts/crates-release.toml` in
   dependency order, compares immutable checksums on retries, and verifies a
   fresh facade consumer plus `cargo install cymule-cli` from registry bytes.
+- Crate release recovery uses separate checkouts: current public `main` owns the
+  reviewed controller script while the exact immutable tag owns every manifest,
+  catalog, source file, package archive, and checksum. Never move a tag or let
+  controller files replace release payload files.
 - crates.io requires an owner token for the first version of a new crate name.
   The bootstrap branch is temporary first-release machinery: use only a
   short-expiry token stored as `CRATES_IO_BOOTSTRAP_TOKEN`, configure every
