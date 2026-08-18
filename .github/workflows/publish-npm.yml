@@ -6,13 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Existing public tag version without the v prefix
+        description: Package version without the v prefix
         required: true
         type: string
 
-permissions:
-  contents: read
-  id-token: write
+permissions: {}
 
 concurrency:
   group: publish-npm-${{ github.event.release.tag_name || inputs.version }}
@@ -21,12 +19,19 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
+      tag_exists: ${{ steps.identity.outputs.tag_exists }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
       - name: Verify release identity
+        id: identity
         env:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -42,11 +47,26 @@ jobs:
             echo "release tag $expected_tag does not match package version $package_version" >&2
             exit 2
           fi
-          tag_commit=$(git rev-list -n 1 "$expected_tag")
-          if [ "$tag_commit" != "$(git rev-parse HEAD)" ]; then
-            echo "release tag $expected_tag does not select the checked-out commit" >&2
-            exit 2
+          git fetch --force --tags origin
+          if git show-ref --verify --quiet "refs/tags/$expected_tag"; then
+            tag_commit=$(git rev-list -n 1 "$expected_tag")
+            if [ "$tag_commit" != "$(git rev-parse HEAD)" ]; then
+              echo "release tag $expected_tag does not select the checked-out commit" >&2
+              exit 2
+            fi
+            tag_exists=true
+          else
+            if [ "$EVENT_NAME" = release ]; then
+              echo "release event tag $expected_tag is missing" >&2
+              exit 2
+            fi
+            tag_exists=false
           fi
+          {
+            echo "tag=$expected_tag"
+            echo "version=$package_version"
+            echo "tag_exists=$tag_exists"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
         run: |
@@ -78,11 +98,31 @@ jobs:
       - name: Verify complete repository
         run: ./scripts/verify.sh
 
+      - name: Create missing public release tag
+        if: steps.identity.outputs.tag_exists == 'false'
+        env:
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag -a "$RELEASE_TAG" -m "Cymule SDK $RELEASE_VERSION"
+          git push origin "refs/tags/$RELEASE_TAG"
+
   publish:
     needs: verify
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        package_name: [cymule, "@cymule/sdk"]
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
 
       - uses: pnpm/action-setup@v6.0.10
         with:
@@ -103,26 +143,66 @@ jobs:
           pnpm --dir sdk/typescript run build
           pnpm --dir sdk/typescript test
 
-      - name: Prepare both public packages
-        run: |
-          node sdk/typescript/scripts/prepare-package.mjs \
-            cymule "$RUNNER_TEMP/npm-cymule"
-          node sdk/typescript/scripts/prepare-package.mjs \
-            '@cymule/sdk' "$RUNNER_TEMP/npm-cymule-sdk"
+      - name: Prepare public package
+        run: >-
+          node sdk/typescript/scripts/prepare-package.mjs
+          '${{ matrix.package_name }}'
+          "$RUNNER_TEMP/npm-package"
 
-      - name: Inspect package contents and registry availability
-        run: |
-          npm pack --dry-run "$RUNNER_TEMP/npm-cymule"
-          npm pack --dry-run "$RUNNER_TEMP/npm-cymule-sdk"
-          package_version=$(node -p "require('./sdk/typescript/package.json').version")
-          for package_name in cymule '@cymule/sdk'; do
-            if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
-              echo "$package_name@$package_version is already published" >&2
-              exit 2
-            fi
-          done
+      - name: Inspect package contents
+        run: npm pack --dry-run "$RUNNER_TEMP/npm-package"
 
-      - name: Publish both packages with trusted provenance
+      - name: Check immutable registry version
+        id: registry
+        env:
+          PACKAGE_NAME: ${{ matrix.package_name }}
+          PACKAGE_VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          npm publish "$RUNNER_TEMP/npm-cymule"
-          npm publish "$RUNNER_TEMP/npm-cymule-sdk"
+          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "$PACKAGE_NAME@$PACKAGE_VERSION is already immutable in npm; retaining it"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish with trusted provenance
+        if: steps.registry.outputs.published == 'false'
+        run: npm publish "$RUNNER_TEMP/npm-package" --access public --provenance
+
+  release:
+    needs: [verify, publish]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - name: Prepare release notes
+        env:
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          awk -v heading="## [$RELEASE_VERSION]" '
+            $0 == heading { capture=1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes.md"
+
+      - name: Create GitHub Release once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub Release $RELEASE_TAG already exists"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "Cymule SDK $RELEASE_VERSION" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi

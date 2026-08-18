@@ -62,11 +62,29 @@ jobs:
             exit 2
           fi
 
-      - name: Force-publish rewritten public history
+      - name: Compare rewritten and public tips
+        id: compare
+        env:
+          GH_TOKEN: ${{ secrets.CYMULE_PUBLIC_PUSH_TOKEN }}
+        run: |
+          cd "$RUNNER_TEMP/source"
+          source_tip=$(git rev-parse main)
+          public_tip=$(git ls-remote \
+            "https://x-access-token:${GH_TOKEN}@github.com/cymule-framework/cymule.git" \
+            refs/heads/main | awk '{print $1}')
+          if [ "$source_tip" = "$public_tip" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "public mirror already matches rewritten source $source_tip"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "rewritten source $source_tip will replace public tip ${public_tip:-<missing>}"
+          fi
+
+      - name: Force-publish changed rewritten history
+        if: steps.compare.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.CYMULE_PUBLIC_PUSH_TOKEN }}
         run: |
           cd "$RUNNER_TEMP/source"
           git remote add public "https://x-access-token:${GH_TOKEN}@github.com/cymule-framework/cymule.git"
           git push --force public main:main
-          gh workflow run ci.yml --repo cymule-framework/cymule --ref main

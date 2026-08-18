@@ -6,6 +6,8 @@ domains described in `docs/specification.md`.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-18
+
 - Introduce frozen `cymule.ir/2` with reusable local definition invocation,
   durable invocation frames, and matching TypeScript, Python, Rust, and Go
   authoring/execution conformance.
