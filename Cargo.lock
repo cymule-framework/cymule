@@ -122,107 +122,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "cymule-agent"
-version = "0.1.0"
-dependencies = [
- "cymule-core",
- "cymule-durable",
- "cymule-resource",
- "jsonschema",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cymule-cli"
-version = "0.1.0"
-dependencies = [
- "cymule-core",
- "cymule-durable",
- "cymule-evolution",
- "cymule-resource",
- "cymule-runtime",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cymule-core"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "serde",
- "serde_json",
- "serde_json_canonicalizer",
- "sha2",
-]
-
-[[package]]
-name = "cymule-directory-store"
-version = "0.1.0"
-dependencies = [
- "cymule-core",
- "cymule-durable",
- "fs4",
- "serde_json",
-]
-
-[[package]]
-name = "cymule-durable"
-version = "0.1.0"
-dependencies = [
- "cymule-core",
- "cymule-runtime",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cymule-evolution"
-version = "0.1.0"
-dependencies = [
- "cymule-core",
- "cymule-durable",
- "cymule-runtime",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cymule-example-hello-world"
-version = "0.1.0"
-dependencies = [
- "cymule-core",
- "cymule-runtime",
- "cymule-sdk",
- "serde_json",
-]
-
-[[package]]
-name = "cymule-resource"
-version = "0.1.0"
-dependencies = [
- "base64",
- "cymule-core",
- "cymule-durable",
- "serde",
- "serde_json",
- "sha2",
- "url",
-]
-
-[[package]]
-name = "cymule-runtime"
-version = "0.1.0"
-dependencies = [
- "cymule-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cymule-sdk"
-version = "0.1.0"
+name = "cymule"
+version = "0.1.3"
 dependencies = [
  "cymule-core",
  "cymule-durable",
@@ -235,8 +136,107 @@ dependencies = [
 ]
 
 [[package]]
+name = "cymule-agent"
+version = "0.1.3"
+dependencies = [
+ "cymule-core",
+ "cymule-durable",
+ "cymule-resource",
+ "jsonschema",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cymule-cli"
+version = "0.1.3"
+dependencies = [
+ "cymule-core",
+ "cymule-durable",
+ "cymule-evolution",
+ "cymule-resource",
+ "cymule-runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cymule-core"
+version = "0.1.3"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2",
+]
+
+[[package]]
+name = "cymule-directory-store"
+version = "0.1.3"
+dependencies = [
+ "cymule-core",
+ "cymule-durable",
+ "fs4",
+ "serde_json",
+]
+
+[[package]]
+name = "cymule-durable"
+version = "0.1.3"
+dependencies = [
+ "cymule-core",
+ "cymule-runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cymule-evolution"
+version = "0.1.3"
+dependencies = [
+ "cymule-core",
+ "cymule-durable",
+ "cymule-runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cymule-example-hello-world"
+version = "0.1.3"
+dependencies = [
+ "cymule",
+ "cymule-core",
+ "cymule-runtime",
+ "serde_json",
+]
+
+[[package]]
+name = "cymule-resource"
+version = "0.1.3"
+dependencies = [
+ "base64",
+ "cymule-core",
+ "cymule-durable",
+ "serde",
+ "serde_json",
+ "sha2",
+ "url",
+]
+
+[[package]]
+name = "cymule-runtime"
+version = "0.1.3"
+dependencies = [
+ "cymule-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cymule-test-adapter"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "cymule-core",
  "cymule-runtime",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-virtual"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "cymule-core",
  "cymule-durable",

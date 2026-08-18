@@ -13,3 +13,6 @@
 - M4 is implemented only for one provider-neutral durable domain. Keep metrics,
   traffic movement, deployments, shadow sandboxes, schema transformation code,
   and Agent/session controllers explicitly outside the profile.
+- `releasing.md` is the publication runbook. Keep package names, dependency
+  order, immutable retry checks, first-release bootstrap, trusted publishing,
+  and credential-removal gates aligned with live workflows and scripts.

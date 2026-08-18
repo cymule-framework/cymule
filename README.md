@@ -118,7 +118,16 @@ controller.
 
 ## Five-minute quick start
 
-Build and run a complete code-first Flow with Rust 1.97:
+Install the Rust facade and CLI from crates.io:
+
+```sh
+cargo add cymule
+cargo install cymule-cli
+```
+
+The facade is for authoring and typed engine control; the CLI is the Rust
+engine/process boundary. To run the complete code-first example with its
+in-process plugin, use Rust 1.97 and the source repository:
 
 ```sh
 git clone https://github.com/cymule-framework/cymule.git
@@ -220,9 +229,12 @@ The Python, Rust, and Go SDKs expose the same concepts with idiomatic builders.
 All four SDKs send Plan Candidates to the Rust engine; none implements a second
 canonicalizer or state reducer.
 
-Version `0.1.x` keeps all SDK sources in this repository. Public package
-publication is performed only by the reviewed GitHub Actions release workflow;
-local development and verification never publish registry bytes.
+Version `0.1.x` keeps all SDK sources in this repository. The Rust facade is
+published as `cymule`, the CLI as `cymule-cli`, and advanced profile/plugin
+crates retain their `cymule-*` names. TypeScript is published as both `cymule`
+and `@cymule/sdk`. Public package publication is performed only by reviewed
+GitHub Actions release workflows; local development and verification never
+publish registry bytes.
 
 ## The programming model
 
@@ -499,7 +511,7 @@ crates/cymule-durable   provider-neutral M1 persistence and recovery contracts
 crates/cymule-evolution provider-neutral M4 Plan DAG and rollout semantics
 crates/cymule-runtime   embedded interpreter and plugin host
 crates/cymule-resource  provider-neutral Resource Handles and Run handoffs
-crates/cymule-sdk       native Rust authoring and engine facade
+crates/cymule-sdk       native Rust facade, published as the `cymule` crate
 crates/cymule-virtual   provider-neutral M3 bounded virtual-work scheduler
 crates/cymule-cli       command-line and JSON engine boundary
 sdk/typescript          TypeScript SDK
@@ -528,6 +540,7 @@ scripts                 complete repository verification
   differences from maintained execution systems and standards.
 - [Roadmap](docs/roadmap.md) — durable execution, agent integration, large
   virtual work, live evolution, isolation, and formalization.
+- [Releasing](docs/releasing.md) — immutable npm and crates.io publication.
 - [ADR 0001](docs/decisions/0001-small-rust-kernel.md) — why the authoritative
   kernel is small and Rust-first.
 - [ADR 0002](docs/decisions/0002-mlir-outside-core.md) — why MLIR stays outside

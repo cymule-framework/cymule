@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::env;
 
-use cymule_sdk::{
+use cymule::{
     CliEngine, DispatchPolicy, EffectProfile, Engine, EvolutionCommand, Expression, FlowBuilder,
     MutationKind, Operation, ReconciliationMode, Region, RegionMigrationCommand, ResourceCandidate,
     Step, VirtualClaimCommand, VirtualCompactionCommand, VirtualLeaseRenewalCommand,

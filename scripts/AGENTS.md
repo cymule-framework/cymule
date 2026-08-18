@@ -67,3 +67,14 @@
 - Keep core mutation and the bounded M4 evolution mutation as separate suites.
   The M4 filter owns compatibility, safe-point, relink-admission, and restart
   laws; expand it deliberately when a new M4 admission law becomes normative.
+- `crates-release.toml` is the single public Rust package order. The release
+  verifier must match Cargo metadata exactly, run Cargo's whole-workspace
+  publication dry-run, package the unpublished workspace as one set, reject
+  dependency-path leakage, compare two archive hashes, and compile normalized
+  package bytes through a local patch registry.
+- The package witness uses Cargo `--allow-dirty` so pre-commit candidate changes
+  are the bytes under test. The actual publish command separately requires an
+  exact annotated tag and a clean checkout; never weaken that release gate.
+- crates.io publication is ordered and resumable. Before skipping an existing
+  version, compare its registry checksum with the archive built from the exact
+  tag; after every upload, wait for the index and verify downloaded bytes.

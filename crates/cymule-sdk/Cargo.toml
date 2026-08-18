@@ -1,19 +1,23 @@
 [package]
-name = "cymule-sdk"
+name = "cymule"
 description = "Rust authoring and engine client SDK for Cymule"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+publish.workspace = true
 
 [dependencies]
-cymule-core = { path = "../cymule-core" }
-cymule-durable = { path = "../cymule-durable" }
-cymule-evolution = { path = "../cymule-evolution" }
-cymule-resource = { path = "../cymule-resource" }
-cymule-runtime = { path = "../cymule-runtime" }
-cymule-virtual = { path = "../cymule-virtual" }
+cymule-core.workspace = true
+cymule-durable.workspace = true
+cymule-evolution.workspace = true
+cymule-resource.workspace = true
+cymule-runtime.workspace = true
+cymule-virtual.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

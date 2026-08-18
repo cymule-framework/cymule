@@ -9,4 +9,9 @@
 - New dependencies require a concrete benefit and must not pull provider or
   async-runtime choices into the core.
 - Every transition needs positive, illegal-transition, retry, and replay tests.
-
+- Public crates share one release version and declare internal dependencies as
+  workspace-owned `version + path` locations. `cymule` is the canonical Rust
+  user facade; `cymule-cli` owns the installable `cymule` binary. Core profile
+  crates remain directly publishable for advanced composition.
+- Package verification compiles normalized `.crate` contents, not just the
+  source workspace. Test adapters and examples are never registry packages.
