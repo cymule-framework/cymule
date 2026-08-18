@@ -126,6 +126,12 @@ lane = "rust"
 tools = ["rust"]
 commands = [["./scripts/verify-analysis.sh", "mutation"]]
 
+[suites.rust-mutation-evolution-m4]
+description = "Prove M4 compatibility, safe-point, relink, and restart tests kill semantic mutations."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-analysis.sh", "mutation-evolution-m4"]]
+
 [suites.rust-portability]
 description = "Run portable core, durable, and directory-store witnesses."
 lane = "rust"

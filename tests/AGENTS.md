@@ -22,11 +22,17 @@
   through all four SDKs and the Rust verifier. Rust stateful tests separately
   prove transitive relinking, checked adapters, promotion/rollback, mixed Plan
   execution, stale CAS, and acknowledgement-loss recovery.
+- The shared restart fixture proves the `/2` safe-point and replacement-Run wire
+  contract across all SDKs. Stateful Rust tests must reject stale durable proofs
+  and preserve one restart receipt after acknowledgement loss.
 - Resource fixtures are sealed only by the Rust engine. Every SDK must submit
   the shared candidate and receive the same Resource ID; no fixture may contain
   credentials or a signed URL.
 - Add fault-oriented tests for semantic changes, especially stale commands,
   fencing, scope closure, ambiguous effects, reconciliation, and replay.
+- M4 negative tests must isolate one admission axis and use distinct command
+  identities so a later idempotency conflict cannot mask a broken earlier
+  check. The scheduled M4 mutation witness is the regression probe for this.
 - Effect fault matrices distinguish prepare-response loss, durable enqueue,
   scope commit, dispatch-start claim, provider application, Applied settlement,
   and Unknown observation. Assert exact provider call counts and reject

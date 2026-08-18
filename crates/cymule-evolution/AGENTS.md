@@ -13,6 +13,10 @@
   and retains every historical linked Plan. A compatible leaf update relinks
   all transitive future callers. Exact schema equality is the current
   compatibility profile; adapters remain explicit future work.
+- Automatic relinking compares the entry-reachable semantic surface. Adding a
+  component, effect, wait, capability/authority requirement, or changing a
+  reachable contract blocks the future-head update without deleting the new
+  revision. There is no unchecked-latest escape hatch.
 - Registry snapshots are portable authority. Restore must recompute revision
   identities, validate sequences and exact links, rebuild reverse indexes, and
   reject tampering or extraneous resolution claims. Durable publication uses
@@ -21,6 +25,9 @@
   rollback affect future selection only; admitted occurrences remain pinned.
 - State migration is legal only at an explicit semantic safe point and must
   record source/target schema, input/output artifacts, and evidence.
+- Safe points are derived proofs over current durable Continuations, never
+  caller booleans. Restart-under-new-plan authorizes a distinct replacement Run
+  and explicit input; it does not mutate the source or execute a loop.
 - Impact analysis must include active frames, stable sites, waits, scopes, and
   released effects. Missing evidence fails closed.
 - Shadow output is evidence, not user-visible authority. Canary selection is

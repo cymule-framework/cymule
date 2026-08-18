@@ -149,7 +149,7 @@ def main() -> int:
 
     evolution_control = load(root / "tests/fixtures/evolution-control.json")
     evolution_validator = Draft202012Validator(
-        by_title["Cymule Evolution Control cymule.evolution-control/1"],
+        by_title["Cymule Evolution Control cymule.evolution-control/2"],
         registry=registry,
     )
     evolution_validator.validate(evolution_control)
@@ -175,7 +175,7 @@ def main() -> int:
     }
     evolution_variants = [
         {
-            "control_version": "cymule.evolution-control/1",
+            "control_version": "cymule.evolution-control/2",
             "command_id": "command:patch",
             "operation": "apply_patch",
             "patch": {
@@ -193,7 +193,7 @@ def main() -> int:
             },
         },
         {
-            "control_version": "cymule.evolution-control/1",
+            "control_version": "cymule.evolution-control/2",
             "command_id": "command:rollout",
             "operation": "set_rollout",
             "decision": {
@@ -204,13 +204,13 @@ def main() -> int:
             },
         },
         {
-            "control_version": "cymule.evolution-control/1",
+            "control_version": "cymule.evolution-control/2",
             "command_id": "command:select",
             "operation": "select_occurrence",
             "occurrence_id": "occurrence:1",
         },
         {
-            "control_version": "cymule.evolution-control/1",
+            "control_version": "cymule.evolution-control/2",
             "command_id": "command:migrate",
             "operation": "migrate",
             "request": {
@@ -218,11 +218,29 @@ def main() -> int:
                 "run_id": "run:1",
                 "from_plan": "sha256:" + "1" * 64,
                 "to_plan": "sha256:" + "2" * 64,
+                "safe_point_id": "sha256:" + "3" * 64,
+                "source_epoch": 7,
                 "input_state": artifact,
             },
         },
         {
-            "control_version": "cymule.evolution-control/1",
+            "control_version": "cymule.evolution-control/2",
+            "command_id": "command:restart",
+            "operation": "restart_under_new_plan",
+            "request": {
+                "restart_id": "restart:1",
+                "source_run": "run:source",
+                "replacement_run": "run:replacement",
+                "from_plan": "sha256:" + "1" * 64,
+                "to_plan": "sha256:" + "2" * 64,
+                "safe_point_id": "sha256:" + "3" * 64,
+                "source_epoch": 7,
+                "input": artifact,
+                "evidence": artifact,
+            },
+        },
+        {
+            "control_version": "cymule.evolution-control/2",
             "command_id": "command:shadow",
             "operation": "shadow",
             "request": {
@@ -236,7 +254,7 @@ def main() -> int:
             },
         },
         {
-            "control_version": "cymule.evolution-control/1",
+            "control_version": "cymule.evolution-control/2",
             "command_id": "command:observe",
             "operation": "observe",
             "observation": {

@@ -4,12 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EvolutionController, EvolutionError, EvolutionResult, EvolutionSnapshot, MigrationAdapter,
-    MigrationReceipt, MigrationRequest, PlanEdge, PlanPatch, RolloutDecision, RolloutGate,
-    RolloutObservation, RolloutTransition, ShadowComparison, ShadowDriver, ShadowRequest,
+    MigrationReceipt, MigrationRequest, MigrationSafePoint, PlanEdge, PlanPatch, RestartReceipt,
+    RestartRequest, RolloutDecision, RolloutGate, RolloutObservation, RolloutTransition,
+    ShadowComparison, ShadowDriver, ShadowRequest,
 };
 
 /// Versioned M4 checkpoint stored in the generic M1 journal.
-pub const EVOLUTION_CHECKPOINT_SCHEMA: &str = "cymule.evolution-checkpoint/2";
+pub const EVOLUTION_CHECKPOINT_SCHEMA: &str = "cymule.evolution-checkpoint/3";
 
 /// One complete portable evolution checkpoint with explicit lineage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -148,8 +149,9 @@ impl DurableEvolutionController {
         journal_id: &str,
         checkpoint_id: &str,
         receipt: MigrationReceipt,
-        safe_point: bool,
+        safe_point: &MigrationSafePoint,
     ) -> EvolutionResult<()> {
+        verify_durable_safe_point(coordinator, safe_point)?;
         apply_and_checkpoint(
             coordinator,
             controller,
@@ -184,14 +186,34 @@ impl DurableEvolutionController {
         checkpoint_id: &str,
         adapter: &mut A,
         request: MigrationRequest,
-        safe_point: bool,
+        safe_point: &MigrationSafePoint,
     ) -> EvolutionResult<MigrationReceipt> {
+        verify_durable_safe_point(coordinator, safe_point)?;
         apply_and_checkpoint(
             coordinator,
             controller,
             journal_id,
             checkpoint_id,
             |controller| controller.execute_migration(adapter, request, safe_point),
+        )
+    }
+
+    /// Authorize one replacement Run and checkpoint its exact target Plan.
+    pub fn restart_under_new_plan_and_checkpoint<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        controller: &mut EvolutionController,
+        journal_id: &str,
+        checkpoint_id: &str,
+        request: RestartRequest,
+        safe_point: &MigrationSafePoint,
+    ) -> EvolutionResult<RestartReceipt> {
+        verify_durable_safe_point(coordinator, safe_point)?;
+        apply_and_checkpoint(
+            coordinator,
+            controller,
+            journal_id,
+            checkpoint_id,
+            |controller| controller.restart_under_new_plan(request, safe_point),
         )
     }
 
@@ -247,6 +269,24 @@ impl DurableEvolutionController {
             |controller| controller.apply_gate(gate, next_decision_id),
         )
     }
+}
+
+fn verify_durable_safe_point<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    safe_point: &MigrationSafePoint,
+) -> EvolutionResult<()> {
+    let continuation = coordinator
+        .state()
+        .map_err(durable_error)?
+        .continuations
+        .get(&safe_point.run_id)
+        .ok_or_else(|| {
+            EvolutionError::NotFound(format!(
+                "migration Continuation {} is missing",
+                safe_point.run_id
+            ))
+        })?;
+    safe_point.verify_continuation(continuation)
 }
 
 fn apply_and_checkpoint<S: DurableStore, T>(

@@ -24,6 +24,7 @@ CYMULE_VIRTUAL_LEASE_RENEWAL_FIXTURE="$ROOT/tests/fixtures/virtual-lease-renewal
 CYMULE_VIRTUAL_RECOVERY_FIXTURE="$ROOT/tests/fixtures/virtual-recovery-control.json"
 CYMULE_VIRTUAL_RUN_WEIGHT_FIXTURE="$ROOT/tests/fixtures/virtual-run-weight-control.json"
 CYMULE_EVOLUTION_CONTROL_FIXTURE="$ROOT/tests/fixtures/evolution-control.json"
+CYMULE_EVOLUTION_RESTART_FIXTURE="$ROOT/tests/fixtures/evolution-restart-control.json"
 CYMULE_EXPECTED_PLAN_ID=$("$CYMULE_BIN" seal --input "$ROOT/tests/fixtures/cross-language-plan.json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["plan_id"])')
 CYMULE_EXPECTED_RESOURCE_ID=$("$CYMULE_BIN" resource seal --input "$ROOT/tests/fixtures/resource-candidate.json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["resource_id"])')
 export CYMULE_BIN CYMULE_TEST_PLUGIN CYMULE_WAIT_ACTIVATION_FIXTURE
@@ -34,6 +35,7 @@ export CYMULE_VIRTUAL_CLAIM_FIXTURE CYMULE_VIRTUAL_LEASE_RENEWAL_FIXTURE
 export CYMULE_VIRTUAL_RECOVERY_FIXTURE
 export CYMULE_VIRTUAL_RUN_WEIGHT_FIXTURE
 export CYMULE_EVOLUTION_CONTROL_FIXTURE
+export CYMULE_EVOLUTION_RESTART_FIXTURE
 export CYMULE_EXPECTED_RESOURCE_ID
 
 case "$LANGUAGE" in

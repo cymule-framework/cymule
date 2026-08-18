@@ -132,6 +132,9 @@ Status: implemented for one provider-neutral durable domain.
   migration and isolated shadow plugin contracts, observation gates,
   promotion/rollback, mixed-version Plan selection, four-language controls,
   and lost-receipt recovery are implemented.
+- `LatestCompatible` is the wire/API default, reachable no-widening admission
+  protects future heads, durable safe-point proofs replace caller booleans, and
+  explicit replacement-Run restart authorization is implemented.
 
 ## M5 - Isolation and federation
 

@@ -6,9 +6,10 @@ use serde::Serialize;
 
 use crate::{
     EvolutionError, EvolutionResult, EvolutionSnapshot, GateOutcome, ImpactCone, MigrationAdapter,
-    MigrationReceipt, MigrationRequest, ObservationOutcome, PatchOperation, PlanEdge, PlanNode,
-    PlanPatch, RolloutDecision, RolloutEvaluation, RolloutGate, RolloutMode, RolloutObservation,
-    RolloutTransition, ShadowComparison, ShadowDriver, ShadowRequest,
+    MigrationReceipt, MigrationRequest, MigrationSafePoint, ObservationOutcome, PatchOperation,
+    PlanEdge, PlanNode, PlanPatch, RestartReceipt, RestartRequest, RolloutDecision,
+    RolloutEvaluation, RolloutGate, RolloutMode, RolloutObservation, RolloutTransition,
+    ShadowComparison, ShadowDriver, ShadowRequest,
 };
 
 /// Deterministic reducer for Plan DAG and future-version decisions.
@@ -27,6 +28,7 @@ impl EvolutionController {
                 rollout_decisions: BTreeMap::new(),
                 occurrence_plans: BTreeMap::new(),
                 migrations: BTreeMap::new(),
+                restarts: BTreeMap::new(),
                 shadows: BTreeMap::new(),
                 observations: BTreeMap::new(),
                 transitions: BTreeMap::new(),
@@ -358,11 +360,17 @@ impl EvolutionController {
     pub fn record_migration(
         &mut self,
         receipt: MigrationReceipt,
-        safe_point: bool,
+        safe_point: &MigrationSafePoint,
     ) -> EvolutionResult<()> {
-        if !safe_point {
+        safe_point.verify()?;
+        if receipt.safe_point_id != safe_point.safe_point_id
+            || receipt.source_epoch != safe_point.epoch
+            || receipt.run_id != safe_point.run_id
+            || receipt.from_plan != safe_point.plan_id
+            || safe_point.state.as_ref() != Some(&receipt.input_state)
+        {
             return Err(EvolutionError::Conflict(
-                "state migration requires a semantic safe point".to_owned(),
+                "migration receipt does not match its verified safe point".to_owned(),
             ));
         }
         validate_identity("migration", &receipt.migration_id)?;
@@ -396,11 +404,17 @@ impl EvolutionController {
         &mut self,
         adapter: &mut A,
         request: MigrationRequest,
-        safe_point: bool,
+        safe_point: &MigrationSafePoint,
     ) -> EvolutionResult<MigrationReceipt> {
-        if !safe_point {
+        safe_point.verify()?;
+        if request.safe_point_id != safe_point.safe_point_id
+            || request.source_epoch != safe_point.epoch
+            || request.run_id != safe_point.run_id
+            || request.from_plan != safe_point.plan_id
+            || safe_point.state.as_ref() != Some(&request.input_state)
+        {
             return Err(EvolutionError::Conflict(
-                "state migration requires a semantic safe point".to_owned(),
+                "migration request does not match its verified safe point".to_owned(),
             ));
         }
         let descriptor = adapter.describe()?;
@@ -415,6 +429,8 @@ impl EvolutionController {
             if existing.run_id == request.run_id
                 && existing.from_plan == request.from_plan
                 && existing.to_plan == request.to_plan
+                && existing.safe_point_id == request.safe_point_id
+                && existing.source_epoch == request.source_epoch
                 && existing.input_state == request.input_state
                 && existing.adapter_id == descriptor.adapter_id
                 && existing.adapter_revision == descriptor.adapter_revision
@@ -433,6 +449,8 @@ impl EvolutionController {
             run_id: request.run_id,
             from_plan: request.from_plan,
             to_plan: request.to_plan,
+            safe_point_id: request.safe_point_id,
+            source_epoch: request.source_epoch,
             adapter_id: descriptor.adapter_id,
             adapter_revision: descriptor.adapter_revision,
             from_schema: descriptor.from_schema,
@@ -441,8 +459,67 @@ impl EvolutionController {
             output_state: output.output_state,
             evidence: output.evidence,
         };
-        self.record_migration(receipt.clone(), true)?;
+        self.record_migration(receipt.clone(), safe_point)?;
         Ok(receipt)
+    }
+
+    /// Authorize a replacement Run under one exact target Plan at a verified
+    /// source safe point. Runtime initialization remains outside this reducer.
+    pub fn restart_under_new_plan(
+        &mut self,
+        request: RestartRequest,
+        safe_point: &MigrationSafePoint,
+    ) -> EvolutionResult<RestartReceipt> {
+        safe_point.verify()?;
+        validate_identity("restart", &request.restart_id)?;
+        validate_identity("source Run", &request.source_run)?;
+        validate_identity("replacement Run", &request.replacement_run)?;
+        if request.source_run == request.replacement_run {
+            return Err(EvolutionError::Conflict(
+                "restart requires a distinct replacement Run identity".to_owned(),
+            ));
+        }
+        if request.from_plan == request.to_plan {
+            return Err(EvolutionError::Conflict(
+                "restart_under_new_plan requires a different target Plan".to_owned(),
+            ));
+        }
+        if request.safe_point_id != safe_point.safe_point_id
+            || request.source_epoch != safe_point.epoch
+            || request.source_run != safe_point.run_id
+            || request.from_plan != safe_point.plan_id
+        {
+            return Err(EvolutionError::Conflict(
+                "restart request does not match its verified safe point".to_owned(),
+            ));
+        }
+        if !self.snapshot.plans.contains_key(&request.from_plan) {
+            return Err(EvolutionError::NotFound(
+                "restart source Plan is unknown".to_owned(),
+            ));
+        }
+        let target_plan = self
+            .snapshot
+            .plans
+            .get(&request.to_plan)
+            .map(|node| node.plan.clone())
+            .ok_or_else(|| EvolutionError::NotFound("restart target Plan is unknown".to_owned()))?;
+        let receipt = RestartReceipt {
+            request: request.clone(),
+            target_plan,
+        };
+        match self.snapshot.restarts.get(&request.restart_id) {
+            Some(existing) if existing == &receipt => Ok(existing.clone()),
+            Some(_) => Err(EvolutionError::Conflict(
+                "restart ID was reused with different semantics".to_owned(),
+            )),
+            None => {
+                self.snapshot
+                    .restarts
+                    .insert(request.restart_id, receipt.clone());
+                Ok(receipt)
+            }
+        }
     }
 
     /// Record idempotent shadow comparison evidence.
@@ -901,6 +978,28 @@ impl EvolutionController {
                 return Err(EvolutionError::NotFound(
                     "migration references a missing Plan".to_owned(),
                 ));
+            }
+        }
+        for (restart_id, receipt) in &self.snapshot.restarts {
+            if receipt.request.restart_id != *restart_id
+                || receipt.request.source_run == receipt.request.replacement_run
+                || receipt.request.from_plan == receipt.request.to_plan
+            {
+                return Err(EvolutionError::Validation(format!(
+                    "restart {restart_id} has an invalid identity or lineage"
+                )));
+            }
+            if !self.snapshot.plans.contains_key(&receipt.request.from_plan)
+                || self
+                    .snapshot
+                    .plans
+                    .get(&receipt.request.to_plan)
+                    .map(|node| &node.plan)
+                    != Some(&receipt.target_plan)
+            {
+                return Err(EvolutionError::NotFound(format!(
+                    "restart {restart_id} references a missing or mismatched Plan"
+                )));
             }
         }
         let mut shadow_subjects = BTreeSet::new();

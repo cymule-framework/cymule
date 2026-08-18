@@ -176,7 +176,22 @@ type MigrationRequest struct {
 	RunID       string      `json:"run_id"`
 	FromPlan    string      `json:"from_plan"`
 	ToPlan      string      `json:"to_plan"`
+	SafePointID string      `json:"safe_point_id"`
+	SourceEpoch uint64      `json:"source_epoch"`
 	InputState  ArtifactRef `json:"input_state"`
+}
+
+// RestartRequest authorizes one replacement Run under an exact new Plan.
+type RestartRequest struct {
+	RestartID      string      `json:"restart_id"`
+	SourceRun      string      `json:"source_run"`
+	ReplacementRun string      `json:"replacement_run"`
+	FromPlan       string      `json:"from_plan"`
+	ToPlan         string      `json:"to_plan"`
+	SafePointID    string      `json:"safe_point_id"`
+	SourceEpoch    uint64      `json:"source_epoch"`
+	Input          ArtifactRef `json:"input"`
+	Evidence       ArtifactRef `json:"evidence"`
 }
 
 // ShadowRequest asks a pinned driver for isolated comparison evidence.
@@ -215,6 +230,7 @@ type EvolutionCommand struct {
 	Decision       *RolloutDecision    `json:"decision,omitempty"`
 	OccurrenceID   string              `json:"occurrence_id,omitempty"`
 	Migration      *MigrationRequest   `json:"-"`
+	Restart        *RestartRequest     `json:"-"`
 	Shadow         *ShadowRequest      `json:"-"`
 	Observation    *RolloutObservation `json:"observation,omitempty"`
 	Gate           *RolloutGate        `json:"gate,omitempty"`
@@ -227,6 +243,8 @@ func (command EvolutionCommand) MarshalJSON() ([]byte, error) {
 	switch command.Operation {
 	case "migrate":
 		request = command.Migration
+	case "restart_under_new_plan":
+		request = command.Restart
 	case "shadow":
 		request = command.Shadow
 	}
@@ -283,6 +301,12 @@ func (command *EvolutionCommand) UnmarshalJSON(input []byte) error {
 			return err
 		}
 		command.Migration = &request
+	case "restart_under_new_plan":
+		var request RestartRequest
+		if err := json.Unmarshal(wire.Request, &request); err != nil {
+			return err
+		}
+		command.Restart = &request
 	case "shadow":
 		var request ShadowRequest
 		if err := json.Unmarshal(wire.Request, &request); err != nil {
@@ -702,7 +726,7 @@ type VirtualSchedulingControl interface {
 
 func evolutionCommand(commandID, operation string) EvolutionCommand {
 	return EvolutionCommand{
-		ControlVersion: "cymule.evolution-control/1",
+		ControlVersion: "cymule.evolution-control/2",
 		CommandID:      commandID,
 		Operation:      operation,
 	}
@@ -733,6 +757,13 @@ func SelectEvolutionOccurrence(commandID, occurrenceID string) EvolutionCommand 
 func MigrateEvolutionState(commandID string, request MigrationRequest) EvolutionCommand {
 	command := evolutionCommand(commandID, "migrate")
 	command.Migration = &request
+	return command
+}
+
+// RestartEvolutionRun builds one explicit replacement-Run authorization command.
+func RestartEvolutionRun(commandID string, request RestartRequest) EvolutionCommand {
+	command := evolutionCommand(commandID, "restart_under_new_plan")
+	command.Restart = &request
 	return command
 }
 

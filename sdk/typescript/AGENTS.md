@@ -26,6 +26,8 @@
 - Keep M4 operations as the closed `EvolutionCommand` discriminated union.
   `EvolutionControlBuilder` copies caller data but never executes adapters,
   counts evidence, or chooses promotion/rollback.
+- Preserve safe-point identity/epoch and explicit replacement input in migration
+  and restart commands; never infer them from a local clock or cached Run.
 - The public npm package name is `cymule`. Changes to exports, files, engine
   requirements, or minimum Node versions require a package dry-run and release
   workflow review.

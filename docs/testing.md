@@ -138,16 +138,19 @@ workflows:
 ```sh
 python3 scripts/test_harness.py run rust-coverage
 python3 scripts/test_harness.py run rust-mutation
+python3 scripts/test_harness.py run rust-mutation-evolution-m4
 python3 scripts/test_harness.py run rust-portability
 ```
 
 Coverage currently gates the measured four-crate semantic baseline at 72% line
 and 78% region coverage. These are non-regression floors, not a claim that a
-percentage proves correctness. Mutation runs only against `cymule-core` and
-uses its independent public-interface conformance tests. The scheduled workflow
-partitions the deterministic mutant list across eight parallel zero-based
-`K/N` shards and copies the existing target into each scratch tree for
-incremental rebuilds.
+percentage proves correctness. Core mutation uses its independent
+public-interface conformance tests. A separate M4 mutation witness targets
+compatibility analysis, safe-point proofs, automatic relink admission, and
+replacement-Run authorization so changes in those higher-profile laws cannot
+hide behind core coverage. The scheduled workflow partitions core across eight
+parallel zero-based `K/N` shards and the smaller M4 surface across four; each
+copies the existing target into its scratch tree for incremental rebuilds.
 Portability repeats only core, durable, and directory-store witnesses on Linux
 and macOS; it does not multiply every SDK lane by every operating system. The
 catalog invokes its shell leaves through explicit `bash` so the command remains

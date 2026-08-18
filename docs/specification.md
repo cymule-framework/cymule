@@ -486,6 +486,15 @@ dependency relinks every affected future parent default. Dependency cycles and
 conflicting revision choices MUST fail closed. Contract changes require an
 explicit checked adapter and MUST NOT be inferred from a logical name.
 
+Before advancing an existing future head, M4 computes the reachable semantic
+surface from the Plan entry through local invocations and nested scopes. A
+candidate MUST NOT automatically add a reachable component, effect, or wait, or
+change a reachable component/effect contract, safety profile, capability, or
+authority requirement. A violation leaves the current head unchanged while the
+new immutable revision remains independently addressable. Removing an old
+surface is compatible. `LatestCompatible` is the API and omitted-wire default;
+there is no unchecked-latest strategy.
+
 The reusable-definition registry snapshot is portable semantic control state.
 Restore MUST verify revision content identities and publication sequences,
 rebuild reverse dependencies, deterministically reproduce current and
@@ -514,12 +523,23 @@ diff, and reject the patch unless the lists are identical. Impact analysis MUST
 inspect generic Continuation sites and MAY accept stable active-site identities
 from higher profiles; it MUST NOT import their domain models.
 
-A migration adapter is called only at a semantic safe point and is pinned by
-identity and revision. Its admitted descriptor MUST claim totality over
+A migration adapter is called only with a content-addressed safe-point proof and
+is pinned by identity and revision. The proof MUST be derived from a persisted
+`Ready` Continuation at the root scope with at least one frame and no waits,
+effect obligations, or authority leases. Durable admission MUST re-derive the
+proof from current M1 authority before invoking the adapter. Its admitted
+descriptor MUST claim totality over
 reachable source state, preserve failure/cancellation and budget/ownership
 meaning, and not widen authority or effects. A shadow driver MUST suppress or
 simulate target mutating effects and pin both occurrence bindings. Migration
 output and shadow comparisons are immutable evidence, never ambient authority.
+
+`restart_under_new_plan` is an explicit alternative to state migration. At the
+same verified source safe point it authorizes a distinct replacement Run, exact
+target Plan, explicit replacement input, and policy evidence. It MUST NOT mutate
+the source Run, reuse its identity, or reinterpret old state implicitly. The
+runtime initializes the replacement through normal Run admission; the evolution
+controller records only the immutable authorization and target Plan.
 
 Rollout observations MUST reference the decision and the occurrence's immutable
 Plan pin. A gate counts exact retained observation and shadow identities. An
@@ -528,10 +548,11 @@ satisfied minimum success/equivalence evidence yields promotion; otherwise the
 gate is pending. Promotion and rollback create new future-only decisions and
 auditable transition receipts. Previously admitted occurrences do not change.
 
-`cymule.evolution-control/1` is the closed cross-language command boundary.
+`cymule.evolution-control/2` is the closed cross-language command boundary.
 SDKs may construct and transport its patch, selection, migration, shadow,
-observation, and gate operations, but only the Rust M4 controller resolves
-dependencies, invokes plugins, evaluates evidence, or mutates durable state.
+restart, observation, and gate operations, but only the Rust M4 controller
+resolves dependencies, invokes plugins, evaluates evidence, or mutates durable
+state.
 
 ## 13. Replay
 

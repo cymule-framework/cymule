@@ -6,6 +6,18 @@ domains described in `docs/specification.md`.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-18
+
+- Make `latest_compatible` the actual reference default and block automatic
+  future-head changes that widen reachable component, effect, wait,
+  capability, or authority surfaces.
+- Replace caller-asserted migration booleans with content-addressed safe-point
+  proofs verified against durable Continuations, and add first-class
+  `restart_under_new_plan` authorization through `cymule.evolution-control/2`
+  across all four SDKs.
+- Add a separately sharded M4 mutation witness for compatibility, safe-point,
+  automatic relink, and replacement-Run admission laws.
+
 ## [0.1.1] - 2026-08-18
 
 - Introduce frozen `cymule.ir/2` with reusable local definition invocation,

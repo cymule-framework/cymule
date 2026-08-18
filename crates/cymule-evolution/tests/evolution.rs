@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cymule_core::{ArtifactRef, Definition, Expression, PlanCandidate, Region};
+use cymule_core::{
+    ArtifactRef, ComponentContract, Definition, DispatchPolicy, EffectContract, EffectProfile,
+    Expression, MutationKind, PlanCandidate, ReconciliationMode, Region, WaitSpec,
+};
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
     DurableState, DurableStore, FrameState, MemoryStore, StoreCommit, StoredState,
@@ -13,14 +16,15 @@ use cymule_evolution::{
     DefinitionRegistry, DurableDefinitionRegistry, DurableEvolutionController, EvolutionCommand,
     EvolutionController, EvolutionError, GateOutcome, MigrationAdapter, MigrationAdapterDescriptor,
     MigrationCapabilityChange, MigrationOutput, MigrationPreservation, MigrationReceipt,
-    MigrationRequest, MigrationStateCoverage, ObservationOutcome, PatchOperation, PlanPatch,
-    PlanTemplate, ReferenceStrategy, RolloutDecision, RolloutGate, RolloutMode, RolloutObservation,
-    ShadowBindingMode, ShadowComparison, ShadowDriver, ShadowDriverDescriptor, ShadowEffectMode,
-    ShadowOutput, ShadowRequest, SubflowReference, diff_plans,
+    MigrationRequest, MigrationSafePoint, MigrationStateCoverage, ObservationOutcome,
+    PatchOperation, PlanPatch, PlanTemplate, ReferenceStrategy, RelinkViolation, RestartRequest,
+    RolloutDecision, RolloutGate, RolloutMode, RolloutObservation, ShadowBindingMode,
+    ShadowComparison, ShadowDriver, ShadowDriverDescriptor, ShadowEffectMode, ShadowOutput,
+    ShadowRequest, SubflowReference, analyze_relink, diff_plans,
 };
 use cymule_runtime::{
-    EmbeddedRuntime, PLUGIN_VERSION, PluginHost, PluginManifest, PluginRequest, PluginResponse,
-    RuntimeError, RuntimeResult,
+    EmbeddedRuntime, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginRequest,
+    PluginResponse, RuntimeError, RuntimeResult,
 };
 use serde_json::json;
 
@@ -83,6 +87,32 @@ fn continuation(plan_id: &str) -> Continuation {
     }
 }
 
+fn migration_safe_point(
+    run_id: &str,
+    plan_id: &str,
+    input_state: ArtifactRef,
+) -> (Continuation, MigrationSafePoint) {
+    let mut continuation = continuation(plan_id);
+    run_id.clone_into(&mut continuation.run_id);
+    continuation.state = Some(input_state);
+    let safe_point = MigrationSafePoint::derive(&continuation).expect("safe point derives");
+    (continuation, safe_point)
+}
+
+fn resign_safe_point(safe_point: &mut MigrationSafePoint) {
+    safe_point.safe_point_id = cymule_core::content_id(
+        cymule_evolution::MIGRATION_SAFE_POINT_VERSION,
+        &(
+            safe_point.run_id.as_str(),
+            safe_point.plan_id.as_str(),
+            safe_point.epoch,
+            &safe_point.state,
+            &safe_point.continuation_digest,
+        ),
+    )
+    .expect("safe point re-signs");
+}
+
 fn reusable_definition(version: &str, input_schema: serde_json::Value) -> Definition {
     Definition {
         id: "review".to_owned(),
@@ -90,6 +120,28 @@ fn reusable_definition(version: &str, input_schema: serde_json::Value) -> Defini
         output_schema: json!({}),
         body: Region {
             steps: Vec::new(),
+            result: Expression::Literal {
+                value: json!({"version": version}),
+            },
+        },
+    }
+}
+
+fn effectful_reusable_definition(version: &str) -> Definition {
+    Definition {
+        id: "review".to_owned(),
+        input_schema: json!({}),
+        output_schema: json!({}),
+        body: Region {
+            steps: vec![cymule_core::Step {
+                id: "effect.capture".to_owned(),
+                operation: cymule_core::Operation::Effect {
+                    effect: "test.capture".to_owned(),
+                    input: Expression::Input,
+                    occurrence: "review".to_owned(),
+                    bind: None,
+                },
+            }],
             result: Expression::Literal {
                 value: json!({"version": version}),
             },
@@ -182,6 +234,32 @@ impl PluginHost for EmptyPlugin {
             }),
             _ => Err(RuntimeError::Plugin(
                 "empty plugin received an executable request".to_owned(),
+            )),
+        }
+    }
+}
+
+struct DeclaredEffectPlugin;
+
+impl PluginHost for DeclaredEffectPlugin {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        match request {
+            PluginRequest::Describe => Ok(PluginResponse::Manifest {
+                manifest: PluginManifest {
+                    plugin_version: PLUGIN_VERSION.to_owned(),
+                    implementation_id: "test.declared-effect/1".to_owned(),
+                    components: BTreeMap::new(),
+                    effects: BTreeMap::from([(
+                        "test.capture".to_owned(),
+                        PluginEffect {
+                            implementation_revision: "1".to_owned(),
+                            can_reconcile: true,
+                        },
+                    )]),
+                },
+            }),
+            _ => Err(RuntimeError::Plugin(
+                "safe relink unexpectedly dispatched an effect".to_owned(),
             )),
         }
     }
@@ -363,6 +441,270 @@ fn latest_compatible_subflow_relinks_future_parent_without_rewriting_history() {
         pinned.resolved_revisions["subflow:review"],
         first.revision_id
     );
+}
+
+#[test]
+fn latest_compatible_is_the_actual_reference_default() {
+    assert_eq!(
+        ReferenceStrategy::default(),
+        ReferenceStrategy::LatestCompatible
+    );
+    let reference: SubflowReference = serde_json::from_value(json!({
+        "logical_ref": "subflow:review",
+        "local_definition": "review_dependency",
+        "input_schema": {},
+        "output_schema": {}
+    }))
+    .expect("omitted strategy uses the safe default");
+    assert_eq!(reference.strategy, ReferenceStrategy::LatestCompatible);
+    assert_eq!(
+        reference,
+        SubflowReference::latest_compatible(
+            "subflow:review",
+            "review_dependency",
+            json!({}),
+            json!({}),
+        )
+    );
+}
+
+#[test]
+fn automatic_relink_blocks_new_effect_surface_and_later_safe_head_advances() {
+    let mut registry = DefinitionRegistry::new();
+    let first = registry
+        .publish("subflow:review", reusable_definition("1", json!({})))
+        .expect("first revision publishes");
+    let mut template = parent_template(ReferenceStrategy::LatestCompatible);
+    template.candidate.effects = vec![EffectContract {
+        id: "test.capture".to_owned(),
+        input_schema: json!({}),
+        output_schema: json!({}),
+        profile: EffectProfile {
+            mutation: MutationKind::Mutating,
+            dispatch: DispatchPolicy::OnScopeCommit,
+            reconciliation: ReconciliationMode::Queryable,
+            keyed_idempotency: true,
+            irreversible: false,
+        },
+        requirements: BTreeMap::from([
+            ("capability".to_owned(), "capture".to_owned()),
+            ("authority".to_owned(), "external-write".to_owned()),
+        ]),
+    }];
+    let initial = registry
+        .register_template(template)
+        .expect("initial safe parent links");
+    assert_eq!(
+        initial.resolved_revisions["subflow:review"],
+        first.revision_id
+    );
+
+    let (effectful, blocked) = registry
+        .publish_and_relink("subflow:review", effectful_reusable_definition("2"))
+        .expect("effectful revision publishes without taking over the default");
+    assert_eq!(blocked, vec![initial.clone()]);
+    assert_ne!(effectful.revision_id, first.revision_id);
+    assert_eq!(
+        registry
+            .current_link("template:review-parent")
+            .expect("current remains")
+            .plan
+            .plan_id,
+        initial.plan.plan_id
+    );
+    let blocked_candidate = registry
+        .snapshot()
+        .templates
+        .get("template:review-parent")
+        .expect("template retained")
+        .clone();
+    let mut explicit =
+        DefinitionRegistry::restore(registry.snapshot()).expect("blocked head registry restores");
+    assert_eq!(
+        explicit
+            .register_template(blocked_candidate)
+            .expect("registered template retry preserves block")
+            .plan
+            .plan_id,
+        initial.plan.plan_id
+    );
+
+    let (_, advanced) = registry
+        .publish_and_relink("subflow:review", reusable_definition("3", json!({})))
+        .expect("later no-widening revision advances");
+    assert_eq!(advanced.len(), 1);
+    assert_ne!(advanced[0].plan.plan_id, initial.plan.plan_id);
+    assert_eq!(
+        EmbeddedRuntime::new(DeclaredEffectPlugin)
+            .execute(advanced[0].plan.clone(), &json!({}), "run:safe-head")
+            .expect("safe head executes")
+            .value,
+        json!({"version": "3"})
+    );
+}
+
+#[test]
+fn relink_analysis_treats_new_component_requirements_as_capability_widening() {
+    let contract = ComponentContract {
+        id: "test.compute".to_owned(),
+        input_schema: json!({}),
+        output_schema: json!({}),
+        requirements: BTreeMap::from([
+            ("capability".to_owned(), "sandbox".to_owned()),
+            ("authority".to_owned(), "workspace-read".to_owned()),
+        ]),
+    };
+    let base = PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "surface_base".to_owned(),
+        entry: "main".to_owned(),
+        components: vec![contract.clone()],
+        effects: Vec::new(),
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: Vec::new(),
+                result: Expression::Literal { value: json!(null) },
+            },
+        }],
+        metadata: BTreeMap::new(),
+    }
+    .seal()
+    .expect("base seals");
+    let widened = PlanCandidate {
+        name: "surface_widened".to_owned(),
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: vec![cymule_core::Step {
+                    id: "call.compute".to_owned(),
+                    operation: cymule_core::Operation::Call {
+                        component: "test.compute".to_owned(),
+                        input: Expression::Input,
+                        bind: Some("computed".to_owned()),
+                    },
+                }],
+                result: Expression::Binding {
+                    name: "computed".to_owned(),
+                },
+            },
+        }],
+        ..base.candidate.clone()
+    }
+    .seal()
+    .expect("widened Plan seals");
+    let report = analyze_relink(&base, &widened).expect("surface analyzes");
+    assert!(!report.is_compatible());
+    assert!(
+        report
+            .violations
+            .contains(&RelinkViolation::ComponentAdded {
+                component: "test.compute".to_owned()
+            })
+    );
+
+    let mut changed_component_candidate = widened.candidate.clone();
+    changed_component_candidate.components[0]
+        .requirements
+        .insert("capability".to_owned(), "network".to_owned());
+    let changed_component = changed_component_candidate
+        .seal()
+        .expect("changed component Plan seals");
+    let report = analyze_relink(&widened, &changed_component).expect("component contract analyzes");
+    assert!(
+        report
+            .violations
+            .contains(&RelinkViolation::ComponentContractChanged {
+                component: "test.compute".to_owned()
+            })
+    );
+
+    let effect = EffectContract {
+        id: "test.capture".to_owned(),
+        input_schema: json!({}),
+        output_schema: json!({}),
+        profile: EffectProfile {
+            mutation: MutationKind::Mutating,
+            dispatch: DispatchPolicy::OnScopeCommit,
+            reconciliation: ReconciliationMode::Queryable,
+            keyed_idempotency: true,
+            irreversible: false,
+        },
+        requirements: BTreeMap::from([("authority".to_owned(), "workspace-write".to_owned())]),
+    };
+    let effect_base = PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "surface_effect".to_owned(),
+        entry: "main".to_owned(),
+        components: Vec::new(),
+        effects: vec![effect],
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: vec![cymule_core::Step {
+                    id: "effect.capture".to_owned(),
+                    operation: cymule_core::Operation::Effect {
+                        effect: "test.capture".to_owned(),
+                        input: Expression::Input,
+                        occurrence: "main".to_owned(),
+                        bind: None,
+                    },
+                }],
+                result: Expression::Literal { value: json!(null) },
+            },
+        }],
+        metadata: BTreeMap::new(),
+    }
+    .seal()
+    .expect("effect Plan seals");
+    let mut changed_effect_candidate = effect_base.candidate.clone();
+    changed_effect_candidate.effects[0]
+        .requirements
+        .insert("authority".to_owned(), "organization-write".to_owned());
+    let changed_effect = changed_effect_candidate
+        .seal()
+        .expect("changed effect Plan seals");
+    let report = analyze_relink(&effect_base, &changed_effect).expect("effect contract analyzes");
+    assert!(
+        report
+            .violations
+            .contains(&RelinkViolation::EffectContractChanged {
+                effect: "test.capture".to_owned()
+            })
+    );
+
+    let wait = WaitSpec::Signal {
+        key: "signal:new-work".to_owned(),
+        consume_once: true,
+    };
+    let waiting = PlanCandidate {
+        name: "surface_waiting".to_owned(),
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: vec![cymule_core::Step {
+                    id: "wait.new-work".to_owned(),
+                    operation: cymule_core::Operation::Wait { wait: wait.clone() },
+                }],
+                result: Expression::Literal { value: json!(null) },
+            },
+        }],
+        ..base.candidate.clone()
+    }
+    .seal()
+    .expect("waiting Plan seals");
+    let report = analyze_relink(&base, &waiting).expect("wait surface analyzes");
+    assert!(report.violations.contains(&RelinkViolation::WaitAdded {
+        wait_digest: cymule_core::canonical_digest(&wait).expect("wait hashes")
+    }));
 }
 
 #[test]
@@ -821,28 +1163,31 @@ fn migration_requires_safe_point_and_shadow_evidence_is_idempotent() {
     let mut controller = EvolutionController::new();
     controller.register_plan(first.clone()).expect("registers");
     controller.register_plan(second.clone()).expect("registers");
+    let input_state = artifact("state:1");
+    let (_, safe_point) = migration_safe_point("run:active", &first.plan_id, input_state.clone());
     let migration = MigrationReceipt {
         migration_id: "migration:1".to_owned(),
         run_id: "run:active".to_owned(),
         from_plan: first.plan_id.clone(),
         to_plan: second.plan_id.clone(),
+        safe_point_id: safe_point.safe_point_id.clone(),
+        source_epoch: safe_point.epoch,
         adapter_id: "migration:test".to_owned(),
         adapter_revision: "1".to_owned(),
         from_schema: "schema:1".to_owned(),
         to_schema: "schema:2".to_owned(),
-        input_state: artifact("state:1"),
+        input_state,
         output_state: artifact("state:2"),
         evidence: artifact("evidence:migration"),
     };
-    assert!(matches!(
-        controller.record_migration(migration.clone(), false),
-        Err(EvolutionError::Conflict(_))
-    ));
+    let mut running = continuation(&first.plan_id);
+    running.status = ContinuationStatus::Running;
+    assert!(MigrationSafePoint::derive(&running).is_err());
     controller
-        .record_migration(migration.clone(), true)
+        .record_migration(migration.clone(), &safe_point)
         .expect("safe migration records");
     controller
-        .record_migration(migration, true)
+        .record_migration(migration, &safe_point)
         .expect("migration retry is idempotent");
 
     controller
@@ -900,43 +1245,188 @@ fn checked_migration_adapter_is_safe_point_gated_pinned_and_idempotent() {
         budget_and_ownership: MigrationPreservation::Preserved,
         authority_and_effects: MigrationCapabilityChange::NoWidening,
     };
+    let input_state = artifact("state:checked:input");
+    let (_, safe_point) = migration_safe_point("run:migrate", &first.plan_id, input_state.clone());
     let request = MigrationRequest {
         migration_id: "migration:checked:1".to_owned(),
         run_id: "run:migrate".to_owned(),
         from_plan: first.plan_id,
         to_plan: second.plan_id,
-        input_state: artifact("state:checked:input"),
+        safe_point_id: safe_point.safe_point_id.clone(),
+        source_epoch: safe_point.epoch,
+        input_state,
     };
     let mut adapter = TestMigrationAdapter {
         descriptor: descriptor.clone(),
         calls: 0,
     };
+    let mut mismatched_request = request.clone();
+    mismatched_request.safe_point_id = "sha256:not-the-safe-point".to_owned();
     assert!(matches!(
-        controller.execute_migration(&mut adapter, request.clone(), false),
+        controller.execute_migration(&mut adapter, mismatched_request, &safe_point),
         Err(EvolutionError::Conflict(_))
     ));
     assert_eq!(adapter.calls, 0, "unsafe migration never reaches plugin");
 
     adapter.descriptor.to_plan = request.from_plan.clone();
     assert!(matches!(
-        controller.execute_migration(&mut adapter, request.clone(), true),
+        controller.execute_migration(&mut adapter, request.clone(), &safe_point),
         Err(EvolutionError::Conflict(_))
     ));
     assert_eq!(adapter.calls, 0, "mismatched contract never reaches plugin");
 
     adapter.descriptor = descriptor;
     let receipt = controller
-        .execute_migration(&mut adapter, request.clone(), true)
+        .execute_migration(&mut adapter, request.clone(), &safe_point)
         .expect("checked migration executes");
     assert_eq!(receipt.adapter_revision, "sha256:adapter-v1");
     assert_eq!(adapter.calls, 1);
     assert_eq!(
         controller
-            .execute_migration(&mut adapter, request, true)
+            .execute_migration(&mut adapter, request, &safe_point)
             .expect("retry returns retained receipt"),
         receipt
     );
     assert_eq!(adapter.calls, 1, "receipt retry does not transform twice");
+}
+
+#[test]
+fn migration_safe_point_rejects_every_non_quiescent_axis_and_tampering() {
+    let (base, proof) = migration_safe_point(
+        "run:safe-point-matrix",
+        &plan("safe-point").plan_id,
+        artifact("state:safe-point-matrix"),
+    );
+    proof
+        .verify_continuation(&base)
+        .expect("derived proof verifies");
+    let mut invalid = Vec::new();
+    let mut running = base.clone();
+    running.status = ContinuationStatus::Running;
+    invalid.push(running);
+    let mut no_frame = base.clone();
+    no_frame.frames.clear();
+    invalid.push(no_frame);
+    let mut waiting = base.clone();
+    waiting.wait_set.insert("wait:unsafe".to_owned());
+    invalid.push(waiting);
+    let mut nested = base.clone();
+    nested.scope_stack.push("scope:nested".to_owned());
+    invalid.push(nested);
+    let mut obligated = base.clone();
+    obligated
+        .effect_obligations
+        .insert("obligation:unsafe".to_owned());
+    invalid.push(obligated);
+    let mut leased = base;
+    leased.authority_leases.insert("lease:unsafe".to_owned());
+    invalid.push(leased);
+    for continuation in invalid {
+        assert!(MigrationSafePoint::derive(&continuation).is_err());
+    }
+    for malformed in [
+        {
+            let mut malformed = proof.clone();
+            malformed.safe_point_version = "cymule.migration-safe-point/unknown".to_owned();
+            malformed
+        },
+        {
+            let mut malformed = proof.clone();
+            malformed.run_id.clear();
+            resign_safe_point(&mut malformed);
+            malformed
+        },
+        {
+            let mut malformed = proof.clone();
+            malformed.plan_id.clear();
+            resign_safe_point(&mut malformed);
+            malformed
+        },
+        {
+            let mut malformed = proof.clone();
+            malformed.continuation_digest.pop();
+            resign_safe_point(&mut malformed);
+            malformed
+        },
+    ] {
+        assert!(malformed.verify().is_err());
+    }
+    let mut tampered = proof;
+    tampered.epoch += 1;
+    assert!(tampered.verify().is_err());
+}
+
+#[test]
+fn restart_under_new_plan_is_explicit_safe_point_authorization() {
+    let first = plan("1");
+    let second = plan("2");
+    let mut controller = EvolutionController::new();
+    controller.register_plan(first.clone()).expect("registers");
+    controller.register_plan(second.clone()).expect("registers");
+    let (_, safe_point) = migration_safe_point(
+        "run:restart-source",
+        &first.plan_id,
+        artifact("state:restart-source"),
+    );
+    let request = RestartRequest {
+        restart_id: "restart:1".to_owned(),
+        source_run: "run:restart-source".to_owned(),
+        replacement_run: "run:restart-target".to_owned(),
+        from_plan: first.plan_id,
+        to_plan: second.plan_id.clone(),
+        safe_point_id: safe_point.safe_point_id.clone(),
+        source_epoch: safe_point.epoch,
+        input: artifact("input:restart-target"),
+        evidence: artifact("evidence:restart-policy"),
+    };
+    let receipt = controller
+        .restart_under_new_plan(request.clone(), &safe_point)
+        .expect("restart authorizes");
+    assert_eq!(receipt.target_plan.plan_id, second.plan_id);
+    assert_eq!(
+        controller
+            .restart_under_new_plan(request.clone(), &safe_point)
+            .expect("restart retry is idempotent"),
+        receipt
+    );
+    for mismatched in [
+        {
+            let mut mismatched = request.clone();
+            mismatched.restart_id = "restart:wrong-epoch".to_owned();
+            mismatched.source_epoch += 1;
+            mismatched
+        },
+        {
+            let mut mismatched = request.clone();
+            mismatched.restart_id = "restart:wrong-source-run".to_owned();
+            mismatched.source_run = "run:wrong-source".to_owned();
+            mismatched
+        },
+        {
+            let mut mismatched = request.clone();
+            mismatched.restart_id = "restart:wrong-source-plan".to_owned();
+            mismatched.from_plan = "sha256:wrong-source-plan".to_owned();
+            mismatched
+        },
+    ] {
+        assert!(matches!(
+            controller.restart_under_new_plan(mismatched, &safe_point),
+            Err(EvolutionError::Conflict(_))
+        ));
+    }
+    let mut reused = request.clone();
+    reused.input = artifact("input:restart-conflict");
+    assert!(matches!(
+        controller.restart_under_new_plan(reused, &safe_point),
+        Err(EvolutionError::Conflict(_))
+    ));
+    let mut conflicting = request;
+    conflicting.replacement_run = conflicting.source_run.clone();
+    assert!(matches!(
+        controller.restart_under_new_plan(conflicting, &safe_point),
+        Err(EvolutionError::Conflict(_))
+    ));
+    EvolutionController::restore(controller.snapshot()).expect("restart snapshot restores");
 }
 
 #[test]
@@ -1219,6 +1709,12 @@ fn durable_mixed_version_pin_reopens_after_lost_checkpoint_receipt() {
         first.plan_id
     );
 
+    let migration_input = artifact("state:durable:1");
+    let (migration_continuation, migration_safe_point) =
+        migration_safe_point("run:active", &first.plan_id, migration_input.clone());
+    reopened
+        .put_continuation(migration_continuation)
+        .expect("migration safe point persists");
     DurableEvolutionController::record_migration_and_checkpoint(
         &mut reopened,
         &mut restored,
@@ -1229,15 +1725,17 @@ fn durable_mixed_version_pin_reopens_after_lost_checkpoint_receipt() {
             run_id: "run:active".to_owned(),
             from_plan: first.plan_id.clone(),
             to_plan: pinned_target.clone(),
+            safe_point_id: migration_safe_point.safe_point_id.clone(),
+            source_epoch: migration_safe_point.epoch,
             adapter_id: "migration:test".to_owned(),
             adapter_revision: "1".to_owned(),
             from_schema: "schema:1".to_owned(),
             to_schema: "schema:2".to_owned(),
-            input_state: artifact("state:durable:1"),
+            input_state: migration_input,
             output_state: artifact("state:durable:2"),
             evidence: artifact("evidence:durable:migration"),
         },
-        true,
+        &migration_safe_point,
     )
     .expect("migration checkpoints");
     DurableEvolutionController::record_shadow_and_checkpoint(
@@ -1397,6 +1895,107 @@ fn durable_rollout_gate_reopens_after_lost_transition_receipt() {
 }
 
 #[test]
+fn durable_restart_reopens_after_lost_receipt_and_rejects_stale_proof() {
+    let first = plan("1");
+    let second = plan("2");
+    let armed = Arc::new(AtomicBool::new(false));
+    let store = LostReceiptStore {
+        inner: MemoryStore::new(),
+        armed: armed.clone(),
+    };
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("coordinator opens")
+        .initialize(&cymule_core::Machine::new())
+        .expect("coordinator initializes");
+    let (continuation, safe_point) = migration_safe_point(
+        "run:restart-durable",
+        &first.plan_id,
+        artifact("state:restart-durable"),
+    );
+    coordinator
+        .put_continuation(continuation.clone())
+        .expect("safe point persists");
+    let mut controller = EvolutionController::new();
+    controller.register_plan(first.clone()).expect("registers");
+    controller.register_plan(second.clone()).expect("registers");
+    DurableEvolutionController::checkpoint(
+        &mut coordinator,
+        &controller,
+        "evolution:restart",
+        "checkpoint:plans",
+    )
+    .expect("plans checkpoint");
+
+    let mut advanced = continuation;
+    advanced.epoch += 1;
+    let stale_proof = MigrationSafePoint::derive(&advanced).expect("stale proof derives");
+    let stale_request = RestartRequest {
+        restart_id: "restart:stale".to_owned(),
+        source_run: stale_proof.run_id.clone(),
+        replacement_run: "run:restart-stale-target".to_owned(),
+        from_plan: stale_proof.plan_id.clone(),
+        to_plan: second.plan_id.clone(),
+        safe_point_id: stale_proof.safe_point_id.clone(),
+        source_epoch: stale_proof.epoch,
+        input: artifact("input:restart-stale"),
+        evidence: artifact("evidence:restart-stale"),
+    };
+    assert!(
+        DurableEvolutionController::restart_under_new_plan_and_checkpoint(
+            &mut coordinator,
+            &mut controller,
+            "evolution:restart",
+            "checkpoint:restart-stale",
+            stale_request,
+            &stale_proof,
+        )
+        .is_err()
+    );
+    assert!(controller.snapshot().restarts.is_empty());
+
+    let request = RestartRequest {
+        restart_id: "restart:durable".to_owned(),
+        source_run: safe_point.run_id.clone(),
+        replacement_run: "run:restart-durable-target".to_owned(),
+        from_plan: first.plan_id,
+        to_plan: second.plan_id.clone(),
+        safe_point_id: safe_point.safe_point_id.clone(),
+        source_epoch: safe_point.epoch,
+        input: artifact("input:restart-durable"),
+        evidence: artifact("evidence:restart-durable"),
+    };
+    armed.store(true, Ordering::SeqCst);
+    assert!(
+        DurableEvolutionController::restart_under_new_plan_and_checkpoint(
+            &mut coordinator,
+            &mut controller,
+            "evolution:restart",
+            "checkpoint:restart",
+            request.clone(),
+            &safe_point,
+        )
+        .is_err()
+    );
+    assert!(controller.snapshot().restarts.is_empty());
+
+    let store = coordinator.into_store();
+    let mut reopened = DurableCoordinator::open(store).expect("coordinator reopens");
+    let mut restored = DurableEvolutionController::load(&reopened, "evolution:restart")
+        .expect("restart receipt restores");
+    let receipt = DurableEvolutionController::restart_under_new_plan_and_checkpoint(
+        &mut reopened,
+        &mut restored,
+        "evolution:restart",
+        "checkpoint:restart",
+        request,
+        &safe_point,
+    )
+    .expect("lost restart receipt retries");
+    assert_eq!(receipt.target_plan.plan_id, second.plan_id);
+    assert_eq!(restored.snapshot().restarts.len(), 1);
+}
+
+#[test]
 fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
     let first = plan("1");
     let second = plan("2");
@@ -1420,6 +2019,15 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
             mode: RolloutMode::Shadow,
         })
         .expect("shadow rollout sets");
+    let migration_input = artifact("state:durable-plugin");
+    let (migration_continuation, migration_safe_point) = migration_safe_point(
+        "run:durable-plugin",
+        &first.plan_id,
+        migration_input.clone(),
+    );
+    coordinator
+        .put_continuation(migration_continuation)
+        .expect("migration safe point persists");
     DurableEvolutionController::checkpoint(
         &mut coordinator,
         &controller,
@@ -1433,7 +2041,9 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
         run_id: "run:durable-plugin".to_owned(),
         from_plan: first.plan_id.clone(),
         to_plan: second.plan_id.clone(),
-        input_state: artifact("state:durable-plugin"),
+        safe_point_id: migration_safe_point.safe_point_id.clone(),
+        source_epoch: migration_safe_point.epoch,
+        input_state: migration_input,
     };
     let mut migration = TestMigrationAdapter {
         descriptor: MigrationAdapterDescriptor {
@@ -1459,7 +2069,7 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
             "checkpoint:migration-plugin",
             &mut migration,
             migration_request.clone(),
-            true,
+            &migration_safe_point,
         )
         .is_err()
     );
@@ -1476,7 +2086,7 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
         "checkpoint:migration-plugin",
         &mut migration,
         migration_request,
-        true,
+        &migration_safe_point,
     )
     .expect("migration retry uses retained receipt");
     assert_eq!(migration.calls, 1);

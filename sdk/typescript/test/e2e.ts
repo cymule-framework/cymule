@@ -211,4 +211,13 @@ test("TypeScript evolution control validates through the Rust engine", () => {
   );
   assert.deepEqual(command, expected);
   assert.deepEqual(new CliEngine(enginePath).verifyEvolutionCommand(command), command);
+  const restartPath = process.env.CYMULE_EVOLUTION_RESTART_FIXTURE;
+  if (restartPath === undefined) return;
+  const restartExpected = JSON.parse(readFileSync(restartPath, "utf8"));
+  const restart = EvolutionControlBuilder.restartUnderNewPlan(
+    "command:evolution:fixture:restart",
+    restartExpected.request,
+  );
+  assert.deepEqual(restart, restartExpected);
+  assert.deepEqual(new CliEngine(enginePath).verifyEvolutionCommand(restart), restart);
 });

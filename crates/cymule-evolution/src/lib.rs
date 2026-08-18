@@ -1,6 +1,7 @@
 //! Provider-neutral Plan DAG, impact, rollout, migration, and rollback semantics.
 
 mod adapters;
+mod compatibility;
 mod control;
 mod controller;
 mod durable;
@@ -10,9 +11,13 @@ mod model;
 mod registry_durable;
 
 pub use adapters::{
-    MigrationAdapter, MigrationAdapterDescriptor, MigrationCapabilityChange, MigrationOutput,
-    MigrationPreservation, MigrationRequest, MigrationStateCoverage, ShadowBindingMode,
-    ShadowDriver, ShadowDriverDescriptor, ShadowEffectMode, ShadowOutput, ShadowRequest,
+    MIGRATION_SAFE_POINT_VERSION, MigrationAdapter, MigrationAdapterDescriptor,
+    MigrationCapabilityChange, MigrationOutput, MigrationPreservation, MigrationRequest,
+    MigrationSafePoint, MigrationStateCoverage, ShadowBindingMode, ShadowDriver,
+    ShadowDriverDescriptor, ShadowEffectMode, ShadowOutput, ShadowRequest,
+};
+pub use compatibility::{
+    RELINK_COMPATIBILITY_VERSION, RelinkCompatibility, RelinkViolation, analyze_relink,
 };
 pub use control::{EVOLUTION_CONTROL_VERSION, EvolutionCommand};
 pub use controller::{EvolutionController, diff_plans};
@@ -24,8 +29,9 @@ pub use linker::{
 };
 pub use model::{
     EvolutionSnapshot, GateOutcome, ImpactCone, MigrationReceipt, ObservationOutcome,
-    PatchOperation, PlanEdge, PlanNode, PlanPatch, RolloutDecision, RolloutEvaluation, RolloutGate,
-    RolloutMode, RolloutObservation, RolloutTransition, ShadowComparison,
+    PatchOperation, PlanEdge, PlanNode, PlanPatch, RestartReceipt, RestartRequest, RolloutDecision,
+    RolloutEvaluation, RolloutGate, RolloutMode, RolloutObservation, RolloutTransition,
+    ShadowComparison,
 };
 pub use registry_durable::{
     DEFINITION_REGISTRY_CHECKPOINT_SCHEMA, DefinitionRegistryCheckpoint, DurableDefinitionRegistry,

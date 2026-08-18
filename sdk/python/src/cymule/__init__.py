@@ -53,7 +53,23 @@ class MigrationRequest(TypedDict):
     run_id: str
     from_plan: str
     to_plan: str
+    safe_point_id: str
+    source_epoch: int
     input_state: ArtifactRef
+
+
+class RestartRequest(TypedDict):
+    """Authorize a replacement Run under one exact new Plan."""
+
+    restart_id: str
+    source_run: str
+    replacement_run: str
+    from_plan: str
+    to_plan: str
+    safe_point_id: str
+    source_epoch: int
+    input: ArtifactRef
+    evidence: ArtifactRef
 
 
 class ShadowRequest(TypedDict):
@@ -669,6 +685,15 @@ class EvolutionControlBuilder:
         )
 
     @staticmethod
+    def restart_under_new_plan(
+        command_id: str, request: RestartRequest
+    ) -> EvolutionCommand:
+        return EvolutionControlBuilder._build(
+            command_id,
+            {"operation": "restart_under_new_plan", "request": request},
+        )
+
+    @staticmethod
     def shadow(command_id: str, request: ShadowRequest) -> EvolutionCommand:
         return EvolutionControlBuilder._build(
             command_id, {"operation": "shadow", "request": request}
@@ -700,7 +725,7 @@ class EvolutionControlBuilder:
         if not command_id:
             raise ValueError("evolution control requires a command identity")
         return {
-            "control_version": "cymule.evolution-control/1",
+            "control_version": "cymule.evolution-control/2",
             "command_id": command_id,
             **copy.deepcopy(operation),
         }
@@ -1119,6 +1144,7 @@ __all__ = [
     "RolloutGate",
     "RolloutObservation",
     "ResourceBuilder",
+    "RestartRequest",
     "ShadowRequest",
     "VirtualWorkControl",
     "VirtualWorkControlBuilder",

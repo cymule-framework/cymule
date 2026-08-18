@@ -5,10 +5,13 @@
   the same explicit local definition ID, input expression, site ID, and result
   binding. Linking logical latest-compatible references remains Rust authority.
 - SDKs must not compute authoritative Plan/Event IDs or implement a reducer.
-- Every SDK exposes the same closed `cymule.evolution-control/1` command union
+- Every SDK exposes the same closed `cymule.evolution-control/2` command union
   and transport interface. SDKs construct commands only; Rust resolves module
   revisions, invokes pinned migration/shadow plugins, counts observations, and
   admits promotion or rollback.
+- Migration and restart commands carry exact safe-point IDs and source epochs.
+  SDKs never derive safe points, reinterpret old state, or initialize the
+  replacement Run locally.
 - SDKs also author the same `cymule.resource/1` candidates and Run handoff wire
   records. They delegate Resource ID validation and sealing to the Rust Engine.
 - Keep APIs idiomatic in each language while preserving explicit site IDs,

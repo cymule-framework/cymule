@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EvolutionError, EvolutionResult, MigrationRequest, PlanPatch, RolloutDecision, RolloutGate,
-    RolloutObservation, ShadowRequest,
+    EvolutionError, EvolutionResult, MigrationRequest, PlanPatch, RestartRequest, RolloutDecision,
+    RolloutGate, RolloutObservation, ShadowRequest,
 };
 
 /// Frozen cross-language M4 control envelope version.
-pub const EVOLUTION_CONTROL_VERSION: &str = "cymule.evolution-control/1";
+pub const EVOLUTION_CONTROL_VERSION: &str = "cymule.evolution-control/2";
 
 /// Closed idempotent M4 commands shared by every SDK.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,6 +47,15 @@ pub enum EvolutionCommand {
         command_id: String,
         /// Migration request.
         request: MigrationRequest,
+    },
+    /// Authorize a replacement Run under a different exact Plan.
+    RestartUnderNewPlan {
+        /// Control protocol version.
+        control_version: String,
+        /// Stable command/idempotency identity.
+        command_id: String,
+        /// Restart authorization request.
+        request: RestartRequest,
     },
     /// Execute isolated non-authoritative shadow work through a pinned plugin.
     Shadow {
@@ -113,6 +122,14 @@ impl EvolutionCommand {
                 request,
             } => {
                 validate_identity("migration", &request.migration_id)?;
+                (control_version, command_id)
+            }
+            Self::RestartUnderNewPlan {
+                control_version,
+                command_id,
+                request,
+            } => {
+                validate_identity("restart", &request.restart_id)?;
                 (control_version, command_id)
             }
             Self::Shadow {

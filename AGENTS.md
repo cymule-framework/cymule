@@ -96,10 +96,16 @@ Use this precedence order when guidance conflicts:
   sealing. Store every exact revision in the linked record, derive reverse
   indexes from registry state, and make transitive compatible updates create a
   new future parent Plan without rewriting any historical Plan or invocation.
+- `LatestCompatible` is the actual API and Serde default. Before advancing an
+  existing future head, compare entry-reachable component, effect, wait,
+  capability, and authority surfaces; any widening retains the old head.
 - M4 rollout state is evidence-driven and future-only. Migration/shadow code is
   a pinned plugin, observations match immutable occurrence pins, and only Rust
   evaluates deterministic promotion/rollback gates. SDKs carry the closed
   control union without duplicating these decisions.
+- Never accept a caller boolean as migration-safe-point authority. Derive a
+  content-addressed proof from a quiescent durable Continuation and revalidate it
+  against M1 before adapter invocation or replacement-Run authorization.
 - New behavior is provider-neutral by default. Concrete persistence, activation,
   execution, model, tool, and effect integrations belong behind plugin or
   substrate interfaces.

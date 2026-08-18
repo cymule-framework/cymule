@@ -28,3 +28,5 @@
 - Evolution builders preserve the closed M4 operation tag, exact Plan and
   Artifact identities, adapter requests, observations, and gates. Python never
   resolves latest revisions or evaluates a gate locally.
+- Migration/restart builders preserve safe-point proof identity, source epoch,
+  distinct Run IDs, explicit input, and evidence without local interpretation.

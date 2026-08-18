@@ -81,7 +81,21 @@ export interface MigrationRequest {
   run_id: string;
   from_plan: string;
   to_plan: string;
+  safe_point_id: string;
+  source_epoch: number;
   input_state: ArtifactRef;
+}
+
+export interface RestartRequest {
+  restart_id: string;
+  source_run: string;
+  replacement_run: string;
+  from_plan: string;
+  to_plan: string;
+  safe_point_id: string;
+  source_epoch: number;
+  input: ArtifactRef;
+  evidence: ArtifactRef;
 }
 
 export interface ShadowRequest {
@@ -111,12 +125,13 @@ type EvolutionOperation =
   | { operation: "set_rollout"; decision: RolloutDecision }
   | { operation: "select_occurrence"; occurrence_id: string }
   | { operation: "migrate"; request: MigrationRequest }
+  | { operation: "restart_under_new_plan"; request: RestartRequest }
   | { operation: "shadow"; request: ShadowRequest }
   | { operation: "observe"; observation: RolloutObservation }
   | { operation: "apply_gate"; gate: RolloutGate; next_decision_id: string };
 
 export type EvolutionCommand = {
-  control_version: "cymule.evolution-control/1";
+  control_version: "cymule.evolution-control/2";
   command_id: string;
 } & EvolutionOperation;
 
@@ -648,6 +663,13 @@ export class EvolutionControlBuilder {
     return EvolutionControlBuilder.build(commandId, { operation: "migrate", request });
   }
 
+  static restartUnderNewPlan(commandId: string, request: RestartRequest): EvolutionCommand {
+    return EvolutionControlBuilder.build(commandId, {
+      operation: "restart_under_new_plan",
+      request,
+    });
+  }
+
   static shadow(commandId: string, request: ShadowRequest): EvolutionCommand {
     return EvolutionControlBuilder.build(commandId, { operation: "shadow", request });
   }
@@ -672,7 +694,7 @@ export class EvolutionControlBuilder {
   private static build(commandId: string, operation: EvolutionOperation): EvolutionCommand {
     if (commandId.length === 0) throw new Error("evolution control requires a command identity");
     return {
-      control_version: "cymule.evolution-control/1",
+      control_version: "cymule.evolution-control/2",
       command_id: commandId,
       ...structuredClone(operation),
     };

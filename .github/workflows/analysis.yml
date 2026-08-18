@@ -40,19 +40,23 @@ jobs:
           if-no-files-found: warn
 
   mutation:
-    name: Analysis / semantic mutation / ${{ matrix.id }}
+    name: Analysis / semantic mutation / ${{ matrix.target }} / ${{ matrix.id }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { id: 1-of-8, shard: 0/8 }
-          - { id: 2-of-8, shard: 1/8 }
-          - { id: 3-of-8, shard: 2/8 }
-          - { id: 4-of-8, shard: 3/8 }
-          - { id: 5-of-8, shard: 4/8 }
-          - { id: 6-of-8, shard: 5/8 }
-          - { id: 7-of-8, shard: 6/8 }
-          - { id: 8-of-8, shard: 7/8 }
+          - { target: core, id: 1-of-8, shard: 0/8, suite: rust-mutation, output: mutation }
+          - { target: core, id: 2-of-8, shard: 1/8, suite: rust-mutation, output: mutation }
+          - { target: core, id: 3-of-8, shard: 2/8, suite: rust-mutation, output: mutation }
+          - { target: core, id: 4-of-8, shard: 3/8, suite: rust-mutation, output: mutation }
+          - { target: core, id: 5-of-8, shard: 4/8, suite: rust-mutation, output: mutation }
+          - { target: core, id: 6-of-8, shard: 5/8, suite: rust-mutation, output: mutation }
+          - { target: core, id: 7-of-8, shard: 6/8, suite: rust-mutation, output: mutation }
+          - { target: core, id: 8-of-8, shard: 7/8, suite: rust-mutation, output: mutation }
+          - { target: evolution-m4, id: 1-of-4, shard: 0/4, suite: rust-mutation-evolution-m4, output: mutation-evolution-m4 }
+          - { target: evolution-m4, id: 2-of-4, shard: 1/4, suite: rust-mutation-evolution-m4, output: mutation-evolution-m4 }
+          - { target: evolution-m4, id: 3-of-4, shard: 2/4, suite: rust-mutation-evolution-m4, output: mutation-evolution-m4 }
+          - { target: evolution-m4, id: 4-of-4, shard: 3/4, suite: rust-mutation-evolution-m4, output: mutation-evolution-m4 }
     runs-on: ubuntu-24.04
     env:
       CYMULE_MUTATION_SHARD: ${{ matrix.shard }}
@@ -68,13 +72,13 @@ jobs:
       - name: Run mutation witness
         run: >-
           python3 scripts/test_harness.py run
-          rust-mutation
-          --report .cache/test-harness/rust-mutation.json
+          ${{ matrix.suite }}
+          --report .cache/test-harness/${{ matrix.suite }}.json
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: analysis-mutation-${{ matrix.id }}
+          name: analysis-mutation-${{ matrix.target }}-${{ matrix.id }}
           path: |
-            .cache/test-analysis/mutation
-            .cache/test-harness/rust-mutation.json
+            .cache/test-analysis/${{ matrix.output }}
+            .cache/test-harness/${{ matrix.suite }}.json
           if-no-files-found: warn

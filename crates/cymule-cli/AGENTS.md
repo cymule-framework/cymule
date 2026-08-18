@@ -11,7 +11,7 @@
   delivery record. Stateful source matching, consume-once admission, and
   Continuation readiness remain `cymule-durable` CAS operations.
 - `verify_evolution_command` validates only the closed
-  `cymule.evolution-control/1` envelope. Plan linking, adapter execution,
+  `cymule.evolution-control/2` envelope. Plan linking, adapter execution,
   evidence counting, and durable promotion remain `cymule-evolution` authority.
 - Write only the response JSON to stdout. Diagnostics go to stderr.
 - Never expose unrestricted raw event append.
