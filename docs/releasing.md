@@ -73,6 +73,11 @@ publishes in catalog dependency order. For each crate it:
 4. waits for a new version to enter the index;
 5. downloads the registry archive and verifies its checksum.
 
+The workflow keeps its reviewed release controller in a current-public-main
+checkout and all release payload in a separate exact-tag checkout. This lets a
+historical immutable release use a corrected resumability controller without
+moving its tag or changing any manifest, catalog, source, archive, or checksum.
+
 After the ordered upload, the workflow builds a clean consumer of exact
 registry versions and installs `cymule-cli` from crates.io. A partial failure is
 safe to retry because every completed version must match the exact tag bytes.
