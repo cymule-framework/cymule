@@ -102,6 +102,12 @@ lane = "package-typescript"
 tools = ["node"]
 commands = [["./scripts/verify-typescript-package.sh"]]
 
+[suites.package-rust]
+description = "Build deterministic public Rust archives and compile their normalized registry manifests."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-crates-package.sh"]]
+
 [suites.mlir]
 description = "Run the optional MLIR workbench smoke test when the pinned toolchain exists."
 lane = "workbench"
@@ -156,6 +162,7 @@ requires = [
   "sdk-go",
   "example",
   "package-typescript",
+  "package-rust",
   "mlir",
 ]
 
@@ -165,6 +172,10 @@ requires = [
 [[routes]]
 patterns = ["README.md", "docs/**", "**/AGENTS.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "LICENSE*"]
 suites = ["docs"]
+
+[[routes]]
+patterns = ["Cargo.toml", "Cargo.lock", "**/Cargo.toml", "scripts/crates-release.toml", "scripts/crates_release.py", "scripts/verify-crates-package.sh"]
+suites = ["package-rust"]
 
 [[routes]]
 patterns = ["crates/cymule-core/tests/**"]

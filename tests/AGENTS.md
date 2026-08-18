@@ -33,6 +33,9 @@
 - M4 negative tests must isolate one admission axis and use distinct command
   identities so a later idempotency conflict cannot mask a broken earlier
   check. The scheduled M4 mutation witness is the regression probe for this.
+- Rust packaging tests operate on normalized `.crate` contents. They must prove
+  deterministic archives, no dependency-path leakage, compilation of every
+  public library/binary, and a user facade consumer before publication.
 - Effect fault matrices distinguish prepare-response loss, durable enqueue,
   scope commit, dispatch-start claim, provider application, Applied settlement,
   and Unknown observation. Assert exact provider call counts and reject

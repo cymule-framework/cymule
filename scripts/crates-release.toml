@@ -1,0 +1,64 @@
+schema = 1
+
+[[crate]]
+name = "cymule-core"
+path = "crates/cymule-core"
+dependencies = []
+
+[[crate]]
+name = "cymule-runtime"
+path = "crates/cymule-runtime"
+dependencies = ["cymule-core"]
+
+[[crate]]
+name = "cymule-durable"
+path = "crates/cymule-durable"
+dependencies = ["cymule-core", "cymule-runtime"]
+
+[[crate]]
+name = "cymule-resource"
+path = "crates/cymule-resource"
+dependencies = ["cymule-core", "cymule-durable"]
+
+[[crate]]
+name = "cymule-evolution"
+path = "crates/cymule-evolution"
+dependencies = ["cymule-core", "cymule-durable"]
+
+[[crate]]
+name = "cymule-virtual"
+path = "crates/cymule-virtual"
+dependencies = ["cymule-core", "cymule-durable"]
+
+[[crate]]
+name = "cymule-directory-store"
+path = "plugins/directory-store"
+dependencies = ["cymule-core", "cymule-durable"]
+
+[[crate]]
+name = "cymule-agent"
+path = "plugins/agent-interaction"
+dependencies = ["cymule-core", "cymule-durable", "cymule-resource"]
+
+[[crate]]
+name = "cymule"
+path = "crates/cymule-sdk"
+dependencies = [
+  "cymule-core",
+  "cymule-durable",
+  "cymule-evolution",
+  "cymule-resource",
+  "cymule-runtime",
+  "cymule-virtual",
+]
+
+[[crate]]
+name = "cymule-cli"
+path = "crates/cymule-cli"
+dependencies = [
+  "cymule-core",
+  "cymule-durable",
+  "cymule-evolution",
+  "cymule-resource",
+  "cymule-runtime",
+]

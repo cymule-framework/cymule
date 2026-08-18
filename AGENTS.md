@@ -118,6 +118,10 @@ Use this precedence order when guidance conflicts:
   including packages, release assets, and future registry distributions. Local
   commands may build, test, stage, and inspect release bytes, but must never
   publish them or require a long-lived registry token.
+- Public Rust crates share the TypeScript release version. `cymule` is the Rust
+  facade and `cymule-cli` is the binary package; profile/plugin crates publish
+  in the dependency order owned by `scripts/crates-release.toml`. Retry only
+  after comparing registry and exact-tag archive checksums.
 
 ## Change discipline
 

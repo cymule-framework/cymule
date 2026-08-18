@@ -13,3 +13,6 @@
   create a fresh intent.
 - Concrete provider plugins must live in separately reviewable packages and must
   document credentials, egress, idempotency, reconciliation, and failure modes.
+- Official reusable plugins may publish as independent crates only when their
+  normalized package compiles against published Cymule contracts. Test adapters
+  and examples remain `publish = false`.

@@ -16,12 +16,10 @@ It deliberately does not implement an Agent Loop or a transport protocol. ACP,
 MCP, A2A, editor, provider, and loop integrations should be separate plugins or
 adapters that depend on this package when its domain model is useful.
 
-The Rust package is named `cymule-agent` for compatibility. Add it by path while
-the repository is pre-release:
+The Rust package is named `cymule-agent`. Add it from crates.io:
 
-```toml
-[dependencies]
-cymule-agent = { path = "plugins/agent-interaction" }
+```sh
+cargo add cymule-agent
 ```
 
 Use the controllers directly from `cymule_agent`; the application remains

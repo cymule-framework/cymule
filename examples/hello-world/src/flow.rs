@@ -1,4 +1,4 @@
-use cymule_sdk::{
+use cymule::{
     DispatchPolicy, EffectProfile, Expression, FlowBuilder, MutationKind, PlanCandidate,
     ReconciliationMode,
 };

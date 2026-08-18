@@ -6,6 +6,16 @@ domains described in `docs/specification.md`.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-18
+
+- Publish the canonical Rust facade as `cymule` plus the CLI, semantic profile
+  crates, and official reusable plugins through an ordered crates.io release.
+- Add deterministic whole-workspace Cargo archives, normalized-manifest
+  compilation, checksum-checked retries, and fresh registry consumer/install
+  verification.
+- Add an idempotent GitHub Actions crates.io workflow with temporary
+  first-release bootstrap and OIDC trusted publishing for normal releases.
+
 ## [0.1.2] - 2026-08-18
 
 - Make `latest_compatible` the actual reference default and block automatic

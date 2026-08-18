@@ -15,3 +15,6 @@
   evidence counting, and durable promotion remain `cymule-evolution` authority.
 - Write only the response JSON to stdout. Diagnostics go to stderr.
 - Never expose unrestricted raw event append.
+- The package is `cymule-cli` and installs the `cymule` binary. Keep binary
+  rustdoc disabled so it cannot collide with the public `cymule` facade library;
+  user API documentation belongs to the facade and profile crates.

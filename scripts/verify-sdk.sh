@@ -40,7 +40,7 @@ export CYMULE_EXPECTED_RESOURCE_ID
 
 case "$LANGUAGE" in
   rust)
-    cargo test -p cymule-sdk --test cross_language
+    cargo test -p cymule --test cross_language
     ;;
   typescript)
     pnpm --dir sdk/typescript install --frozen-lockfile

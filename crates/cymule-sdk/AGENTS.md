@@ -1,5 +1,7 @@
 # Rust SDK Guidance
 
+- The public Cargo package and library name is `cymule`; the repository path
+  remains `crates/cymule-sdk` to make its facade ownership explicit.
 - The SDK is an authoring and client facade. It does not own semantic reduction.
 - Builders must emit the same `cymule.ir/2` objects as other language SDKs.
 - Rust builder definitions and invocations must match the TypeScript, Python,

@@ -20,6 +20,16 @@
 - `publish-npm.yml` is the only npm publication authority for both `cymule` and
   `@cymule/sdk`. A local npm command may run `pack --dry-run`, but never
   `publish`.
+- `publish-crates.yml` is the only crates.io publication authority. It consumes
+  the exact public release tag, follows `scripts/crates-release.toml` in
+  dependency order, compares immutable checksums on retries, and verifies a
+  fresh facade consumer plus `cargo install cymule-cli` from registry bytes.
+- crates.io requires an owner token for the first version of a new crate name.
+  The bootstrap branch is temporary first-release machinery: use only a
+  short-expiry token stored as `CRATES_IO_BOOTSTRAP_TOKEN`, configure every
+  crate for the pinned trusted-publishing workflow and `crates-io` Environment
+  immediately afterward, then remove both the secret and bootstrap branch.
+  Normal releases use OIDC only.
 - Scheduled mirror runs must no-op when the rewritten source tip already equals
   public `main`. A changed PAT-backed push emits the standard CI event; do not
   dispatch a duplicate CI run manually.

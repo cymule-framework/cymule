@@ -9,9 +9,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-cymule-core = { path = "../../crates/cymule-core" }
-cymule-runtime = { path = "../../crates/cymule-runtime" }
-cymule-sdk = { path = "../../crates/cymule-sdk" }
+cymule.workspace = true
+cymule-core.workspace = true
+cymule-runtime.workspace = true
 serde_json.workspace = true
 
 [lints]
