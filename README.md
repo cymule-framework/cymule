@@ -437,83 +437,33 @@ Public packages and release artifacts are produced only by GitHub Actions after
 repository verification and staged-byte inspection. npm packages use trusted
 publishing and provenance; local development commands never publish releases.
 
-## Current capabilities and limits
+## Capabilities and limits
 
-Version `0.1.x` implements the bounded Semantic Interpreter M0, Embedded M0,
-single-domain Large Virtual Work M3, and provider-neutral Live Evolution M4
-profiles. M1 has a useful, tested foundation but remains partial.
+Cymule implements four bounded profiles:
 
-Implemented today:
+- **M0 semantic execution:** sealed Plans, canonical identities, typed
+  idempotent Commands, causal replay, fenced attempts and effects, and explicit
+  reconciliation of ambiguous outcomes.
+- **M1 durable single-domain foundation (partial):** CAS state,
+  Continuations, waits, outbox records, component occurrences, compaction, and
+  acknowledgement-loss recovery.
+- **M3 large virtual work:** bounded materialization, deterministic fairness,
+  portable snapshots, verified region changes, cold-history archival, and
+  fenced worker leases.
+- **M4 live evolution:** immutable Plan DAGs, latest-compatible reusable-module
+  linking, future-only rollout, safe-point migration, shadow evidence, and
+  deterministic promotion or rollback.
 
-- frozen IR validation and canonical Plan IDs;
-- in-memory Plan, Event, and Artifact stores;
-- typed Commands, idempotency, and stale-action preconditions;
-- causal state replay and projection digest verification;
-- Attempt epoch fencing;
-- scope, effect, obligation, and reconciliation state machines;
-- future-default binding updates with pinned Attempt and Effect bindings;
-- one-shot process plugins and four SDK execution chains;
-- durable whole-state CAS, complete Continuations, waits, leases, outbox, and
-  component occurrence replay;
-- atomic Run-plus-Continuation creation and deterministic failure scans across
-  every pre-CAS write and post-commit acknowledgement-loss boundary;
-- process reopen after a durable wait without reinvoking a recorded component;
-- ambiguous mutating-effect recovery by reconciliation without redispatch;
-- exact canonical Event/command/Artifact delta validation for root effect
-  enqueue, dispatch claim, Applied/Unknown observation, and reconciliation, with
-  prepare/commit/dispatch/receipt-loss reopen tests;
-- an optional Agent interaction plugin with M1-backed Session/input replay,
-  binding-pinned host occurrences, workspace scope integration, and finalized
-  streams; none of these types enter the framework core or main SDKs;
-- provider-neutral cross-Run Resource Handles for inline values, objects,
-  directories, collections, snapshots, remote references, and public URLs;
-- bounded resolver/store interfaces and durable idempotent M1 handoffs, with
-  atomic target input-wait activation and one shared Resource ID sealed through
-  all four SDKs;
-- authenticated Machine Event-prefix compaction, exact suffix rehydration,
-  cumulative lineage, and old command-receipt replay;
-- bounded virtual work with deterministic fairness and portable snapshots;
-- durable M1 checkpoints for virtual cursors/frontiers and exact indexed wake-up;
-- binding-pinned virtual-work attempts with durable retry, failure, result, and
-  cancellation records;
-- deterministic weighted Run fairness and priority aging without wall-clock or
-  floating-point scheduler state;
-- adapter-verified opaque cursor split/merge with durable retirement lineage and
-  coverage evidence;
-- certified cold-history compaction through a provider-neutral immutable byte
-  archive, plus exact occurrence-selection rehydration with tamper/fault tests;
-- capacity-slot worker leases with atomic M1 claims, renewal, pre-expiry result
-  fencing, explicit post-expiry recovery, lost-receipt reopen, and four-language
-  scheduling/Run-weight controls;
-- deterministic Plan diff and immutable evolution DAGs, impact cones, canaries,
-  rollback pins, safe-point migration receipts, and shadow evidence, with M1
-  checkpoint lineage, stale-CAS rollback, and lost-acknowledgement replay;
-- latest-compatible reusable module linking, including transitive dependency
-  relinking, that creates a new immutable parent Plan for future work while
-  retaining every historical linked Plan;
-- portable, fully verified definition-registry checkpoints with M1 journal
-  lineage, stale-writer rollback, and lost-acknowledgement recovery;
-- checked migration and isolated shadow plugin interfaces, exact reviewed patch
-  admission, higher-profile impact sites, deterministic observation gates,
-  promotion/rollback receipts, mixed-version Plan dispatch, and one closed M4
-  control protocol across all four SDKs.
+Provider-neutral Resource and Agent interfaces, official adapters, and the
+TypeScript, Python, Rust, and Go SDKs sit above these semantics. Agent Loops,
+model behavior, infrastructure topology, and provider policy remain outside the
+framework core.
 
-Not yet claimed:
-
-- production wait-source plugins and automatic higher-profile indexed-wake
-  routing;
-- process-kill crash campaigns beyond the deterministic adapter-level fault
-  matrix;
-- production resource resolver/store plugins;
-- distributed ownership, consensus, scheduling, and failover;
-- strong untrusted-code or multi-tenant isolation;
-- provider-level exactly-once guarantees;
-- a registered MLIR dialect and deterministic MLIR-to-Plan lowering.
-
-M0 proves exact canonical **state replay** over retained Events and required
-Artifacts. Partial M1 additionally proves resume and exact execution replay
-only where a component occurrence was durably recorded. Neither claim implies
-distributed consensus or provider-level exactly-once behavior.
+Cymule does not claim distributed consensus or failover, strong multi-tenant
+isolation, provider-level exactly-once behavior, production certification for
+every adapter, or a complete MLIR dialect and lowering pipeline. Exact M0 replay
+requires retained Events and Artifacts; exact execution replay additionally
+requires a durably recorded component occurrence.
 
 See [Conformance](docs/conformance.md) for precise profile claims and
 [Roadmap](docs/roadmap.md) for the implementation sequence.
