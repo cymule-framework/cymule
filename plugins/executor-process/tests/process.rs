@@ -20,6 +20,8 @@ fn shell(script: &str) -> ProcessExecutor {
 fn process_manifest_uses_only_explicit_environment() {
     let script = r#"
       test -z "${SHOULD_NOT_LEAK:-}" || exit 9
+      request=$(/bin/cat)
+      test -n "$request" || exit 8
       printf '%s' '{"type":"manifest","manifest":{"plugin_version":"cymule.plugin/1","implementation_id":"process:test","components":{},"effects":{}}}'
     "#;
     let mut executor = shell(script);
@@ -59,7 +61,10 @@ fn process_output_limit_fails_closed() {
 fn process_output_exactly_at_limit_is_accepted() {
     let response = r#"{"type":"manifest","manifest":{"plugin_version":"cymule.plugin/1","implementation_id":"process:limit","components":{},"effects":{}}}"#;
     let mut config = ProcessExecutorConfig::new(PathBuf::from("/bin/sh"));
-    config.arguments = vec!["-c".to_owned(), format!("printf '%s' '{response}'")];
+    config.arguments = vec![
+        "-c".to_owned(),
+        format!("request=$(/bin/cat); test -n \"$request\" || exit 8; printf '%s' '{response}'"),
+    ];
     config.message_limit = response.len();
     let mut executor = ProcessExecutor::new(config).expect("executor configures");
     assert_eq!(
