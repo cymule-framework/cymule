@@ -24,6 +24,9 @@
   a missing public tag. Package matrix jobs are independently retryable, skip
   immutable versions already present in npm, and create the GitHub Release only
   after both package names succeed.
+- A retry for an existing version checks out and verifies that immutable public
+  tag even when `main` has advanced. Never move a published tag merely to make a
+  workflow rerun select the current branch.
 - `finalize-release.yml` is an idempotent recovery path for release metadata
   after both immutable npm versions already exist. It verifies the exact tag,
   package manifest, and both registry names before creating a missing GitHub
