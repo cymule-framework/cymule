@@ -109,6 +109,10 @@ Use this precedence order when guidance conflicts:
 - New behavior is provider-neutral by default. Concrete persistence, activation,
   execution, model, tool, and effect integrations belong behind plugin or
   substrate interfaces.
+- Day-one official plugins cover SQLite/directory durability, filesystem and
+  Apache object-store Resources, HTTP/timer activation, process execution,
+  OpenTelemetry observation, and RMCP tool mapping. They remain independent
+  crates and may not move their runtime/provider semantics into core.
 - Domain-specific Sessions, Agent Loops, transport streams, protocol objects,
   and their controllers belong in optional plugins. Core crates, CLI, and SDKs
   expose only technology-neutral semantic and substrate contracts.

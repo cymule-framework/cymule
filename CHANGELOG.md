@@ -6,6 +6,18 @@ domains described in `docs/specification.md`.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-18
+
+- Add day-one SQLite and filesystem/object-store persistence plugins with
+  immediate contention, idempotent chunking, conditional publication, and
+  content verification.
+- Add HTTP signal and durable timer activation sources that acknowledge only
+  after M1 admission, plus a hardened bounded process executor.
+- Add composable OpenTelemetry/OTLP observations and an official RMCP tool
+  adapter without introducing Agent Loop semantics into the framework.
+- Split every plugin family into independently routed Rust verification suites
+  and extend the ordered crates.io release catalog.
+
 ## [0.1.3] - 2026-08-18
 
 - Publish the canonical Rust facade as `cymule` plus the CLI, semantic profile

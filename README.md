@@ -87,6 +87,21 @@ effects, resources, and M1 application journals. ACP, MCP, A2A, editor, and
 provider support belongs in additional plugins above that package, not in
 framework core, CLI, or SDK semantics.
 
+## Official plugins
+
+Cymule ships a day-one adapter set without making any provider canonical:
+
+- SQLite and atomic-directory durable stores;
+- content-addressed filesystem and Apache `object_store` Resources;
+- acknowledgement-coupled HTTP signals and durable logical timers;
+- a bounded process executor;
+- composable OpenTelemetry/OTLP observation;
+- official RMCP tool mapping above the optional Agent contracts.
+
+Every adapter is an independent crate with focused fault and boundary tests.
+See the [official plugin catalog](docs/plugins.md) for exact guarantees,
+limitations, mature dependencies, and the RocksDB assessment.
+
 ## How live evolution works
 
 Application source can reference a reusable module with
@@ -523,6 +538,14 @@ examples/hello-world    code-first Flow, Embedded runtime, and example plugin
 plugins/test-adapter    deterministic conformance plugin
 plugins/directory-store atomic local M1 DurableStore reference adapter
 plugins/agent-interaction optional Agent-domain integration plugin
+plugins/store-sqlite    SQLite single-domain DurableStore adapter
+plugins/resource-fs     content-addressed files and directory manifests
+plugins/resource-object-store Apache object_store Resource adapter
+plugins/activation-http ack-after-CAS signal ingress
+plugins/activation-timer durable logical timer source
+plugins/executor-process bounded process plugin transport
+plugins/observability-otel derived tracing and OTLP export
+plugins/agent-mcp       official RMCP tool adapter, without an Agent Loop
 tests                   shared fixtures and conformance assets
 docs                    specification, architecture, and decisions
 scripts                 complete repository verification
@@ -541,6 +564,7 @@ scripts                 complete repository verification
 - [Roadmap](docs/roadmap.md) — durable execution, agent integration, large
   virtual work, live evolution, isolation, and formalization.
 - [Releasing](docs/releasing.md) — immutable npm and crates.io publication.
+- [Official plugins](docs/plugins.md) — day-one adapters and provider boundaries.
 - [ADR 0001](docs/decisions/0001-small-rust-kernel.md) — why the authoritative
   kernel is small and Rust-first.
 - [ADR 0002](docs/decisions/0002-mlir-outside-core.md) — why MLIR stays outside

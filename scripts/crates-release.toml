@@ -36,9 +36,49 @@ path = "plugins/directory-store"
 dependencies = ["cymule-core", "cymule-durable"]
 
 [[crate]]
+name = "cymule-store-sqlite"
+path = "plugins/store-sqlite"
+dependencies = ["cymule-core", "cymule-durable"]
+
+[[crate]]
+name = "cymule-resource-fs"
+path = "plugins/resource-fs"
+dependencies = ["cymule-core", "cymule-resource"]
+
+[[crate]]
+name = "cymule-resource-object-store"
+path = "plugins/resource-object-store"
+dependencies = ["cymule-core", "cymule-resource"]
+
+[[crate]]
+name = "cymule-activation-http"
+path = "plugins/activation-http"
+dependencies = ["cymule-core", "cymule-durable"]
+
+[[crate]]
+name = "cymule-activation-timer"
+path = "plugins/activation-timer"
+dependencies = ["cymule-core", "cymule-durable"]
+
+[[crate]]
+name = "cymule-executor-process"
+path = "plugins/executor-process"
+dependencies = ["cymule-runtime"]
+
+[[crate]]
+name = "cymule-observability-otel"
+path = "plugins/observability-otel"
+dependencies = []
+
+[[crate]]
 name = "cymule-agent"
 path = "plugins/agent-interaction"
 dependencies = ["cymule-core", "cymule-durable", "cymule-resource"]
+
+[[crate]]
+name = "cymule-agent-mcp"
+path = "plugins/agent-mcp"
+dependencies = ["cymule-agent"]
 
 [[crate]]
 name = "cymule"

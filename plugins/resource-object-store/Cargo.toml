@@ -1,0 +1,36 @@
+[package]
+name = "cymule-resource-object-store"
+description = "Apache object_store Resource adapter for Cymule"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+publish.workspace = true
+
+[features]
+default = ["fs"]
+fs = ["object_store/fs"]
+aws = ["object_store/aws"]
+azure = ["object_store/azure"]
+gcp = ["object_store/gcp"]
+http = ["object_store/http"]
+
+[dependencies]
+cymule-core.workspace = true
+cymule-resource.workspace = true
+futures-util.workspace = true
+object_store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+object_store = { workspace = true, features = ["fs"] }
+
+[lints]
+workspace = true

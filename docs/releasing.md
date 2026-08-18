@@ -21,10 +21,14 @@ The ordered Rust catalog in `scripts/crates-release.toml` publishes:
 4. `cymule-resource`
 5. `cymule-evolution`
 6. `cymule-virtual`
-7. `cymule-directory-store`
+7. durable/resource/activation/executor/observability adapter crates
 8. `cymule-agent`
-9. `cymule`
-10. `cymule-cli`
+9. `cymule-agent-mcp`
+10. `cymule`
+11. `cymule-cli`
+
+The exact expanded list and dependency order is executable authority; read it
+from `scripts/crates-release.toml` rather than duplicating every adapter here.
 
 `cymule` is the Rust user facade. `cymule-cli` owns the installable `cymule`
 binary. The conformance adapter and repository examples are never registry

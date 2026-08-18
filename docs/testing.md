@@ -131,14 +131,20 @@ PROPTEST_CASES=16384 CYMULE_SOAK_REPETITIONS=5 \
 The public GitHub repository also runs that leaf suite weekly. Soak is not part
 of a normal routed commit because repetition is a different kind of evidence,
 not a reason to delay feedback from a local SDK or documentation change.
+The repeated deterministic sweep includes the high-risk day-one plugin
+boundaries: non-blocking SQLite contention, exact filesystem/object-store chunk
+retry, ack-coupled HTTP/timers, process timeout ambiguity, and MCP incomplete
+work that must remain caller-driven.
 
 Coverage, mutation, and platform portability are independent scheduled/manual
 workflows:
 
 ```sh
 python3 scripts/test_harness.py run rust-coverage
+python3 scripts/test_harness.py run rust-coverage-plugins
 python3 scripts/test_harness.py run rust-mutation
 python3 scripts/test_harness.py run rust-mutation-evolution-m4
+python3 scripts/test_harness.py run rust-mutation-plugins
 python3 scripts/test_harness.py run rust-portability
 ```
 
@@ -151,6 +157,14 @@ replacement-Run authorization so changes in those higher-profile laws cannot
 hide behind core coverage. The scheduled workflow partitions core across eight
 parallel zero-based `K/N` shards and the smaller M4 surface across four; each
 copies the existing target into its scratch tree for incremental rebuilds.
+Day-one plugin coverage is a separate witness with 72% line and 72% region
+floors. It cannot raise or lower the semantic baseline and is not inferred from
+core tests that happen to compile plugin dependencies.
+Plugin mutation is independently sharded and bounded to the admission and
+ambiguity functions whose failure could acknowledge the wrong state: SQLite
+CAS, HTTP/timer acknowledgement, process execution limits, and MCP result
+mapping. Resource streaming uses deterministic fault/soak and coverage evidence
+until its larger mutation set is separately partitioned.
 Portability repeats only core, durable, and directory-store witnesses on Linux
 and macOS; it does not multiply every SDK lane by every operating system. The
 catalog invokes its shell leaves through explicit `bash` so the command remains
