@@ -88,3 +88,7 @@
 - crates.io publication is ordered and resumable. Before skipping an existing
   version, compare its registry checksum with the archive built from the exact
   tag; after every upload, wait for the index and verify downloaded bytes.
+- Retry publication automatically only for crates.io's exact new-crate 429
+  response with a parseable server retry timestamp. Bound both delay and retry
+  count; authentication, checksum, malformed-limit, and other failures remain
+  immediate hard failures.

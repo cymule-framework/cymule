@@ -76,6 +76,9 @@ publishes in catalog dependency order. For each crate it:
 After the ordered upload, the workflow builds a clean consumer of exact
 registry versions and installs `cymule-cli` from crates.io. A partial failure is
 safe to retry because every completed version must match the exact tag bytes.
+If crates.io returns its explicit new-crate-name 429 with a server retry time,
+the publisher waits only until that bounded timestamp and retries. It does not
+retry authentication, checksum, malformed-limit, or other registry failures.
 
 ## First publication bootstrap
 

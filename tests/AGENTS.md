@@ -36,6 +36,9 @@
 - Rust packaging tests operate on normalized `.crate` contents. They must prove
   deterministic archives, no dependency-path leakage, compilation of every
   public library/binary, and a user facade consumer before publication.
+- Release-script tests require crates.io rate-limit recovery to match both the
+  exact new-crate 429 reason and a bounded server timestamp. Never retry an
+  authentication, checksum, malformed response, or unrelated registry error.
 - Plugin suites remain split by store, Resource, activation, executor,
   observability, and Agent-protocol ownership. A plugin change runs its leaf;
   manifest/catalog changes additionally run package verification.
