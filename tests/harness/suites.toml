@@ -126,6 +126,12 @@ lane = "rust"
 tools = ["rust"]
 commands = [["./scripts/verify-analysis.sh", "coverage"]]
 
+[suites.rust-coverage-plugins]
+description = "Measure day-one plugin coverage against its independent non-regression floor."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-analysis.sh", "coverage-plugins"]]
+
 [suites.rust-mutation]
 description = "Prove cymule-core tests kill generated semantic mutations."
 lane = "rust"
@@ -138,6 +144,12 @@ lane = "rust"
 tools = ["rust"]
 commands = [["./scripts/verify-analysis.sh", "mutation-evolution-m4"]]
 
+[suites.rust-mutation-plugins]
+description = "Prove day-one plugin tests kill critical admission and ambiguity mutations."
+lane = "rust"
+tools = ["rust"]
+commands = [["./scripts/verify-analysis.sh", "mutation-plugins"]]
+
 [suites.rust-portability]
 description = "Run portable core, durable, and directory-store witnesses."
 lane = "rust"
@@ -147,6 +159,45 @@ commands = [
   ["bash", "./scripts/verify-rust.sh", "cymule-durable"],
   ["bash", "./scripts/verify-rust.sh", "cymule-directory-store"],
 ]
+
+[suites.rust-store-plugins]
+description = "Run SQLite and directory durable-store adapters."
+lane = "rust"
+tools = ["rust"]
+commands = [["bash", "./scripts/verify-rust.sh", "cymule-store-sqlite", "cymule-directory-store"]]
+
+[suites.rust-resource-plugins]
+description = "Run filesystem and Apache object-store Resource adapters."
+lane = "rust"
+tools = ["rust"]
+commands = [
+  ["bash", "./scripts/verify-rust.sh", "cymule-resource-fs", "cymule-resource-object-store"],
+  ["cargo", "check", "--package", "cymule-resource-object-store", "--all-features"],
+]
+
+[suites.rust-activation-plugins]
+description = "Run HTTP signal and durable timer activation adapters."
+lane = "rust"
+tools = ["rust"]
+commands = [["bash", "./scripts/verify-rust.sh", "cymule-activation-http", "cymule-activation-timer"]]
+
+[suites.rust-executor-plugin]
+description = "Run the hardened process executor adapter."
+lane = "rust"
+tools = ["rust"]
+commands = [["bash", "./scripts/verify-rust.sh", "cymule-executor-process"]]
+
+[suites.rust-observability-plugin]
+description = "Run bounded OpenTelemetry observation and pipeline tests."
+lane = "rust"
+tools = ["rust"]
+commands = [["bash", "./scripts/verify-rust.sh", "cymule-observability-otel"]]
+
+[suites.rust-agent-mcp-plugin]
+description = "Run official RMCP tool mapping and boundary tests."
+lane = "rust"
+tools = ["rust"]
+commands = [["bash", "./scripts/verify-rust.sh", "cymule-agent-mcp"]]
 
 [suites.full]
 description = "Run every required Cymule verification family."
@@ -163,6 +214,12 @@ requires = [
   "example",
   "package-typescript",
   "package-rust",
+  "rust-store-plugins",
+  "rust-resource-plugins",
+  "rust-activation-plugins",
+  "rust-executor-plugin",
+  "rust-observability-plugin",
+  "rust-agent-mcp-plugin",
   "mlir",
 ]
 
@@ -220,6 +277,30 @@ suites = ["rust-agent-plugin"]
 [[routes]]
 patterns = ["plugins/directory-store/**"]
 suites = ["rust-directory-plugin", "rust-durable"]
+
+[[routes]]
+patterns = ["plugins/store-sqlite/**"]
+suites = ["rust-store-plugins"]
+
+[[routes]]
+patterns = ["plugins/resource-fs/**", "plugins/resource-object-store/**"]
+suites = ["rust-resource-plugins"]
+
+[[routes]]
+patterns = ["plugins/activation-http/**", "plugins/activation-timer/**"]
+suites = ["rust-activation-plugins"]
+
+[[routes]]
+patterns = ["plugins/executor-process/**"]
+suites = ["rust-executor-plugin"]
+
+[[routes]]
+patterns = ["plugins/observability-otel/**"]
+suites = ["rust-observability-plugin"]
+
+[[routes]]
+patterns = ["plugins/agent-mcp/**"]
+suites = ["rust-agent-mcp-plugin"]
 
 [[routes]]
 patterns = ["plugins/test-adapter/**"]

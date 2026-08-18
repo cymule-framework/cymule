@@ -12,6 +12,10 @@
 - Partition core and bounded M4 evolution mutation independently. Every matrix
   entry must select one named harness suite and upload only that suite's report
   and mutation output; do not merge their evidence directories.
+- Day-one plugin mutation uses its own four shards and output tree. It must not
+  share a cargo-mutants output directory with core or M4.
+- Semantic and plugin coverage are separate Analysis jobs and artifacts. Do not
+  average them into one percentage or make ordinary push CI wait for them.
 - GitHub Actions is the only publication authority for all public artifacts.
   Release workflows must use GitHub-hosted runners, frozen dependencies,
   repository verification, staged-byte inspection, and short-lived OIDC or the

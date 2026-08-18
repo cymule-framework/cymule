@@ -1,0 +1,12 @@
+# SQLite Durable Store Guidance
+
+- This plugin implements the complete-state `DurableStore` CAS contract; it
+  does not reinterpret or partition canonical M1 state.
+- Keep `busy_timeout` at zero. SQLite writer contention must return a Cymule
+  conflict immediately instead of waiting behind a database lock.
+- Use an immediate transaction to compare the current revision and replace the
+  state atomically. Serialized bytes and the canonical next revision are
+  computed before acquiring the writer transaction.
+- Reopen, stale writer, busy writer, committed-receipt loss, and corrupted-row
+  tests are required. SQLite WAL and synchronous-full durability are adapter
+  configuration, not framework semantics.

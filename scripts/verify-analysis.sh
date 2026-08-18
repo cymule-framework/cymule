@@ -65,6 +65,32 @@ case "${1:-}" in
       --fail-under-lines 72 \
       --fail-under-regions 78
     ;;
+  coverage-plugins)
+    command -v cargo-llvm-cov >/dev/null 2>&1 || {
+      echo "cargo-llvm-cov 0.9.0 is required" >&2
+      exit 2
+    }
+    cargo llvm-cov --version | grep -Fx 'cargo-llvm-cov 0.9.0' >/dev/null || {
+      echo "cargo-llvm-cov must be exactly 0.9.0" >&2
+      exit 2
+    }
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov \
+      --package cymule-store-sqlite \
+      --package cymule-resource-fs \
+      --package cymule-resource-object-store \
+      --package cymule-activation-http \
+      --package cymule-activation-timer \
+      --package cymule-executor-process \
+      --package cymule-observability-otel \
+      --package cymule-agent-mcp \
+      --tests \
+      --json \
+      --summary-only \
+      --output-path "$OUTPUT_DIR/coverage-plugins.json" \
+      --fail-under-lines 72 \
+      --fail-under-regions 72
+    ;;
   mutation)
     require_mutants
     run_mutants cymule-core "$OUTPUT_DIR/mutation" ''
@@ -76,8 +102,32 @@ case "${1:-}" in
       "$OUTPUT_DIR/mutation-evolution-m4" \
       'compatibility\.rs|MigrationSafePoint|restart_under_new_plan|link_registered'
     ;;
+  mutation-plugins)
+    require_mutants
+    mkdir -p "$OUTPUT_DIR/mutation-plugins"
+    run_mutants \
+      cymule-store-sqlite \
+      "$OUTPUT_DIR/mutation-plugins/store-sqlite" \
+      'compare_and_swap|SqliteStore::load'
+    run_mutants \
+      cymule-activation-http \
+      "$OUTPUT_DIR/mutation-plugins/activation-http" \
+      'HttpSignalDriver::receive|HttpSignalDriver::acknowledge|receive_signal'
+    run_mutants \
+      cymule-activation-timer \
+      "$OUTPUT_DIR/mutation-plugins/activation-timer" \
+      'schedule|SqliteTimerDriver.*receive|SqliteTimerDriver.*acknowledge'
+    run_mutants \
+      cymule-executor-process \
+      "$OUTPUT_DIR/mutation-plugins/executor-process" \
+      'ProcessExecutor::invoke|read_limited'
+    run_mutants \
+      cymule-agent-mcp \
+      "$OUTPUT_DIR/mutation-plugins/agent-mcp" \
+      'invoke_tool_async|map_content|validate_tool_request'
+    ;;
   *)
-    echo "usage: $0 coverage|mutation|mutation-evolution-m4" >&2
+    echo "usage: $0 coverage|coverage-plugins|mutation|mutation-evolution-m4|mutation-plugins" >&2
     exit 2
     ;;
 esac

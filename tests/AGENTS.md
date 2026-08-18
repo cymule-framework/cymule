@@ -36,6 +36,9 @@
 - Rust packaging tests operate on normalized `.crate` contents. They must prove
   deterministic archives, no dependency-path leakage, compilation of every
   public library/binary, and a user facade consumer before publication.
+- Plugin suites remain split by store, Resource, activation, executor,
+  observability, and Agent-protocol ownership. A plugin change runs its leaf;
+  manifest/catalog changes additionally run package verification.
 - Effect fault matrices distinguish prepare-response loss, durable enqueue,
   scope commit, dispatch-start claim, provider application, Applied settlement,
   and Unknown observation. Assert exact provider call counts and reject

@@ -61,12 +61,22 @@
 - `verify-soak.sh` owns only repeatable high-risk Rust properties and anomaly
   sweeps. Keep it out of `full`; scheduled soak complements, rather than
   duplicates, change-routed verification.
+- The soak sweep repeats day-one plugin authority boundaries: SQLite
+  contention, Resource chunk replay, HTTP/timer acknowledgement, process
+  ambiguity, and incomplete MCP work. Add a plugin case only when it is
+  deterministic and independently runnable by exact test name.
 - `verify-analysis.sh` owns scheduled/manual coverage and mutation witnesses.
   Keep their exact tool versions in `analysis.yml`, their measured floors in the
   script, and their artifacts separate from normal lane reports.
+- Keep semantic and day-one plugin coverage in separate reports and floors. A
+  green aggregate may not hide an uncovered provider boundary or reduce the
+  semantic-core baseline.
 - Keep core mutation and the bounded M4 evolution mutation as separate suites.
   The M4 filter owns compatibility, safe-point, relink-admission, and restart
   laws; expand it deliberately when a new M4 admission law becomes normative.
+- Day-one plugin mutation is a third independent bounded witness. Keep its
+  filters on authority, acknowledgement, ambiguity, and protocol mapping;
+  resource streaming remains covered by fault/soak until separately sharded.
 - `crates-release.toml` is the single public Rust package order. The release
   verifier must match Cargo metadata exactly, run Cargo's whole-workspace
   publication dry-run, package the unpublished workspace as one set, reject
