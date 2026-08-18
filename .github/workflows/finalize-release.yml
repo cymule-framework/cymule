@@ -1,0 +1,81 @@
+name: Finalize GitHub Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published package version without the v prefix
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: finalize-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: v${{ inputs.version }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.7.0
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - name: Verify immutable release inputs
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          package_version=$(node -p "require('./sdk/typescript/package.json').version")
+          if [ "$RELEASE_VERSION" != "$package_version" ]; then
+            echo "requested version $RELEASE_VERSION does not match package $package_version" >&2
+            exit 2
+          fi
+          tag="v$RELEASE_VERSION"
+          if [ "$(git rev-list -n 1 "$tag")" != "$(git rev-parse HEAD)" ]; then
+            echo "tag $tag does not select the checked-out commit" >&2
+            exit 2
+          fi
+          for package_name in cymule '@cymule/sdk'; do
+            published=$(npm view "$package_name@$RELEASE_VERSION" version)
+            if [ "$published" != "$RELEASE_VERSION" ]; then
+              echo "$package_name@$RELEASE_VERSION is not published" >&2
+              exit 2
+            fi
+          done
+
+      - name: Prepare release notes
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          awk -v heading="## [$RELEASE_VERSION]" '
+            index($0, heading) == 1 { capture=1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes.md"
+
+      - name: Create GitHub Release once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ inputs.version }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub Release $RELEASE_TAG already exists"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "Cymule SDK $RELEASE_VERSION" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi

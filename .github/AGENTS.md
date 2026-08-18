@@ -24,5 +24,9 @@
   a missing public tag. Package matrix jobs are independently retryable, skip
   immutable versions already present in npm, and create the GitHub Release only
   after both package names succeed.
+- `finalize-release.yml` is an idempotent recovery path for release metadata
+  after both immutable npm versions already exist. It verifies the exact tag,
+  package manifest, and both registry names before creating a missing GitHub
+  Release; it never publishes package bytes or moves a tag.
 - Do not add private hosting URLs, internal project IDs, credentials, runner
   names, or private CI metadata under `.github/`.

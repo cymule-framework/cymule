@@ -185,7 +185,7 @@ jobs:
           RELEASE_VERSION: ${{ needs.verify.outputs.version }}
         run: |
           awk -v heading="## [$RELEASE_VERSION]" '
-            $0 == heading { capture=1; next }
+            index($0, heading) == 1 { capture=1; next }
             capture && /^## \[/ { exit }
             capture { print }
           ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
