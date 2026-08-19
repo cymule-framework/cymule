@@ -12,5 +12,10 @@ The adapter enables WAL and full synchronous durability for file databases and
 uses a zero busy timeout. Writer contention is returned immediately as a
 Cymule conflict; the application owns retry and backoff policy.
 
+Status and inspection paths can use `SqliteStore::open_read_only`. That
+constructor performs no WAL or schema configuration and rejects every CAS, so
+an observer cannot contend as a writer or accidentally acquire mutation
+authority.
+
 SQLite is appropriate for local development, desktop applications, and
 single-node services. It does not provide distributed ownership or failover.

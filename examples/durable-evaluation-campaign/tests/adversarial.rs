@@ -1,9 +1,11 @@
 //! Black-box campaign, crash, evolution, and integrity tests.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cymule_example_durable_evaluation_campaign::CampaignReport;
 
@@ -292,6 +294,134 @@ fn expired_claim_is_recovered_but_unexpired_claim_is_not_stolen() {
     assert_eq!(recovered.succeeded, 12);
     assert_eq!(recovered.total_occurrences, 13);
     assert_eq!(recovered.recovered_attempts, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn external_process_kill_reopens_to_a_valid_frontier_and_completes_once() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const CASES: usize = 24;
+
+    let state = TestDir::new("process-kill");
+    let state_arg = state.path().to_str().expect("UTF-8 path");
+    let suite = state.path().join("large-suite.jsonl");
+    let mut bytes = Vec::new();
+    for index in 0..CASES {
+        let case = serde_json::json!({
+            "id": format!("generated-{index:04}"),
+            "input": {"message": format!("How do I use feature {index}?")},
+            "expected": {"category": "general", "urgency": "normal"}
+        });
+        bytes.extend(serde_json::to_vec(&case).expect("case encodes"));
+        bytes.push(b'\n');
+    }
+    fs::write(&suite, bytes).expect("large suite writes");
+    let suite_arg = suite.to_str().expect("UTF-8 path");
+    let slow_plugin = state.path().join("slow-plugin.sh");
+    let quoted_binary = format!("'{}'", binary().replace('\'', "'\"'\"'"));
+    fs::write(
+        &slow_plugin,
+        format!("#!/bin/sh\n/bin/sleep 0.05\nexec {quoted_binary} __plugin\n"),
+    )
+    .expect("slow plugin wrapper writes");
+    let mut permissions = fs::metadata(&slow_plugin)
+        .expect("slow plugin metadata reads")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&slow_plugin, permissions).expect("slow plugin becomes executable");
+    let slow_plugin_arg = slow_plugin.to_str().expect("UTF-8 path");
+    let mut running = Command::new(binary())
+        .args([
+            "run",
+            "--state",
+            state_arg,
+            "--suite",
+            suite_arg,
+            "--run-id",
+            "run:process-kill",
+            "--worker-id",
+            "worker:killed",
+            "--plugin",
+            slow_plugin_arg,
+            "--logical-now",
+            "10",
+            "--lease-ttl",
+            "1",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("campaign process starts");
+
+    let mut before_kill = None;
+    for _ in 0..400 {
+        assert!(
+            running.try_wait().expect("campaign polls").is_none(),
+            "campaign completed before the external kill boundary was observed"
+        );
+        let observed = invoke(&[
+            "status",
+            "--state",
+            state_arg,
+            "--run-id",
+            "run:process-kill",
+        ]);
+        if observed.status.success() {
+            let observed = report(&observed);
+            if observed.succeeded >= 3 {
+                before_kill = Some(observed);
+                running.kill().expect("campaign receives an external kill");
+                let killed = running.wait().expect("killed campaign reaps");
+                assert!(!killed.success());
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let before_kill = before_kill.expect("durable progress becomes externally visible");
+    assert!(before_kill.succeeded < CASES);
+
+    let reopened = report(&invoke(&[
+        "status",
+        "--state",
+        state_arg,
+        "--run-id",
+        "run:process-kill",
+    ]));
+    assert!(reopened.succeeded >= before_kill.succeeded);
+    assert!(reopened.succeeded < CASES);
+    assert_eq!(reopened.failed, 0);
+
+    let completed = report(&invoke(&[
+        "run",
+        "--state",
+        state_arg,
+        "--suite",
+        suite_arg,
+        "--run-id",
+        "run:process-kill",
+        "--worker-id",
+        "worker:reopened",
+        "--logical-now",
+        "11",
+        "--lease-ttl",
+        "1",
+    ]));
+    assert_eq!(completed.succeeded, CASES);
+    assert_eq!(completed.failed, 0);
+    assert_eq!(completed.cases.len(), CASES);
+    assert!(completed.recovered_attempts <= 1);
+    assert!(matches!(completed.total_occurrences, CASES | 25));
+    assert_eq!(
+        completed
+            .cases
+            .iter()
+            .map(|case| &case.case_id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        CASES
+    );
 }
 
 #[test]

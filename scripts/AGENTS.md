@@ -20,6 +20,8 @@
   evaluation campaign's black-box crash, Resource, lease, and M4 tests. Keep it
   independently runnable; do not scatter those user-path checks across SDK or
   plugin leaves.
+- The SQLite plugin route also selects the example leaf because campaign status
+  relies on its non-mutating read-only observation contract.
 - Export the Resource ID sealed from the checked-in Resource Candidate so every
   SDK verifies the same Rust-owned identity.
 - Every SDK submits the shared wait activation fixture to the Rust Engine. This

@@ -4,6 +4,9 @@
   does not reinterpret or partition canonical M1 state.
 - Keep `busy_timeout` at zero. SQLite writer contention must return a Cymule
   conflict immediately instead of waiting behind a database lock.
+- Observation-only callers use `open_read_only`, which performs no schema or
+  journal-mode writes and rejects CAS. Never make a status path initialize or
+  reconfigure the database.
 - Use an immediate transaction to compare the current revision and replace the
   state atomically. Serialized bytes and the canonical next revision are
   computed before acquiring the writer transaction.

@@ -52,8 +52,11 @@ Status: partial.
 - canonical Event-prefix compaction retains an authenticated base plus exact
   suffix, cumulative receipt lineage, old command deduplication, and
   stale/lost-receipt recovery;
-- production resolver/clock/signal plugins and process-kill crash campaigns
-  remain proposed.
+- one black-box M1/M3 campaign now observes committed progress, externally
+  kills the process, reopens authority, recovers a possible expired claim, and
+  completes without duplicate logical results; production
+  resolver/clock/signal plugins and process-kill coverage across every M1 crash
+  window remain proposed.
 
 ## Optional plugin track - Agent interaction
 

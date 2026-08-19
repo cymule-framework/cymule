@@ -6,7 +6,7 @@ use std::time::Duration;
 use cymule_durable::{
     DurableError, DurableResult, DurableState, DurableStore, StoreCommit, StoredState,
 };
-use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 const SCHEMA: &str = "cymule.sqlite-store/1";
 
@@ -14,6 +14,7 @@ const SCHEMA: &str = "cymule.sqlite-store/1";
 pub struct SqliteStore {
     connection: Connection,
     domain: String,
+    writable: bool,
 }
 
 impl SqliteStore {
@@ -29,16 +30,35 @@ impl SqliteStore {
         Self::initialize(connection, domain.into(), false)
     }
 
+    /// Open an existing file-backed domain for observation only.
+    ///
+    /// This path performs no journal-mode or schema writes, so a status reader
+    /// cannot become a competing writer. `compare_and_swap` fails closed on
+    /// the returned store.
+    pub fn open_read_only(
+        path: impl AsRef<Path>,
+        domain: impl Into<String>,
+    ) -> DurableResult<Self> {
+        let domain = domain.into();
+        validate_domain(&domain)?;
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(sqlite_error)?;
+        connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(sqlite_error)?;
+        Ok(Self {
+            connection,
+            domain,
+            writable: false,
+        })
+    }
+
     fn initialize(
         connection: Connection,
         domain: String,
         file_backed: bool,
     ) -> DurableResult<Self> {
-        if domain.is_empty() || domain.len() > 512 || domain.chars().any(char::is_control) {
-            return Err(DurableError::Validation(
-                "SQLite durable domain must contain 1..=512 non-control characters".to_owned(),
-            ));
-        }
+        validate_domain(&domain)?;
         connection
             .busy_timeout(Duration::ZERO)
             .map_err(sqlite_error)?;
@@ -60,7 +80,11 @@ impl SqliteStore {
                 ) STRICT;",
             )
             .map_err(sqlite_error)?;
-        Ok(Self { connection, domain })
+        Ok(Self {
+            connection,
+            domain,
+            writable: true,
+        })
     }
 
     fn read(&self) -> DurableResult<Option<StoredState>> {
@@ -99,6 +123,11 @@ impl DurableStore for SqliteStore {
         expected_revision: Option<&str>,
         next: &DurableState,
     ) -> DurableResult<StoreCommit> {
+        if !self.writable {
+            return Err(DurableError::Validation(
+                "read-only SQLite stores cannot compare and swap".to_owned(),
+            ));
+        }
         next.validate()?;
         let revision = next.revision()?;
         let bytes = cymule_core::canonical_bytes(next)?;
@@ -134,6 +163,15 @@ impl DurableStore for SqliteStore {
         transaction.commit().map_err(sqlite_error)?;
         Ok(StoreCommit { revision })
     }
+}
+
+fn validate_domain(domain: &str) -> DurableResult<()> {
+    if domain.is_empty() || domain.len() > 512 || domain.chars().any(char::is_control) {
+        return Err(DurableError::Validation(
+            "SQLite durable domain must contain 1..=512 non-control characters".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn contention(error: rusqlite::Error, expected: Option<&str>) -> DurableError {

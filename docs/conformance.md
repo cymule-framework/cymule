@@ -8,7 +8,7 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | --- | --- | --- |
 | Semantic Interpreter M0 | Implemented | frozen IR, canonical stores, admission, reducer, exact state replay |
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
-| Durable Single Domain | Partial | snapshot/base-plus-suffix restore, CAS, nested Continuation frames, identified bounded wait-source drivers, leases, commit-gated/eager/explicit outbox policy, occurrence replay, atomic Resource handoff input activation, directory-store reopen, history compaction, and ambiguous-effect reconciliation; production plugins and process-kill coverage remain |
+| Durable Single Domain | Partial | snapshot/base-plus-suffix restore, CAS, nested Continuation frames, identified bounded wait-source drivers, leases, commit-gated/eager/explicit outbox policy, occurrence replay, atomic Resource handoff input activation, directory-store reopen, history compaction, ambiguous-effect reconciliation, and one black-box M1/M3 external process-kill campaign; production plugins and exhaustive process-kill coverage remain |
 | Optional Agent Interaction plugin | Partial plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces; not a framework profile |
 | Large Virtual Graph M3 | Implemented | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker slot leases/recovery, four SDK controls, and restore |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
@@ -41,6 +41,10 @@ The local suite verifies:
 - effect/outbox checkpoints reject unrelated canonical Events, commands,
   Artifacts, or Plan changes, and `Unknown` Event plus outbox state commit in one
   CAS;
+- a running virtual evaluation campaign is observed through a non-mutating
+  SQLite connection, externally killed after visible durable progress, reopened
+  under an expired-lease fence, and completed with one terminal result per
+  logical case;
 - nested Region paths and scope stacks survive reopen without repeating a
   completed component; nested effects cannot dispatch before child commit;
 - eager observations can bind a settled Artifact while their scope remains

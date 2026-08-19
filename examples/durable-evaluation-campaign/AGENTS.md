@@ -23,6 +23,10 @@ test fixture disguised as a product example.
 - The `demo` command is the root README's feature tour. It must execute real
   child processes, verify every phase before printing success, require no
   credentials or network services, and leave its state available for inspection.
+- The external process-kill test is Unix-only and must use a replaceable plugin
+  to create an observable window, a read-only status path, logical lease expiry,
+  and terminal identity checks. Do not add sleeps or kill hooks to semantic
+  production code.
 
 ## Validation
 

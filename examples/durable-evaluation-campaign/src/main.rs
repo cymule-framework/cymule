@@ -241,11 +241,15 @@ fn parse_options(
     let state = option_value(arguments, "--state").ok_or("--state is required")?;
     let run_id = option_value(arguments, "--run-id").unwrap_or("run:evaluation-demo");
     let suite = option_value(arguments, "--suite").map(PathBuf::from);
+    let plugin_executable = option_value(arguments, "--plugin").map_or_else(
+        || Ok(executable),
+        |path| fs::canonicalize(path).map_err(Box::<dyn std::error::Error>::from),
+    )?;
     let mut options = CampaignOptions {
         state_dir: PathBuf::from(state),
         suite_path: suite,
         run_id: run_id.to_owned(),
-        plugin_executable: executable,
+        plugin_executable,
         worker_id: option_value(arguments, "--worker-id").map_or_else(
             || format!("worker:local:{}", std::process::id()),
             str::to_owned,
@@ -285,6 +289,7 @@ fn reject_unknown_options(arguments: &[String]) -> Result<(), Box<dyn std::error
         "--suite",
         "--run-id",
         "--worker-id",
+        "--plugin",
         "--logical-now",
         "--lease-ttl",
         "--policy",
@@ -326,7 +331,7 @@ fn print_help() {
         "Cymule durable evaluation campaign\n\n\
          Usage:\n\
            cymule-example-durable-evaluation-campaign demo [--state NEW_DIR]\n\
-           cymule-example-durable-evaluation-campaign run --state DIR --suite FILE [--run-id ID]\n\
+           cymule-example-durable-evaluation-campaign run --state DIR --suite FILE [--run-id ID] [--plugin EXECUTABLE]\n\
            cymule-example-durable-evaluation-campaign status --state DIR [--suite FILE] [--run-id ID]\n\
            cymule-example-durable-evaluation-campaign evolve --state DIR --policy weighted|incompatible [--run-id ID]\n\n\
          The child subject/scorer is a process plugin. Simulated crash flags are documented in the example README."

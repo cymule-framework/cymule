@@ -23,6 +23,7 @@ than a happy-path demo. The assertions below are backed by
 | After claim CAS, before plugin | one running fenced occurrence | no stealing before expiry; explicit retry after expiry |
 | After pure plugin, before result CAS | running occurrence, outcome unrecorded | the pure subject may be invoked again after fenced recovery |
 | After result CAS, before caller sees output | terminal occurrence and Artifact | report replays the retained result; no new occurrence |
+| External process kill during a running campaign | last complete CAS plus at most one active claim | read-only observation remains non-mutating; expiry fences one explicit retry; all cases finish once |
 | During compatible publication | old or new complete registry checkpoint | future work uses one verified immutable head |
 | After compatible publication | earlier occurrences retain old Plan | later claims pin the new Plan |
 
@@ -89,5 +90,9 @@ it does not pretend to demonstrate every rollout mode in one CLI flow.
   mutating subject needs Effect idempotency and reconciliation instead.
 - SQLite provides one local durable domain. Cross-host ownership and failover
   require a different DurableStore and deployment-level coordination.
+- The external process-kill campaign covers this M1/M3 application path, not
+  every internal M1 effect, wait, compaction, or migration crash window. Those
+  deterministic fault matrices remain independent evidence until equivalent
+  black-box kill campaigns are added deliberately.
 - The local filesystem Resource adapter protects content integrity, not secrecy
   or access control. Production resolvers own credentials and authorization.

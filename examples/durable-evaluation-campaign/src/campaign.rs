@@ -310,7 +310,7 @@ pub fn run(options: &CampaignOptions) -> CampaignResult<CampaignRun> {
 /// Verify retained resources and project current campaign status without work.
 pub fn status(options: &CampaignOptions) -> CampaignResult<CampaignReport> {
     validate_options(options)?;
-    let (coordinator, _machine) = open_existing_coordinator(options)?;
+    let (coordinator, _machine) = open_read_only_coordinator(options)?;
     let mut resource_store =
         FsResourceStore::open(options.state_dir.join("resources"), RESOURCE_BINDING)?;
     let metadata = retained_metadata(&coordinator)?;
@@ -395,6 +395,21 @@ fn open_existing_coordinator(
     options: &CampaignOptions,
 ) -> CampaignResult<(DurableCoordinator<SqliteStore>, Machine)> {
     let store = SqliteStore::open(
+        options.state_dir.join("campaign.sqlite"),
+        format!("campaign:{}", options.run_id),
+    )?;
+    let coordinator = DurableCoordinator::open(store)?;
+    if coordinator.revision().is_none() {
+        return Err("campaign has not been initialized".into());
+    }
+    let machine = coordinator.restore_machine()?;
+    Ok((coordinator, machine))
+}
+
+fn open_read_only_coordinator(
+    options: &CampaignOptions,
+) -> CampaignResult<(DurableCoordinator<SqliteStore>, Machine)> {
+    let store = SqliteStore::open_read_only(
         options.state_dir.join("campaign.sqlite"),
         format!("campaign:{}", options.run_id),
     )?;

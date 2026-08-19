@@ -68,6 +68,38 @@ fn active_sqlite_writer_returns_immediately_as_conflict() {
 }
 
 #[test]
+fn read_only_observer_neither_configures_nor_contends_as_a_writer() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("observer.sqlite");
+    let candidate = state();
+    let mut writer = SqliteStore::open(&path, "domain:one").expect("writer opens");
+    let commit = writer
+        .compare_and_swap(None, &candidate)
+        .expect("initial state commits");
+    let blocker = Connection::open(&path).expect("blocking connection opens");
+    blocker
+        .busy_timeout(Duration::ZERO)
+        .expect("zero timeout configures");
+    blocker
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("writer transaction starts");
+
+    let mut observer =
+        SqliteStore::open_read_only(&path, "domain:one").expect("observer opens read-only");
+    let retained = observer
+        .load()
+        .expect("observer reads through active writer")
+        .expect("committed state exists");
+    assert_eq!(retained.revision, commit.revision);
+    assert_eq!(retained.state, candidate);
+    assert!(matches!(
+        observer.compare_and_swap(Some(&commit.revision), &state()),
+        Err(DurableError::Validation(message)) if message.contains("read-only")
+    ));
+    blocker.execute_batch("ROLLBACK").expect("writer releases");
+}
+
+#[test]
 fn corrupted_state_fails_closed() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("corrupt.sqlite");

@@ -156,8 +156,18 @@ semantic limits.
 
 The binary launches itself in process-plugin mode only to make the default
 experience self-contained. To integrate a real evaluator, keep the published
-component contracts and point `ProcessExecutorConfig` at another absolute
-executable implementing `cymule.plugin/1`:
+component contracts and pass an executable implementing `cymule.plugin/1`:
+
+```sh
+./target/debug/cymule-example-durable-evaluation-campaign run \
+  --state "$CAMPAIGN_STATE" \
+  --suite examples/durable-evaluation-campaign/fixtures/support-tickets.jsonl \
+  --run-id run:external-subject \
+  --plugin /absolute/path/to/evaluation-plugin
+```
+
+The example invokes that executable with `__plugin`, an empty ambient
+environment, a five-second timeout, and a one-MiB protocol-message limit:
 
 - `example.ticket-subject` receives one typed case and returns a prediction;
 - `example.ticket-scorer` receives the case, prediction, and Plan-pinned policy;
@@ -184,8 +194,12 @@ It covers process exit after a committed result, expiry and explicit recovery
 after exit with an active claim, refusal to steal an unexpired claim, changed
 suite bytes, retained Resource tampering, duplicate case IDs, unknown fields,
 symlink input, compatible future-only evolution, and incompatible-update
-blocking. See [ADVERSARIAL_REVIEW.md](ADVERSARIAL_REVIEW.md) for the reviewed
-failure model and remaining boundaries.
+blocking. A separate Unix black-box test runs a 24-case campaign through a
+protocol-compatible slow process plugin, observes committed progress through a
+read-only SQLite connection, sends an external process kill, reopens authority,
+recovers at most one expired claim, and proves one terminal result per case.
+See [ADVERSARIAL_REVIEW.md](ADVERSARIAL_REVIEW.md) for the reviewed failure
+model and remaining boundaries.
 
 This is a single-domain reference application. It does not claim distributed
 consensus, remote failover, untrusted-code isolation, or provider-level exactly

@@ -280,7 +280,7 @@ suites = ["rust-directory-plugin", "rust-durable"]
 
 [[routes]]
 patterns = ["plugins/store-sqlite/**"]
-suites = ["rust-store-plugins"]
+suites = ["rust-store-plugins", "example"]
 
 [[routes]]
 patterns = ["plugins/resource-fs/**", "plugins/resource-object-store/**"]

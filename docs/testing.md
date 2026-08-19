@@ -236,6 +236,14 @@ The current effect case loses the provider response after application, commits
 proves one dispatch plus one reconciliation. This is separate from repeating a
 single fault window.
 
+Black-box process-kill campaigns remain separate from adapter fault injection.
+The durable evaluation witness observes a committed M1/M3 projection through a
+read-only SQLite connection, kills the writer process externally, reopens the
+same Resource and virtual journal, explicitly recovers an expired claim when
+present, and proves one terminal result per logical case. It does not replace
+the deterministic per-CAS matrices, which identify narrower internal windows
+that an OS kill cannot select reproducibly.
+
 The M1 Run sweep treats every whole-state CAS as two distinct anomaly points:
 failure before the write and lost acknowledgement after a successful write. It
 first discovers the boundary count from a successful execution, injects one
