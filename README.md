@@ -516,18 +516,7 @@ schemas                 frozen JSON Schema contracts
 compiler/mlir           optional, partial MLIR workbench
 examples/hello-world    code-first Flow, Embedded runtime, and example plugin
 examples/durable-evaluation-campaign durable recovery/evolution user path
-plugins/test-adapter    deterministic conformance plugin
-plugins/directory-store atomic local DurableStore reference adapter
-plugins/agent-interaction optional Agent-domain integration plugin
-plugins/store-sqlite    SQLite single-domain DurableStore adapter
-plugins/resource-fs     content-addressed files and directory manifests
-plugins/resource-object-store Apache object_store Resource adapter
-plugins/activation-http ack-after-CAS signal ingress
-plugins/activation-timer durable logical timer source
-plugins/clock-system    restart-monotonic logical clock observations
-plugins/executor-process bounded process plugin transport
-plugins/observability-otel derived tracing and OTLP export
-plugins/agent-mcp       official RMCP tool adapter, without an Agent Loop
+plugins                 replaceable infrastructure and integration adapters
 tests                   shared fixtures and conformance assets
 docs                    specification, architecture, and decisions
 scripts                 complete repository verification
