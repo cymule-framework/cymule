@@ -133,7 +133,20 @@ controller.
 
 ## Five-minute quick start
 
-Run one credential-free feature tour with Rust 1.97:
+Imagine a team evaluating hundreds of support cases through a model, Agent, or
+rules engine. The run is expensive and may last for hours. Halfway through:
+
+- a worker process crashes;
+- the team ships a better scoring policy;
+- a later policy change is incompatible with the running evaluation.
+
+Without durable, versioned execution, the team must choose between repeating
+expensive completed work, maintaining its own recovery database, or accepting
+results whose meaning changed halfway through the run.
+
+Cymule keeps completed work, applies a compatible update only to work that has
+not started, and rejects an incompatible update before it changes the run. Try
+the complete scenario locally with Rust 1.97:
 
 ```sh
 git clone https://github.com/cymule-framework/cymule.git
@@ -141,37 +154,36 @@ cd cymule
 cargo run -p cymule-example-durable-evaluation-campaign -- demo
 ```
 
-It deliberately terminates a real child process midway through an evaluation,
-changes a reusable scorer, resumes the same Run, and attempts an incompatible
-change:
+The demo runs real work, stops the worker after three results, upgrades the
+scoring policy, resumes the evaluation, and tries an unsafe update:
 
 ```text
-Cymule five-minute feature tour
+Cymule: safely upgrade a running evaluation
 
-1. Resource   sealed 12 evaluation cases as sha256:...
-2. Recovery   exited a real process after 3 commits; all 3 results survived
-3. Evolution  compatible scorer relinked future work
-              sha256:<old-plan> -> sha256:<new-plan>
-4. Resume     completed 12/12 cases: 3 old-Plan, 9 new-Plan
-5. Admission  incompatible scorer was retained but could not take over
+Scenario        Evaluate 12 support tickets while the scoring policy changes.
+✓ Crash recovery  The worker stopped after 3 results; restart reused all 3.
+✓ Safe upgrade    3 completed results kept the original policy;
+                  9 future results used the update.
+✓ Compatibility   An incompatible scoring update was blocked before it changed work.
+✓ Outcome         12/12 finished without repeating completed evaluations.
 ```
 
-This is not a scripted transcript. The demo composes the published framework
-boundaries:
+What this gives an application:
 
-- the suite is a content-verified Resource rather than an ambient path;
-- the scheduler materializes a bounded work frontier and records each claimed
-  occurrence;
-- SQLite CAS preserves the first three results across process death;
-- every occurrence pins the exact immutable Plan selected before execution;
-- `latest_compatible` relinks only future work to the new scorer;
-- a scorer with a changed input contract is retained but cannot silently take
-  over the default.
+- **No duplicate cost after a crash.** Finished model calls, tool executions,
+  or batch items do not run again merely because the worker restarted.
+- **Comparable historical results.** Every result keeps the exact program and
+  policy that produced it, so an upgrade cannot rewrite history.
+- **Safe changes during long-running work.** Compatible updates can serve new
+  work immediately; incompatible changes fail before silently taking over.
+- **Replaceable execution.** The evaluator can be a model gateway, Agent,
+  script, sandbox, or remote service without moving its internal loop into the
+  framework.
+- **Provider-neutral recovery.** The application is not coupled to a particular
+  queue, database, object store, or model provider.
 
-The bundled subject and scorer run through the bounded process-plugin protocol.
-They are deterministic so the tour needs no account, model, network service, or
-container. Replace that plugin with a model gateway, Agent, script, sandbox, or
-remote evaluator; its internal loop remains outside Cymule.
+The bundled evaluator is deterministic, so the tour needs no account, model,
+network service, or container.
 
 The command prints the retained state directory. The
 [campaign guide](examples/durable-evaluation-campaign/README.md) expands each
@@ -179,14 +191,15 @@ phase into individual commands, and its
 [adversarial review](examples/durable-evaluation-campaign/ADVERSARIAL_REVIEW.md)
 documents the crash and integrity boundaries.
 
-To separately see ambiguous world-effect recovery, run:
+To see how Cymule avoids repeating an external action when the provider applies
+it but its response is lost, run:
 
 ```sh
 cargo run -p cymule-example-hello-world -- Ada --unknown-once
 ```
 
-That plugin loses the response after dispatch. Cymule reconciles the original
-effect intent instead of creating a duplicate operation.
+The example checks what happened to the original action instead of blindly
+sending it again.
 
 Install the published Rust facade and engine CLI when embedding Cymule in your
 own application:

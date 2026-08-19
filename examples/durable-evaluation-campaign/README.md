@@ -1,15 +1,14 @@
 # Durable Evaluation Campaign
 
-This example runs a reproducible evaluation suite as durable, versioned work.
-It is intentionally more substantial than Hello World: you can stop the
-process, resume from SQLite, change the scorer for future cases, and inspect
-which immutable Plan evaluated every result.
+This example answers a practical question: what happens when a long-running,
+expensive evaluation loses its worker while the team is also changing how
+results are scored?
 
-The bundled workload classifies support tickets so the example stays fast,
-credential-free, and deterministic. The architecture is the useful part. A
-real subject can be a model gateway, an MCP-backed Agent, a script, a sandbox,
-or a remote service behind the same component plugin boundary. Cymule does not
-own its internal loop.
+The bundled workload classifies support tickets so it stays fast,
+credential-free, and deterministic. During the tour, the worker stops after
+three results, the scoring policy is upgraded, the run resumes, and an unsafe
+follow-up update is rejected. A real evaluator can be a model gateway,
+MCP-backed Agent, script, sandbox, or remote service.
 
 ## Run the complete feature tour
 
@@ -19,10 +18,11 @@ For the shortest path, run one command from the repository root:
 cargo run -p cymule-example-durable-evaluation-campaign -- demo
 ```
 
-The tour starts child processes for the crash, evolution, and resume phases. It
-prints a compact five-line proof and the temporary state directory that remains
-available for inspection. To choose that directory yourself, it must not
-already exist:
+The tour prints a short proof that completed evaluations were not repeated,
+finished results kept their original scoring policy, future results used the
+compatible update, and an incompatible update changed nothing. It also prints
+the temporary state directory for inspection. To choose that directory
+yourself, it must not already exist:
 
 ```sh
 cargo run -p cymule-example-durable-evaluation-campaign -- \
@@ -135,22 +135,19 @@ Try a revision with a changed input contract:
 The revision is retained, but `advanced` is `false`; compatibility admission
 keeps the previous future-default Plan.
 
-## What is actually exercised
+## Why this matters
 
-| Concern | Cymule boundary | Local realization in this example |
+| Operational problem | What the example proves | Advantage |
 | --- | --- | --- |
-| Durable authority | complete-state CAS and application journals | `cymule-store-sqlite` |
-| Suite and artifacts | content-verified Resource Handle | `cymule-resource-fs` |
-| Large case space | bounded cursor and ready frontier | pages of 16, frontier of 32 |
-| Worker ownership | CAS-backed capacity-slot lease and attempt epoch | one process worker slot |
-| Subject and scorer | abstract component plugin calls | bounded child process |
-| Scorer evolution | reusable definition with `latest_compatible` | strict to weighted policy |
-| Historical replay | occurrence-bound exact Plan and result Artifacts | retained in SQLite state |
+| A worker dies midway through expensive work | Restart continues from completed results | No unnecessary repeated model calls or batch work |
+| A scoring policy changes during a run | Completed results keep the old policy; future results use the compatible update | Results remain comparable and upgrades do not require downtime |
+| A new policy changes the expected contract | The update is rejected before it handles future work | Unsafe changes cannot silently corrupt a running campaign |
+| An evaluation may contain a very large number of cases | Only a bounded amount of ready work is held at once | Predictable memory use without materializing the full campaign |
+| Teams change models, Agents, or execution environments | The evaluator is replaceable behind one interface | Recovery and evolution logic does not become provider-specific |
 
-The scheduler never loads more than its configured frontier, even though this
-small fixture finishes in one page. Suite input is capped at 8 MiB and 100,000
-cases for this local example. Those are application safety limits, not Cymule
-semantic limits.
+This local example accepts suites up to 8 MiB and 100,000 cases. Production
+sources can page over databases, object stores, APIs, or generated work without
+changing the application-level behavior demonstrated here.
 
 ## Replace the deterministic subject
 

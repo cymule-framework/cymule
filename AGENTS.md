@@ -121,6 +121,9 @@ Use this precedence order when guidance conflicts:
 - User-facing README files describe observable capabilities and limits without
   M0-M6 milestone labels. Keep milestone sequencing in the roadmap and
   maintainer profile/specification documents.
+- User quick starts lead with a concrete scenario, the failure or cost being
+  avoided, and an observable outcome. Defer CAS, journal, occurrence, binding,
+  and other implementation vocabulary to architecture or conformance material.
 - GitHub Actions is the only publication authority for every public artifact,
   including packages, release assets, and future registry distributions. Local
   commands may build, test, stage, and inspect release bytes, but must never

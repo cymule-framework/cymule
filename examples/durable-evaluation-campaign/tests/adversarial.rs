@@ -98,10 +98,12 @@ fn five_minute_demo_exposes_recovery_and_future_only_evolution() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("demo output is UTF-8");
-    assert!(stdout.contains("Cymule five-minute feature tour"));
-    assert!(stdout.contains("exited a real process after 3 commits"));
-    assert!(stdout.contains("3 old-Plan, 9 new-Plan"));
-    assert!(stdout.contains("incompatible scorer was retained but could not take over"));
+    assert!(stdout.contains("Cymule: safely upgrade a running evaluation"));
+    assert!(stdout.contains("restart reused all 3"));
+    assert!(stdout.contains("3 completed results kept the original policy"));
+    assert!(stdout.contains("9 future results used the update"));
+    assert!(stdout.contains("incompatible scoring update was blocked"));
+    assert!(stdout.contains("without repeating completed evaluations"));
     assert!(state.join("campaign.sqlite").is_file());
 }
 

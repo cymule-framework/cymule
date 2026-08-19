@@ -169,7 +169,11 @@ fn demo(arguments: &[String], executable: &Path) -> Result<(), Box<dyn std::erro
                 .is_some_and(|output| output.score.policy == "weighted")
         })
         .count();
-    if final_report.succeeded != final_report.total_cases || (strict, weighted) != (3, 9) {
+    if final_report.succeeded != final_report.total_cases
+        || final_report.total_occurrences != final_report.total_cases
+        || final_report.recovered_attempts != 0
+        || (strict, weighted) != (3, 9)
+    {
         return Err("resumed campaign did not preserve the 3/9 Plan boundary".into());
     }
 
@@ -193,22 +197,27 @@ fn demo(arguments: &[String], executable: &Path) -> Result<(), Box<dyn std::erro
         return Err("incompatible scorer revision changed the future Plan".into());
     }
 
-    println!("Cymule five-minute feature tour");
+    println!("Cymule: safely upgrade a running evaluation");
     println!();
     println!(
-        "1. Resource   sealed {} evaluation cases as {}",
-        before.total_cases, before.suite_resource_id
+        "Scenario        Evaluate {} support tickets while the scoring policy changes.",
+        before.total_cases
     );
-    println!("2. Recovery   exited a real process after 3 commits; all 3 results survived");
+    println!("✓ Crash recovery  The worker stopped after 3 results; restart reused all 3.");
     println!(
-        "3. Evolution  compatible scorer relinked future work\n              {} -> {}",
-        compatible.previous_plan_id, compatible.current_plan_id
+        concat!(
+            "✓ Safe upgrade    {} completed results kept the original policy;\n",
+            "                  {} future results used the update."
+        ),
+        strict, weighted
     );
     println!(
-        "4. Resume     completed {}/{} cases: {strict} old-Plan, {weighted} new-Plan",
+        "✓ Compatibility   An incompatible scoring update was blocked before it changed work."
+    );
+    println!(
+        "✓ Outcome         {}/{} finished without repeating completed evaluations.",
         final_report.succeeded, final_report.total_cases
     );
-    println!("5. Admission  incompatible scorer was retained but could not take over");
     println!();
     println!("State retained at {}", state.display());
     Ok(())
