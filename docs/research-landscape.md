@@ -17,6 +17,25 @@ standards.
 - [DBOS](https://docs.dbos.dev/) demonstrates a lightweight library experience,
   durable steps, queues, and recovery centered on a transactional database.
   Cymule keeps persistence as a contract rather than a required product class.
+- Effective durable-execution quick starts make recovery observable rather than
+  merely printing Hello World. The
+  [Restate quickstart](https://docs.restate.dev/quickstart) injects intermittent
+  step failure and shows completed steps being skipped on retry; the
+  [DBOS checkout example](https://docs.dbos.dev/typescript/examples/checkout-tutorial)
+  exposes a crash control while an order is in progress. Cymule's feature tour
+  similarly exits a real process after durable commits and proves the retained
+  state after reopen, without adopting either project's runtime model.
+- Evaluation is a useful neutral workload because the framework need not own
+  the evaluated implementation. Inspect separates dataset, solver, and scorer,
+  while [Eval Sets](https://inspect.aisi.org.uk/eval-sets.html) reuse completed
+  samples after failure and resume repeated invocations. Cymule's quick start
+  uses the same product lesson while keeping subject/scorer behavior behind a
+  generic process plugin and adding immutable future-only Plan evolution.
+- [Inngest's execution guide](https://www.inngest.com/docs/learn/how-functions-are-executed)
+  and the [Prefect quickstart](https://docs.prefect.io/v3/get-started/quickstart)
+  make checkpointed steps and mapped fan-out visible immediately. Cymule's
+  tour likewise reports Resource, recovery, evolution, resume, and admission as
+  distinct observable phases rather than hiding them behind one success line.
 - [Restate Awakeables](https://docs.restate.dev/develop/python/awakeables/) use a
   stable externally delivered identifier to resolve a suspended invocation, and
   [Restate durable timers](https://docs.restate.dev/develop/java/durable-timers)

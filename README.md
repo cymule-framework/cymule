@@ -133,74 +133,69 @@ controller.
 
 ## Five-minute quick start
 
-Install the Rust facade and CLI from crates.io:
+Run one credential-free feature tour with Rust 1.97:
+
+```sh
+git clone https://github.com/cymule-framework/cymule.git
+cd cymule
+cargo run -p cymule-example-durable-evaluation-campaign -- demo
+```
+
+It deliberately terminates a real child process midway through an evaluation,
+changes a reusable scorer, resumes the same Run, and attempts an incompatible
+change:
+
+```text
+Cymule five-minute feature tour
+
+1. Resource   sealed 12 evaluation cases as sha256:...
+2. Recovery   exited a real process after 3 commits; all 3 results survived
+3. Evolution  compatible scorer relinked future work
+              sha256:<old-plan> -> sha256:<new-plan>
+4. Resume     completed 12/12 cases: 3 old-Plan, 9 new-Plan
+5. Admission  incompatible scorer was retained but could not take over
+```
+
+This is not a scripted transcript. The demo composes the published framework
+boundaries:
+
+- the suite is a content-verified Resource rather than an ambient path;
+- M3 materializes a bounded work frontier and records each claimed occurrence;
+- SQLite CAS preserves the first three results across process death;
+- every occurrence pins the exact immutable Plan selected before execution;
+- M4 `latest_compatible` relinks only future work to the new scorer;
+- a scorer with a changed input contract is retained but cannot silently take
+  over the default.
+
+The bundled subject and scorer run through the bounded process-plugin protocol.
+They are deterministic so the tour needs no account, model, network service, or
+container. Replace that plugin with a model gateway, Agent, script, sandbox, or
+remote evaluator; its internal loop remains outside Cymule.
+
+The command prints the retained state directory. The
+[campaign guide](examples/durable-evaluation-campaign/README.md) expands each
+phase into individual commands, and its
+[adversarial review](examples/durable-evaluation-campaign/ADVERSARIAL_REVIEW.md)
+documents the crash and integrity boundaries.
+
+To separately see ambiguous world-effect recovery, run:
+
+```sh
+cargo run -p cymule-example-hello-world -- Ada --unknown-once
+```
+
+That plugin loses the response after dispatch. Cymule reconciles the original
+effect intent instead of creating a duplicate operation.
+
+Install the published Rust facade and engine CLI when embedding Cymule in your
+own application:
 
 ```sh
 cargo add cymule
 cargo install cymule-cli
 ```
 
-The facade is for authoring and typed engine control; the CLI is the Rust
-engine/process boundary. To run the complete code-first example with its
-in-process plugin, use Rust 1.97 and the source repository:
-
-```sh
-git clone https://github.com/cymule-framework/cymule.git
-cd cymule
-cargo run -p cymule-example-hello-world -- Ada
-```
-
-The example uses the Rust SDK to declare an `example.greet` component and a
-commit-gated `example.capture` effect. It seals the Flow, runs both operations
-through an in-process plugin, and returns the greeting:
-
-```json
-{
-  "run_id": "run:hello-world",
-  "plan_id": "sha256:...",
-  "value": { "message": "Hello, Ada!" },
-  "projection_digest": "...",
-  "precondition_token": "pre:0:...",
-  "effects": ["sha256:..."]
-}
-```
-
-Open [`src/flow.rs`](examples/hello-world/src/flow.rs) to change program meaning,
-[`src/plugin.rs`](examples/hello-world/src/plugin.rs) to replace the concrete
-implementation, and [`src/main.rs`](examples/hello-world/src/main.rs) to embed
-the runtime in your application.
-
-Then exercise Cymule's most important failure behavior:
-
-```sh
-cargo run -p cymule-example-hello-world -- Ada --unknown-once
-```
-
-This simulates losing the response after effect dispatch. Cymule records the
-outcome as `unknown` and reconciles the original intent instead of creating a
-duplicate effect. The [example guide](examples/hello-world/README.md) explains
-the execution and suggests useful first modifications.
-
-For a production-shaped local example, run the
-[durable evaluation campaign](examples/durable-evaluation-campaign/README.md).
-It imports an immutable evaluation suite as a Resource, materializes cases
-through a bounded M3 frontier, invokes a process plugin, survives process exit
-through SQLite, and updates the scorer for future cases through M4
-`latest_compatible` linking:
-
-```sh
-cargo build -p cymule-example-durable-evaluation-campaign
-CAMPAIGN_STATE=$(mktemp -d)
-
-./target/debug/cymule-example-durable-evaluation-campaign run \
-  --state "$CAMPAIGN_STATE" \
-  --suite examples/durable-evaluation-campaign/fixtures/support-tickets.jsonl \
-  --run-id run:support-evaluation
-```
-
-The default subject is deterministic and credential-free. Replace its process
-plugin with a model, Agent, script, sandbox, or remote evaluator without moving
-that system's internal loop into Cymule.
+## Development
 
 Contributors should first select the smallest conservative suite for their
 change:

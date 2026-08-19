@@ -1,11 +1,15 @@
 //! Command-line entry point and child process-plugin protocol endpoint.
 
 use std::env;
+use std::fs;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cymule_example_durable_evaluation_campaign::{
-    CampaignOptions, FaultPoint, RunDisposition, plugin::EvaluationPlugin,
+    CampaignOptions, CampaignReport, EvolutionReport, FaultPoint, RunDisposition,
+    plugin::EvaluationPlugin,
 };
 use cymule_runtime::PluginHost;
 
@@ -30,6 +34,9 @@ fn dispatch() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let executable = env::current_exe()?.canonicalize()?;
+    if command == "demo" {
+        return demo(&arguments[1..], &executable);
+    }
     let mut options = parse_options(&arguments[1..], executable)?;
     match command {
         "run" => {
@@ -58,6 +65,173 @@ fn dispatch() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err(format!("unknown command {command:?}; run with --help").into()),
     }
     Ok(())
+}
+
+fn demo(arguments: &[String], executable: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let state = match arguments {
+        [] => {
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            env::temp_dir().join(format!(
+                "cymule-feature-tour-{}-{nonce}",
+                std::process::id()
+            ))
+        }
+        [option, path] if option == "--state" => PathBuf::from(path),
+        _ => return Err("demo accepts only an optional --state DIR".into()),
+    };
+    fs::create_dir(&state).map_err(|error| {
+        format!(
+            "demo state directory {} must not already exist: {error}",
+            state.display()
+        )
+    })?;
+    let suite = state.join("support-tickets.jsonl");
+    fs::write(&suite, include_bytes!("../fixtures/support-tickets.jsonl"))?;
+    let state_arg = state.to_str().ok_or("demo state path must be UTF-8")?;
+    let suite_arg = suite.to_str().ok_or("demo suite path must be UTF-8")?;
+    let run_id = "run:five-minute-tour";
+
+    let crashed = child(
+        executable,
+        &[
+            "run",
+            "--state",
+            state_arg,
+            "--suite",
+            suite_arg,
+            "--run-id",
+            run_id,
+            "--worker-id",
+            "worker:tour:before-update",
+            "--logical-now",
+            "10",
+            "--simulate-crash-after-commit",
+            "3",
+        ],
+    )?;
+    if crashed.status.code() != Some(75) {
+        return Err(child_failure("crash phase", &crashed).into());
+    }
+    let before: CampaignReport = serde_json::from_slice(&crashed.stdout)?;
+    if before.succeeded != 3 {
+        return Err("crash phase did not retain exactly three completed cases".into());
+    }
+
+    let compatible = successful_child(
+        "compatible evolution",
+        child(
+            executable,
+            &[
+                "evolve", "--state", state_arg, "--run-id", run_id, "--policy", "weighted",
+            ],
+        )?,
+    )?;
+    let compatible: EvolutionReport = serde_json::from_slice(&compatible.stdout)?;
+    if !compatible.advanced {
+        return Err("compatible scorer revision did not advance future work".into());
+    }
+
+    let resumed = successful_child(
+        "resume",
+        child(
+            executable,
+            &[
+                "run",
+                "--state",
+                state_arg,
+                "--suite",
+                suite_arg,
+                "--run-id",
+                run_id,
+                "--worker-id",
+                "worker:tour:after-update",
+                "--logical-now",
+                "20",
+            ],
+        )?,
+    )?;
+    let final_report: CampaignReport = serde_json::from_slice(&resumed.stdout)?;
+    let strict = final_report
+        .cases
+        .iter()
+        .filter(|case| {
+            case.output
+                .as_ref()
+                .is_some_and(|output| output.score.policy == "strict")
+        })
+        .count();
+    let weighted = final_report
+        .cases
+        .iter()
+        .filter(|case| {
+            case.output
+                .as_ref()
+                .is_some_and(|output| output.score.policy == "weighted")
+        })
+        .count();
+    if final_report.succeeded != final_report.total_cases || (strict, weighted) != (3, 9) {
+        return Err("resumed campaign did not preserve the 3/9 Plan boundary".into());
+    }
+
+    let incompatible = successful_child(
+        "incompatible evolution",
+        child(
+            executable,
+            &[
+                "evolve",
+                "--state",
+                state_arg,
+                "--run-id",
+                run_id,
+                "--policy",
+                "incompatible",
+            ],
+        )?,
+    )?;
+    let incompatible: EvolutionReport = serde_json::from_slice(&incompatible.stdout)?;
+    if incompatible.advanced || incompatible.current_plan_id != compatible.current_plan_id {
+        return Err("incompatible scorer revision changed the future Plan".into());
+    }
+
+    println!("Cymule five-minute feature tour");
+    println!();
+    println!(
+        "1. Resource   sealed {} evaluation cases as {}",
+        before.total_cases, before.suite_resource_id
+    );
+    println!("2. Recovery   exited a real process after 3 commits; all 3 results survived");
+    println!(
+        "3. Evolution  compatible scorer relinked future work\n              {} -> {}",
+        compatible.previous_plan_id, compatible.current_plan_id
+    );
+    println!(
+        "4. Resume     completed {}/{} cases: {strict} old-Plan, {weighted} new-Plan",
+        final_report.succeeded, final_report.total_cases
+    );
+    println!("5. Admission  incompatible scorer was retained but could not take over");
+    println!();
+    println!("State retained at {}", state.display());
+    Ok(())
+}
+
+fn child(executable: &Path, arguments: &[&str]) -> Result<Output, std::io::Error> {
+    Command::new(executable).args(arguments).output()
+}
+
+fn successful_child(phase: &str, output: Output) -> Result<Output, Box<dyn std::error::Error>> {
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(child_failure(phase, &output).into())
+    }
+}
+
+fn child_failure(phase: &str, output: &Output) -> String {
+    format!(
+        "{phase} failed with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
 }
 
 fn parse_options(
@@ -151,6 +325,7 @@ fn print_help() {
     println!(
         "Cymule durable evaluation campaign\n\n\
          Usage:\n\
+           cymule-example-durable-evaluation-campaign demo [--state NEW_DIR]\n\
            cymule-example-durable-evaluation-campaign run --state DIR --suite FILE [--run-id ID]\n\
            cymule-example-durable-evaluation-campaign status --state DIR [--suite FILE] [--run-id ID]\n\
            cymule-example-durable-evaluation-campaign evolve --state DIR --policy weighted|incompatible [--run-id ID]\n\n\

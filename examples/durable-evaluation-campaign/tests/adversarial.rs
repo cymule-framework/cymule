@@ -86,6 +86,24 @@ fn campaign_completes_and_reopens_without_new_occurrences() {
 }
 
 #[test]
+fn five_minute_demo_exposes_recovery_and_future_only_evolution() {
+    let parent = TestDir::new("feature-tour");
+    let state = parent.path().join("tour");
+    let output = invoke(&["demo", "--state", state.to_str().expect("UTF-8 path")]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("demo output is UTF-8");
+    assert!(stdout.contains("Cymule five-minute feature tour"));
+    assert!(stdout.contains("exited a real process after 3 commits"));
+    assert!(stdout.contains("3 old-Plan, 9 new-Plan"));
+    assert!(stdout.contains("incompatible scorer was retained but could not take over"));
+    assert!(state.join("campaign.sqlite").is_file());
+}
+
+#[test]
 fn committed_work_survives_exit_and_compatible_evolution_is_future_only() {
     let state = TestDir::new("evolve");
     let state_arg = state.path().to_str().expect("UTF-8 path");

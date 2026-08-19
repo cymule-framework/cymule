@@ -11,6 +11,24 @@ real subject can be a model gateway, an MCP-backed Agent, a script, a sandbox,
 or a remote service behind the same component plugin boundary. Cymule does not
 own its internal loop.
 
+## Run the complete feature tour
+
+For the shortest path, run one command from the repository root:
+
+```sh
+cargo run -p cymule-example-durable-evaluation-campaign -- demo
+```
+
+The tour starts child processes for the crash, evolution, and resume phases. It
+prints a compact five-line proof and the temporary state directory that remains
+available for inspection. To choose that directory yourself, it must not
+already exist:
+
+```sh
+cargo run -p cymule-example-durable-evaluation-campaign -- \
+  demo --state /tmp/cymule-feature-tour
+```
+
 ## Run the campaign
 
 From the repository root:

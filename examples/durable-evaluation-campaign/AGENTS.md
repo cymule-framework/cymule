@@ -20,6 +20,9 @@ test fixture disguised as a product example.
   between validation and Resource publication.
 - Use durable leases and CAS fencing for ownership. Do not add an ambient mutex,
   advisory process lock, or global singleton.
+- The `demo` command is the root README's feature tour. It must execute real
+  child processes, verify every phase before printing success, require no
+  credentials or network services, and leave its state available for inspection.
 
 ## Validation
 
