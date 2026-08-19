@@ -10,6 +10,38 @@ three results, the scoring policy is upgraded, the run resumes, and an unsafe
 follow-up update is rejected. A real evaluator can be a model gateway,
 MCP-backed Agent, script, sandbox, or remote service.
 
+## How the participants collaborate
+
+```mermaid
+flowchart LR
+    operator["Operator<br/>starts, resumes, or updates the campaign"]
+    suite["Evaluation suite<br/>cases and expected outcomes"]
+    campaign["Campaign application<br/>defines the evaluation"]
+    cymule["Cymule<br/>coordinates durable execution"]
+    worker["Worker<br/>executes assigned cases"]
+    subject["Subject<br/>model, Agent, script, sandbox, or service"]
+    scorer["Scorer<br/>grades each prediction"]
+    store[("Durable storage")]
+
+    operator --> campaign
+    suite --> campaign
+    campaign -->|"start or resume"| cymule
+    campaign -->|"publish a compatible scorer update"| cymule
+    cymule -->|"case and pinned scorer"| worker
+    worker -->|"case"| subject
+    subject -->|"prediction"| scorer
+    scorer -->|"score"| worker
+    worker -->|"result"| cymule
+    cymule -->|"progress and final report"| campaign
+    cymule <-->|"persist and recover"| store
+```
+
+The campaign application decides what should be evaluated. Cymule coordinates
+the work and recovery while treating the worker, subject, scorer, and storage as
+replaceable collaborators. It does not interpret a model or Agent's internal
+loop. A compatible scorer update applies to later assignments, while already
+assigned or completed cases keep their original scorer.
+
 ## Run the complete feature tour
 
 For the shortest path, run one command from the repository root:
