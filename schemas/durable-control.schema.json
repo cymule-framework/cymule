@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/durable-control.schema.json",
+  "title": "Cymule Durable Control cymule.durable-control/1",
+  "oneOf": [
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "run_id", "candidate", "input"],
+      "properties": {
+        "type": { "const": "start_run" },
+        "control_version": { "const": "cymule.durable-control/1" },
+        "run_id": { "$ref": "#/$defs/identity" },
+        "candidate": { "$ref": "plan-candidate.schema.json" },
+        "input": true
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "run_id"],
+      "properties": {
+        "type": { "const": "resume_run" },
+        "control_version": { "const": "cymule.durable-control/1" },
+        "run_id": { "$ref": "#/$defs/identity" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "type", "control_version", "activation_id", "source", "wait_ids", "value"
+      ],
+      "properties": {
+        "type": { "const": "activate_wait" },
+        "control_version": { "const": "cymule.durable-control/1" },
+        "activation_id": { "$ref": "#/$defs/identity" },
+        "source": { "$ref": "#/$defs/waitSource" },
+        "wait_ids": {
+          "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identity" }
+        },
+        "value": true
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "intent_id"],
+      "properties": {
+        "type": { "const": "release_effect" },
+        "control_version": { "const": "cymule.durable-control/1" },
+        "intent_id": { "$ref": "#/$defs/identity" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "query_id", "run_id"],
+      "properties": {
+        "type": { "const": "query_run" },
+        "control_version": { "const": "cymule.durable-control/1" },
+        "query_id": { "$ref": "#/$defs/identity" },
+        "run_id": { "$ref": "#/$defs/identity" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "query_id"],
+      "properties": {
+        "type": { "const": "query_domain" },
+        "control_version": { "const": "cymule.durable-control/1" },
+        "query_id": { "$ref": "#/$defs/identity" }
+      }
+    }
+  ],
+  "$defs": {
+    "identity": {
+      "type": "string", "minLength": 1, "maxLength": 512,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "waitSource": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "key"],
+          "properties": {
+            "kind": { "const": "signal" }, "key": { "$ref": "#/$defs/identity" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "timer_id"],
+          "properties": {
+            "kind": { "const": "timer" }, "timer_id": { "$ref": "#/$defs/identity" }
+          }
+        }
+      ]
+    }
+  }
+}

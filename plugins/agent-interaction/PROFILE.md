@@ -1,6 +1,6 @@
 # Agent Interaction Plugin Profile
 
-Status: optional plugin, partial.
+Status: implemented optional plugin profile.
 
 This profile belongs to `plugins/agent-interaction`, not to the Cymule
 framework, semantic kernel, CLI, or language SDKs. It defines one possible
@@ -32,7 +32,7 @@ ACP, MCP, A2A, editor, model-provider, and concrete Agent Loop support belongs
 in separate adapters or plugins above this package. Those adapters are not
 completion gates for this protocol-neutral plugin.
 
-## Implemented foundation
+## Implemented profile
 
 - ordered Session projection with validate-before-append updates, idempotent
   update IDs, conflicting-reuse rejection, tool lifecycle checks, and replay;
@@ -63,16 +63,19 @@ completion gates for this protocol-neutral plugin.
 - plugin-owned JSON Schema validation for Agent occurrence and stream fixtures;
 - fault-oriented Rust tests for reopen, retry, conflicting reuse, stale CAS,
   receipt loss, unknown reconciliation, abort, and immutable output identity.
+- cancellation, refusal, and host-failure matrices across context, model,
+  permission, tool, elicitation, and workspace calls, including proof that
+  ambiguous retries never redispatch;
+- real child-process death on both sides of every prepared/started/completed
+  occurrence checkpoint plus the Session journal and atomic stream-finalization
+  checkpoint, with SQLite reopen and provider-call counts;
+- field-complete Session JSON Schema and fixture, including stop reason,
+  ordered finalized messages, Plan, tools, usage, elicitations, and applied
+  update identities;
+- complete public rustdoc without incubation allowances.
 
-## Remaining plugin gates
-
-- cancellation, refusal, and host-failure coverage across every interaction
-  kind;
-- process-level crash injection around every plugin journal and host-dispatch
-  window;
-- field-complete Session projection schema;
-- removal of incubation rustdoc allowances;
-- optional plugin-specific clients if a protocol integration needs them.
+Protocol-specific clients remain optional adapter work, not a gap in this
+protocol-neutral profile.
 
 Capability advertisement, authentication, permission, credential access, and
 effect release remain separate decisions. A tool or model catalog entry never

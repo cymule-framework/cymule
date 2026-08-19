@@ -24,8 +24,8 @@ cargo add cymule-agent
 
 Use the controllers directly from `cymule_agent`; the application remains
 responsible for interaction ordering and loop progress. See
-[`PROFILE.md`](PROFILE.md) for the exact implemented behavior and remaining
-gates.
+[`PROFILE.md`](PROFILE.md) for the exact implemented behavior, fault families,
+and boundary with protocol-specific adapters.
 
 Run the plugin suite from the repository root:
 

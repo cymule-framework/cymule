@@ -9,6 +9,9 @@
 - Wait activation builders sort and deduplicate exact wait targets while
   preserving delivery, source, and Artifact identities. Engine verification is
   not stateful admission; consume-once remains a durable runtime CAS decision.
+- `DurableControlBuilder` covers every M1 command/query variant and sorts only
+  duplicate-free wait targets. It never selects a wait or resumes a Run in
+  TypeScript.
 - Virtual work query/control types keep logical work, attempt occurrence,
   binding, owner, epoch, and disposition separate. Builders require stable
   command IDs; transports never apply retry policy locally.
@@ -26,6 +29,9 @@
 - Keep M4 operations as the closed `EvolutionCommand` discriminated union.
   `EvolutionControlBuilder` copies caller data but never executes adapters,
   counts evidence, or chooses promotion/rollback.
+- Keep `LiveEvolutionCommand` as the complete discriminated union around
+  definition publication, template registration, publish/relink, and
+  template-scoped evolution. Do not emit sequential lower-level calls.
 - Preserve safe-point identity/epoch and explicit replacement input in migration
   and restart commands; never infer them from a local clock or cached Run.
 - The public npm package name is `cymule`. Changes to exports, files, engine

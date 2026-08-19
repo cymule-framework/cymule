@@ -1,20 +1,33 @@
 //! Plan DAG, rollout, migration, shadow, and rollback tests.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::fs;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::thread;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use cymule_core::{
-    ArtifactRef, ComponentContract, Definition, DispatchPolicy, EffectContract, EffectProfile,
-    Expression, MutationKind, PlanCandidate, ReconciliationMode, Region, WaitSpec,
+    ArtifactRecord, ArtifactRef, ComponentContract, Definition, DispatchPolicy, EffectContract,
+    EffectProfile, Expression, Machine, MutationKind, PlanCandidate, ReconciliationMode, Region,
+    WaitSpec,
 };
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
     DurableState, DurableStore, FrameState, MemoryStore, StoreCommit, StoredState,
 };
 use cymule_evolution::{
-    DefinitionRegistry, DurableDefinitionRegistry, DurableEvolutionController, EvolutionCommand,
-    EvolutionController, EvolutionError, GateOutcome, MigrationAdapter, MigrationAdapterDescriptor,
+    DefinitionRegistry, DurableDefinitionRegistry, DurableEvolutionController,
+    DurableLiveEvolutionController, EvolutionCommand, EvolutionController, EvolutionError,
+    GateOutcome, LiveEvolutionCommand, LiveEvolutionController, LiveEvolutionResponse,
+    LivePublicationCommand, LiveVirtualClaimCommand, MigrationAdapter, MigrationAdapterDescriptor,
     MigrationCapabilityChange, MigrationOutput, MigrationPreservation, MigrationReceipt,
     MigrationRequest, MigrationSafePoint, MigrationStateCoverage, ObservationOutcome,
     PatchOperation, PlanPatch, PlanTemplate, ReferenceStrategy, RelinkViolation, RestartRequest,
@@ -26,7 +39,15 @@ use cymule_runtime::{
     EmbeddedRuntime, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginRequest,
     PluginResponse, RuntimeError, RuntimeResult,
 };
+#[cfg(unix)]
+use cymule_store_sqlite::SqliteStore;
+use cymule_virtual::{
+    DurableVirtualController, FrontierLimits, MaterializedPage, RegionSource, VirtualCursor,
+    VirtualRegion, VirtualResult, VirtualScheduler, WorkItem,
+};
 use serde_json::json;
+#[cfg(unix)]
+use tempfile::tempdir;
 
 fn plan(version: &str) -> cymule_core::SealedPlan {
     PlanCandidate {
@@ -57,6 +78,15 @@ fn artifact(id: &str) -> ArtifactRef {
         artifact_id: id.to_owned(),
         kind: "evolution/evidence".to_owned(),
     }
+}
+
+fn artifact_record(kind: &str, value: &str) -> ArtifactRecord {
+    let mut machine = Machine::new();
+    let reference = machine.put_artifact(kind, value.as_bytes().to_vec());
+    machine
+        .artifact(&reference)
+        .expect("Artifact record exists")
+        .clone()
 }
 
 fn continuation(plan_id: &str) -> Continuation {
@@ -281,8 +311,14 @@ impl MigrationAdapter for TestMigrationAdapter {
     ) -> cymule_evolution::EvolutionResult<MigrationOutput> {
         self.calls += 1;
         Ok(MigrationOutput {
-            output_state: artifact(&format!("state:migrated:{}", request.migration_id)),
-            evidence: artifact(&format!("evidence:migration:{}", request.migration_id)),
+            output_state: artifact_record(
+                "evolution/migrated-state",
+                &format!("state:migrated:{}", request.migration_id),
+            ),
+            evidence: artifact_record(
+                "evolution/migration-evidence",
+                &format!("evidence:migration:{}", request.migration_id),
+            ),
         })
     }
 }
@@ -307,7 +343,10 @@ impl ShadowDriver for TestShadowDriver {
             primary_digest: format!("primary:{}", request.comparison_id),
             shadow_digest: format!("shadow:{}", request.comparison_id),
             equivalent: self.equivalent,
-            evidence: artifact(&format!("evidence:shadow:{}", request.comparison_id)),
+            evidence: artifact_record(
+                "evolution/shadow-evidence",
+                &format!("evidence:shadow:{}", request.comparison_id),
+            ),
         })
     }
 }
@@ -316,6 +355,36 @@ impl ShadowDriver for TestShadowDriver {
 struct LostReceiptStore {
     inner: MemoryStore,
     armed: Arc<AtomicBool>,
+}
+
+struct OneWorkSource;
+
+impl RegionSource for OneWorkSource {
+    fn materialize(
+        &mut self,
+        region: &VirtualRegion,
+        _limit: usize,
+    ) -> VirtualResult<MaterializedPage> {
+        Ok(MaterializedPage {
+            items: vec![WorkItem {
+                work_id: "work:live-claim".to_owned(),
+                region_id: region.region_id.clone(),
+                run_id: region.run_id.clone(),
+                payload: ArtifactRef {
+                    artifact_id: format!("sha256:{}", "a".repeat(64)),
+                    kind: "test/work".to_owned(),
+                },
+                capability: Some("evaluation".to_owned()),
+                priority: 0,
+                cost: 1,
+            }],
+            next_cursor: VirtualCursor {
+                version: region.cursor.version.clone(),
+                position: "1".to_owned(),
+                exhausted: true,
+            },
+        })
+    }
 }
 
 impl DurableStore for LostReceiptStore {
@@ -335,6 +404,80 @@ impl DurableStore for LostReceiptStore {
             ));
         }
         Ok(commit)
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillPhase {
+    BeforeCommit,
+    AfterCommit,
+}
+
+#[cfg(unix)]
+struct KillBarrierStore {
+    inner: SqliteStore,
+    phase: KillPhase,
+    marker: PathBuf,
+}
+
+#[cfg(unix)]
+impl KillBarrierStore {
+    fn stop_here(&self) -> ! {
+        fs::write(&self.marker, b"ready").expect("kill barrier marker writes");
+        loop {
+            thread::park_timeout(Duration::from_mins(1));
+        }
+    }
+}
+
+#[cfg(unix)]
+impl DurableStore for KillBarrierStore {
+    fn load(&mut self) -> DurableResult<Option<StoredState>> {
+        self.inner.load()
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        expected_revision: Option<&str>,
+        next: &DurableState,
+    ) -> DurableResult<StoreCommit> {
+        match self.phase {
+            KillPhase::BeforeCommit => self.stop_here(),
+            KillPhase::AfterCommit => {
+                self.inner.compare_and_swap(expected_revision, next)?;
+                self.stop_here();
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+struct KillChild(Child);
+
+#[cfg(unix)]
+impl Drop for KillChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_kill_barrier(child: &mut Child, marker: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if marker.exists() {
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("kill worker status reads") {
+            panic!("kill worker exited before its barrier with {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "kill worker did not reach its durable-store barrier"
+        );
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -440,6 +583,580 @@ fn latest_compatible_subflow_relinks_future_parent_without_rewriting_history() {
     assert_eq!(
         pinned.resolved_revisions["subflow:review"],
         first.revision_id
+    );
+}
+
+#[test]
+fn unified_live_evolution_relinks_all_parents_and_pins_history() {
+    let mut controller = LiveEvolutionController::new();
+    controller
+        .publish("subflow:review", reusable_definition("1", json!({})))
+        .expect("initial definition publishes");
+    let first = controller
+        .register_template(parent_template(ReferenceStrategy::LatestCompatible))
+        .expect("first parent registers");
+    let mut second_template = parent_template(ReferenceStrategy::LatestCompatible);
+    second_template.template_id = "template:second-parent".to_owned();
+    let second = controller
+        .register_template(second_template)
+        .expect("second parent registers");
+    assert_eq!(first.plan.plan_id, second.plan.plan_id);
+    let old_plan = first.plan.plan_id;
+    assert_eq!(
+        controller
+            .select_occurrence("template:review-parent", "occurrence:old")
+            .expect("old occurrence pins"),
+        old_plan
+    );
+
+    let mut machine = Machine::new();
+    let evidence = machine.put_artifact("evolution/evidence", b"reviewed revision 2".to_vec());
+    let receipt = controller
+        .publish_and_relink(LivePublicationCommand {
+            logical_ref: "subflow:review".to_owned(),
+            definition: reusable_definition("2", json!({})),
+            evidence,
+            mode: RolloutMode::Active,
+        })
+        .expect("compatible revision advances atomically");
+    assert_eq!(receipt.updates.len(), 2);
+    assert!(receipt.updates.iter().all(|update| update.advanced));
+    let new_plan = receipt.updates[0].current_plan_id.clone();
+    assert_ne!(new_plan, old_plan);
+    assert!(
+        receipt
+            .updates
+            .iter()
+            .all(|update| update.current_plan_id == new_plan && update.decision_id.is_some())
+    );
+    assert_eq!(
+        controller
+            .select_occurrence("template:review-parent", "occurrence:old")
+            .expect("historical occurrence remains pinned"),
+        old_plan
+    );
+    assert_eq!(
+        controller
+            .select_occurrence("template:review-parent", "occurrence:new")
+            .expect("future occurrence advances"),
+        new_plan
+    );
+    assert_eq!(
+        controller
+            .select_occurrence("template:second-parent", "occurrence:second")
+            .expect("second parent advances"),
+        new_plan
+    );
+
+    let incompatible = controller
+        .publish_and_relink(LivePublicationCommand {
+            logical_ref: "subflow:review".to_owned(),
+            definition: reusable_definition("3", json!({"type": "string"})),
+            evidence: machine.put_artifact("evolution/evidence", b"incompatible revision".to_vec()),
+            mode: RolloutMode::Active,
+        })
+        .expect("incompatible revision remains retained");
+    assert_eq!(incompatible.updates.len(), 2);
+    assert!(incompatible.updates.iter().all(|update| !update.advanced));
+    assert!(
+        incompatible
+            .updates
+            .iter()
+            .all(|update| update.current_plan_id == new_plan && update.decision_id.is_none())
+    );
+    let restored = LiveEvolutionController::restore(controller.snapshot())
+        .expect("unified authority restores");
+    assert_eq!(
+        restored
+            .current_link("template:review-parent")
+            .expect("current link restores")
+            .plan
+            .plan_id,
+        new_plan
+    );
+}
+
+#[test]
+fn unified_live_evolution_publication_replays_after_lost_receipt() {
+    let inner = MemoryStore::new();
+    let armed = Arc::new(AtomicBool::new(false));
+    let store = LostReceiptStore {
+        inner: inner.clone(),
+        armed: armed.clone(),
+    };
+    let machine = Machine::new();
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("domain initializes");
+    let mut controller = LiveEvolutionController::new();
+    DurableLiveEvolutionController::publish_and_checkpoint(
+        &mut coordinator,
+        &mut controller,
+        "live:main",
+        "live:initial-definition",
+        "subflow:review",
+        reusable_definition("1", json!({})),
+    )
+    .expect("initial definition checkpoints");
+    DurableLiveEvolutionController::register_template_and_checkpoint(
+        &mut coordinator,
+        &mut controller,
+        "live:main",
+        "live:initial-template",
+        parent_template(ReferenceStrategy::LatestCompatible),
+    )
+    .expect("template checkpoints");
+    let previous_plan = controller
+        .current_link("template:review-parent")
+        .expect("initial link")
+        .plan
+        .plan_id
+        .clone();
+    let mut machine = coordinator.restore_machine().expect("Machine restores");
+    let evidence = machine.put_artifact("evolution/evidence", b"reviewed revision 2".to_vec());
+    armed.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        DurableLiveEvolutionController::publish_and_relink_and_checkpoint(
+            &mut coordinator,
+            &mut controller,
+            &machine,
+            "live:main",
+            "live:publish:revision-2",
+            LivePublicationCommand {
+                logical_ref: "subflow:review".to_owned(),
+                definition: reusable_definition("2", json!({})),
+                evidence: evidence.clone(),
+                mode: RolloutMode::Active,
+            },
+        ),
+        Err(EvolutionError::Conflict(message)) if message.contains("lost evolution")
+    ));
+    assert_eq!(
+        controller
+            .current_link("template:review-parent")
+            .expect("local rollback keeps old link")
+            .plan
+            .plan_id,
+        previous_plan
+    );
+
+    let mut reopened = DurableCoordinator::open(inner).expect("domain reopens");
+    let mut restored = DurableLiveEvolutionController::load(&reopened, "live:main")
+        .expect("unified authority reopens");
+    let current_plan = restored
+        .current_link("template:review-parent")
+        .expect("new link committed")
+        .plan
+        .plan_id
+        .clone();
+    assert_ne!(current_plan, previous_plan);
+    assert!(
+        reopened
+            .restore_machine()
+            .expect("Machine restores")
+            .artifact(&evidence)
+            .is_some()
+    );
+    let replayed = DurableLiveEvolutionController::publish_and_relink_and_checkpoint(
+        &mut reopened,
+        &mut restored,
+        &machine,
+        "live:main",
+        "live:publish:revision-2",
+        LivePublicationCommand {
+            logical_ref: "subflow:review".to_owned(),
+            definition: reusable_definition("2", json!({})),
+            evidence,
+            mode: RolloutMode::Active,
+        },
+    )
+    .expect("lost publication receipt replays");
+    assert_eq!(replayed.updates.len(), 1);
+    assert!(replayed.updates[0].advanced);
+    assert_eq!(replayed.updates[0].previous_plan_id, previous_plan);
+    assert_eq!(replayed.updates[0].current_plan_id, current_plan);
+    let pinned = DurableLiveEvolutionController::select_occurrence_and_checkpoint(
+        &mut reopened,
+        &mut restored,
+        "live:main",
+        "live:pin:after-reopen",
+        "template:review-parent",
+        "occurrence:after-reopen",
+    )
+    .expect("future occurrence pins");
+    assert_eq!(pinned, current_plan);
+
+    let command = LiveEvolutionCommand::Apply {
+        control_version: cymule_evolution::LIVE_EVOLUTION_CONTROL_VERSION.to_owned(),
+        command_id: "live:submit:select".to_owned(),
+        template_id: "template:review-parent".to_owned(),
+        command: Box::new(EvolutionCommand::SelectOccurrence {
+            control_version: cymule_evolution::EVOLUTION_CONTROL_VERSION.to_owned(),
+            command_id: "evolution:submit:select".to_owned(),
+            occurrence_id: "occurrence:submitted".to_owned(),
+        }),
+        safe_point: None,
+    };
+    let mut migration = TestMigrationAdapter {
+        descriptor: MigrationAdapterDescriptor {
+            adapter_id: "unused:migration".to_owned(),
+            adapter_revision: "1".to_owned(),
+            from_plan: previous_plan.clone(),
+            to_plan: current_plan.clone(),
+            from_schema: "schema:1".to_owned(),
+            to_schema: "schema:2".to_owned(),
+            state_coverage: MigrationStateCoverage::TotalReachableState,
+            failure_and_cancellation: MigrationPreservation::Preserved,
+            budget_and_ownership: MigrationPreservation::Preserved,
+            authority_and_effects: MigrationCapabilityChange::NoWidening,
+        },
+        calls: 0,
+    };
+    let mut shadow = TestShadowDriver {
+        descriptor: ShadowDriverDescriptor {
+            driver_id: "unused:shadow".to_owned(),
+            driver_revision: "1".to_owned(),
+            target_effects: ShadowEffectMode::SuppressedOrSimulated,
+            occurrence_bindings: ShadowBindingMode::Pinned,
+        },
+        equivalent: true,
+        calls: 0,
+    };
+    let response = DurableLiveEvolutionController::submit(
+        &mut reopened,
+        &mut restored,
+        "live:main",
+        command.clone(),
+        &mut migration,
+        &mut shadow,
+    )
+    .expect("unified command submits");
+    assert_eq!(
+        response,
+        LiveEvolutionResponse::OccurrenceSelected {
+            plan_id: current_plan.clone(),
+        }
+    );
+    assert_eq!(
+        DurableLiveEvolutionController::submit(
+            &mut reopened,
+            &mut restored,
+            "live:main",
+            command,
+            &mut migration,
+            &mut shadow,
+        )
+        .expect("unified command replays"),
+        response
+    );
+    assert_eq!((migration.calls, shadow.calls), (0, 0));
+}
+
+#[cfg(unix)]
+#[test]
+fn process_kill_worker_entry() {
+    let Ok(database) = std::env::var("CYMULE_EVOLUTION_KILL_DB") else {
+        return;
+    };
+    let phase = match std::env::var("CYMULE_EVOLUTION_KILL_PHASE")
+        .expect("kill phase is supplied")
+        .as_str()
+    {
+        "before_commit" => KillPhase::BeforeCommit,
+        "after_commit" => KillPhase::AfterCommit,
+        phase => panic!("unknown kill phase {phase}"),
+    };
+    let marker = PathBuf::from(
+        std::env::var("CYMULE_EVOLUTION_KILL_MARKER").expect("kill marker is supplied"),
+    );
+    let store = KillBarrierStore {
+        inner: SqliteStore::open(database, "domain:live-kill").expect("SQLite store opens"),
+        phase,
+        marker,
+    };
+    let mut coordinator = DurableCoordinator::open(store).expect("durable domain reopens");
+    let mut live = DurableLiveEvolutionController::load(&coordinator, "live:kill")
+        .expect("live authority restores");
+    let machine = coordinator.restore_machine().expect("Machine restores");
+    let mut identity = Machine::new();
+    let evidence = identity.put_artifact(
+        "evolution/evidence",
+        b"process-kill reviewed revision 2".to_vec(),
+    );
+    DurableLiveEvolutionController::publish_and_relink_and_checkpoint(
+        &mut coordinator,
+        &mut live,
+        &machine,
+        "live:kill",
+        "live:kill:publish",
+        LivePublicationCommand {
+            logical_ref: "subflow:review".to_owned(),
+            definition: reusable_definition("2", json!({})),
+            evidence,
+            mode: RolloutMode::Active,
+        },
+    )
+    .expect("worker reaches a kill barrier before returning");
+    panic!("kill worker unexpectedly returned");
+}
+
+#[cfg(unix)]
+#[test]
+fn live_publication_recovers_from_real_process_kill_on_both_cas_sides() {
+    for (phase_name, committed_before_kill) in [("before_commit", false), ("after_commit", true)] {
+        let directory = tempdir().expect("temporary directory creates");
+        let database = directory.path().join("live.sqlite");
+        let marker = directory.path().join("kill-ready");
+        let mut machine = Machine::new();
+        let evidence = machine.put_artifact(
+            "evolution/evidence",
+            b"process-kill reviewed revision 2".to_vec(),
+        );
+        let store = SqliteStore::open(&database, "domain:live-kill").expect("SQLite store opens");
+        let mut coordinator = DurableCoordinator::open(store)
+            .expect("domain opens")
+            .initialize(&machine)
+            .expect("domain initializes");
+        let mut live = LiveEvolutionController::new();
+        DurableLiveEvolutionController::publish_and_checkpoint(
+            &mut coordinator,
+            &mut live,
+            "live:kill",
+            "live:kill:definition",
+            "subflow:review",
+            reusable_definition("1", json!({})),
+        )
+        .expect("initial definition checkpoints");
+        let initial = DurableLiveEvolutionController::register_template_and_checkpoint(
+            &mut coordinator,
+            &mut live,
+            "live:kill",
+            "live:kill:template",
+            parent_template(ReferenceStrategy::LatestCompatible),
+        )
+        .expect("template checkpoints");
+        drop(coordinator);
+
+        let executable = std::env::current_exe().expect("current test executable resolves");
+        let child = ProcessCommand::new(executable)
+            .arg("--exact")
+            .arg("process_kill_worker_entry")
+            .arg("--nocapture")
+            .env("CYMULE_EVOLUTION_KILL_DB", &database)
+            .env("CYMULE_EVOLUTION_KILL_PHASE", phase_name)
+            .env("CYMULE_EVOLUTION_KILL_MARKER", &marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("kill worker starts");
+        let mut child = KillChild(child);
+        wait_for_kill_barrier(&mut child.0, &marker);
+        child.0.kill().expect("kill worker is terminated");
+        let status = child.0.wait().expect("kill worker is reaped");
+        assert!(!status.success(), "process kill must not be a clean exit");
+
+        let store = SqliteStore::open(&database, "domain:live-kill")
+            .expect("SQLite domain reopens after process death");
+        let mut reopened = DurableCoordinator::open(store).expect("durable domain reopens");
+        let mut restored = DurableLiveEvolutionController::load(&reopened, "live:kill")
+            .expect("live authority rehydrates");
+        let before_retry = restored
+            .current_link("template:review-parent")
+            .expect("future head exists")
+            .plan
+            .plan_id
+            .clone();
+        assert_eq!(
+            before_retry != initial.plan.plan_id,
+            committed_before_kill,
+            "only the post-commit crash window may expose the new head before retry"
+        );
+        let restored_machine = reopened.restore_machine().expect("Machine restores");
+        let receipt = DurableLiveEvolutionController::publish_and_relink_and_checkpoint(
+            &mut reopened,
+            &mut restored,
+            &restored_machine,
+            "live:kill",
+            "live:kill:publish",
+            LivePublicationCommand {
+                logical_ref: "subflow:review".to_owned(),
+                definition: reusable_definition("2", json!({})),
+                evidence: evidence.clone(),
+                mode: RolloutMode::Active,
+            },
+        )
+        .expect("identical retry converges after process death");
+        assert_eq!(receipt.updates.len(), 1);
+        assert!(receipt.updates[0].advanced);
+        assert_eq!(receipt.updates[0].previous_plan_id, initial.plan.plan_id);
+        assert_eq!(
+            receipt.updates[0].current_plan_id,
+            restored
+                .current_link("template:review-parent")
+                .expect("retry leaves one current future head")
+                .plan
+                .plan_id
+        );
+        assert!(
+            reopened
+                .restore_machine()
+                .expect("Machine restores after retry")
+                .artifact(&evidence)
+                .is_some(),
+            "evolution evidence and future-head transition commit together"
+        );
+        assert_eq!(
+            reopened
+                .journal_records("live:kill")
+                .expect("journal reads")
+                .iter()
+                .filter(|record| record.record_id == "live:kill:publish")
+                .count(),
+            1,
+            "recovery retains exactly one publication checkpoint"
+        );
+        let replay = DurableLiveEvolutionController::publish_and_relink_and_checkpoint(
+            &mut reopened,
+            &mut restored,
+            &restored_machine,
+            "live:kill",
+            "live:kill:publish",
+            LivePublicationCommand {
+                logical_ref: "subflow:review".to_owned(),
+                definition: reusable_definition("2", json!({})),
+                evidence,
+                mode: RolloutMode::Active,
+            },
+        )
+        .expect("settled retry returns the original receipt");
+        assert_eq!(replay, receipt);
+    }
+}
+
+#[test]
+fn live_selection_and_virtual_claim_share_one_lost_receipt_safe_cas() {
+    let inner = MemoryStore::new();
+    let armed = Arc::new(AtomicBool::new(false));
+    let store = LostReceiptStore {
+        inner: inner.clone(),
+        armed: armed.clone(),
+    };
+    let machine = Machine::new();
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("domain initializes");
+    let mut live = LiveEvolutionController::new();
+    DurableLiveEvolutionController::publish_and_checkpoint(
+        &mut coordinator,
+        &mut live,
+        "live:claim",
+        "live:claim:definition",
+        "subflow:review",
+        reusable_definition("1", json!({})),
+    )
+    .expect("definition checkpoints");
+    let linked = DurableLiveEvolutionController::register_template_and_checkpoint(
+        &mut coordinator,
+        &mut live,
+        "live:claim",
+        "live:claim:template",
+        parent_template(ReferenceStrategy::LatestCompatible),
+    )
+    .expect("template checkpoints");
+
+    let limits = FrontierLimits {
+        max_materialized: 2,
+        max_active: 1,
+        max_active_per_run: 1,
+        materialize_batch: 1,
+    };
+    let mut scheduler = VirtualScheduler::new(limits).expect("scheduler creates");
+    scheduler
+        .register(VirtualRegion {
+            region_id: "region:live-claim".to_owned(),
+            run_id: "run:live-claim".to_owned(),
+            source: "test:one-work".to_owned(),
+            cursor: VirtualCursor {
+                version: "test:cursor/1".to_owned(),
+                position: "0".to_owned(),
+                exhausted: false,
+            },
+            estimated_total: Some(1),
+        })
+        .expect("region registers");
+    DurableVirtualController::fill_and_checkpoint(
+        &mut coordinator,
+        &mut scheduler,
+        &mut OneWorkSource,
+        "virtual:claim",
+        "virtual:claim:fill",
+    )
+    .expect("work checkpoints");
+    let command = LiveVirtualClaimCommand {
+        template_id: "template:review-parent".to_owned(),
+        selection_id: "live:selection:one".to_owned(),
+        command_id: "virtual:claim:one".to_owned(),
+        owner: "worker:one".to_owned(),
+        slot_id: "slot:one".to_owned(),
+        capabilities: BTreeSet::from(["evaluation".to_owned()]),
+        logical_now: 10,
+        lease_ttl: 20,
+    };
+    let live_before = live.snapshot();
+    let scheduler_before = scheduler.snapshot();
+    armed.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        DurableLiveEvolutionController::claim_virtual_work_and_checkpoint(
+            &mut coordinator,
+            &mut live,
+            &mut scheduler,
+            "live:claim",
+            "virtual:claim",
+            &command,
+        ),
+        Err(EvolutionError::Conflict(message)) if message.contains("lost evolution")
+    ));
+    assert_eq!(live.snapshot(), live_before);
+    assert_eq!(scheduler.snapshot(), scheduler_before);
+
+    let mut reopened = DurableCoordinator::open(inner).expect("domain reopens");
+    let mut restored_live = DurableLiveEvolutionController::load(&reopened, "live:claim")
+        .expect("live authority restores");
+    let mut restored_scheduler = DurableVirtualController::load(&reopened, "virtual:claim", limits)
+        .expect("scheduler restores");
+    let retained_claim = restored_scheduler
+        .snapshot()
+        .active
+        .get("work:live-claim")
+        .expect("claim committed")
+        .clone();
+    assert_eq!(retained_claim.occurrence_binding, linked.plan.plan_id);
+    assert_eq!(
+        restored_live.snapshot().templates["template:review-parent"].occurrence_plans["live:selection:one"],
+        retained_claim.occurrence_binding
+    );
+    let replay = DurableLiveEvolutionController::claim_virtual_work_and_checkpoint(
+        &mut reopened,
+        &mut restored_live,
+        &mut restored_scheduler,
+        "live:claim",
+        "virtual:claim",
+        &command,
+    )
+    .expect("lost coupled receipt replays");
+    assert_eq!(replay.plan_id, linked.plan.plan_id);
+    assert_eq!(replay.claim.claim, Some(retained_claim));
+    assert_eq!(
+        reopened
+            .journal_records("live:claim")
+            .expect("live journal reads")
+            .iter()
+            .filter(|record| record.record_id == "live:selection:one")
+            .count(),
+        1
     );
 }
 
@@ -1038,6 +1755,32 @@ fn frozen_evolution_control_fixture_is_closed_and_verified() {
             .verify()
             .is_err()
     );
+}
+
+#[test]
+fn frozen_live_evolution_control_fixture_is_closed_and_verified() {
+    let command: LiveEvolutionCommand = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/live-evolution-control.json"
+    ))
+    .expect("live-evolution fixture deserializes");
+    command.verify().expect("live-evolution fixture verifies");
+
+    let mut unexpected_proof = serde_json::to_value(&command).expect("command encodes");
+    unexpected_proof["safe_point"] = json!({
+        "safe_point_version": "cymule.migration-safe-point/1",
+        "safe_point_id": format!("sha256:{}", "1".repeat(64)),
+        "run_id": "run:fixture",
+        "plan_id": format!("sha256:{}", "2".repeat(64)),
+        "epoch": 1,
+        "state": null,
+        "continuation_digest": "3".repeat(64)
+    });
+    let unexpected_proof: LiveEvolutionCommand =
+        serde_json::from_value(unexpected_proof).expect("shape remains closed");
+    assert!(matches!(
+        unexpected_proof.verify(),
+        Err(EvolutionError::Validation(message)) if message.contains("only migration")
+    ));
 }
 
 #[test]
@@ -2079,7 +2822,7 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
     let mut reopened = DurableCoordinator::open(store).expect("reopens after migration");
     let mut restored = DurableEvolutionController::load(&reopened, "evolution:plugins")
         .expect("migration receipt restores");
-    DurableEvolutionController::execute_migration_and_checkpoint(
+    let migration_receipt = DurableEvolutionController::execute_migration_and_checkpoint(
         &mut reopened,
         &mut restored,
         "evolution:plugins",
@@ -2090,6 +2833,9 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
     )
     .expect("migration retry uses retained receipt");
     assert_eq!(migration.calls, 1);
+    let machine = reopened.restore_machine().expect("Machine restores");
+    assert!(machine.artifact(&migration_receipt.output_state).is_some());
+    assert!(machine.artifact(&migration_receipt.evidence).is_some());
 
     let shadow_request = ShadowRequest {
         comparison_id: "shadow:durable-plugin".to_owned(),
@@ -2129,7 +2875,7 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
     let mut final_controller =
         DurableEvolutionController::load(&final_coordinator, "evolution:plugins")
             .expect("shadow evidence restores");
-    DurableEvolutionController::execute_shadow_and_checkpoint(
+    let comparison = DurableEvolutionController::execute_shadow_and_checkpoint(
         &mut final_coordinator,
         &mut final_controller,
         "evolution:plugins",
@@ -2139,6 +2885,13 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
     )
     .expect("shadow retry uses retained evidence");
     assert_eq!(shadow.calls, 1);
+    assert!(
+        final_coordinator
+            .restore_machine()
+            .expect("Machine restores")
+            .artifact(&comparison.evidence)
+            .is_some()
+    );
 }
 
 #[test]

@@ -42,6 +42,9 @@
 - Every SDK constructs the same closed M4 gate command and submits it to the
   Rust verifier. Stateful linking, migration/shadow plugin calls, observation
   gates, and lost-receipt recovery remain in the Rust evolution fault suite.
+- Every SDK also constructs the shared unified live-evolution command. The Rust
+  verifier rejects unknown fields and safe-point proofs on operations that do
+  not accept them.
 - Every SDK also constructs the same `/2` replacement-Run restart command with
   exact safe-point proof, source epoch, distinct Run IDs, input, and evidence.
 - Schema verification covers every `schemas/*.schema.json` file and must include
@@ -83,11 +86,18 @@
 - Day-one plugin mutation is a third independent bounded witness. Keep its
   filters on authority, acknowledgement, ambiguity, and protocol mapping;
   resource streaming remains covered by fault/soak until separately sharded.
+- `cymule-clock-system` precedes timer adapters in the release catalog because
+  timer clock injection reuses its wall-clock boundary. Keep its focused
+  restart/backward-time witness in plugin coverage, mutation, and soak lanes.
 - `crates-release.toml` is the single public Rust package order. The release
   verifier must match Cargo metadata exactly, run Cargo's whole-workspace
   publication dry-run, package the unpublished workspace as one set, reject
   dependency-path leakage, compare two archive hashes, and compile normalized
   package bytes through a local patch registry.
+- The whole-workspace Cargo dry-run uses an ephemeral `[patch.crates-io]`
+  pointing at the exact candidate workspace so coordinated inter-crate API
+  changes compile as one release set. The patch is control input only: archive
+  inspection must still reject every normalized dependency path.
 - The package witness uses Cargo `--allow-dirty` so pre-commit candidate changes
   are the bytes under test. The actual publish command separately requires an
   exact annotated tag and a clean checkout; never weaken that release gate.

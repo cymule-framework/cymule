@@ -10,7 +10,8 @@ use cymule_core::{
     ScopeMode, Step, WaitSpec, WorldOutcome,
 };
 use cymule_durable::{
-    DriveOutcome, DurableError, DurableResult, DurableState, DurableStore, MemoryStore,
+    DURABLE_CONTROL_VERSION, DriveOutcome, DurableBoundary, DurableCommand, DurableError,
+    DurableResponse, DurableResult, DurableRuntimeControl, DurableState, DurableStore, MemoryStore,
     OutboxState, ResumableRuntime, StoreCommit, StoredState, WaitActivationSource,
 };
 use cymule_runtime::{
@@ -65,6 +66,45 @@ struct CasFaultStore {
     inner: MemoryStore,
     timing: CasFaultTiming,
     control: Arc<CasFaultControl>,
+}
+
+#[derive(Clone)]
+struct ArmableLostReceiptStore {
+    inner: MemoryStore,
+    lose_next: Arc<AtomicBool>,
+}
+
+impl ArmableLostReceiptStore {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            lose_next: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn arm(&self) {
+        self.lose_next.store(true, Ordering::SeqCst);
+    }
+}
+
+impl DurableStore for ArmableLostReceiptStore {
+    fn load(&mut self) -> DurableResult<Option<StoredState>> {
+        self.inner.load()
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        expected_revision: Option<&str>,
+        next: &DurableState,
+    ) -> DurableResult<StoreCommit> {
+        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        if self.lose_next.swap(false, Ordering::SeqCst) {
+            return Err(DurableError::Substrate(
+                "simulated lost multi-Run creation receipt".to_owned(),
+            ));
+        }
+        Ok(commit)
+    }
 }
 
 impl CasFaultStore {
@@ -691,6 +731,154 @@ fn process_reopen_resumes_after_wait_without_reinvoking_component() {
 }
 
 #[test]
+fn one_durable_domain_runs_multiple_runs_and_replays_start_exactly() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut runtime = ResumableRuntime::open(
+        MemoryStore::new(),
+        CountingPlugin {
+            calls: calls.clone(),
+        },
+    )
+    .expect("runtime opens");
+
+    let DriveOutcome::Suspended {
+        wait_id: first_wait,
+    } = runtime
+        .start(candidate(), &json!({"name": "Ada"}), "run:one")
+        .expect("first Run suspends")
+    else {
+        panic!("first Run should suspend");
+    };
+    let first_revision = runtime
+        .coordinator()
+        .revision()
+        .expect("first revision")
+        .to_owned();
+    let DriveOutcome::Suspended { wait_id: replayed } = runtime
+        .start(candidate(), &json!({"name": "Ada"}), "run:one")
+        .expect("identical start replays current boundary")
+    else {
+        panic!("start replay should remain suspended");
+    };
+    assert_eq!(replayed, first_wait);
+    assert_eq!(
+        runtime.coordinator().revision(),
+        Some(first_revision.as_str())
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(
+        runtime.start(candidate(), &json!({"name": "Changed"}), "run:one"),
+        Err(DurableError::IllegalTransition(message)) if message.contains("different input")
+    ));
+    let mut changed_plan = candidate();
+    changed_plan.name = "different_plan".to_owned();
+    assert!(matches!(
+        runtime.start(changed_plan, &json!({"name": "Ada"}), "run:one"),
+        Err(DurableError::IllegalTransition(message)) if message.contains("different Plan")
+    ));
+    assert_eq!(
+        runtime.coordinator().revision(),
+        Some(first_revision.as_str())
+    );
+
+    let DriveOutcome::Suspended {
+        wait_id: second_wait,
+    } = runtime
+        .start(candidate(), &json!({"name": "Grace"}), "run:two")
+        .expect("second Run shares the durable domain")
+    else {
+        panic!("second Run should suspend");
+    };
+    assert_ne!(second_wait, first_wait);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        runtime
+            .coordinator()
+            .state()
+            .expect("state")
+            .continuations
+            .len(),
+        2
+    );
+
+    let DriveOutcome::Completed(second) = runtime
+        .complete_wait(&second_wait, &json!(true))
+        .expect("second Run completes")
+    else {
+        panic!("second Run should complete");
+    };
+    let DriveOutcome::Completed(first) = runtime
+        .complete_wait(&first_wait, &json!(true))
+        .expect("first Run completes")
+    else {
+        panic!("first Run should complete");
+    };
+    assert_eq!(second.value, json!({"greeting": "Hello, Grace!"}));
+    assert_eq!(first.value, json!({"greeting": "Hello, Ada!"}));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let machine = runtime
+        .coordinator()
+        .restore_machine()
+        .expect("Machine restores");
+    assert_eq!(machine.projection().runs.len(), 2);
+    machine.verify_replay().expect("multi-Run history replays");
+}
+
+#[test]
+fn second_run_creation_reopens_after_lost_cas_receipt() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = ArmableLostReceiptStore::new();
+    let mut runtime = ResumableRuntime::open(
+        store.clone(),
+        CountingPlugin {
+            calls: calls.clone(),
+        },
+    )
+    .expect("runtime opens");
+    runtime
+        .start(candidate(), &json!({"name": "Ada"}), "run:existing")
+        .expect("existing Run reaches wait");
+    store.arm();
+    assert!(matches!(
+        runtime.start(candidate(), &json!({"name": "Grace"}), "run:lost-receipt"),
+        Err(DurableError::Substrate(message)) if message.contains("lost multi-Run")
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let mut reopened = ResumableRuntime::open(
+        store,
+        CountingPlugin {
+            calls: calls.clone(),
+        },
+    )
+    .expect("committed second Run reopens");
+    let DriveOutcome::Suspended { wait_id } = reopened
+        .start(candidate(), &json!({"name": "Grace"}), "run:lost-receipt")
+        .expect("identical start resumes committed Run")
+    else {
+        panic!("reopened second Run should suspend");
+    };
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let state = reopened.coordinator().state().expect("state");
+    assert_eq!(state.continuations.len(), 2);
+    assert_eq!(state.waits[&wait_id].run_id, "run:lost-receipt");
+    let machine = reopened
+        .coordinator()
+        .restore_machine()
+        .expect("Machine restores");
+    assert_eq!(machine.projection().runs.len(), 2);
+    assert_eq!(
+        machine
+            .events()
+            .filter(|event| matches!(event.payload, cymule_core::EventPayload::RunStarted { .. }))
+            .count(),
+        2
+    );
+    machine.verify_replay().expect("multi-Run history replays");
+}
+
+#[test]
 fn nested_scope_wait_reopens_from_region_path_without_reinvoking_component() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut runtime = ResumableRuntime::open(
@@ -788,6 +976,117 @@ fn invoked_definition_wait_reopens_without_reinvoking_completed_component() {
             .len(),
         1
     );
+}
+
+#[test]
+fn durable_control_drives_and_queries_one_domain_across_reopen() {
+    let store = MemoryStore::new();
+    let plugin = || SweepPlugin {
+        dispatches: Arc::new(AtomicUsize::new(0)),
+        reconciliations: Arc::new(AtomicUsize::new(0)),
+    };
+    let runtime = ResumableRuntime::open(store.clone(), plugin()).expect("runtime opens");
+    let mut control = DurableRuntimeControl::new(runtime);
+    let candidate = external_wait_candidate(
+        "durable_control_signal",
+        WaitSpec::Signal {
+            key: "signal:control".to_owned(),
+            consume_once: true,
+        },
+    );
+    let input = json!({"message": "durable control"});
+    let response = control
+        .submit(DurableCommand::StartRun {
+            control_version: DURABLE_CONTROL_VERSION.to_owned(),
+            run_id: "run:control".to_owned(),
+            candidate: candidate.clone(),
+            input: input.clone(),
+        })
+        .expect("Run starts");
+    let DurableResponse::RunBoundary {
+        boundary: DurableBoundary::Suspended { wait_id },
+    } = response
+    else {
+        panic!("signal Run must suspend");
+    };
+    let DurableResponse::Run { run: Some(view) } = control
+        .submit(DurableCommand::QueryRun {
+            control_version: DURABLE_CONTROL_VERSION.to_owned(),
+            query_id: "query:control:waiting".to_owned(),
+            run_id: "run:control".to_owned(),
+        })
+        .expect("Run queries")
+    else {
+        panic!("Run query must exist");
+    };
+    assert_eq!(
+        view.continuation.status,
+        cymule_durable::ContinuationStatus::Waiting
+    );
+    drop(control);
+
+    let runtime = ResumableRuntime::open(store, plugin()).expect("runtime reopens");
+    let mut reopened = DurableRuntimeControl::new(runtime);
+    assert_eq!(
+        reopened
+            .submit(DurableCommand::ActivateWait {
+                control_version: DURABLE_CONTROL_VERSION.to_owned(),
+                activation_id: "activation:control".to_owned(),
+                source: WaitActivationSource::Signal {
+                    key: "signal:control".to_owned(),
+                },
+                wait_ids: BTreeSet::from([wait_id]),
+                value: json!({"approved": true}),
+            })
+            .expect("wait activates"),
+        DurableResponse::WaitActivated {
+            ready_run_ids: BTreeSet::from(["run:control".to_owned()]),
+        }
+    );
+    let DurableResponse::RunBoundary {
+        boundary: DurableBoundary::Completed { result },
+    } = reopened
+        .submit(DurableCommand::ResumeRun {
+            control_version: DURABLE_CONTROL_VERSION.to_owned(),
+            run_id: "run:control".to_owned(),
+        })
+        .expect("Run resumes")
+    else {
+        panic!("resumed Run must complete");
+    };
+    assert_eq!(result.value, input);
+    let replay = reopened
+        .submit(DurableCommand::StartRun {
+            control_version: DURABLE_CONTROL_VERSION.to_owned(),
+            run_id: "run:control".to_owned(),
+            candidate,
+            input,
+        })
+        .expect("identical start replays terminal result");
+    assert!(matches!(
+        replay,
+        DurableResponse::RunBoundary {
+            boundary: DurableBoundary::Completed { .. }
+        }
+    ));
+    let DurableResponse::Domain { domain } = reopened
+        .submit(DurableCommand::QueryDomain {
+            control_version: DURABLE_CONTROL_VERSION.to_owned(),
+            query_id: "query:control:domain".to_owned(),
+        })
+        .expect("domain queries")
+    else {
+        panic!("domain query must return a domain view");
+    };
+    assert_eq!(domain.run_ids, ["run:control"]);
+
+    let malformed = json!({
+        "type": "resume_run",
+        "control_version": DURABLE_CONTROL_VERSION,
+        "run_id": "run:control",
+        "provider": "must-not-enter-control"
+    });
+    assert!(serde_json::from_value::<DurableCommand>(malformed).is_err());
 }
 
 #[test]

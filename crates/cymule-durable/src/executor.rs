@@ -68,13 +68,58 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
         input: &Value,
         run_id: impl Into<String>,
     ) -> DurableResult<DriveOutcome> {
-        if self.coordinator.revision().is_some() {
-            return Err(DurableError::IllegalTransition(
-                "start currently requires an empty durable store".to_owned(),
-            ));
-        }
         let run_id = run_id.into();
-        let mut machine = Machine::new();
+        let input_bytes = canonical_bytes(input)?;
+        let proposed_plan = candidate.clone().seal()?;
+        let existing = if self.coordinator.revision().is_some() {
+            self.coordinator
+                .state()?
+                .continuations
+                .get(&run_id)
+                .cloned()
+        } else {
+            None
+        };
+        if let Some(existing) = existing {
+            if existing.plan_id != proposed_plan.plan_id {
+                return Err(DurableError::IllegalTransition(format!(
+                    "Run {run_id} already exists under a different Plan"
+                )));
+            }
+            let machine = self.coordinator.restore_machine()?;
+            let plan = machine
+                .plan(&existing.plan_id)
+                .ok_or_else(|| DurableError::NotFound("existing Run Plan is missing".to_owned()))?;
+            validate_manifest(plan, &self.manifest)?;
+            let expected_input = Machine::new().put_artifact("cymule.input/1", input_bytes);
+            if existing.frames.first().map(|frame| &frame.input) != Some(&expected_input) {
+                return Err(DurableError::IllegalTransition(format!(
+                    "Run {run_id} already exists with different input"
+                )));
+            }
+            if existing.status == ContinuationStatus::Waiting {
+                let mut waits = existing.wait_set.iter();
+                let Some(wait_id) = waits.next() else {
+                    return Err(DurableError::Validation(format!(
+                        "waiting Run {run_id} does not have exactly one active wait"
+                    )));
+                };
+                if waits.next().is_some() {
+                    return Err(DurableError::Validation(format!(
+                        "waiting Run {run_id} has more than one active wait"
+                    )));
+                }
+                return Ok(DriveOutcome::Suspended {
+                    wait_id: wait_id.clone(),
+                });
+            }
+            return self.resume(&run_id);
+        }
+        let mut machine = if self.coordinator.revision().is_some() {
+            self.coordinator.restore_machine()?
+        } else {
+            Machine::new()
+        };
         let plan = machine.seal_plan(candidate)?;
         validate_manifest(&plan, &self.manifest)?;
         submit(
@@ -87,7 +132,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             },
         )?;
         begin_attempt(&mut machine, &run_id, &self.manifest, 0)?;
-        let input_ref = machine.put_artifact("cymule.input/1", canonical_bytes(input)?);
+        let input_ref = machine.put_artifact("cymule.input/1", input_bytes);
         let continuation = Continuation {
             run_id: run_id.clone(),
             plan_id: plan.plan_id,
@@ -110,7 +155,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             epoch: 0,
             status: ContinuationStatus::Running,
         };
-        self.coordinator.initialize_run(&machine, continuation)?;
+        self.coordinator.create_run(&machine, continuation)?;
         self.drive(&run_id)
     }
 

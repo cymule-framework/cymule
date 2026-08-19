@@ -39,6 +39,8 @@ while [ "$iteration" -le "$CYMULE_SOAK_REPETITIONS" ]; do
     acknowledged_identity_replays_and_conflicting_reuse_fails -- --exact
   cargo test -p cymule-activation-timer --test timer \
     due_timer_redelivers_until_acknowledged -- --exact
+  cargo test -p cymule-clock-system --test clock \
+    logical_time_advances_across_reopen_and_backward_wall_time -- --exact
   cargo test -p cymule-executor-process --test process \
     process_timeout_is_reported_as_ambiguous -- --exact
   cargo test -p cymule-agent-mcp --test mcp \

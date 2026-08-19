@@ -2,7 +2,7 @@
 
 Status: implemented for the provider-neutral single-domain profile.
 
-## Implemented foundation
+## Implemented profile
 
 - immutable sealed Plan nodes and content-addressed parent/child patch edges;
 - deterministic structural Plan diff over IR version, entry, component,
@@ -15,6 +15,8 @@ Status: implemented for the provider-neutral single-domain profile.
   resolution, exact-schema compatibility, reusable modules, acyclic transitive
   dependency resolution and relinking into new immutable parent Plans, pinned
   references, and retained historical links;
+- template-plus-Plan historical identities, allowing multiple parent templates
+  to seal to the same Plan without overwriting one another's link history;
 - strict reachable-surface admission that retains the previous future head when
   a candidate adds a component, effect, wait, capability/authority requirement,
   or changes an already reachable contract;
@@ -22,6 +24,12 @@ Status: implemented for the provider-neutral single-domain profile.
   exact current/history links, and rebuild derived dependency indexes;
 - M1-journal-backed registry publication and template linking with explicit
   checkpoint lineage, stale-CAS rollback, and lost-receipt reopen;
+- one complete `cymule.live-evolution/1` authority that snapshots the registry
+  together with every template-scoped Plan DAG, rollout decision, evidence,
+  and occurrence pin; compatible transitive relinks and their future decisions
+  enter one `cymule.live-evolution-checkpoint/1` journal CAS;
+- exact publication command/receipt replay after acknowledgement loss, including
+  the original set of advanced and blocked parent templates;
 - declared patch operations with review/compiler evidence artifacts;
 - cycle rejection and portable Plan DAG snapshots;
 - conservative impact cones over changed stable targets, active Continuation
@@ -34,6 +42,8 @@ Status: implemented for the provider-neutral single-domain profile.
   replay for Plan edges, rollout decisions, mixed-version occurrence pins,
   migrations, and shadow evidence;
 - safe-point-only state migration receipts with input/output/evidence artifacts;
+- migration output and shadow evidence bytes are content-verified and committed
+  to the M1 Machine in the same CAS as their unified evolution checkpoint;
 - pinned migration-adapter contracts that require total reachable-state
   coverage, failure/cancellation and budget/ownership preservation, and no
   authority/effect widening before plugin invocation;
@@ -47,17 +57,31 @@ Status: implemented for the provider-neutral single-domain profile.
 - immutable rollout observations tied to occurrence Plan pins, deterministic
   evidence gates, and auditable future-only promotion/rollback transitions;
 - exact selected-Plan return for mixed-version runtime dispatch;
+- atomic live-version selection plus virtual-work capacity-slot claim, so the
+  immutable Plan pin and fenced worker occurrence enter one lease CAS and a
+  lost acknowledgement replays only when both journal records are retained;
 - frozen `cymule.evolution-control/2` command union, schema, Rust verifier, and
   TypeScript, Python, Rust, and Go transport interfaces/builders;
+- frozen `cymule.live-evolution-control/1` unified command union and shared
+  four-language fixture for definition publication, template registration,
+  atomic relinking, and template-scoped operations with required safe-point
+  proofs;
 - tests for DAG and reusable-module cycles, deterministic diff, active impact,
   transitive executable relinking, deterministic pins, rollback without
   history rewrite, safe-point migration, tamper-resistant snapshot restore,
   stale CAS rollback, and lost-checkpoint receipt reopen.
 
-The profile's crash suite covers stale writers plus lost acknowledgements for
-registry relinking, mixed-version pins, migration output, shadow evidence, and
+The profile's crash suite covers real process death on both sides of a unified
+publication CAS, plus stale writers and lost acknowledgements for registry
+relinking, mixed-version pins, migration output, shadow evidence, and
 promotion. Retrying after reopen returns the committed record without invoking
 the migration or shadow plugin again.
+
+Multi-parent exact history and unified authority advance the registry snapshot
+to `cymule.definition-registry/3` and its standalone durable checkpoint to
+`cymule.definition-registry-checkpoint/2`. Complete applications use
+`cymule.live-evolution/1`; the standalone registry/evolution controllers are
+lower-level reducers and do not independently constitute this profile.
 
 ## Deliberately external
 

@@ -21,6 +21,13 @@
   identities, validate sequences and exact links, rebuild reverse indexes, and
   reject tampering or extraneous resolution claims. Durable publication uses
   the generic M1 journal and rolls back local state on stale CAS.
+- `LiveEvolutionController` is the complete application-facing authority. It
+  checkpoints the registry and every template-scoped DAG, rollout decision,
+  and occurrence pin in one journal snapshot. Applications must not advance a
+  registry head and a separate rollout controller in sequential CAS writes.
+- Historical links are keyed by template-plus-Plan identity. Distinct parent
+  templates may legitimately seal to the same Plan ID and must not overwrite
+  one another's dependency or history records.
 - Keep semantic Plan changes separate from Binding Context changes. Rollout and
   rollback affect future selection only; admitted occurrences remain pinned.
 - State migration is legal only at an explicit semantic safe point and must
@@ -35,6 +42,10 @@
 - Migration and shadow implementations are pinned plugins. Validate their
   safety descriptors before invocation; retries after a committed checkpoint
   must return retained evidence without calling the plugin again.
+- Migration and shadow plugins return complete `ArtifactRecord` products, not
+  bare references. Verify content identity and commit those bytes to the M1
+  Machine in the same CAS as the evolution checkpoint; an evolution journal
+  must never reference evidence that only existed in plugin memory.
 - Rollout observations must match an immutable occurrence Plan pin. Gates count
   exact retained identities and create a new future-only decision; never mutate
   an existing decision or reinterpret an admitted occurrence.

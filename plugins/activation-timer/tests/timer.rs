@@ -9,6 +9,7 @@ use cymule_durable::{
     WaitKind, WaitSourceDriver, WaitState,
 };
 use serde_json::json;
+use tempfile::tempdir;
 
 #[derive(Clone, Copy)]
 struct ManualClock(u64);
@@ -113,4 +114,34 @@ fn timer_before_due_or_without_a_wait_stays_pending() {
         .schedule("activation:one", "timer:one", 100, &json!(null))
         .expect("timer schedules");
     assert!(driver.receive(&index(), 1).expect("polls").is_none());
+}
+
+#[test]
+fn selected_delivery_survives_reopen_after_the_wait_leaves_the_index() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("timer.sqlite");
+    let mut driver =
+        SqliteTimerDriver::open_with_clock(&database, ManualClock(100)).expect("driver opens");
+    driver
+        .schedule("activation:reopen", "timer:one", 100, &json!({"due": true}))
+        .expect("timer schedules");
+    let selected = driver
+        .receive(&index(), 1)
+        .expect("timer receives")
+        .expect("delivery exists");
+    drop(driver);
+
+    let empty = ParkedWaitIndex::rebuild(&DurableState::new(Machine::new().snapshot()))
+        .expect("empty index rebuilds");
+    let mut reopened =
+        SqliteTimerDriver::open_with_clock(&database, ManualClock(100)).expect("driver reopens");
+    assert_eq!(
+        reopened.receive(&empty, 1).expect("redelivery reads"),
+        Some(selected),
+        "acknowledgement loss must not trigger target reselection"
+    );
+    reopened
+        .acknowledge("activation:reopen")
+        .expect("retained delivery acknowledges");
+    assert!(reopened.receive(&empty, 1).expect("polls").is_none());
 }

@@ -1,5 +1,6 @@
 //! Plugin-owned Draft 2020-12 schema and fixture conformance.
 
+use cymule_agent::AgentSession;
 use serde_json::Value;
 
 #[test]
@@ -27,6 +28,15 @@ fn agent_plugin_schema_validates_owned_fixtures_and_rejects_provider_fields() {
     validator
         .validate(&occurrence)
         .expect("occurrence fixture validates");
+    let session: Value = serde_json::from_str(include_str!("fixtures/agent-session.json"))
+        .expect("Session fixture parses");
+    validator
+        .validate(&session)
+        .expect("Session fixture validates");
+    assert_eq!(
+        serde_json::from_value::<AgentSession>(session).expect("Session fixture deserializes"),
+        AgentSession::new("session:fixture")
+    );
     let records: Vec<Value> =
         serde_json::from_str(include_str!("fixtures/agent-stream-records.json"))
             .expect("stream fixture parses");

@@ -4,9 +4,11 @@
   not name a database, queue, object store, cloud, or transport product.
 - A durable write is compare-and-swap over one complete `DurableState` revision.
   Adapters must not acknowledge a partial state transition.
-- Run initialization includes the initial Continuation in that first state CAS.
-  Both pre-commit failure and post-commit acknowledgement loss must reopen to a
-  retryable or resumable state.
+- Every Run creation includes its Plan/input/start Events and initial
+  Continuation in one state CAS. The first Run initializes the domain; later
+  Runs append an exact Machine delta under the same authority. Both pre-commit
+  failure and post-commit acknowledgement loss must reopen to a retryable or
+  resumable state, and an identical start must never reset existing progress.
 - Continuations contain only typed canonical references and explicit logical
   positions. Never persist process memory, closures, host-language stacks, or
   ambient time.
@@ -50,6 +52,9 @@
   the exact appended Machine Events, command receipts, and allowed Artifacts
   against the proposed outbox transition. Never use a generic Machine write for
   `Unknown`; its observation Event and outbox state share one CAS.
+- Exact Machine-delta checkpoints preserve the current compacted base. Effect,
+  wait, journal, and Run-creation transitions must not carry an unrelated base,
+  Plan, Event, command, or Artifact change.
 - Eager observational effects keep their frame on the effect site until the
   durable result Artifact can be bound. Explicit effects return a stable
   release-required outcome and may claim only after their scope commits;
@@ -85,3 +90,11 @@
   and inspect provider call counts after reopen.
 - M1 changes require updates to the profile document, fault matrix, schemas,
   SDK control surfaces, and restart-level tests.
+- `cymule.durable-control/1` is the only public M1 mutation/query union. It may
+  start/resume Runs, admit identified waits, release explicit effects, and
+  query Runs/domains; never expose raw Machine, Continuation, outbox, or journal
+  writes through an SDK command.
+- Keep deterministic injected CAS sweeps in this crate and real SQLite
+  child-process death sweeps in `plugins/store-sqlite`. Both discover the Run
+  boundary count from a successful execution and inspect provider calls as well
+  as recovered state.

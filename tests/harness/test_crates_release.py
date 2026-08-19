@@ -6,7 +6,9 @@ import datetime
 import importlib.util
 import pathlib
 import sys
+import tomllib
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -59,6 +61,37 @@ class NewCrateRateLimitTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "excessive"):
             crates_release.new_crate_rate_limit_delay(output, now=self.now)
 
+
+class WorkspaceDryRunTests(unittest.TestCase):
+    def test_candidate_workspace_patch_keeps_cargo_verification_enabled(self) -> None:
+        crates = [
+            crates_release.PublicCrate("cymule-core", ROOT / "crates/cymule-core", ()),
+            crates_release.PublicCrate(
+                "cymule-durable",
+                ROOT / "crates/cymule-durable",
+                ("cymule-core",),
+            ),
+        ]
+        observed: dict[str, object] = {}
+
+        def inspect(args: list[str], **_kwargs: object) -> None:
+            observed["args"] = args
+            config = pathlib.Path(args[args.index("--config") + 1])
+            observed["config"] = tomllib.loads(config.read_text(encoding="utf-8"))
+
+        with mock.patch.object(crates_release, "run", side_effect=inspect):
+            crates_release.cargo_publish_dry_run(crates, allow_dirty=True)
+
+        args = observed["args"]
+        self.assertIsInstance(args, list)
+        self.assertIn("--dry-run", args)
+        self.assertIn("--allow-dirty", args)
+        self.assertNotIn("--no-verify", args)
+        config = observed["config"]
+        self.assertEqual(
+            config["patch"]["crates-io"]["cymule-durable"]["path"],
+            str(ROOT / "crates/cymule-durable"),
+        )
 
 if __name__ == "__main__":
     unittest.main()

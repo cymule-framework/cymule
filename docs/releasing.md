@@ -43,12 +43,14 @@ Before committing a release version:
 ```
 
 The `package-rust` leaf first runs Cargo's dependency-aware workspace
-`publish --dry-run`, including Cargo's own package builds. It then packages the
-complete workspace twice and requires the archive hashes to match, verifies the
-catalog against Cargo metadata, rejects dependency paths in normalized
-manifests, safely extracts the exact archives, and compiles every public library
-and binary plus a fresh `cymule` consumer through a local `[patch.crates-io]`
-registry simulation.
+`publish --dry-run`, including Cargo's own package builds. An ephemeral
+`[patch.crates-io]` points dependency resolution at the exact candidate
+workspace so one coordinated release can introduce inter-crate APIs before
+those versions exist in the registry. It then packages the complete workspace
+twice and requires the archive hashes to match, verifies the catalog against
+Cargo metadata, rejects dependency paths in normalized manifests, safely
+extracts the exact archives, and compiles every public library and binary plus
+a fresh `cymule` consumer through a separate local patch-registry simulation.
 
 The release commit must update the workspace and TypeScript package to the same
 version and add a dated changelog entry. Mirror the reviewed private-source

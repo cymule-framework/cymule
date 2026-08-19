@@ -14,6 +14,9 @@
 - Wait activation DTOs preserve stable delivery, source, target, and Artifact
   identities. CLI verification covers the closed record; only a durable runtime
   CAS can admit it against pending waits and enforce consume-once semantics.
+- `DurableControl` transports the complete `cymule.durable-control/1` union.
+  SDKs may build start, resume, activation, explicit-release, and query
+  commands, but must not reduce Continuations or outbox state locally.
 - `VirtualWorkControl` is transport-neutral. Preserve stable command and
   occurrence IDs, immutable binding, owner, work epoch, lease epoch, and
   logical observation time; SDK transports never implement retry/failure
@@ -30,3 +33,6 @@
 - `EvolutionControl` transports closed `cymule.evolution-control/2` commands.
   Re-export Rust M4 DTOs without adding client-side latest resolution,
   migration/shadow execution, evidence counting, or rollout decisions.
+- `LiveEvolutionControl` transports the unified registry/DAG/rollout/pin
+  envelope. It must preserve the template identity and safe-point proof without
+  splitting one command into lower-level registry and rollout calls.

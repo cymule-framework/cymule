@@ -86,6 +86,38 @@ func TestEvolutionControlValidatesThroughRust(t *testing.T) {
 	}
 }
 
+func TestUnifiedLiveEvolutionValidatesThroughRust(t *testing.T) {
+	enginePath := os.Getenv("CYMULE_BIN")
+	fixturePath := os.Getenv("CYMULE_LIVE_EVOLUTION_CONTROL_FIXTURE")
+	if enginePath == "" || fixturePath == "" {
+		t.Skip("live-evolution conformance is not configured")
+	}
+	fixtureBytes, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expected LiveEvolutionCommand
+	if err := json.Unmarshal(fixtureBytes, &expected); err != nil {
+		t.Fatal(err)
+	}
+	command := ApplyLiveEvolution(
+		"command:live-evolution:fixture:select",
+		"template:review-parent",
+		*expected.Command,
+		nil,
+	)
+	if !reflect.DeepEqual(command, expected) {
+		t.Fatalf("live-evolution command differs from shared fixture: %#v", command)
+	}
+	verified, err := (CliEngine{Executable: enginePath}).VerifyLiveEvolutionCommand(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(verified, command) {
+		t.Fatalf("Rust engine changed live-evolution command: %#v", verified)
+	}
+}
+
 func TestCrossLanguageEndToEnd(t *testing.T) {
 	enginePath := os.Getenv("CYMULE_BIN")
 	pluginPath := os.Getenv("CYMULE_TEST_PLUGIN")
@@ -188,6 +220,43 @@ func TestWaitActivationValidatesThroughRustEngine(t *testing.T) {
 	}
 	if !reflect.DeepEqual(verified, activation) {
 		t.Fatalf("unexpected activation: %#v", verified)
+	}
+}
+
+func TestDurableControlValidatesThroughRustEngine(t *testing.T) {
+	enginePath := os.Getenv("CYMULE_BIN")
+	fixturePath := os.Getenv("CYMULE_DURABLE_CONTROL_FIXTURE")
+	if enginePath == "" || fixturePath == "" {
+		t.Skip("durable control conformance is not configured")
+	}
+	command := QueryDurableDomain("query:cross-language-domain")
+	fixtureBytes, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture DurableCommand
+	if err := json.Unmarshal(fixtureBytes, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(command, fixture) {
+		t.Fatalf("durable command differs from shared fixture: %#v", command)
+	}
+	verified, err := (CliEngine{Executable: enginePath}).VerifyDurableCommand(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(verified, command) {
+		t.Fatalf("Rust engine changed durable command: %#v", verified)
+	}
+	activation, err := ActivateDurableSignal(
+		"activation:sdk", "signal:sdk", []string{"wait:z", "wait:a", "wait:z"},
+		map[string]any{"accepted": true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(activation.WaitIDs, []string{"wait:a", "wait:z"}) {
+		t.Fatalf("durable activation targets are not canonical: %#v", activation.WaitIDs)
 	}
 }
 

@@ -7,7 +7,9 @@ use cymule_resource::{
     ArtifactStore, ResourceClient, ResourceError, ResourceShape, ResourceWriteIntent,
 };
 use cymule_resource_object_store::ObjectResourceStore;
+use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
+use tempfile::tempdir;
 
 #[test]
 fn object_store_chunk_retry_commit_and_read_are_exact() {
@@ -80,4 +82,26 @@ async fn synchronous_adapter_bridges_from_a_multithread_runtime() {
         .write_chunk(&session, 0, b"bridged")
         .expect("chunk writes");
     store.commit_write(&session).expect("write commits");
+}
+
+#[test]
+fn backend_without_conditional_metadata_update_fails_closed() {
+    let directory = tempdir().expect("temporary directory creates");
+    let backend = Arc::new(
+        LocalFileSystem::new_with_prefix(directory.path()).expect("local object backend opens"),
+    );
+    let mut store =
+        ObjectResourceStore::new(backend, "cymule", "object:local").expect("adapter opens");
+    let session = store
+        .begin_write(&ResourceWriteIntent {
+            write_id: "write:unsupported-cas".to_owned(),
+            shape: ResourceShape::Object,
+            media_type: "text/plain".to_owned(),
+            annotations: BTreeMap::new(),
+        })
+        .expect("write begins");
+    assert!(matches!(
+        store.write_chunk(&session, 0, b"cannot weaken CAS"),
+        Err(ResourceError::Substrate(_))
+    ));
 }

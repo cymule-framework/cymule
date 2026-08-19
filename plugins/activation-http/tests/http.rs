@@ -4,12 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use cymule_activation_http::{AllowAll, signal_router};
+use cymule_activation_http::{AllowAll, durable_signal_router, signal_router};
 use cymule_core::{ArtifactRef, Machine, ROOT_SCOPE_ID};
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableState, FrameState, ParkedWaitIndex, WaitCondition,
     WaitKind, WaitSourceDriver, WaitState,
 };
+use tempfile::tempdir;
 use tower::ServiceExt;
 
 fn index() -> ParkedWaitIndex {
@@ -159,4 +160,60 @@ async fn acknowledged_identity_replays_and_conflicting_reuse_fails() {
             .status(),
         StatusCode::CONFLICT
     );
+}
+
+#[tokio::test]
+async fn durable_ingress_reopens_with_the_exact_selected_delivery() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("http.sqlite");
+    let (router, mut driver) =
+        durable_signal_router(&database, 4, AllowAll).expect("durable router builds");
+    let first_response = tokio::spawn(router.oneshot(request()));
+    let selected = loop {
+        if let Some(delivery) = driver.receive(&index(), 1).expect("driver polls") {
+            break delivery;
+        }
+        tokio::task::yield_now().await;
+    };
+    assert!(!first_response.is_finished());
+    first_response.abort();
+    drop(driver);
+
+    let empty = ParkedWaitIndex::rebuild(&DurableState::new(Machine::new().snapshot()))
+        .expect("empty index rebuilds");
+    let (reopened_router, mut reopened) =
+        durable_signal_router(&database, 4, AllowAll).expect("durable router reopens");
+    let retry = tokio::spawn(reopened_router.oneshot(request()));
+    let redelivered = loop {
+        if let Some(delivery) = reopened.receive(&empty, 1).expect("driver polls") {
+            break delivery;
+        }
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(redelivered, selected);
+    reopened
+        .acknowledge(&redelivered.activation_id)
+        .expect("retained delivery acknowledges");
+    assert!(
+        reopened
+            .receive(&empty, 1)
+            .expect("acknowledged ingress drains")
+            .is_none()
+    );
+    assert_eq!(
+        retry
+            .await
+            .expect("task joins")
+            .expect("router responds")
+            .status(),
+        StatusCode::ACCEPTED
+    );
+
+    let replay = durable_signal_router(&database, 4, AllowAll)
+        .expect("durable router reopens again")
+        .0
+        .oneshot(request())
+        .await
+        .expect("router responds");
+    assert_eq!(replay.status(), StatusCode::ACCEPTED);
 }

@@ -2,6 +2,14 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(unix)]
+use std::path::Path;
+#[cfg(unix)]
+use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
+use std::thread;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use cymule_resource::{
     ArtifactResolver, ArtifactStore, ResourceClient, ResourceError, ResourceShape,
@@ -122,4 +130,115 @@ fn malformed_directory_manifest_fails_before_publication() {
         store.commit_write(&session),
         Err(ResourceError::Substrate(_))
     ));
+}
+
+#[cfg(unix)]
+struct KillChild(Child);
+
+#[cfg(unix)]
+impl Drop for KillChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(unix)]
+fn process_kill_intent() -> ResourceWriteIntent {
+    ResourceWriteIntent {
+        write_id: "write:process-kill".to_owned(),
+        shape: ResourceShape::Object,
+        media_type: "text/plain".to_owned(),
+        annotations: BTreeMap::from([("purpose".to_owned(), "crash-recovery".to_owned())]),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn resource_process_kill_worker_entry() {
+    let Ok(root) = std::env::var("CYMULE_RESOURCE_KILL_ROOT") else {
+        return;
+    };
+    let phase = std::env::var("CYMULE_RESOURCE_KILL_PHASE").expect("kill phase exists");
+    let marker = std::env::var("CYMULE_RESOURCE_KILL_MARKER").expect("kill marker exists");
+    let mut store = FsResourceStore::open(root, "fs:process-kill").expect("store opens");
+    let session = store
+        .begin_write(&process_kill_intent())
+        .expect("write begins");
+    store
+        .write_chunk(&session, 0, b"durable ")
+        .expect("first chunk writes");
+    if phase == "after_commit" {
+        store
+            .write_chunk(&session, 8, b"resource")
+            .expect("second chunk writes");
+        store.commit_write(&session).expect("Resource commits");
+    } else {
+        assert_eq!(phase, "after_chunk");
+    }
+    fs::write(marker, b"ready").expect("kill marker writes");
+    loop {
+        thread::park_timeout(Duration::from_mins(1));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn filesystem_resource_recovers_from_real_process_death_before_and_after_publication() {
+    for phase in ["after_chunk", "after_commit"] {
+        let directory = tempdir().expect("temporary directory creates");
+        let store_root = directory.path().join("store");
+        let marker = directory.path().join("kill-ready");
+        let child = Command::new(std::env::current_exe().expect("test executable resolves"))
+            .arg("--exact")
+            .arg("resource_process_kill_worker_entry")
+            .arg("--nocapture")
+            .env("CYMULE_RESOURCE_KILL_ROOT", &store_root)
+            .env("CYMULE_RESOURCE_KILL_PHASE", phase)
+            .env("CYMULE_RESOURCE_KILL_MARKER", &marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("kill worker starts");
+        let mut child = KillChild(child);
+        wait_for_marker(&mut child.0, &marker);
+        child.0.kill().expect("worker is killed");
+        assert!(!child.0.wait().expect("worker is reaped").success());
+
+        let mut store =
+            FsResourceStore::open(&store_root, "fs:process-kill").expect("store reopens");
+        let session = store
+            .begin_write(&process_kill_intent())
+            .expect("write resumes");
+        store
+            .write_chunk(&session, 0, b"durable ")
+            .expect("first chunk replays");
+        store
+            .write_chunk(&session, 8, b"resource")
+            .expect("second chunk converges");
+        let resource = store.commit_write(&session).expect("commit converges");
+        let replay = store.commit_write(&session).expect("commit replays");
+        assert_eq!(resource, replay);
+        let mut bytes = Vec::new();
+        ResourceClient::new(store)
+            .copy_to(&resource, 3, &mut bytes)
+            .expect("Resource copies");
+        assert_eq!(bytes, b"durable resource");
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_marker(child: &mut Child, marker: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if marker.exists() {
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("worker status reads") {
+            panic!("Resource kill worker exited before barrier with {status}");
+        }
+        assert!(Instant::now() < deadline, "Resource kill worker timed out");
+        thread::sleep(Duration::from_millis(10));
+    }
 }

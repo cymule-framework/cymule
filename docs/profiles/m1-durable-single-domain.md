@@ -1,8 +1,8 @@
 # M1 Durable Single-Domain Profile
 
-Status: partial.
+Status: implemented for one production single-domain authority.
 
-## Implemented foundation
+## Implemented profile
 
 - portable `cymule.machine-snapshot/2` with deterministic projection rebuild,
   restored command deduplication, and legacy v1 read compatibility;
@@ -11,6 +11,11 @@ Status: partial.
   repeated compaction lineage, old-command replay, tamper rejection, and
   lost-acknowledgement reopen;
 - provider-neutral whole-state compare-and-swap `DurableStore`;
+- multi-Run domain creation: the first Run initializes the durable state and
+  every later Run atomically appends its exact Plan, input, start/attempt
+  Events, command receipts, and initial Continuation without resetting existing
+  Runs; identical start replay returns the retained boundary and conflicting
+  Plan/input reuse fails closed;
 - typed, self-validating higher-profile journals committed by the same M1 CAS,
   allowing M2-M4 state to share one durable authority without entering the
   semantic kernel;
@@ -88,22 +93,26 @@ Status: partial.
   root scope commit, dispatch-start claim, Applied settlement, and Unknown
   observation, with exact prepare/dispatch/reconcile call counts across reopen;
 - reopen, interrupted-staging, stale-writer, stale-claim, and idempotency tests.
-
-## Remaining completion gates
-
-- all SDK control/query surfaces and restart-level end-to-end tests;
-- production resolver/store and wait-source plugins.
+- lost-acknowledgement recovery for later Run creation, proving reopen resumes
+  one committed Run without duplicate start Events or component invocation.
+- closed `cymule.durable-control/1` start, resume, wait-admission,
+  effect-release, Run-query, and domain-query commands, with one Rust admission
+  authority and Rust, TypeScript, Python, and Go transport contracts;
+- real child-process death before and after every CAS in a complete mutating
+  effect Run, with SQLite reopen, Machine replay, terminal outbox inspection,
+  and independent provider dispatch/reconciliation counts;
+- official production adapters for SQLite/atomic-directory state, filesystem
+  and conditional object Resources, persistent HTTP signals, durable timers,
+  and restart-monotonic logical clock observations.
 
 No concrete storage product is part of this profile. An adapter conforms only
 when it provides atomic whole-state CAS and passes the profile fault suite.
 
 Version decision: Resources introduce independent `cymule.resource/1` and
 `cymule.resource-handoff/1` domains. Identified signal/timer admission introduces
-the independent `cymule.wait-activation/1` record inside partial M1 durable
-state. The additive activation map defaults empty when older M1 state is read.
-The additive `seal_resource` and `verify_wait_activation` Engine requests are
-returned only to callers that request them; activation verification lets every
-SDK validate the closed record without claiming stateful admission. These
-additions do not alter `cymule.semantic/1`, `cymule-core`, `ArtifactRef`, Event,
-or Continuation wire shapes; they implement the existing resource, durable-wait,
-consume-once, and epoch-fencing laws.
+the independent `cymule.wait-activation/1` record inside M1 durable state. The
+additive activation map defaults empty when older M1 state is read. The
+`cymule.durable-control/1` domain is additive and delegates all reduction to
+Rust. These additions do not alter `cymule.semantic/1`, `cymule-core`,
+`ArtifactRef`, Event, or Continuation wire shapes; they implement the existing
+resource, durable-wait, consume-once, and epoch-fencing laws.

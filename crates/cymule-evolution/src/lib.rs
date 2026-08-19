@@ -7,6 +7,8 @@ mod controller;
 mod durable;
 mod error;
 mod linker;
+mod live;
+mod live_control;
 mod model;
 mod registry_durable;
 
@@ -26,6 +28,15 @@ pub use error::{EvolutionError, EvolutionResult};
 pub use linker::{
     DEFINITION_REGISTRY_VERSION, DefinitionRegistry, DefinitionRegistrySnapshot, LinkedPlan,
     PlanTemplate, ReferenceStrategy, SUBFLOW_REVISION_VERSION, SubflowReference, SubflowRevision,
+};
+pub use live::{
+    DurableLiveEvolutionController, LIVE_EVOLUTION_CHECKPOINT_SCHEMA, LIVE_EVOLUTION_VERSION,
+    LiveEvolutionCheckpoint, LiveEvolutionController, LiveEvolutionSnapshot, LiveMigrationCommand,
+    LivePublicationCommand, LivePublicationReceipt, LivePublicationRecord, LiveTemplateUpdate,
+};
+pub use live::{LiveVirtualClaimCommand, LiveVirtualClaimReceipt};
+pub use live_control::{
+    LIVE_EVOLUTION_CONTROL_VERSION, LiveEvolutionCommand, LiveEvolutionResponse,
 };
 pub use model::{
     EvolutionSnapshot, GateOutcome, ImpactCone, MigrationReceipt, ObservationOutcome,

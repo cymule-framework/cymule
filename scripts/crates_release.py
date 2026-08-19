@@ -236,12 +236,19 @@ def package_workspace(
 def cargo_publish_dry_run(crates: list[PublicCrate], allow_dirty: bool) -> None:
     """Run Cargo's own dependency-aware workspace publication simulation."""
 
-    command = ["cargo", "publish", "--dry-run"]
-    for crate in crates:
-        command.extend(["--package", crate.name])
-    if allow_dirty:
-        command.append("--allow-dirty")
-    run(command)
+    patch = "[patch.crates-io]\n" + "\n".join(
+        f'{json.dumps(crate.name)} = {{ path = {json.dumps(str(crate.path))} }}'
+        for crate in crates
+    ) + "\n"
+    with tempfile.TemporaryDirectory(prefix="cymule-publish-dry-run-") as directory:
+        config = pathlib.Path(directory) / "config.toml"
+        config.write_text(patch, encoding="utf-8")
+        command = ["cargo", "publish", "--dry-run", "--config", str(config)]
+        for crate in crates:
+            command.extend(["--package", crate.name])
+        if allow_dirty:
+            command.append("--allow-dirty")
+        run(command)
 
 
 def write_packaged_workspace(

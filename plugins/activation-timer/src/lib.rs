@@ -1,34 +1,15 @@
 //! Durable logical timer source for Cymule.
 
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+pub use cymule_clock_system::{SystemWallClock as SystemClock, WallClock as Clock};
 use cymule_durable::{
     DurableError, DurableResult, ParkedWaitIndex, WaitActivationSource, WaitDelivery,
     WaitSourceDriver,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use serde_json::Value;
-
-/// Clock observation boundary for timer plugins.
-pub trait Clock {
-    /// Current observed Unix time in milliseconds.
-    fn now_unix_ms(&self) -> DurableResult<u64>;
-}
-
-/// System clock implementation for production timer polling.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now_unix_ms(&self) -> DurableResult<u64> {
-        let duration = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| DurableError::Substrate(error.to_string()))?;
-        u64::try_from(duration.as_millis())
-            .map_err(|error| DurableError::Substrate(error.to_string()))
-    }
-}
 
 /// SQLite-backed durable timer source.
 pub struct SqliteTimerDriver<C = SystemClock> {
@@ -80,12 +61,31 @@ impl<C: Clock> SqliteTimerDriver<C> {
                     timer_id TEXT NOT NULL,
                     due_unix_ms INTEGER NOT NULL,
                     value_json BLOB NOT NULL,
+                    selected_wait_ids BLOB,
                     acknowledged INTEGER NOT NULL DEFAULT 0
                 ) STRICT;
                 CREATE INDEX IF NOT EXISTS cymule_timers_due
                     ON cymule_timers(acknowledged, due_unix_ms, activation_id);",
             )
             .map_err(sqlite_error)?;
+        let has_selected_wait_ids: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pragma_table_info('cymule_timers')
+                    WHERE name = 'selected_wait_ids'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_error)?;
+        if !has_selected_wait_ids {
+            connection
+                .execute(
+                    "ALTER TABLE cymule_timers ADD COLUMN selected_wait_ids BLOB",
+                    [],
+                )
+                .map_err(sqlite_error)?;
+        }
         Ok(Self { connection, clock })
     }
 
@@ -144,7 +144,7 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT activation_id, timer_id, value_json
+                "SELECT activation_id, timer_id, value_json, selected_wait_ids
                  FROM cymule_timers
                  WHERE acknowledged = 0 AND due_unix_ms <= ?1
                  ORDER BY due_unix_ms, activation_id",
@@ -156,21 +156,49 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
                 ))
             })
             .map_err(sqlite_error)?;
         for row in rows {
-            let (activation_id, timer_id, bytes) = row.map_err(sqlite_error)?;
+            let (activation_id, timer_id, bytes, retained_targets) = row.map_err(sqlite_error)?;
             let source = WaitActivationSource::Timer { timer_id };
-            let selection = index.select(&source, max_targets)?;
-            if selection.wait_ids.is_empty() {
-                continue;
-            }
+            let wait_ids = if let Some(retained_targets) = retained_targets {
+                let wait_ids = serde_json::from_slice(&retained_targets)?;
+                validate_retained_targets(&wait_ids, max_targets)?;
+                wait_ids
+            } else {
+                let selection = index.select(&source, max_targets)?;
+                if selection.wait_ids.is_empty() {
+                    continue;
+                }
+                let target_bytes = cymule_core::canonical_bytes(&selection.wait_ids)?;
+                self.connection
+                    .execute(
+                        "UPDATE cymule_timers SET selected_wait_ids = ?1
+                         WHERE activation_id = ?2 AND selected_wait_ids IS NULL
+                           AND acknowledged = 0",
+                        params![target_bytes, activation_id],
+                    )
+                    .map_err(contention)?;
+                let retained: Vec<u8> = self
+                    .connection
+                    .query_row(
+                        "SELECT selected_wait_ids FROM cymule_timers
+                         WHERE activation_id = ?1 AND acknowledged = 0",
+                        [&activation_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(sqlite_error)?;
+                let wait_ids = serde_json::from_slice(&retained)?;
+                validate_retained_targets(&wait_ids, max_targets)?;
+                wait_ids
+            };
             let value = serde_json::from_slice(&bytes)?;
             return Ok(Some(WaitDelivery {
                 activation_id,
                 source,
-                wait_ids: selection.wait_ids,
+                wait_ids,
                 value,
             }));
         }
@@ -203,6 +231,19 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
             )))
         }
     }
+}
+
+fn validate_retained_targets(
+    wait_ids: &std::collections::BTreeSet<String>,
+    max_targets: usize,
+) -> DurableResult<()> {
+    if max_targets == 0 || wait_ids.is_empty() || wait_ids.len() > max_targets {
+        return Err(DurableError::Validation(format!(
+            "retained timer delivery has {} targets outside requested bound {max_targets}",
+            wait_ids.len()
+        )));
+    }
+    Ok(())
 }
 
 fn validate_identity(kind: &str, identity: &str) -> DurableResult<()> {

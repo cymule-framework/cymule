@@ -17,7 +17,7 @@ Status: implemented in 0.1.0.
 
 ## M1 - Durable single domain
 
-Status: partial.
+Status: implemented for one production single-domain authority.
 
 - provider-neutral durable state CAS, full Continuation data, waits, leases,
   outbox, component occurrences, and snapshot records are implemented;
@@ -43,24 +43,31 @@ Status: partial.
 - rebuilt parked indexes provide bounded deterministic signal/timer selection,
   and the replaceable source-driver contract acknowledges only after CAS;
   acknowledgement loss redelivers one retained activation across reopen;
-- Run creation commits the initial Machine and Continuation atomically; a
-  deterministic sweep faults every CAS before commit and after durable commit,
-  reopens authority, and verifies replay plus terminal outbox integrity;
+- first and later Run creation commit exact Plan/input/start data and the
+  initial Continuation atomically in one shared domain; identical start replay
+  preserves progress, conflicting Plan/input reuse fails, and lost creation
+  acknowledgement reopens to one Run; a deterministic sweep faults every Run
+  CAS before commit and after durable commit, reopens authority, and verifies
+  replay plus terminal outbox integrity;
 - provider-neutral cross-Run Resource descriptors, replay classification,
   bounded resolver/store interfaces, M1 handoff journals, and four SDK builders
   are implemented; handoff input activation is atomic and lost-receipt tested;
 - canonical Event-prefix compaction retains an authenticated base plus exact
   suffix, cumulative receipt lineage, old command deduplication, and
   stale/lost-receipt recovery;
-- one black-box M1/M3 campaign now observes committed progress, externally
-  kills the process, reopens authority, recovers a possible expired claim, and
-  completes without duplicate logical results; production
-  resolver/clock/signal plugins and process-kill coverage across every M1 crash
-  window remain proposed.
+- one black-box M1/M3 campaign observes committed progress, externally kills
+  the process, reopens authority, recovers a possible expired claim, and
+  completes without duplicate logical results;
+- a separate real-process matrix kills both sides of every discovered M1 Run
+  CAS and verifies terminal state plus external provider counts;
+- persistent HTTP/timer sources, filesystem/conditional-object Resources, and
+  a restart-monotonic clock adapter complete the production substrate set;
+- Rust, TypeScript, Python, and Go expose one closed mutation/query control
+  union while Rust remains the only admission authority.
 
 ## Optional plugin track - Agent interaction
 
-Status: partial.
+Status: implemented optional plugin profile.
 
 This track is not a Cymule framework milestone or a requirement for M1, M3, or
 M4 conformance. The optional
@@ -70,11 +77,12 @@ generic M1 CAS, application journals, waits, effects, scopes, resources, and
 binding rules without exporting Agent-domain types from the framework CLI or
 language SDKs.
 
-The Rust plugin currently includes durable projection/replay, input suspension,
+The Rust plugin includes durable projection/replay, input suspension,
 binding-pinned host interactions, no-redispatch reconciliation, workspace
-effect integration, staged stream finalization, and fault-oriented reopen/CAS
-tests. Its remaining gates and exact behavior live in the
-[plugin profile](../plugins/agent-interaction/PROFILE.md). ACP, MCP, A2A,
+effect integration, staged stream finalization, all-host-kind failure/refusal
+coverage, and real process-death matrices for its occurrence, Session, and
+stream journals. Its exact behavior lives in the [plugin
+profile](../plugins/agent-interaction/PROFILE.md). ACP, MCP, A2A,
 provider, editor, and concrete Agent Loop support are separate plugin layers and
 do not block the framework roadmap.
 
@@ -131,6 +139,13 @@ Status: implemented for one provider-neutral durable domain.
   latest-compatible exact-schema registry resolution, transitive reusable
   module relinking, pinned references, historical linked Plans, and durable
   tamper-checked registry recovery are implemented;
+- one unified durable authority now checkpoints the registry, exact
+  template-plus-Plan history, every template-scoped DAG/rollout, automatic
+  compatible relinks, and occurrence pins together; lost publication receipts
+  replay the original advanced/blocked parent set;
+- future Plan selection and virtual worker claim can commit in one capacity-slot
+  lease CAS, preventing a claim without its immutable version pin or a pin
+  appended after dispatch;
 - exact reviewed patch admission, generic higher-profile impact sites, checked
   migration and isolated shadow plugin contracts, observation gates,
   promotion/rollback, mixed-version Plan selection, four-language controls,
@@ -138,6 +153,9 @@ Status: implemented for one provider-neutral durable domain.
 - `LatestCompatible` is the wire/API default, reachable no-widening admission
   protects future heads, durable safe-point proofs replace caller booleans, and
   explicit replacement-Run restart authorization is implemented.
+- `cymule.live-evolution-control/1` exposes the complete template-scoped
+  authority through Rust, TypeScript, Python, and Go without client-side
+  sequencing.
 
 ## M5 - Isolation and federation
 

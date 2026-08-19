@@ -1,4 +1,5 @@
-use cymule_evolution::EvolutionCommand;
+use cymule_durable::{DurableCommand, DurableResponse};
+use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
 use cymule_virtual::{
     RegionMigrationCommand, RegionMigrationReceipt, VirtualClaimCommand, VirtualClaimReceipt,
     VirtualCompactionCommand, VirtualCompactionReceipt, VirtualLeaseRenewalCommand,
@@ -6,6 +7,19 @@ use cymule_virtual::{
     VirtualRehydrationCommand, VirtualRehydrationReceipt, VirtualRunWeightCommand,
     VirtualRunWeightReceipt, WorkOccurrence, WorkResolutionCommand,
 };
+
+/// Transport-neutral M1 single-domain control and query interface.
+///
+/// Implementations transport the closed command to a durable Rust authority;
+/// SDKs never replay Continuations, select wait targets, reconcile effects, or
+/// reduce outbox state locally.
+pub trait DurableControl {
+    /// Transport or remote-control error.
+    type Error;
+
+    /// Submit one stateful mutation or read-only query.
+    fn submit(&mut self, command: &DurableCommand) -> Result<DurableResponse, Self::Error>;
+}
 
 /// Transport-neutral M4 live-evolution control interface.
 ///
@@ -20,6 +34,21 @@ pub trait EvolutionControl {
 
     /// Submit one idempotent, versioned M4 command.
     fn submit(&mut self, command: &EvolutionCommand) -> Result<Self::Response, Self::Error>;
+}
+
+/// Unified registry, DAG, rollout, migration, and occurrence control interface.
+///
+/// Implementations submit one closed command to the complete durable
+/// live-evolution authority. SDK transports do not sequence registry and
+/// rollout mutations locally.
+pub trait LiveEvolutionControl {
+    /// Transport or remote-control error.
+    type Error;
+    /// Transport-specific typed response or receipt union.
+    type Response;
+
+    /// Submit one idempotent unified live-evolution command.
+    fn submit(&mut self, command: &LiveEvolutionCommand) -> Result<Self::Response, Self::Error>;
 }
 
 /// Transport-neutral query and control interface for M3 virtual work.

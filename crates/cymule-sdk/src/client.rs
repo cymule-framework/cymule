@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use cymule_core::{CoreError, PlanCandidate, SealedPlan};
-use cymule_durable::WaitActivation;
-use cymule_evolution::EvolutionCommand;
+use cymule_durable::{DurableCommand, WaitActivation};
+use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::ExecutionResult;
 use serde::{Deserialize, Serialize};
@@ -21,11 +21,19 @@ pub trait Engine {
         &self,
         activation: &WaitActivation,
     ) -> Result<WaitActivation, CoreError>;
+    /// Validate one closed, versioned M1 control envelope.
+    fn verify_durable_command(&self, command: &DurableCommand)
+    -> Result<DurableCommand, CoreError>;
     /// Validate one closed, versioned M4 control envelope.
     fn verify_evolution_command(
         &self,
         command: &EvolutionCommand,
     ) -> Result<EvolutionCommand, CoreError>;
+    /// Validate one complete unified live-evolution control envelope.
+    fn verify_live_evolution_command(
+        &self,
+        command: &LiveEvolutionCommand,
+    ) -> Result<LiveEvolutionCommand, CoreError>;
     /// Execute a sealed plan through a selected plugin realization.
     fn run(
         &self,
@@ -100,6 +108,20 @@ impl CliEngine {
         }
     }
 
+    fn verify_durable_command(
+        &self,
+        command: &DurableCommand,
+    ) -> Result<DurableCommand, CoreError> {
+        match self.request(&EngineRequest::VerifyDurableCommand {
+            command: command.clone(),
+        })? {
+            EngineResponse::VerifiedDurableCommand { command } => Ok(command),
+            response => Err(CoreError::Validation(format!(
+                "CLI returned unexpected response {response:?}"
+            ))),
+        }
+    }
+
     fn verify_evolution_command(
         &self,
         command: &EvolutionCommand,
@@ -108,6 +130,20 @@ impl CliEngine {
             command: command.clone(),
         })? {
             EngineResponse::VerifiedEvolutionCommand { command } => Ok(command),
+            response => Err(CoreError::Validation(format!(
+                "CLI returned unexpected response {response:?}"
+            ))),
+        }
+    }
+
+    fn verify_live_evolution_command(
+        &self,
+        command: &LiveEvolutionCommand,
+    ) -> Result<LiveEvolutionCommand, CoreError> {
+        match self.request(&EngineRequest::VerifyLiveEvolutionCommand {
+            command: command.clone(),
+        })? {
+            EngineResponse::VerifiedLiveEvolutionCommand { command } => Ok(command),
             response => Err(CoreError::Validation(format!(
                 "CLI returned unexpected response {response:?}"
             ))),
@@ -138,11 +174,25 @@ impl Engine for CliEngine {
         CliEngine::verify_wait_activation(self, activation)
     }
 
+    fn verify_durable_command(
+        &self,
+        command: &DurableCommand,
+    ) -> Result<DurableCommand, CoreError> {
+        CliEngine::verify_durable_command(self, command)
+    }
+
     fn verify_evolution_command(
         &self,
         command: &EvolutionCommand,
     ) -> Result<EvolutionCommand, CoreError> {
         CliEngine::verify_evolution_command(self, command)
+    }
+
+    fn verify_live_evolution_command(
+        &self,
+        command: &LiveEvolutionCommand,
+    ) -> Result<LiveEvolutionCommand, CoreError> {
+        CliEngine::verify_live_evolution_command(self, command)
     }
 
     fn run(
@@ -178,8 +228,14 @@ enum EngineRequest {
     VerifyWaitActivation {
         activation: WaitActivation,
     },
+    VerifyDurableCommand {
+        command: DurableCommand,
+    },
     VerifyEvolutionCommand {
         command: EvolutionCommand,
+    },
+    VerifyLiveEvolutionCommand {
+        command: LiveEvolutionCommand,
     },
     Run {
         plan: SealedPlan,
@@ -195,7 +251,9 @@ enum EngineResponse {
     Sealed { plan: SealedPlan },
     SealedResource { resource: ResourceHandle },
     VerifiedWaitActivation { activation: WaitActivation },
+    VerifiedDurableCommand { command: DurableCommand },
     VerifiedEvolutionCommand { command: EvolutionCommand },
+    VerifiedLiveEvolutionCommand { command: LiveEvolutionCommand },
     Executed { result: ExecutionResult },
     Verified,
 }

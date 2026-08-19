@@ -10,7 +10,7 @@ use crate::{EvolutionError, EvolutionResult, analyze_relink};
 pub const SUBFLOW_REVISION_VERSION: &str = "cymule.subflow-revision/2";
 
 /// Portable registry snapshot schema and semantic version.
-pub const DEFINITION_REGISTRY_VERSION: &str = "cymule.definition-registry/2";
+pub const DEFINITION_REGISTRY_VERSION: &str = "cymule.definition-registry/3";
 
 /// Resolution strategy retained by an unsealed parent template.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,7 +120,7 @@ pub struct DefinitionRegistrySnapshot {
     pub templates: BTreeMap<String, PlanTemplate>,
     /// Latest immutable link selected for each template.
     pub current_links: BTreeMap<String, LinkedPlan>,
-    /// All previously emitted links keyed by immutable Plan ID.
+    /// All previously emitted links keyed by template-plus-Plan identity.
     pub link_history: BTreeMap<String, LinkedPlan>,
 }
 
@@ -243,31 +243,32 @@ impl DefinitionRegistry {
         }
         registry.current_links = snapshot.current_links.clone();
 
-        for (plan_id, linked) in &snapshot.link_history {
-            if linked.plan.plan_id != *plan_id {
+        for (history_id, linked) in &snapshot.link_history {
+            if link_history_id(&linked.template_id, &linked.plan.plan_id)? != *history_id {
                 return Err(EvolutionError::Validation(format!(
-                    "historical link key {plan_id} does not match its Plan ID"
+                    "historical link key {history_id} does not match its template and Plan"
                 )));
             }
             linked.plan.verify()?;
             let template = snapshot.templates.get(&linked.template_id).ok_or_else(|| {
                 EvolutionError::Validation(format!(
-                    "historical link {plan_id} references missing template {}",
+                    "historical link {history_id} references missing template {}",
                     linked.template_id
                 ))
             })?;
             let expected = registry.link_exact(template, &linked.resolved_revisions)?;
             if expected != *linked {
                 return Err(EvolutionError::Validation(format!(
-                    "historical link {plan_id} does not match its exact revisions"
+                    "historical link {history_id} does not match its exact revisions"
                 )));
             }
         }
         for linked in snapshot.current_links.values() {
-            if snapshot.link_history.get(&linked.plan.plan_id) != Some(linked) {
+            let history_id = link_history_id(&linked.template_id, &linked.plan.plan_id)?;
+            if snapshot.link_history.get(&history_id) != Some(linked) {
                 return Err(EvolutionError::Validation(format!(
-                    "current Plan {} is missing from link history",
-                    linked.plan.plan_id
+                    "current Plan {} for template {} is missing from link history",
+                    linked.plan.plan_id, linked.template_id
                 )));
             }
         }
@@ -386,7 +387,18 @@ impl DefinitionRegistry {
 
     /// Historical linked Plan by content identity.
     pub fn historical_link(&self, plan_id: &str) -> Option<&LinkedPlan> {
-        self.link_history.get(plan_id)
+        let mut matches = self
+            .link_history
+            .values()
+            .filter(|linked| linked.plan.plan_id == plan_id);
+        let linked = matches.next()?;
+        matches.next().is_none().then_some(linked)
+    }
+
+    /// Historical linked Plan under one exact parent template.
+    pub fn historical_link_for(&self, template_id: &str, plan_id: &str) -> Option<&LinkedPlan> {
+        let history_id = link_history_id(template_id, plan_id).ok()?;
+        self.link_history.get(&history_id)
     }
 
     fn link_registered(&mut self, template_id: &str) -> EvolutionResult<LinkedPlan> {
@@ -400,8 +412,10 @@ impl DefinitionRegistry {
         {
             return Ok(current.clone());
         }
-        self.link_history
-            .insert(linked.plan.plan_id.clone(), linked.clone());
+        self.link_history.insert(
+            link_history_id(&linked.template_id, &linked.plan.plan_id)?,
+            linked.clone(),
+        );
         self.current_links
             .insert(template_id.to_owned(), linked.clone());
         Ok(linked)
@@ -615,6 +629,10 @@ impl DefinitionRegistry {
             }
         }
     }
+}
+
+fn link_history_id(template_id: &str, plan_id: &str) -> EvolutionResult<String> {
+    content_id("cymule.link-history/1", &(template_id, plan_id)).map_err(Into::into)
 }
 
 fn rewrite_invocation(region: &mut Region, original: &str, linked: &str) {

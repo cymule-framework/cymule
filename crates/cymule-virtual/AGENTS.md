@@ -61,6 +61,10 @@
   Slot IDs express bounded capacity, not a queue, host, Pod, process, or worker
   registry. One slot has at most one active claim; separate slots may progress
   independently through optimistic M1 CAS without blocking locks.
+- `claim_command_and_checkpoint_with_journals` is the exact cross-profile seam
+  for atomic version selection plus worker claim. Additional records must be
+  retained identically on replay; a claim receipt without its coupled record is
+  corruption, not a reason to append the missing side later.
 - Claim, renewal, and Run-weight controls retain stable command receipts. A
   no-eligible-work claim checkpoints an empty receipt but acquires no lease.
   Renewal atomically advances the M1 lease and active occurrence lease epoch.

@@ -22,14 +22,12 @@ are rebuildable projections. Languages, databases, queues, sandboxes,
 providers, and deployment topologies remain replaceable realizations rather
 than framework semantics.
 
-> **Project status:** Cymule `0.1.x` is an early executable reference
-> implementation of this model, not yet a complete production fabric. The
-> exact semantic kernel, bounded virtual-work scheduler, and provider-neutral
-> live-evolution controls are executable today. Single-domain durable execution
-> is fault-tested but remains partial. Optional Agent integration is maintained
-> as a plugin. See
-> the [roadmap](docs/roadmap.md) for the exact implemented and remaining
-> boundaries.
+> **Project status:** Cymule `0.1.x` implements the complete single-domain
+> execution profile: durable suspension and recovery, honest effect handling,
+> bounded virtual work, safe live evolution, and an optional Agent interaction
+> plugin. It is not a distributed consensus system or an untrusted-code
+> isolation boundary. See the [roadmap](docs/roadmap.md) for those separate
+> future profiles.
 
 ## What Cymule gives you
 
@@ -94,6 +92,7 @@ Cymule ships a day-one adapter set without making any provider canonical:
 - SQLite and atomic-directory durable stores;
 - content-addressed filesystem and Apache `object_store` Resources;
 - acknowledgement-coupled HTTP signals and durable logical timers;
+- a restart-monotonic logical clock for leases and scheduling observations;
 - a bounded process executor;
 - composable OpenTelemetry/OTLP observation;
 - official RMCP tool mapping above the optional Agent contracts.
@@ -448,13 +447,14 @@ See [Architecture](docs/architecture.md) and the
 | TypeScript SDK | Implemented | Builder and CLI-backed engine client. |
 | Python SDK | Implemented | Dependency-light builder and engine client. |
 | Go SDK | Implemented | Builder and engine client. |
-| Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, durable handoff journal, and atomic input activation. |
-| Durable wait activation | Implemented foundation | Identified signal/timer records, bounded parked indexes, replaceable source drivers, acknowledgement-loss replay, reopen-safe epoch advance, and four SDK wire validation. |
-| Durable effect policies | Implemented foundation | Nested commit gates, eager observation binding, explicit caller release, exact outbox deltas, and ambiguity reconciliation. |
+| Cross-Run Resources | Implemented | Four SDK builders, Rust sealing, bounded resolver/store interfaces, durable handoff journal, atomic input activation, and official filesystem/object-store adapters. |
+| Durable execution control | Implemented | Four-language start, resume, wait admission, effect release, Run query, and domain query commands admitted by Rust. |
+| Durable wait activation | Implemented | Identified signal/timer records, bounded parked indexes, persistent HTTP/timer sources, exact acknowledgement-loss replay, and reopen-safe epoch advance. |
+| Durable effect policies | Implemented | Nested commit gates, eager observation binding, explicit caller release, exact outbox deltas, and ambiguity reconciliation. |
 | Large virtual work | Implemented | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker recovery, durable checkpoints, and four SDK controls. |
 | Virtual work control | Implemented | Binding-pinned attempts, work/lease fencing, explicit recovery, closed dispositions, and four SDK transport interfaces. |
-| Live evolution | Implemented foundation | Deterministic Plan diff/DAG, compatible future relinking, durable occurrence pins, safe-point migration receipts, shadow evidence, canary gates, and rollback. |
-| Agent interaction plugin | Optional, partial | Rust plugin with Session, occurrence, input, workspace, and stream conformance tests. |
+| Live evolution | Implemented | Unified definition/DAG/rollout authority, compatible transitive relinking, durable occurrence pins, content-backed safe-point migration and shadow evidence, canary gates, and rollback. |
+| Agent interaction plugin | Optional, implemented | Session, occurrence, input, workspace, and stream contracts with host-kind and real process-death fault matrices. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
 | JSON Schema contracts | Implemented | Draft 2020-12 Plan and protocol schemas. |
 | MLIR workbench | Partial | Generic-operation syntax and MLIR 22 smoke validation. |
@@ -474,9 +474,9 @@ Today Cymule provides:
 - **Exact semantic execution:** sealed Plans, canonical identities, typed
   idempotent Commands, causal replay, fenced attempts and effects, and explicit
   reconciliation of ambiguous outcomes.
-- **Durable single-domain execution (partial):** CAS state,
-  Continuations, waits, outbox records, component occurrences, compaction, and
-  acknowledgement-loss recovery.
+- **Durable single-domain execution:** multi-Run CAS state, complete
+  Continuations, waits, outbox records, component occurrences, compaction,
+  four-language controls, and process-death recovery across every Run CAS.
 - **Large virtual work:** bounded materialization, deterministic fairness,
   portable snapshots, verified region changes, cold-history archival, and
   fenced worker leases.
@@ -490,10 +490,10 @@ model behavior, infrastructure topology, and provider policy remain outside the
 framework core.
 
 Cymule does not claim distributed consensus or failover, strong multi-tenant
-isolation, provider-level exactly-once behavior, production certification for
-every adapter, or a complete MLIR dialect and lowering pipeline. Exact replay
-requires retained Events and Artifacts; exact execution replay additionally
-requires a durably recorded component occurrence.
+isolation, provider-level exactly-once behavior, certification of every
+third-party provider configuration, or a complete MLIR dialect and lowering
+pipeline. Exact replay requires retained Events and Artifacts; exact execution
+replay additionally requires a durably recorded component occurrence.
 
 See [Conformance](docs/conformance.md) for precise behavioral claims and
 [Roadmap](docs/roadmap.md) for the implementation sequence.
@@ -524,6 +524,7 @@ plugins/resource-fs     content-addressed files and directory manifests
 plugins/resource-object-store Apache object_store Resource adapter
 plugins/activation-http ack-after-CAS signal ingress
 plugins/activation-timer durable logical timer source
+plugins/clock-system    restart-monotonic logical clock observations
 plugins/executor-process bounded process plugin transport
 plugins/observability-otel derived tracing and OTLP export
 plugins/agent-mcp       official RMCP tool adapter, without an Agent Loop

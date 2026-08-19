@@ -17,6 +17,7 @@
   normalized package compiles against published Cymule contracts. Test adapters
   and examples remain `publish = false`.
 - Day-one official adapters are SQLite/directory durable stores, filesystem and
-  Apache object-store Resources, HTTP/timer activation, process execution,
-  OpenTelemetry export, and RMCP tool mapping. Each directory owns focused
-  conformance and must remain independently testable.
+  Apache object-store Resources, HTTP/timer activation, restart-monotonic clock
+  observation, process execution, OpenTelemetry export, and RMCP tool mapping.
+  Each directory owns focused conformance and must remain independently
+  testable.

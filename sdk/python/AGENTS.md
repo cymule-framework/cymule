@@ -14,6 +14,8 @@
 - Wait activation builders sort and deduplicate exact targets while preserving
   delivery, source, and Artifact identities. Rust Engine verification is not a
   substitute for durable CAS admission against pending waits.
+- `DurableControlBuilder` emits the complete M1 command/query union and copies
+  caller JSON defensively; no Python code reduces durable state.
 - Virtual work query/control types preserve command, occurrence, binding,
   owner, epoch, and disposition fields. SDK transports do not classify errors
   or decide retry policy.
@@ -28,5 +30,8 @@
 - Evolution builders preserve the closed M4 operation tag, exact Plan and
   Artifact identities, adapter requests, observations, and gates. Python never
   resolves latest revisions or evaluates a gate locally.
+- Unified live-evolution builders preserve the parent template, nested command,
+  publication evidence, and exact safe-point proof. They never implement
+  reverse-dependency relinking or split the durable command.
 - Migration/restart builders preserve safe-point proof identity, source epoch,
   distinct Run IDs, explicit input, and evidence without local interpretation.

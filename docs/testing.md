@@ -66,6 +66,12 @@ runner:
 | Black-box user path | built engine plus a real process or embedded plugin | Hello World plus durable campaign crash/evolution tests |
 | Plugin conformance | only the optional capability's public seam | one leaf suite per plugin |
 
+Cross-language differential also validates the unified
+`cymule.live-evolution-control/1` fixture in Rust, TypeScript, Python, and Go.
+Stateful Rust tests separately prove that transitive registry relinking, Plan
+DAG edges, rollout decisions, occurrence pins, and virtual worker claims share
+the intended single-domain CAS boundaries.
+
 The suite inventory is a dependency graph, not a checklist that every edit must
 run. A leaf change runs its owner. A shared interface runs that owner and direct
 consumers. A frozen semantic or wire change runs all affected projections. An
@@ -133,8 +139,8 @@ of a normal routed commit because repetition is a different kind of evidence,
 not a reason to delay feedback from a local SDK or documentation change.
 The repeated deterministic sweep includes the high-risk day-one plugin
 boundaries: non-blocking SQLite contention, exact filesystem/object-store chunk
-retry, ack-coupled HTTP/timers, process timeout ambiguity, and MCP incomplete
-work that must remain caller-driven.
+retry, ack-coupled HTTP/timers, restart-monotonic clock observation, process
+timeout ambiguity, and MCP incomplete work that must remain caller-driven.
 
 Coverage, mutation, and platform portability are independent scheduled/manual
 workflows:
@@ -240,9 +246,10 @@ Black-box process-kill campaigns remain separate from adapter fault injection.
 The durable evaluation witness observes a committed M1/M3 projection through a
 read-only SQLite connection, kills the writer process externally, reopens the
 same Resource and virtual journal, explicitly recovers an expired claim when
-present, and proves one terminal result per logical case. It does not replace
-the deterministic per-CAS matrices, which identify narrower internal windows
-that an OS kill cannot select reproducibly.
+present, and proves one terminal result per logical case. Store wrappers in
+integration tests additionally place an external barrier immediately before or
+after a selected real CAS, then the parent sends `SIGKILL`. This selects narrow
+OS-death windows without adding a test branch to the reducer.
 
 The M1 Run sweep treats every whole-state CAS as two distinct anomaly points:
 failure before the write and lost acknowledgement after a successful write. It
@@ -251,6 +258,14 @@ fault at each position, disables the fault, reopens through the public durable
 interface, and runs the same integrity probe. This permanently regresses the
 split initialization window where a Run could previously become durable without
 its first Continuation.
+
+The production SQLite witness repeats that automatically discovered boundary
+set with real child-process death on both CAS sides. A separate SQLite provider
+ledger counts dispatch and reconciliation independently of Cymule state. The
+filesystem Resource witness likewise kills after a retained chunk and after
+publication. M4 kills both sides of unified publication, and the optional Agent
+suite partitions occurrence, Session, and stream journal death from its
+host-kind failure/refusal matrix.
 
 Run that matrix independently for nested commit-gated, eager observational, and
 explicit-release effects. Nested tests inspect the child scope on both sides of

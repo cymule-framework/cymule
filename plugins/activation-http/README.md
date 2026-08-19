@@ -7,10 +7,15 @@ matching `WaitSourceDriver`.
 cargo add cymule-activation-http
 ```
 
-`POST /v1/signals` accepts an activation ID, signal key, and JSON value. The
-request does not return success when it enters an in-memory queue: it waits
-until the application drives the source and acknowledges the committed durable
-CAS. Channel saturation returns 503 so the producer can retry the same identity.
+`durable_signal_router` persists each exact request and its first selected wait
+targets in a SQLite spool. `POST /v1/signals` returns success only after the
+application admits and acknowledges the M1 activation CAS. If the process dies,
+the client sees transport failure and an identical retry joins or observes the
+retained delivery; conflicting reuse returns 409. Channel saturation or SQLite
+contention returns 503 without changing activation semantics.
+
+`signal_router` remains an explicitly process-local embedding option. It has
+the same acknowledgement contract but is not the production restart boundary.
 
 Applications must supply an `HttpActivationAuthorizer`; `AllowAll` is provided
 only for explicit local/test use. Typed user input remains owned by its

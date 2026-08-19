@@ -191,8 +191,37 @@ impl DurableVirtualController {
         command: &VirtualClaimCommand,
         journal_id: &str,
     ) -> VirtualResult<VirtualClaimReceipt> {
+        Self::claim_command_and_checkpoint_with_journals(
+            coordinator,
+            scheduler,
+            command,
+            journal_id,
+            &[],
+        )
+    }
+
+    /// Claim one item and atomically append additional higher-profile records.
+    ///
+    /// This is the cross-profile admission seam used when immutable version
+    /// selection and the fenced worker claim must become visible together.
+    pub fn claim_command_and_checkpoint_with_journals<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        scheduler: &mut VirtualScheduler,
+        command: &VirtualClaimCommand,
+        journal_id: &str,
+        additional: &[JournalBatch],
+    ) -> VirtualResult<VirtualClaimReceipt> {
         if let Some(receipt) = replay_claim_receipt(coordinator, scheduler, journal_id, command)? {
+            ensure_journal_batches_retained(coordinator, additional)?;
             return Ok(receipt);
+        }
+        if additional
+            .iter()
+            .any(|batch| batch.journal_id == journal_id)
+        {
+            return Err(VirtualError::Validation(format!(
+                "additional journal batch repeats virtual journal {journal_id}"
+            )));
         }
         let authority = coordinator
             .preview_lease(
@@ -212,18 +241,21 @@ impl DurableVirtualController {
                 return Err(error);
             }
         };
+        let mut batches = Vec::with_capacity(additional.len() + 1);
+        batches.push(JournalBatch {
+            journal_id: journal_id.to_owned(),
+            records: vec![record],
+        });
+        batches.extend_from_slice(additional);
         let result = if receipt.claim.is_some() {
             coordinator.checkpoint_lease_journals(
                 &authority,
                 command.logical_now,
                 command.lease_ttl,
-                &[JournalBatch {
-                    journal_id: journal_id.to_owned(),
-                    records: vec![record],
-                }],
+                &batches,
             )
         } else {
-            coordinator.append_journal_record(journal_id, record)
+            coordinator.checkpoint_journals(&batches)
         };
         if let Err(error) = result {
             *scheduler = before;
@@ -652,6 +684,38 @@ impl DurableVirtualController {
         }
         Ok(woken)
     }
+}
+
+fn ensure_journal_batches_retained<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    batches: &[JournalBatch],
+) -> VirtualResult<()> {
+    for batch in batches {
+        let retained = coordinator
+            .journal_records(&batch.journal_id)
+            .map_err(durable_error)?;
+        for requested in &batch.records {
+            match retained
+                .iter()
+                .find(|record| record.record_id == requested.record_id)
+            {
+                Some(existing) if existing == requested => {}
+                Some(_) => {
+                    return Err(VirtualError::Conflict(format!(
+                        "journal record {} has conflicting retained content",
+                        requested.record_id
+                    )));
+                }
+                None => {
+                    return Err(VirtualError::Conflict(format!(
+                        "replayed virtual claim is missing coupled journal record {}",
+                        requested.record_id
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn checkpoint_record<S: DurableStore>(

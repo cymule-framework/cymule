@@ -15,6 +15,10 @@
   `cymule.wait-activation/1` delivery record. Source, targets, and result must
   stay closed and pass Rust plus four-SDK fixture conformance; concrete clock,
   signal, queue, and transport fields never enter this schema.
+- `durable-control.schema.json` owns the closed
+  `cymule.durable-control/1` mutation/query union. SDKs may construct start,
+  resume, wait-activation, effect-release, and read-only query commands, but
+  only the Rust M1 runtime may reduce them against a durable domain.
 - `virtual-checkpoint.schema.json` owns `cymule.virtual-checkpoint/1` cursor and
   bounded-frontier journal payloads. The derived parked-reason index is omitted
   from wire state and rebuilt from the closed parked-work map on restore.

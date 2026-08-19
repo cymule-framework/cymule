@@ -179,7 +179,7 @@ commands = [
 description = "Run HTTP signal and durable timer activation adapters."
 lane = "rust"
 tools = ["rust"]
-commands = [["bash", "./scripts/verify-rust.sh", "cymule-activation-http", "cymule-activation-timer"]]
+commands = [["bash", "./scripts/verify-rust.sh", "cymule-activation-http", "cymule-activation-timer", "cymule-clock-system"]]
 
 [suites.rust-executor-plugin]
 description = "Run the hardened process executor adapter."
@@ -287,7 +287,7 @@ patterns = ["plugins/resource-fs/**", "plugins/resource-object-store/**"]
 suites = ["rust-resource-plugins"]
 
 [[routes]]
-patterns = ["plugins/activation-http/**", "plugins/activation-timer/**"]
+patterns = ["plugins/activation-http/**", "plugins/activation-timer/**", "plugins/clock-system/**"]
 suites = ["rust-activation-plugins"]
 
 [[routes]]

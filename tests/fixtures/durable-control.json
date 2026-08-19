@@ -1,0 +1,5 @@
+{
+  "type": "query_domain",
+  "control_version": "cymule.durable-control/1",
+  "query_id": "query:cross-language-domain"
+}

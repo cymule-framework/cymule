@@ -1,6 +1,4 @@
-//! Versioned agent wire data. Field-level rustdoc is completed alongside the
-//! frozen M2 schema; type-level contracts are authoritative during incubation.
-#![allow(missing_docs)]
+//! Versioned protocol-neutral Agent interaction wire data.
 
 use std::collections::BTreeMap;
 
@@ -16,27 +14,45 @@ use crate::{AgentError, AgentResult};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     /// UTF-8 text.
-    Text { text: String },
+    Text {
+        /// UTF-8 content.
+        text: String,
+    },
     /// Structured canonical JSON.
-    Json { value: Value },
+    Json {
+        /// Structured JSON content.
+        value: Value,
+    },
     /// Immutable Cymule artifact.
-    Artifact { artifact: ArtifactRef },
+    Artifact {
+        /// Immutable Artifact reference.
+        artifact: ArtifactRef,
+    },
     /// URI reference interpreted by an external resource adapter.
     Resource {
+        /// Opaque resource URI interpreted by an adapter.
         uri: String,
+        /// Optional media type supplied by the adapter.
         mime_type: Option<String>,
     },
     /// Provider-neutral cross-Run Resource Handle.
-    ResourceHandle { resource: ResourceHandle },
+    ResourceHandle {
+        /// Verified provider-neutral Resource Handle.
+        resource: ResourceHandle,
+    },
 }
 
 /// Message author role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
+    /// Caller or human input.
     User,
+    /// Agent-produced output.
     Agent,
+    /// Tool-produced output.
     Tool,
+    /// System or policy context.
     System,
 }
 
@@ -56,9 +72,13 @@ pub struct AgentMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
+    /// No foreground interaction is active.
     Idle,
+    /// A caller-owned interaction is active.
     Running,
+    /// Durable external input is required.
     RequiresAction,
+    /// The Session cannot accept later updates.
     Closed,
 }
 
@@ -66,9 +86,13 @@ pub enum AgentState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStopReason {
+    /// The caller-owned turn reached its ordinary boundary.
     EndTurn,
+    /// The caller cancelled the foreground work.
     Cancelled,
+    /// The agent or policy refused the requested work.
     Refusal,
+    /// The caller ended the foreground work after an error.
     Error,
 }
 
@@ -76,9 +100,13 @@ pub enum SessionStopReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanEntryStatus {
+    /// Work has not started.
     Pending,
+    /// Work is currently active.
     InProgress,
+    /// Work completed.
     Completed,
+    /// Work was cancelled.
     Cancelled,
 }
 
@@ -86,8 +114,11 @@ pub enum PlanEntryStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPlanEntry {
+    /// Stable entry identity.
     pub entry_id: String,
+    /// User-visible description.
     pub content: String,
+    /// Current projected lifecycle.
     pub status: PlanEntryStatus,
 }
 
@@ -95,7 +126,9 @@ pub struct AgentPlanEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPlan {
+    /// Stable user-visible Plan identity.
     pub plan_id: String,
+    /// Ordered Plan entries.
     pub entries: Vec<AgentPlanEntry>,
 }
 
@@ -103,11 +136,17 @@ pub struct AgentPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallStatus {
+    /// Tool request is known but not admitted.
     Pending,
+    /// Tool request is waiting for a separate permission decision.
     AwaitingPermission,
+    /// Tool execution may have started.
     InProgress,
+    /// Tool execution completed with output.
     Completed,
+    /// Tool execution terminated with failure evidence.
     Failed,
+    /// Tool execution was cancelled.
     Cancelled,
 }
 
@@ -115,11 +154,17 @@ pub enum ToolCallStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCall {
+    /// Stable caller-owned tool occurrence identity.
     pub tool_call_id: String,
+    /// Abstract tool operation.
     pub operation: String,
+    /// Current projected lifecycle.
     pub status: ToolCallStatus,
+    /// Immutable structured input.
     pub input: Value,
+    /// Finalized output, when available.
     pub output: Option<Vec<ContentBlock>>,
+    /// Optional presentation locations attached by an adapter.
     pub locations: Vec<String>,
 }
 
@@ -127,8 +172,11 @@ pub struct ToolCall {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Usage {
+    /// Cumulative consumed units.
     pub used: u64,
+    /// Reported capacity or budget ceiling.
     pub capacity: u64,
+    /// Optional provider-neutral structured cost observation.
     pub cost: Option<Value>,
 }
 
@@ -136,29 +184,48 @@ pub struct Usage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentUpdate {
+    /// Publish one finalized message.
     Message {
+        /// Stable update identity.
         update_id: String,
+        /// Finalized message.
         message: AgentMessage,
     },
+    /// Change the Session activity projection.
     State {
+        /// Stable update identity.
         update_id: String,
+        /// New Session activity state.
         state: AgentState,
+        /// Required reason when returning to idle.
         stop_reason: Option<SessionStopReason>,
     },
+    /// Replace the current user-visible agent Plan.
     Plan {
+        /// Stable update identity.
         update_id: String,
+        /// Complete current Plan projection.
         plan: AgentPlan,
     },
+    /// Advance one tool lifecycle projection.
     Tool {
+        /// Stable update identity.
         update_id: String,
+        /// Complete current tool projection.
         tool: ToolCall,
     },
+    /// Replace the cumulative usage observation.
     Usage {
+        /// Stable update identity.
         update_id: String,
+        /// Latest cumulative usage.
         usage: Usage,
     },
+    /// Create or resolve one durable elicitation.
     Elicitation {
+        /// Stable update identity.
         update_id: String,
+        /// Complete current elicitation projection.
         elicitation: ElicitationProjection,
     },
 }
@@ -185,6 +252,8 @@ pub struct AgentSession {
     pub session_id: String,
     /// Current activity state.
     pub state: AgentState,
+    /// Reason the latest foreground interaction stopped, when idle.
+    pub stop_reason: Option<SessionStopReason>,
     /// Finalized messages keyed by agent-owned identity.
     pub messages: BTreeMap<String, AgentMessage>,
     /// Message identities in durable presentation order.
@@ -206,6 +275,7 @@ impl AgentSession {
         Self {
             session_id: session_id.into(),
             state: AgentState::Idle,
+            stop_reason: None,
             messages: BTreeMap::new(),
             message_order: Vec::new(),
             plan: None,
@@ -253,12 +323,13 @@ impl AgentSession {
                         "closed Session cannot change state".to_owned(),
                     ));
                 }
-                if state == AgentState::Idle && stop_reason.is_none() {
+                if (state == AgentState::Idle) != stop_reason.is_some() {
                     return Err(AgentError::Validation(
-                        "idle transition requires stop_reason".to_owned(),
+                        "only an idle transition carries exactly one stop_reason".to_owned(),
                     ));
                 }
                 self.state = state;
+                self.stop_reason = stop_reason;
             }
             AgentUpdate::Plan { plan, .. } => self.plan = Some(plan),
             AgentUpdate::Tool { tool, .. } => {
@@ -332,79 +403,123 @@ fn valid_tool_transition(previous: ToolCallStatus, next: ToolCallStatus) -> bool
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Request for an adapter-selected bounded context snapshot.
 pub struct ContextRequest {
+    /// Session whose finalized messages are supplied.
     pub session_id: String,
+    /// Ordered finalized messages eligible for selection.
     pub messages: Vec<AgentMessage>,
+    /// Caller-defined bounded selection budget.
     pub budget: u64,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Immutable context selected for one model occurrence.
 pub struct ContextSnapshot {
+    /// Stable snapshot identity.
     pub snapshot_id: String,
+    /// Selected content.
     pub content: Vec<ContentBlock>,
+    /// Pinned context-adapter binding.
     pub occurrence_binding: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// One model-host request over a pinned context snapshot.
 pub struct ModelRequest {
+    /// Owning Session identity.
     pub session_id: String,
+    /// Exact context visible to this occurrence.
     pub context: ContextSnapshot,
+    /// Abstract tool operations offered by the caller.
     pub tools: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Final response from one model occurrence.
 pub struct ModelResponse {
+    /// Finalized Agent message.
     pub message: AgentMessage,
+    /// Tool requests returned to the caller-owned loop.
     pub tool_requests: Vec<ToolRequest>,
+    /// Pinned model-adapter binding.
     pub occurrence_binding: String,
+    /// Cumulative or occurrence usage observation.
     pub usage: Usage,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Separate authorization request for one proposed tool call.
 pub struct PermissionRequest {
+    /// Stable authorization request identity.
     pub request_id: String,
+    /// Tool request being authorized.
     pub tool: ToolRequest,
+    /// Closed options presented to the policy or user.
     pub options: Vec<String>,
 }
+/// Permission outcome kept separate from tool availability and execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionDecision {
+    /// Permit this occurrence only.
     AllowOnce,
+    /// Refuse this occurrence.
     Deny,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// One pinned permission decision.
 pub struct PermissionResponse {
+    /// Explicit authorization outcome.
     pub decision: PermissionDecision,
+    /// Pinned permission-adapter binding.
     pub occurrence_binding: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Proposed invocation of an abstract tool operation.
 pub struct ToolRequest {
+    /// Stable tool-call identity.
     pub tool_call_id: String,
+    /// Abstract operation name.
     pub operation: String,
+    /// Structured immutable input.
     pub input: Value,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Final response from one tool occurrence.
 pub struct ToolResponse {
+    /// Matching tool-call identity.
     pub tool_call_id: String,
+    /// Finalized output content.
     pub content: Vec<ContentBlock>,
+    /// Pinned tool-adapter binding.
     pub occurrence_binding: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Typed request for human or external input.
 pub struct ElicitationRequest {
+    /// Stable input request identity.
     pub request_id: String,
+    /// Self-contained JSON Schema for an accepted value.
     pub schema: Value,
+    /// User-visible prompt content.
     pub prompt: Vec<ContentBlock>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Accepted or declined elicitation result.
 pub struct ElicitationResponse {
+    /// Matching input request identity.
     pub request_id: String,
+    /// Whether the responder accepted the request.
     pub accepted: bool,
+    /// Validated value when accepted; absent when declined.
     pub value: Option<Value>,
+    /// Pinned elicitation-adapter binding.
     pub occurrence_binding: String,
 }
 
@@ -412,8 +527,11 @@ pub struct ElicitationResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ElicitationProjection {
+    /// Owning M1 wait identity.
     pub wait_id: String,
+    /// Immutable input request.
     pub request: ElicitationRequest,
+    /// Optional terminal response.
     pub response: Option<ElicitationResponse>,
 }
 
@@ -448,17 +566,26 @@ impl ElicitationProjection {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Request to commit or abort a prepared workspace overlay.
 pub struct WorkspaceChange {
+    /// Stable workspace-change identity.
     pub change_id: String,
+    /// Immutable overlay Artifact.
     pub overlay: ArtifactRef,
+    /// Whether the overlay should commit rather than abort.
     pub commit: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Final receipt from a workspace adapter.
 pub struct WorkspaceReceipt {
+    /// Matching workspace-change identity.
     pub change_id: String,
+    /// Observed commit outcome.
     pub committed: bool,
+    /// Immutable provider evidence.
     pub evidence: ArtifactRef,
+    /// Pinned workspace-adapter binding.
     pub occurrence_binding: String,
 }
 
@@ -466,11 +593,17 @@ pub struct WorkspaceReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentHostCallKind {
+    /// Context selection.
     Context,
+    /// Model invocation.
     Model,
+    /// Permission decision.
     Permission,
+    /// Tool invocation.
     Tool,
+    /// Human or external input request.
     Elicitation,
+    /// Workspace overlay application.
     Workspace,
 }
 
@@ -478,11 +611,17 @@ pub enum AgentHostCallKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "request", rename_all = "snake_case")]
 pub enum AgentHostRequest {
+    /// Context-selection request.
     Context(ContextRequest),
+    /// Model-invocation request.
     Model(ModelRequest),
+    /// Permission-decision request.
     Permission(PermissionRequest),
+    /// Tool-invocation request.
     Tool(ToolRequest),
+    /// Human or external input request.
     Elicitation(ElicitationRequest),
+    /// Workspace overlay request.
     Workspace(WorkspaceChange),
 }
 
@@ -504,11 +643,17 @@ impl AgentHostRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "response", rename_all = "snake_case")]
 pub enum AgentHostResponse {
+    /// Context-selection response.
     Context(ContextSnapshot),
+    /// Model-invocation response.
     Model(ModelResponse),
+    /// Permission-decision response.
     Permission(PermissionResponse),
+    /// Tool-invocation response.
     Tool(ToolResponse),
+    /// Human or external input response.
     Elicitation(ElicitationResponse),
+    /// Workspace overlay response.
     Workspace(WorkspaceReceipt),
 }
 
@@ -517,11 +662,20 @@ pub enum AgentHostResponse {
 #[serde(tag = "resolution", rename_all = "snake_case")]
 pub enum AgentOccurrenceResolution {
     /// The original occurrence completed and returned this typed response.
-    Completed { response: AgentHostResponse },
+    Completed {
+        /// Original typed host response.
+        response: AgentHostResponse,
+    },
     /// The original occurrence definitely did not apply.
-    NotApplied { evidence: Vec<ContentBlock> },
+    NotApplied {
+        /// Provider evidence that dispatch did not apply.
+        evidence: Vec<ContentBlock>,
+    },
     /// The provider still cannot determine the original outcome.
-    Unknown { evidence: Vec<ContentBlock> },
+    Unknown {
+        /// Evidence available while the result remains ambiguous.
+        evidence: Vec<ContentBlock>,
+    },
 }
 
 impl AgentHostResponse {
@@ -554,10 +708,15 @@ impl AgentHostResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentHostOccurrenceState {
+    /// Binding and request are durable; dispatch has not started.
     Prepared,
+    /// Dispatch may have started and requires reconciliation after ambiguity.
     Started,
+    /// Typed response is durable.
     Completed,
+    /// Dispatch outcome remains ambiguous.
     Unknown,
+    /// Provider proved the dispatch did not apply.
     NotApplied,
 }
 
@@ -578,14 +737,23 @@ impl AgentHostOccurrenceState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentHostOccurrence {
+    /// Stable caller-supplied occurrence identity.
     pub occurrence_id: String,
+    /// Owning Session identity.
     pub session_id: String,
+    /// Immutable typed request.
     pub request: AgentHostRequest,
+    /// Canonical request digest used for conflict detection.
     pub request_digest: String,
+    /// Current durable lifecycle state.
     pub state: AgentHostOccurrenceState,
+    /// Retained terminal response, when completed.
     pub response: Option<AgentHostResponse>,
+    /// Pinned implementation binding selected before dispatch.
     pub occurrence_binding: String,
+    /// Host error summary for an ambiguous outcome.
     pub failure: Option<String>,
+    /// Evidence collected during cancellation or reconciliation.
     #[serde(default)]
     pub recovery_evidence: Vec<ContentBlock>,
 }

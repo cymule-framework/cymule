@@ -357,8 +357,10 @@ dependencies = [
  "axum",
  "cymule-core",
  "cymule-durable",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower",
 ]
@@ -367,6 +369,7 @@ dependencies = [
 name = "cymule-activation-timer"
 version = "0.1.4"
 dependencies = [
+ "cymule-clock-system",
  "cymule-core",
  "cymule-durable",
  "rusqlite",
@@ -382,9 +385,12 @@ dependencies = [
  "cymule-core",
  "cymule-durable",
  "cymule-resource",
+ "cymule-store-sqlite",
  "jsonschema",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -408,6 +414,17 @@ dependencies = [
  "cymule-runtime",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "cymule-clock-system"
+version = "0.1.4"
+dependencies = [
+ "cymule-core",
+ "cymule-durable",
+ "rusqlite",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]
@@ -448,8 +465,11 @@ dependencies = [
  "cymule-core",
  "cymule-durable",
  "cymule-runtime",
+ "cymule-store-sqlite",
+ "cymule-virtual",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -538,6 +558,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
 ]
 
@@ -556,6 +577,7 @@ version = "0.1.4"
 dependencies = [
  "cymule-core",
  "cymule-durable",
+ "cymule-runtime",
  "rusqlite",
  "serde_json",
  "tempfile",

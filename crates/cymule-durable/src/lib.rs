@@ -1,5 +1,6 @@
 //! Provider-neutral durable single-domain contracts and reference coordinator.
 
+mod control;
 mod coordinator;
 mod error;
 mod executor;
@@ -7,6 +8,10 @@ mod model;
 mod store;
 mod wait_source;
 
+pub use control::{
+    DURABLE_CONTROL_VERSION, DurableBoundary, DurableCommand, DurableDomainView, DurableResponse,
+    DurableRunView, DurableRuntimeControl,
+};
 pub use coordinator::DurableCoordinator;
 pub use error::{DurableError, DurableResult};
 pub use executor::{DriveOutcome, ResumableRuntime};

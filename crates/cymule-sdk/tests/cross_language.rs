@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 use std::env;
 
 use cymule::{
-    CliEngine, DispatchPolicy, EffectProfile, Engine, EvolutionCommand, Expression, FlowBuilder,
-    MutationKind, Operation, ReconciliationMode, Region, RegionMigrationCommand, ResourceCandidate,
-    Step, VirtualClaimCommand, VirtualCompactionCommand, VirtualLeaseRenewalCommand,
-    VirtualRecoveryCommand, VirtualRehydrationCommand, VirtualRunWeightCommand, WaitActivation,
-    WorkOccurrence, WorkResolutionCommand,
+    CliEngine, DispatchPolicy, DurableCommand, EffectProfile, Engine, EvolutionCommand, Expression,
+    FlowBuilder, LiveEvolutionCommand, MutationKind, Operation, ReconciliationMode, Region,
+    RegionMigrationCommand, ResourceCandidate, Step, VirtualClaimCommand, VirtualCompactionCommand,
+    VirtualLeaseRenewalCommand, VirtualRecoveryCommand, VirtualRehydrationCommand,
+    VirtualRunWeightCommand, WaitActivation, WorkOccurrence, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -116,6 +116,26 @@ fn rust_wait_activation_validates_through_the_cli() {
 }
 
 #[test]
+fn rust_durable_control_validates_through_the_cli() {
+    let (Ok(engine_path), Ok(fixture_path)) = (
+        env::var("CYMULE_BIN"),
+        env::var("CYMULE_DURABLE_CONTROL_FIXTURE"),
+    ) else {
+        return;
+    };
+    let command: DurableCommand =
+        serde_json::from_str(&std::fs::read_to_string(fixture_path).expect("fixture reads"))
+            .expect("durable command deserializes");
+    command.verify().expect("durable command verifies locally");
+    assert_eq!(
+        CliEngine::new(engine_path)
+            .verify_durable_command(&command)
+            .expect("Rust engine verifies M1 command"),
+        command
+    );
+}
+
+#[test]
 fn rust_virtual_work_query_and_control_fixtures_are_typed() {
     let occurrence: WorkOccurrence = serde_json::from_str(include_str!(
         "../../../tests/fixtures/virtual-work-occurrence.json"
@@ -198,5 +218,25 @@ fn rust_evolution_control_validates_through_the_cli() {
             .verify_evolution_command(&restart)
             .expect("Rust engine verifies restart command"),
         restart
+    );
+}
+
+#[test]
+fn rust_unified_live_evolution_validates_through_the_cli() {
+    let (Ok(engine_path), Ok(fixture_path)) = (
+        env::var("CYMULE_BIN"),
+        env::var("CYMULE_LIVE_EVOLUTION_CONTROL_FIXTURE"),
+    ) else {
+        return;
+    };
+    let command: LiveEvolutionCommand =
+        serde_json::from_str(&std::fs::read_to_string(fixture_path).expect("fixture reads"))
+            .expect("live-evolution command deserializes");
+    command.verify().expect("command verifies locally");
+    assert_eq!(
+        CliEngine::new(&engine_path)
+            .verify_live_evolution_command(&command)
+            .expect("Rust engine verifies live-evolution command"),
+        command
     );
 }

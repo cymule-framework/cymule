@@ -6,20 +6,28 @@ mod control;
 
 pub use builder::FlowBuilder;
 pub use client::{CliEngine, Engine};
-pub use control::{EvolutionControl, VirtualSchedulingControl, VirtualWorkControl};
+pub use control::{
+    DurableControl, EvolutionControl, LiveEvolutionControl, VirtualSchedulingControl,
+    VirtualWorkControl,
+};
 pub use cymule_core::{
     ArtifactRef, DispatchPolicy, EffectProfile, Expression, MutationKind, Operation, PlanCandidate,
     ReconciliationMode, Region, ScopeMode, SealedPlan, Step, WaitSpec,
 };
-pub use cymule_durable::{WAIT_ACTIVATION_VERSION, WaitActivation, WaitActivationSource};
+pub use cymule_durable::{
+    DURABLE_CONTROL_VERSION, DurableBoundary, DurableCommand, DurableDomainView, DurableResponse,
+    DurableRunView, WAIT_ACTIVATION_VERSION, WaitActivation, WaitActivationSource,
+};
 pub use cymule_evolution::{
-    EVOLUTION_CONTROL_VERSION, EvolutionCommand, GateOutcome, MIGRATION_SAFE_POINT_VERSION,
-    MigrationAdapterDescriptor, MigrationCapabilityChange, MigrationOutput, MigrationPreservation,
-    MigrationReceipt, MigrationRequest, MigrationSafePoint, MigrationStateCoverage,
-    ObservationOutcome, PlanPatch, ReferenceStrategy, RestartReceipt, RestartRequest,
-    RolloutDecision, RolloutEvaluation, RolloutGate, RolloutMode, RolloutObservation,
-    RolloutTransition, ShadowBindingMode, ShadowComparison, ShadowDriverDescriptor,
-    ShadowEffectMode, ShadowOutput, ShadowRequest, SubflowReference,
+    EVOLUTION_CONTROL_VERSION, EvolutionCommand, GateOutcome, LIVE_EVOLUTION_CONTROL_VERSION,
+    LiveEvolutionCommand, LiveMigrationCommand, LivePublicationCommand, LivePublicationReceipt,
+    LiveTemplateUpdate, MIGRATION_SAFE_POINT_VERSION, MigrationAdapterDescriptor,
+    MigrationCapabilityChange, MigrationOutput, MigrationPreservation, MigrationReceipt,
+    MigrationRequest, MigrationSafePoint, MigrationStateCoverage, ObservationOutcome, PlanPatch,
+    PlanTemplate, ReferenceStrategy, RestartReceipt, RestartRequest, RolloutDecision,
+    RolloutEvaluation, RolloutGate, RolloutMode, RolloutObservation, RolloutTransition,
+    ShadowBindingMode, ShadowComparison, ShadowDriverDescriptor, ShadowEffectMode, ShadowOutput,
+    ShadowRequest, SubflowReference,
 };
 pub use cymule_resource::{
     InlineData, ResourceCandidate, ResourceHandle, ResourceHandoff, ResourceIntegrity,

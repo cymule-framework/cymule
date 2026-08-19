@@ -147,6 +147,72 @@ def main() -> int:
     else:
         raise AssertionError("wait activation schema accepted a provider field")
 
+    durable_control = load(root / "tests/fixtures/durable-control.json")
+    durable_validator = Draft202012Validator(
+        by_title["Cymule Durable Control cymule.durable-control/1"],
+        registry=registry,
+    )
+    durable_variants = [
+        {
+            "type": "start_run",
+            "control_version": "cymule.durable-control/1",
+            "run_id": "run:fixture",
+            "candidate": candidate,
+            "input": {"message": "fixture"},
+        },
+        {
+            "type": "resume_run",
+            "control_version": "cymule.durable-control/1",
+            "run_id": "run:fixture",
+        },
+        {
+            "type": "activate_wait",
+            "control_version": "cymule.durable-control/1",
+            "activation_id": "activation:fixture",
+            "source": {"kind": "signal", "key": "signal:fixture"},
+            "wait_ids": ["wait:fixture"],
+            "value": {"accepted": True},
+        },
+        {
+            "type": "release_effect",
+            "control_version": "cymule.durable-control/1",
+            "intent_id": "effect:fixture",
+        },
+        {
+            "type": "query_run",
+            "control_version": "cymule.durable-control/1",
+            "query_id": "query:run-fixture",
+            "run_id": "run:fixture",
+        },
+        durable_control,
+    ]
+    for command in durable_variants:
+        durable_validator.validate(command)
+        verified = json.loads(
+            subprocess.run(
+                [str(engine), "durable-command", "verify", "--input", "-"],
+                input=json.dumps(command),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        if verified != command:
+            raise AssertionError(
+                f"Rust Engine changed durable command {command['type']}"
+            )
+    Draft202012Validator(
+        by_title["Cymule Engine Request"], registry=registry
+    ).validate({"type": "verify_durable_command", "command": durable_control})
+    malformed_durable = dict(durable_control)
+    malformed_durable["provider"] = "must-not-enter-durable-control"
+    try:
+        durable_validator.validate(malformed_durable)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("durable control schema accepted a provider field")
+
     evolution_control = load(root / "tests/fixtures/evolution-control.json")
     evolution_validator = Draft202012Validator(
         by_title["Cymule Evolution Control cymule.evolution-control/2"],
@@ -294,6 +360,46 @@ def main() -> int:
         pass
     else:
         raise AssertionError("evolution control schema accepted a provider field")
+
+    live_evolution = load(root / "tests/fixtures/live-evolution-control.json")
+    live_evolution_validator = Draft202012Validator(
+        by_title[
+            "Cymule Live Evolution Control cymule.live-evolution-control/1"
+        ],
+        registry=registry,
+    )
+    live_evolution_validator.validate(live_evolution)
+    verified_live_evolution = json.loads(
+        subprocess.run(
+            [
+                str(engine),
+                "live-evolution-command",
+                "verify",
+                "--input",
+                str(root / "tests/fixtures/live-evolution-control.json"),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    if verified_live_evolution != live_evolution:
+        raise AssertionError("Rust Engine changed the live-evolution fixture")
+    Draft202012Validator(
+        by_title["Cymule Engine Request"], registry=registry
+    ).validate(
+        {"type": "verify_live_evolution_command", "command": live_evolution}
+    )
+    malformed_live_evolution = dict(live_evolution)
+    malformed_live_evolution["provider"] = "must-not-enter-live-evolution"
+    try:
+        live_evolution_validator.validate(malformed_live_evolution)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError(
+            "live-evolution control schema accepted a provider field"
+        )
 
     virtual_checkpoint = load(root / "tests/fixtures/virtual-checkpoint.json")
     virtual_validator = Draft202012Validator(

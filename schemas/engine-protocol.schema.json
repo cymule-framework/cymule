@@ -28,8 +28,22 @@
     {
       "type": "object", "additionalProperties": false, "required": ["type", "command"],
       "properties": {
+        "type": { "const": "verify_durable_command" },
+        "command": { "$ref": "durable-control.schema.json" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false, "required": ["type", "command"],
+      "properties": {
         "type": { "const": "verify_evolution_command" },
         "command": { "$ref": "evolution-control.schema.json" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false, "required": ["type", "command"],
+      "properties": {
+        "type": { "const": "verify_live_evolution_command" },
+        "command": { "$ref": "live-evolution-control.schema.json" }
       }
     },
     {

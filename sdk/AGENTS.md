@@ -9,6 +9,10 @@
   and transport interface. SDKs construct commands only; Rust resolves module
   revisions, invokes pinned migration/shadow plugins, counts observations, and
   admits promotion or rollback.
+- Every SDK also exposes `cymule.live-evolution-control/1`, which scopes the
+  existing Plan operations to one parent template and adds definition
+  publication, template registration, atomic publish/relink, and required
+  migration/restart safe-point proofs. SDKs never sequence these writes.
 - Migration and restart commands carry exact safe-point IDs and source epochs.
   SDKs never derive safe points, reinterpret old state, or initialize the
   replacement Run locally.
@@ -21,6 +25,9 @@
 - Wait activation clients must preserve `cymule.wait-activation/1` delivery,
   source, exact targets, and Artifact identity. All SDKs submit the shared
   fixture to the Rust Engine; only a durable runtime admits it against state.
+- Every SDK exposes the same closed `cymule.durable-control/1` mutations and
+  queries. Builders normalize only set-like target ordering; Rust alone seals
+  Plans/Artifacts and admits Continuation, wait, or effect transitions.
 - Virtual work SDK contracts preserve stable control command and occurrence
   identities, owner/work/lease fencing, logical observation time, immutable
   binding, and closed disposition variants. SDKs expose transport interfaces

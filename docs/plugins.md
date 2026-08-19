@@ -14,9 +14,10 @@ into Plans and Events.
 | `cymule-directory-store` | `DurableStore` | Rust filesystem APIs, `fs4` | complete-state atomic replacement, fsync, non-blocking writer claim |
 | `cymule-store-sqlite` | `DurableStore` | SQLite through `rusqlite` | WAL, full synchronous mode, immediate transaction CAS, zero busy timeout, reopen/integrity checks |
 | `cymule-resource-fs` | `ArtifactStore` / `ArtifactResolver` | Rust filesystem APIs, `fs4` | content addressing, exact chunk retry, atomic publication, recursive directory manifests, bounded cursor listing |
-| `cymule-resource-object-store` | object `ArtifactStore` / `ArtifactResolver` | Apache `object_store` | conditional records/chunks, bounded multipart promotion, digest verification; provider features for local, S3, GCS, Azure and HTTP/WebDAV |
-| `cymule-activation-http` | signal `WaitSourceDriver` | Axum, Tokio | bounded ingress, injected authorization, response only after activation acknowledgement, duplicate/conflict handling |
-| `cymule-activation-timer` | timer `WaitSourceDriver` | SQLite through `rusqlite` | durable schedules, injected clock, exact redelivery until acknowledgement |
+| `cymule-resource-object-store` | object `ArtifactStore` / `ArtifactResolver` | Apache `object_store` | conditional records/chunks, bounded multipart promotion, digest verification; maintained S3, GCS, Azure and HTTP clients; backends without required CAS operations fail closed |
+| `cymule-activation-http` | signal `WaitSourceDriver` | Axum, Tokio, SQLite | durable ingress spool and target selection, injected authorization, response only after activation acknowledgement, exact reopen/redelivery, duplicate/conflict handling |
+| `cymule-activation-timer` | timer `WaitSourceDriver` | SQLite through `rusqlite` | durable schedules and selected targets, injected clock, exact redelivery after restart until acknowledgement |
+| `cymule-clock-system` | logical-time observation | OS clock, SQLite through `rusqlite` | strictly increasing per-scope values across restart and backward wall-clock movement, content-identified observations, zero-timeout contention |
 | `cymule-executor-process` | `PluginHost` | `std::process`, `wait-timeout` | cleared environment, explicit args/env, bounded pipes, concurrent draining, timeout kill/reap |
 | `cymule-observability-otel` | derived observation | `tracing`, OpenTelemetry Rust, OTLP | bounded identity records, caller-composed layer, no global subscriber or semantic authority |
 | `cymule-agent` | optional Agent-domain contracts | Cymule durable journals | Sessions/projections, pinned host occurrences, input/workspace/stream durability without an Agent Loop |

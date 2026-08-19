@@ -81,6 +81,7 @@ case "${1:-}" in
       --package cymule-resource-object-store \
       --package cymule-activation-http \
       --package cymule-activation-timer \
+      --package cymule-clock-system \
       --package cymule-executor-process \
       --package cymule-observability-otel \
       --package cymule-agent-mcp \
@@ -117,6 +118,10 @@ case "${1:-}" in
       cymule-activation-timer \
       "$OUTPUT_DIR/mutation-plugins/activation-timer" \
       'schedule|SqliteTimerDriver.*receive|SqliteTimerDriver.*acknowledge'
+    run_mutants \
+      cymule-clock-system \
+      "$OUTPUT_DIR/mutation-plugins/clock-system" \
+      'SqliteClock.*observe|ClockObservation::verify'
     run_mutants \
       cymule-executor-process \
       "$OUTPUT_DIR/mutation-plugins/executor-process" \

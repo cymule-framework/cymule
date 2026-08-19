@@ -1,6 +1,6 @@
 use cymule_core::{
     EffectTransition, Event, EventPayload, Machine, MachineSnapshot, ReconciliationResolution,
-    WorldOutcome,
+    SealedPlan, WorldOutcome,
 };
 
 use crate::{
@@ -75,6 +75,47 @@ impl<S: DurableStore> DurableCoordinator<S> {
             state,
         });
         Ok(commit.revision)
+    }
+
+    /// Atomically create one new Run and its first resumable Continuation.
+    ///
+    /// The first Run initializes an empty domain. Later Runs append one exact
+    /// Plan/input/start/attempt delta to the existing Machine and publish their
+    /// Continuation in the same CAS revision. Existing Run IDs fail closed;
+    /// callers reopen and inspect the retained Run after an unknown receipt.
+    pub fn create_run(
+        &mut self,
+        machine: &Machine,
+        continuation: Continuation,
+    ) -> DurableResult<String> {
+        if self.stored.is_none() {
+            return self.initialize_run(machine, continuation);
+        }
+        if self
+            .state()?
+            .continuations
+            .contains_key(&continuation.run_id)
+        {
+            return Err(DurableError::IllegalTransition(format!(
+                "Run {} already has a durable Continuation",
+                continuation.run_id
+            )));
+        }
+        let next_machine = machine.snapshot();
+        ensure_run_start_machine(&self.state()?.machine, &next_machine, &continuation)?;
+        self.mutate_checked(|state| {
+            if state.continuations.contains_key(&continuation.run_id) {
+                return Err(DurableError::IllegalTransition(format!(
+                    "Run {} already has a durable Continuation",
+                    continuation.run_id
+                )));
+            }
+            state.machine = next_machine;
+            state
+                .continuations
+                .insert(continuation.run_id.clone(), continuation);
+            Ok(())
+        })
     }
 
     /// Current verified state.
@@ -1356,6 +1397,81 @@ fn ensure_effect_enqueue_machine(
     Ok(())
 }
 
+fn ensure_run_start_machine(
+    current: &MachineSnapshot,
+    next: &MachineSnapshot,
+    continuation: &Continuation,
+) -> DurableResult<()> {
+    if continuation.status != ContinuationStatus::Running
+        || continuation.epoch != 0
+        || continuation.frames.len() != 1
+        || continuation.state.as_ref() != continuation.frames.first().map(|frame| &frame.input)
+        || continuation.scope_stack != [cymule_core::ROOT_SCOPE_ID]
+        || !continuation.wait_set.is_empty()
+        || !continuation.effect_obligations.is_empty()
+        || !continuation.authority_leases.is_empty()
+        || !continuation.budget.is_empty()
+        || !continuation.causal_frontier.is_empty()
+    {
+        return Err(DurableError::Validation(
+            "new Run Continuation is not at its exact initial boundary".to_owned(),
+        ));
+    }
+    let plan = next
+        .plans
+        .iter()
+        .find(|plan| plan.plan_id == continuation.plan_id)
+        .ok_or_else(|| DurableError::Validation("new Run Plan is missing".to_owned()))?;
+    let input = continuation
+        .state
+        .as_ref()
+        .ok_or_else(|| DurableError::Validation("new Run input is missing".to_owned()))?;
+    let events = ensure_canonical_machine_delta_with_plan(
+        current,
+        next,
+        Some(plan),
+        &std::collections::BTreeSet::from([input.clone()]),
+        "Run creation",
+    )?;
+    let [started, attempt] = events.as_slice() else {
+        return Err(DurableError::Validation(
+            "Run creation must add exactly start and first-attempt Events".to_owned(),
+        ));
+    };
+    let run_matches = started.run_id == continuation.run_id
+        && matches!(
+            &started.payload,
+            EventPayload::RunStarted { plan_id, binding_context }
+                if plan_id == &continuation.plan_id
+                    && binding_context == &continuation.binding_context
+        );
+    let implementation = continuation
+        .binding_context
+        .strip_prefix("binding:plugin/")
+        .ok_or_else(|| {
+            DurableError::Validation("new Run binding context is malformed".to_owned())
+        })?;
+    let attempt_matches = attempt.run_id == continuation.run_id
+        && matches!(
+            &attempt.payload,
+            EventPayload::AttemptStarted {
+                attempt_id,
+                continuation_id,
+                occurrence_binding,
+                epoch,
+            } if attempt_id == &format!("attempt:{}:0", continuation.run_id)
+                && continuation_id == &format!("continuation:{}", continuation.run_id)
+                && occurrence_binding == &format!("binding:{implementation}/runtime")
+                && *epoch == 0
+        );
+    if !run_matches || !attempt_matches {
+        return Err(DurableError::Validation(
+            "Run creation Events do not match the initial Continuation".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_effect_claim_machine(
     current: &MachineSnapshot,
     next: &MachineSnapshot,
@@ -1458,9 +1574,34 @@ fn ensure_canonical_machine_delta(
     artifacts: &std::collections::BTreeSet<cymule_core::ArtifactRef>,
     operation: &str,
 ) -> DurableResult<Vec<Event>> {
-    if current.snapshot_version != next.snapshot_version || current.plans != next.plans {
+    ensure_canonical_machine_delta_with_plan(current, next, None, artifacts, operation)
+}
+
+fn ensure_canonical_machine_delta_with_plan(
+    current: &MachineSnapshot,
+    next: &MachineSnapshot,
+    allowed_plan: Option<&SealedPlan>,
+    artifacts: &std::collections::BTreeSet<cymule_core::ArtifactRef>,
+    operation: &str,
+) -> DurableResult<Vec<Event>> {
+    if current.snapshot_version != next.snapshot_version || current.base != next.base {
         return Err(DurableError::Validation(format!(
-            "{operation} cannot change Machine version or Plans"
+            "{operation} cannot change Machine version or compacted base"
+        )));
+    }
+    let mut expected_plans = current.plans.clone();
+    if let Some(plan) = allowed_plan
+        && !expected_plans
+            .iter()
+            .any(|existing| existing.plan_id == plan.plan_id)
+    {
+        plan.verify()?;
+        expected_plans.push(plan.clone());
+        expected_plans.sort_by(|left, right| left.plan_id.cmp(&right.plan_id));
+    }
+    if expected_plans != next.plans {
+        return Err(DurableError::Validation(format!(
+            "{operation} contains unrelated Plan changes"
         )));
     }
     if next.events.len() < current.events.len()

@@ -139,6 +139,65 @@ export interface EvolutionControl<Response = Json> {
   submit(command: EvolutionCommand): Promise<Response>;
 }
 
+export interface MigrationSafePoint {
+  safe_point_version: "cymule.migration-safe-point/1";
+  safe_point_id: string;
+  run_id: string;
+  plan_id: string;
+  epoch: number;
+  state: ArtifactRef | null;
+  continuation_digest: string;
+}
+
+export type ReferenceStrategy =
+  | { strategy: "latest_compatible" }
+  | { strategy: "pinned"; revision_id: string };
+
+export interface SubflowReference {
+  logical_ref: string;
+  local_definition: string;
+  input_schema: Schema;
+  output_schema: Schema;
+  strategy: ReferenceStrategy;
+}
+
+export interface PlanTemplate {
+  template_id: string;
+  candidate: PlanCandidate;
+  references: SubflowReference[];
+}
+
+export interface LivePublicationCommand {
+  logical_ref: string;
+  definition: PlanCandidate["definitions"][number];
+  evidence: ArtifactRef;
+  mode: RolloutMode;
+}
+
+type LiveEvolutionOperation =
+  | {
+      operation: "publish_definition";
+      logical_ref: string;
+      definition: PlanCandidate["definitions"][number];
+    }
+  | { operation: "register_template"; template: PlanTemplate }
+  | { operation: "publish_and_relink"; publication: LivePublicationCommand }
+  | {
+      operation: "apply";
+      template_id: string;
+      command: EvolutionCommand;
+      safe_point?: MigrationSafePoint;
+    };
+
+export type LiveEvolutionCommand = {
+  control_version: "cymule.live-evolution-control/1";
+  command_id: string;
+} & LiveEvolutionOperation;
+
+export interface LiveEvolutionControl<Response = Json> {
+  submit(command: LiveEvolutionCommand): Promise<Response>;
+}
+
 export type WaitActivationSource =
   | { kind: "signal"; key: string }
   | { kind: "timer"; timer_id: string };
@@ -149,6 +208,48 @@ export interface WaitActivation {
   source: WaitActivationSource;
   wait_ids: string[];
   result: ArtifactRef;
+}
+
+export type DurableCommand =
+  | {
+      type: "start_run";
+      control_version: "cymule.durable-control/1";
+      run_id: string;
+      candidate: PlanCandidate;
+      input: Json;
+    }
+  | {
+      type: "resume_run";
+      control_version: "cymule.durable-control/1";
+      run_id: string;
+    }
+  | {
+      type: "activate_wait";
+      control_version: "cymule.durable-control/1";
+      activation_id: string;
+      source: WaitActivationSource;
+      wait_ids: string[];
+      value: Json;
+    }
+  | {
+      type: "release_effect";
+      control_version: "cymule.durable-control/1";
+      intent_id: string;
+    }
+  | {
+      type: "query_run";
+      control_version: "cymule.durable-control/1";
+      query_id: string;
+      run_id: string;
+    }
+  | {
+      type: "query_domain";
+      control_version: "cymule.durable-control/1";
+      query_id: string;
+    };
+
+export interface DurableControl<Response = Json> {
+  submit(command: DurableCommand): Promise<Response>;
 }
 
 export type ParkReason =
@@ -643,6 +744,108 @@ export class WaitActivationBuilder {
   }
 }
 
+export class DurableControlBuilder {
+  static startRun(runId: string, candidate: PlanCandidate, input: Json): DurableCommand {
+    DurableControlBuilder.identity("Run", runId);
+    return {
+      type: "start_run",
+      control_version: "cymule.durable-control/1",
+      run_id: runId,
+      candidate: structuredClone(candidate),
+      input: structuredClone(input),
+    };
+  }
+
+  static resumeRun(runId: string): DurableCommand {
+    DurableControlBuilder.identity("Run", runId);
+    return { type: "resume_run", control_version: "cymule.durable-control/1", run_id: runId };
+  }
+
+  static activateSignal(
+    activationId: string,
+    key: string,
+    waitIds: string[],
+    value: Json,
+  ): DurableCommand {
+    return DurableControlBuilder.activate(
+      activationId,
+      { kind: "signal", key },
+      waitIds,
+      value,
+    );
+  }
+
+  static activateTimer(
+    activationId: string,
+    timerId: string,
+    waitId: string,
+    value: Json,
+  ): DurableCommand {
+    return DurableControlBuilder.activate(
+      activationId,
+      { kind: "timer", timer_id: timerId },
+      [waitId],
+      value,
+    );
+  }
+
+  static releaseEffect(intentId: string): DurableCommand {
+    DurableControlBuilder.identity("effect intent", intentId);
+    return {
+      type: "release_effect",
+      control_version: "cymule.durable-control/1",
+      intent_id: intentId,
+    };
+  }
+
+  static queryRun(queryId: string, runId: string): DurableCommand {
+    DurableControlBuilder.identity("query", queryId);
+    DurableControlBuilder.identity("Run", runId);
+    return {
+      type: "query_run",
+      control_version: "cymule.durable-control/1",
+      query_id: queryId,
+      run_id: runId,
+    };
+  }
+
+  static queryDomain(queryId: string): DurableCommand {
+    DurableControlBuilder.identity("query", queryId);
+    return {
+      type: "query_domain",
+      control_version: "cymule.durable-control/1",
+      query_id: queryId,
+    };
+  }
+
+  private static activate(
+    activationId: string,
+    source: WaitActivationSource,
+    waitIds: string[],
+    value: Json,
+  ): DurableCommand {
+    DurableControlBuilder.identity("activation", activationId);
+    const targets = [...new Set(waitIds)].sort();
+    if (targets.length === 0 || targets.some((target) => target.length === 0)) {
+      throw new Error("durable activation requires at least one wait identity");
+    }
+    return {
+      type: "activate_wait",
+      control_version: "cymule.durable-control/1",
+      activation_id: activationId,
+      source,
+      wait_ids: targets,
+      value: structuredClone(value),
+    };
+  }
+
+  private static identity(kind: string, value: string): void {
+    if (value.length === 0 || value.length > 512) {
+      throw new Error(`durable ${kind} identity must contain 1..=512 characters`);
+    }
+  }
+}
+
 export class EvolutionControlBuilder {
   static applyPatch(commandId: string, patch: PlanPatch): EvolutionCommand {
     return EvolutionControlBuilder.build(commandId, { operation: "apply_patch", patch });
@@ -697,6 +900,66 @@ export class EvolutionControlBuilder {
       control_version: "cymule.evolution-control/2",
       command_id: commandId,
       ...structuredClone(operation),
+    };
+  }
+}
+
+export class LiveEvolutionControlBuilder {
+  static publishDefinition(
+    commandId: string,
+    logicalRef: string,
+    definition: PlanCandidate["definitions"][number],
+  ): LiveEvolutionCommand {
+    return LiveEvolutionControlBuilder.build(commandId, {
+      operation: "publish_definition",
+      logical_ref: logicalRef,
+      definition: structuredClone(definition),
+    });
+  }
+
+  static registerTemplate(commandId: string, template: PlanTemplate): LiveEvolutionCommand {
+    return LiveEvolutionControlBuilder.build(commandId, {
+      operation: "register_template",
+      template: structuredClone(template),
+    });
+  }
+
+  static publishAndRelink(
+    commandId: string,
+    publication: LivePublicationCommand,
+  ): LiveEvolutionCommand {
+    return LiveEvolutionControlBuilder.build(commandId, {
+      operation: "publish_and_relink",
+      publication: structuredClone(publication),
+    });
+  }
+
+  static apply(
+    commandId: string,
+    templateId: string,
+    command: EvolutionCommand,
+    safePoint?: MigrationSafePoint,
+  ): LiveEvolutionCommand {
+    if (templateId.length === 0) throw new Error("live evolution requires a template identity");
+    return LiveEvolutionControlBuilder.build(commandId, {
+      operation: "apply",
+      template_id: templateId,
+      command: structuredClone(command),
+      ...(safePoint === undefined ? {} : { safe_point: structuredClone(safePoint) }),
+    });
+  }
+
+  private static build(
+    commandId: string,
+    operation: LiveEvolutionOperation,
+  ): LiveEvolutionCommand {
+    if (commandId.length === 0) {
+      throw new Error("live-evolution control requires a command identity");
+    }
+    return {
+      control_version: "cymule.live-evolution-control/1",
+      command_id: commandId,
+      ...operation,
     };
   }
 }
@@ -1055,9 +1318,25 @@ export class CliEngine {
     return response.activation;
   }
 
+  verifyDurableCommand(command: DurableCommand): DurableCommand {
+    const response = this.request({ type: "verify_durable_command", command });
+    if (response.type !== "verified_durable_command") {
+      throw new Error(`unexpected response ${response.type}`);
+    }
+    return response.command;
+  }
+
   verifyEvolutionCommand(command: EvolutionCommand): EvolutionCommand {
     const response = this.request({ type: "verify_evolution_command", command });
     if (response.type !== "verified_evolution_command") {
+      throw new Error(`unexpected response ${response.type}`);
+    }
+    return response.command;
+  }
+
+  verifyLiveEvolutionCommand(command: LiveEvolutionCommand): LiveEvolutionCommand {
+    const response = this.request({ type: "verify_live_evolution_command", command });
+    if (response.type !== "verified_live_evolution_command") {
       throw new Error(`unexpected response ${response.type}`);
     }
     return response.command;
@@ -1085,13 +1364,17 @@ type EngineRequest =
   | { type: "seal"; candidate: PlanCandidate }
   | { type: "seal_resource"; candidate: ResourceCandidate }
   | { type: "verify_wait_activation"; activation: WaitActivation }
+  | { type: "verify_durable_command"; command: DurableCommand }
   | { type: "verify_evolution_command"; command: EvolutionCommand }
+  | { type: "verify_live_evolution_command"; command: LiveEvolutionCommand }
   | { type: "run"; plan: SealedPlan; input: Json; plugin: string; run_id: string };
 
 type EngineResponse =
   | { type: "sealed"; plan: SealedPlan }
   | { type: "sealed_resource"; resource: ResourceHandle }
   | { type: "verified_wait_activation"; activation: WaitActivation }
+  | { type: "verified_durable_command"; command: DurableCommand }
   | { type: "verified_evolution_command"; command: EvolutionCommand }
+  | { type: "verified_live_evolution_command"; command: LiveEvolutionCommand }
   | { type: "executed"; result: ExecutionResult }
   | { type: "verified" };

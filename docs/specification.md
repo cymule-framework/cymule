@@ -1,7 +1,8 @@
 # Cymule Semantic Specification
 
-Status: implemented for the explicitly bounded `cymule.semantic/1` Embedded M0
-subset; terminal durable-runtime requirements are marked proposed below.
+Status: implemented for the bounded semantic, embedded, durable single-domain,
+large-virtual-work, and live-evolution profiles. Distributed ownership,
+federation, and strong isolation remain separate proposed profiles.
 
 ## 1. Normative language
 
@@ -37,6 +38,7 @@ The following domains evolve independently:
 | Resource descriptor | `cymule.resource/1` | identity excludes realization locations |
 | Resource handoff | `cymule.resource-handoff/1` | transfer IDs are idempotent per target Run |
 | Wait activation | `cymule.wait-activation/1` | external delivery ID fixes source, targets, and result |
+| Durable control | `cymule.durable-control/1` | closed mutations and queries delegate all admission to Rust |
 | Virtual checkpoint | `cymule.virtual-checkpoint/1` | cursor and bounded frontier advance together |
 | Virtual work occurrence | `cymule.virtual-work-occurrence/1` | one immutable binding per claim epoch |
 | Virtual work control | `cymule.virtual-work-control/1` | stable command ID plus owner/work/lease/time precondition |
@@ -149,10 +151,20 @@ immutable occurrence binding and the continuation epoch. Output from a stale
 attempt MUST be rejected.
 
 The M0 kernel implements Run, Attempt, epoch, scope, effect obligation, and
-binding projections. M1 now defines and persists the complete first-class
-Continuation field set through a provider-neutral CAS store. Automatic capture
-and resumable interpretation at every safe point remain partial and are not
-claimed by the Embedded profile.
+binding projections. M1 defines and persists the complete first-class
+Continuation field set through a provider-neutral CAS store and resumes every
+safe point expressible by the frozen sequential/nested IR. The Embedded profile
+does not claim this persistence because it deliberately uses one-shot memory.
+
+A durable domain MAY contain multiple independent Runs. Creating the first Run
+initializes the domain; creating any later Run MUST append only that Run's exact
+Plan when new, immutable input Artifact, `RunStarted` and first
+`AttemptStarted` Events and command receipts, plus its initial Continuation in
+one CAS revision. It MUST preserve every existing Run and compacted Machine
+base. Repeating the same Run ID with identical Plan and input returns the
+retained current boundary without resetting progress; changing either fails.
+Acknowledgement loss after the creation CAS is recovered by reopen and the same
+start request.
 
 An integration plugin MAY atomically checkpoint its own typed projection with
 a Continuation, wait, outbox entry, or effect transition through the M1
@@ -181,6 +193,12 @@ durable queue. A source driver MUST return exact indexed targets within the
 framework bound and acknowledge transport delivery only after the activation
 CAS succeeds. Lost acknowledgement MUST redeliver the identical activation ID,
 source, targets, and value; admission then returns the retained decision.
+
+The public M1 control union MUST remain closed and provider-neutral. It MAY
+start or resume a Run, admit one identified wait delivery, explicitly release
+one prepared effect, or query one Run/domain. It MUST NOT expose raw Event,
+Continuation, outbox, or journal mutation. TypeScript, Python, Rust, and Go
+construct the same command shape; only the Rust durable runtime reduces it.
 
 When an activation or other wait completion makes a Continuation `Ready`, a
 resume after any process boundary MUST advance its epoch and commit a new fenced
@@ -495,7 +513,17 @@ new immutable revision remains independently addressable. Removing an old
 surface is compatible. `LatestCompatible` is the API and omitted-wire default;
 there is no unchecked-latest strategy.
 
-The reusable-definition registry snapshot is portable semantic control state.
+The complete live-evolution snapshot is portable semantic control state. It
+MUST contain the reusable-definition registry and one template-scoped Plan
+DAG, rollout history, evidence set, and occurrence-pin map for every registered
+parent. Link history MUST be identified by both template and Plan because
+different parents may seal to the same Plan ID. Compatible publication,
+reverse-dependency relinking, resulting DAG edges, and future rollout decisions
+MUST enter one durable checkpoint; a registry head and rollout authority MUST
+NOT advance in separate CAS revisions.
+
+The reusable-definition registry inside that snapshot remains independently
+verifiable.
 Restore MUST verify revision content identities and publication sequences,
 rebuild reverse dependencies, deterministically reproduce current and
 historical links, and reject missing or extraneous revision claims. M1 journal
@@ -511,11 +539,20 @@ different Plan commits only when a checked cross-version adapter is total over
 reachable input/state, preserves output contracts, does not widen effects or
 authority, and maps failure, cancellation, budget, and ownership semantics.
 
-M4 durable controls checkpoint the complete evolution reducer through an M1
+M4 durable controls checkpoint the complete live-evolution authority through an M1
 application journal with explicit parent lineage. Plan-edge admission, future
 rollout, occurrence selection, migration, shadow evidence, promotion, and
 rollback MUST survive stale CAS and lost acknowledgement without changing an
 existing occurrence pin or creating a second decision.
+
+`cymule.live-evolution-control/1` is the complete cross-language envelope. It
+adds reusable-definition publication, parent-template registration, atomic
+publish/relink, and template scope around the closed Plan operations. Migration
+and replacement-Run restart commands MUST carry the exact durable safe-point
+proof; clients MUST NOT sequence registry, rollout, and occurrence mutations.
+When virtual work is dispatched, template-scoped Plan selection, the capacity
+slot lease, and the worker claim MUST enter one CAS revision. Replaying a claim
+whose coupled selection record is absent or different MUST fail closed.
 
 A reviewed patch carries the complete target Plan Candidate, an exact declared
 operation list, and evidence. M4 MUST seal the target, recompute the structural
@@ -533,6 +570,10 @@ reachable source state, preserve failure/cancellation and budget/ownership
 meaning, and not widen authority or effects. A shadow driver MUST suppress or
 simulate target mutating effects and pin both occurrence bindings. Migration
 output and shadow comparisons are immutable evidence, never ambient authority.
+Plugins MUST return complete content-addressed Artifact records for new output
+or evidence; Rust MUST verify their bytes and commit them to the M1 Machine in
+the same CAS as the evolution checkpoint. A durable receipt MUST NOT reference
+an Artifact that existed only in plugin memory.
 
 `restart_under_new_plan` is an explicit alternative to state migration. At the
 same verified source safe point it authorizes a distinct replacement Run, exact

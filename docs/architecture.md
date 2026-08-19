@@ -51,8 +51,8 @@ code. They all emit a Plan Candidate.
 `cymule.ir/2` distinguishes component `call` from reusable definition
 `invoke`. An invocation resolves another definition already sealed into the
 same Plan, creates a structural invocation identity, receives explicit input,
-and returns a result binding without inheriting caller locals. The M4
-`DefinitionRegistry` operates before sealing: it resolves a logical reference,
+and returns a result binding without inheriting caller locals. The live
+evolution registry operates before sealing: it resolves a logical reference,
 resolves the complete acyclic reusable-module closure, injects every exact
 revision, and creates a new parent Plan. Compatible transitive updates advance
 only the future link. Runtime interpretation never follows a mutable registry
@@ -68,6 +68,14 @@ new component/effect/wait surfaces or changed provider-neutral requirements
 retain the old future head. Durable migration revalidates a proof derived from
 the current Continuation. Restart authorization returns an exact Plan for a new
 Run but still leaves process or Agent-loop execution to the owning runtime.
+
+`LiveEvolutionController` is the complete single-domain control authority. Its
+one portable snapshot contains reusable definitions, reverse dependencies,
+template-plus-Plan link history, each template's Plan DAG and rollout state,
+and immutable occurrence pins. Compatible publication, transitive parent
+relinking, DAG edges, and future decisions checkpoint through one application
+journal CAS; applications do not sequence a registry write and a separate
+rollout write.
 
 MLIR is optional and remains outside the kernel. The partial workbench currently
 syntax-checks an experimental generic-operation form and documents its mapping
@@ -114,6 +122,12 @@ identified signal/timer activation receipts, component occurrences, snapshot
 metadata, and typed higher-profile journals. This keeps M2-M4 records under the
 same revision authority without placing their domain types in `cymule-core`.
 
+One durable domain hosts multiple Runs under that same revision authority. The
+first Run creates the state; later Run creation is an append-only Machine delta
+and initial Continuation committed by the same CAS. A Run ID is never reused to
+reset state, and a lost creation acknowledgement is resolved by reopening the
+domain rather than publishing another Run.
+
 Clock and signal plugins do not wake processes directly. They submit a stable
 `cymule.wait-activation/1` proposal naming the declared source and exact parked
 waits. M1 admits the receipt, result Artifact, wait completions, and Continuation
@@ -121,10 +135,22 @@ readiness in one CAS. Stable redelivery is safe, a consume-once signal token has
 at most one consuming winner, and a resumed Continuation receives a new fenced
 Attempt epoch.
 
-The repository provides a non-blocking shared-memory reference store and an
-atomic local directory adapter. Both surface writer contention as a conflict;
-neither a mutex nor a file lock is semantic authority. Production adapters use
-their substrate's native CAS and remain plugins. No database, queue, or object
+Production HTTP and timer sources persist the exact selected targets before
+delivery, so an acknowledgement lost after M1 admission cannot cause target
+reselection on restart. `cymule-clock-system` separately converts OS wall-clock
+observations into strictly increasing per-scope logical values for lease and
+scheduling commands. The command CAS, not the clock database, remains semantic
+authority.
+
+`cymule.durable-control/1` is the common mutation/query transport for all four
+SDKs. It exposes start, resume, wait admission, explicit effect release, and
+read-only Run/domain queries. The Rust `DurableRuntimeControl` is the only
+reducer; clients do not reconstruct Continuations or outbox transitions.
+
+The repository provides a non-blocking shared-memory reference store, an
+atomic local directory adapter, and a SQLite adapter with immediate
+transactions, WAL, synchronous-full persistence, and zero-timeout contention.
+Adapter exclusion is never semantic authority. No database, queue, or object
 store name is part of the contract.
 
 Machine snapshot v2 can compact a causally closed canonical Event prefix into
@@ -136,7 +162,7 @@ recovered by reopen without recomputing history.
 
 ## Cross-Run resources
 
-Status: implemented foundation.
+Status: implemented.
 
 Run state and outputs can use a versioned resource descriptor rather than
 assuming every Artifact is a small inline blob. The descriptor separates
@@ -173,7 +199,7 @@ generic input-delivery seam, not a queue or Agent message model.
 
 ## Large virtual work
 
-Status: implemented foundation.
+Status: implemented.
 
 `cymule-virtual` materializes bounded pages from a provider-neutral
 `RegionSource`; an opaque cursor, not an offset interpreted by Cymule, names the

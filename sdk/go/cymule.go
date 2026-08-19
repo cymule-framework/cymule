@@ -237,6 +237,56 @@ type EvolutionCommand struct {
 	NextDecisionID string              `json:"next_decision_id,omitempty"`
 }
 
+// MigrationSafePoint is one content-addressed durable continuation proof.
+type MigrationSafePoint struct {
+	SafePointVersion   string       `json:"safe_point_version"`
+	SafePointID        string       `json:"safe_point_id"`
+	RunID              string       `json:"run_id"`
+	PlanID             string       `json:"plan_id"`
+	Epoch              uint64       `json:"epoch"`
+	State              *ArtifactRef `json:"state"`
+	ContinuationDigest string       `json:"continuation_digest"`
+}
+
+// SubflowReference selects one reusable definition revision for a parent.
+type SubflowReference struct {
+	LogicalRef      string         `json:"logical_ref"`
+	LocalDefinition string         `json:"local_definition"`
+	InputSchema     map[string]any `json:"input_schema"`
+	OutputSchema    map[string]any `json:"output_schema"`
+	Strategy        string         `json:"strategy"`
+	RevisionID      string         `json:"revision_id,omitempty"`
+}
+
+// PlanTemplate is one unsealed parent plus its logical reusable references.
+type PlanTemplate struct {
+	TemplateID string             `json:"template_id"`
+	Candidate  PlanCandidate      `json:"candidate"`
+	References []SubflowReference `json:"references"`
+}
+
+// LivePublicationCommand atomically publishes and advances compatible parents.
+type LivePublicationCommand struct {
+	LogicalRef string      `json:"logical_ref"`
+	Definition Definition  `json:"definition"`
+	Evidence   ArtifactRef `json:"evidence"`
+	Mode       RolloutMode `json:"mode"`
+}
+
+// LiveEvolutionCommand targets the unified registry, DAG, rollout, and pin authority.
+type LiveEvolutionCommand struct {
+	ControlVersion string                  `json:"control_version"`
+	CommandID      string                  `json:"command_id"`
+	Operation      string                  `json:"operation"`
+	LogicalRef     string                  `json:"logical_ref,omitempty"`
+	Definition     *Definition             `json:"definition,omitempty"`
+	Template       *PlanTemplate           `json:"template,omitempty"`
+	Publication    *LivePublicationCommand `json:"publication,omitempty"`
+	TemplateID     string                  `json:"template_id,omitempty"`
+	Command        *EvolutionCommand       `json:"command,omitempty"`
+	SafePoint      *MigrationSafePoint     `json:"safe_point,omitempty"`
+}
+
 // MarshalJSON emits the exact operation-specific request shape.
 func (command EvolutionCommand) MarshalJSON() ([]byte, error) {
 	var request any
@@ -331,6 +381,21 @@ type WaitActivation struct {
 	Source            WaitActivationSource `json:"source"`
 	WaitIDs           []string             `json:"wait_ids"`
 	Result            ArtifactRef          `json:"result"`
+}
+
+// DurableCommand is one closed M1 mutation or read-only query.
+type DurableCommand struct {
+	Type           string                `json:"type"`
+	ControlVersion string                `json:"control_version"`
+	RunID          string                `json:"run_id,omitempty"`
+	Candidate      *PlanCandidate        `json:"candidate,omitempty"`
+	Input          json.RawMessage       `json:"input,omitempty"`
+	ActivationID   string                `json:"activation_id,omitempty"`
+	Source         *WaitActivationSource `json:"source,omitempty"`
+	WaitIDs        []string              `json:"wait_ids,omitempty"`
+	Value          json.RawMessage       `json:"value,omitempty"`
+	IntentID       string                `json:"intent_id,omitempty"`
+	QueryID        string                `json:"query_id,omitempty"`
 }
 
 // ParkReason identifies one exact indexed condition for virtual work.
@@ -707,6 +772,16 @@ type EvolutionControl interface {
 	Submit(command EvolutionCommand) (any, error)
 }
 
+// LiveEvolutionControl submits commands to the unified durable authority.
+type LiveEvolutionControl interface {
+	Submit(command LiveEvolutionCommand) (any, error)
+}
+
+// DurableControl submits M1 mutations and queries to durable Rust authority.
+type DurableControl interface {
+	Submit(command DurableCommand) (any, error)
+}
+
 // VirtualWorkControl is a transport-neutral occurrence query/control boundary.
 type VirtualWorkControl interface {
 	Occurrence(occurrenceID string) (*WorkOccurrence, error)
@@ -730,6 +805,49 @@ func evolutionCommand(commandID, operation string) EvolutionCommand {
 		CommandID:      commandID,
 		Operation:      operation,
 	}
+}
+
+func liveEvolutionCommand(commandID, operation string) LiveEvolutionCommand {
+	return LiveEvolutionCommand{
+		ControlVersion: "cymule.live-evolution-control/1",
+		CommandID:      commandID,
+		Operation:      operation,
+	}
+}
+
+// PublishLiveDefinition builds one reusable-definition publication command.
+func PublishLiveDefinition(commandID, logicalRef string, definition Definition) LiveEvolutionCommand {
+	command := liveEvolutionCommand(commandID, "publish_definition")
+	command.LogicalRef = logicalRef
+	command.Definition = &definition
+	return command
+}
+
+// RegisterLiveTemplate builds one parent-template registration command.
+func RegisterLiveTemplate(commandID string, template PlanTemplate) LiveEvolutionCommand {
+	command := liveEvolutionCommand(commandID, "register_template")
+	command.Template = &template
+	return command
+}
+
+// PublishAndRelinkLive builds one transitive compatible-update command.
+func PublishAndRelinkLive(commandID string, publication LivePublicationCommand) LiveEvolutionCommand {
+	command := liveEvolutionCommand(commandID, "publish_and_relink")
+	command.Publication = &publication
+	return command
+}
+
+// ApplyLiveEvolution scopes one existing evolution operation to a parent template.
+func ApplyLiveEvolution(
+	commandID, templateID string,
+	operation EvolutionCommand,
+	safePoint *MigrationSafePoint,
+) LiveEvolutionCommand {
+	command := liveEvolutionCommand(commandID, "apply")
+	command.TemplateID = templateID
+	command.Command = &operation
+	command.SafePoint = safePoint
+	return command
 }
 
 // ApplyPlanPatch builds one exact reviewed patch command.
@@ -940,6 +1058,104 @@ func TimerWaitActivation(activationID, timerID, waitID string, result ArtifactRe
 		Source:            WaitActivationSource{Kind: "timer", TimerID: timerID},
 		WaitIDs:           []string{waitID},
 		Result:            result,
+	}
+}
+
+// StartDurableRun builds one M1 Run-creation command.
+func StartDurableRun(runID string, candidate PlanCandidate, input any) (DurableCommand, error) {
+	if runID == "" {
+		return DurableCommand{}, fmt.Errorf("durable Run identity must not be empty")
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return DurableCommand{}, err
+	}
+	return DurableCommand{
+		Type:           "start_run",
+		ControlVersion: "cymule.durable-control/1",
+		RunID:          runID,
+		Candidate:      &candidate,
+		Input:          encoded,
+	}, nil
+}
+
+// ResumeDurableRun builds one M1 resume command.
+func ResumeDurableRun(runID string) DurableCommand {
+	return DurableCommand{
+		Type: "resume_run", ControlVersion: "cymule.durable-control/1", RunID: runID,
+	}
+}
+
+// ActivateDurableSignal builds one identified signal-admission command.
+func ActivateDurableSignal(
+	activationID, key string,
+	waitIDs []string,
+	value any,
+) (DurableCommand, error) {
+	return activateDurableWait(
+		activationID,
+		WaitActivationSource{Kind: "signal", Key: key},
+		waitIDs,
+		value,
+	)
+}
+
+// ActivateDurableTimer builds one identified timer-admission command.
+func ActivateDurableTimer(
+	activationID, timerID, waitID string,
+	value any,
+) (DurableCommand, error) {
+	return activateDurableWait(
+		activationID,
+		WaitActivationSource{Kind: "timer", TimerID: timerID},
+		[]string{waitID},
+		value,
+	)
+}
+
+func activateDurableWait(
+	activationID string,
+	source WaitActivationSource,
+	waitIDs []string,
+	value any,
+) (DurableCommand, error) {
+	targets := uniqueSorted(waitIDs)
+	if activationID == "" || len(targets) == 0 {
+		return DurableCommand{}, fmt.Errorf("durable activation requires identity and targets")
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return DurableCommand{}, err
+	}
+	return DurableCommand{
+		Type:           "activate_wait",
+		ControlVersion: "cymule.durable-control/1",
+		ActivationID:   activationID,
+		Source:         &source,
+		WaitIDs:        targets,
+		Value:          encoded,
+	}, nil
+}
+
+// ReleaseDurableEffect builds one explicit effect-release command.
+func ReleaseDurableEffect(intentID string) DurableCommand {
+	return DurableCommand{
+		Type: "release_effect", ControlVersion: "cymule.durable-control/1", IntentID: intentID,
+	}
+}
+
+// QueryDurableRun builds one read-only Run query.
+func QueryDurableRun(queryID, runID string) DurableCommand {
+	return DurableCommand{
+		Type: "query_run", ControlVersion: "cymule.durable-control/1",
+		QueryID: queryID, RunID: runID,
+	}
+}
+
+// QueryDurableDomain builds one read-only domain query.
+func QueryDurableDomain(queryID string) DurableCommand {
+	return DurableCommand{
+		Type: "query_domain", ControlVersion: "cymule.durable-control/1", QueryID: queryID,
 	}
 }
 
@@ -1216,6 +1432,21 @@ func (engine CliEngine) VerifyWaitActivation(activation WaitActivation) (WaitAct
 	return response.Activation, err
 }
 
+// VerifyDurableCommand validates one M1 envelope with the Rust engine.
+func (engine CliEngine) VerifyDurableCommand(command DurableCommand) (DurableCommand, error) {
+	var response struct {
+		Type    string         `json:"type"`
+		Command DurableCommand `json:"command"`
+	}
+	err := engine.request(map[string]any{
+		"type": "verify_durable_command", "command": command,
+	}, &response)
+	if err == nil && response.Type != "verified_durable_command" {
+		err = fmt.Errorf("unexpected engine response %q", response.Type)
+	}
+	return response.Command, err
+}
+
 // VerifyEvolutionCommand validates one M4 envelope with the Rust engine.
 func (engine CliEngine) VerifyEvolutionCommand(command EvolutionCommand) (EvolutionCommand, error) {
 	var response struct {
@@ -1226,6 +1457,23 @@ func (engine CliEngine) VerifyEvolutionCommand(command EvolutionCommand) (Evolut
 		"type": "verify_evolution_command", "command": command,
 	}, &response)
 	if err == nil && response.Type != "verified_evolution_command" {
+		err = fmt.Errorf("unexpected engine response %q", response.Type)
+	}
+	return response.Command, err
+}
+
+// VerifyLiveEvolutionCommand validates one unified control envelope.
+func (engine CliEngine) VerifyLiveEvolutionCommand(
+	command LiveEvolutionCommand,
+) (LiveEvolutionCommand, error) {
+	var response struct {
+		Type    string               `json:"type"`
+		Command LiveEvolutionCommand `json:"command"`
+	}
+	err := engine.request(map[string]any{
+		"type": "verify_live_evolution_command", "command": command,
+	}, &response)
+	if err == nil && response.Type != "verified_live_evolution_command" {
 		err = fmt.Errorf("unexpected engine response %q", response.Type)
 	}
 	return response.Command, err

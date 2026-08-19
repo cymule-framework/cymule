@@ -10,6 +10,9 @@
   explicit. The Rust Engine is the only Resource ID authority.
 - Keep WaitActivation and source structs closed and provider-neutral. Builders
   sort/deduplicate targets; Rust verification is not durable CAS admission.
+- `DurableCommand` uses `json.RawMessage` for start input and activation value
+  so JSON `null` remains present on the wire. Constructors return encoding
+  errors rather than inventing a fallback value.
 - Virtual work query/control structs preserve binding, owner, epoch, command,
   and disposition identity. Do not implement retry classification in the SDK.
 - Region migration structs retain opaque source cursors, pinned adapter binding,
@@ -23,6 +26,9 @@
 - Evolution command structs retain the closed operation, stable command ID,
   exact patch/request/observation/gate payload, and control version. Go never
   resolves module heads, runs adapters, or evaluates rollout evidence.
+- Unified live-evolution commands retain template scope and safe-point proof
+  around the closed operation. Go clients do not sequence registry, rollout,
+  and occurrence mutations independently.
 - Keep migration and restart proof fields explicit and typed. Go transports do
   not derive safe points or reuse a source Run identity for a replacement.
 - Run `gofmt` and `go test ./...` for every change.

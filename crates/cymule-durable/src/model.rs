@@ -559,7 +559,8 @@ pub enum WaitActivationSource {
 }
 
 impl WaitActivationSource {
-    fn verify(&self) -> DurableResult<()> {
+    /// Validate the closed source kind and its declared identity.
+    pub fn verify(&self) -> DurableResult<()> {
         let identity = match self {
             Self::Signal { key } => key,
             Self::Timer { timer_id } => timer_id,

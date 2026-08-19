@@ -3,6 +3,7 @@
   "$id": "https://cymule.dev/schemas/agent-protocol.schema.json",
   "title": "Cymule Agent Protocol cymule.agent/1",
   "oneOf": [
+    { "$ref": "#/$defs/agentSession" },
     { "$ref": "#/$defs/agentUpdate" },
     { "$ref": "#/$defs/hostOccurrence" },
     { "$ref": "#/$defs/occurrenceResolution" },
@@ -10,6 +11,45 @@
   ],
   "$defs": {
     "nonEmpty": { "type": "string", "minLength": 1 },
+    "agentSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id", "state", "stop_reason", "messages", "message_order",
+        "plan", "tools", "usage", "elicitations", "applied_updates"
+      ],
+      "properties": {
+        "session_id": { "$ref": "#/$defs/nonEmpty" },
+        "state": { "enum": ["idle", "running", "requires_action", "closed"] },
+        "stop_reason": {
+          "oneOf": [
+            { "enum": ["end_turn", "cancelled", "refusal", "error"] },
+            { "type": "null" }
+          ]
+        },
+        "messages": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/message" }
+        },
+        "message_order": {
+          "type": "array", "items": { "$ref": "#/$defs/nonEmpty" }, "uniqueItems": true
+        },
+        "plan": { "oneOf": [{ "$ref": "#/$defs/agentPlan" }, { "type": "null" }] },
+        "tools": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/toolCall" }
+        },
+        "usage": { "oneOf": [{ "$ref": "#/$defs/usage" }, { "type": "null" }] },
+        "elicitations": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/elicitationProjection" }
+        },
+        "applied_updates": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
     "artifactRef": {
       "type": "object",
       "additionalProperties": false,

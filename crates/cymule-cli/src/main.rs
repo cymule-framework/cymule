@@ -6,8 +6,8 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use cymule_core::{PlanCandidate, SealedPlan};
-use cymule_durable::WaitActivation;
-use cymule_evolution::EvolutionCommand;
+use cymule_durable::{DurableCommand, WaitActivation};
+use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{EmbeddedRuntime, ExecutionResult, ProcessPlugin};
 use serde::{Deserialize, Serialize};
@@ -28,8 +28,14 @@ enum EngineRequest {
     VerifyWaitActivation {
         activation: WaitActivation,
     },
+    VerifyDurableCommand {
+        command: DurableCommand,
+    },
     VerifyEvolutionCommand {
         command: EvolutionCommand,
+    },
+    VerifyLiveEvolutionCommand {
+        command: LiveEvolutionCommand,
     },
     Run {
         plan: SealedPlan,
@@ -45,7 +51,9 @@ enum EngineResponse {
     Sealed { plan: SealedPlan },
     SealedResource { resource: ResourceHandle },
     VerifiedWaitActivation { activation: WaitActivation },
+    VerifiedDurableCommand { command: DurableCommand },
     VerifiedEvolutionCommand { command: EvolutionCommand },
+    VerifiedLiveEvolutionCommand { command: LiveEvolutionCommand },
     Executed { result: ExecutionResult },
     Verified,
 }
@@ -81,8 +89,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             activation.verify()?;
             print_json(&activation)
         }
+        Some("durable-command") if arguments.get(1).map(String::as_str) == Some("verify") => {
+            let command: DurableCommand = read_path(argument_value(&arguments, "--input")?)?;
+            command.verify()?;
+            print_json(&command)
+        }
         Some("evolution-command") if arguments.get(1).map(String::as_str) == Some("verify") => {
             let command: EvolutionCommand = read_path(argument_value(&arguments, "--input")?)?;
+            command.verify()?;
+            print_json(&command)
+        }
+        Some("live-evolution-command")
+            if arguments.get(1).map(String::as_str) == Some("verify") =>
+        {
+            let command: LiveEvolutionCommand =
+                read_path(argument_value(&arguments, "--input")?)?;
             command.verify()?;
             print_json(&command)
         }
@@ -96,7 +117,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             print_json(&result)
         }
         _ => Err(
-            "usage: cymule <rpc|seal|verify|run|resource seal|wait-activation verify|evolution-command verify> [options]"
+            "usage: cymule <rpc|seal|verify|run|resource seal|wait-activation verify|durable-command verify|evolution-command verify|live-evolution-command verify> [options]"
                 .into(),
         ),
     }
@@ -121,9 +142,17 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
             activation.verify()?;
             EngineResponse::VerifiedWaitActivation { activation }
         }
+        EngineRequest::VerifyDurableCommand { command } => {
+            command.verify()?;
+            EngineResponse::VerifiedDurableCommand { command }
+        }
         EngineRequest::VerifyEvolutionCommand { command } => {
             command.verify()?;
             EngineResponse::VerifiedEvolutionCommand { command }
+        }
+        EngineRequest::VerifyLiveEvolutionCommand { command } => {
+            command.verify()?;
+            EngineResponse::VerifiedLiveEvolutionCommand { command }
         }
         EngineRequest::Run {
             plan,

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use cymule_core::{
     ComponentContract, Definition, Expression, IR_VERSION, Operation, PlanCandidate, Region, Step,
 };
-use cymule_evolution::{DefinitionRegistry, PlanTemplate, SubflowReference};
+use cymule_evolution::{LiveEvolutionController, PlanTemplate, SubflowReference};
 use serde_json::{Value, json};
 
 use crate::plugin::{SCORER_COMPONENT, SUBJECT_COMPONENT};
@@ -145,8 +145,10 @@ pub fn campaign_template() -> PlanTemplate {
     }
 }
 
-pub fn current_plan(registry: &DefinitionRegistry) -> Result<cymule_evolution::LinkedPlan, String> {
-    registry
+pub fn current_plan(
+    controller: &LiveEvolutionController,
+) -> Result<cymule_evolution::LinkedPlan, String> {
+    controller
         .current_link(TEMPLATE_ID)
         .cloned()
         .ok_or_else(|| "campaign template has no current linked Plan".to_owned())

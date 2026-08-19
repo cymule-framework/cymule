@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Versioned definition-registry checkpoint stored in the generic M1 journal.
-pub const DEFINITION_REGISTRY_CHECKPOINT_SCHEMA: &str = "cymule.definition-registry-checkpoint/1";
+pub const DEFINITION_REGISTRY_CHECKPOINT_SCHEMA: &str = "cymule.definition-registry-checkpoint/2";
 
 /// One complete registry checkpoint with explicit journal lineage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

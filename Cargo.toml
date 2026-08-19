@@ -17,6 +17,7 @@ members = [
   "plugins/resource-object-store",
   "plugins/activation-http",
   "plugins/activation-timer",
+  "plugins/clock-system",
   "plugins/executor-process",
   "plugins/observability-otel",
   "plugins/agent-mcp",

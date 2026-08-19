@@ -1,5 +1,7 @@
-use cymule_core::{ArtifactRef, SealedPlan};
-use cymule_durable::{DurableCoordinator, DurableStore, JournalRecord};
+use std::collections::BTreeSet;
+
+use cymule_core::{ArtifactRecord, ArtifactRef, SealedPlan};
+use cymule_durable::{DurableCoordinator, DurableStore, JournalBatch, JournalRecord};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -189,13 +191,22 @@ impl DurableEvolutionController {
         safe_point: &MigrationSafePoint,
     ) -> EvolutionResult<MigrationReceipt> {
         verify_durable_safe_point(coordinator, safe_point)?;
-        apply_and_checkpoint(
+        let before = controller.snapshot();
+        let (receipt, artifacts) =
+            controller.execute_migration_with_artifacts(adapter, request, safe_point)?;
+        if let Err(error) = checkpoint_artifacts(
             coordinator,
             controller,
             journal_id,
             checkpoint_id,
-            |controller| controller.execute_migration(adapter, request, safe_point),
-        )
+            artifacts,
+            &BTreeSet::from([receipt.output_state.clone(), receipt.evidence.clone()]),
+        ) {
+            *controller = EvolutionController::restore(before)
+                .expect("previously valid evolution snapshot restores");
+            return Err(error);
+        }
+        Ok(receipt)
     }
 
     /// Authorize one replacement Run and checkpoint its exact target Plan.
@@ -226,13 +237,21 @@ impl DurableEvolutionController {
         driver: &mut D,
         request: ShadowRequest,
     ) -> EvolutionResult<ShadowComparison> {
-        apply_and_checkpoint(
+        let before = controller.snapshot();
+        let (comparison, artifacts) = controller.execute_shadow_with_artifacts(driver, request)?;
+        if let Err(error) = checkpoint_artifacts(
             coordinator,
             controller,
             journal_id,
             checkpoint_id,
-            |controller| controller.execute_shadow(driver, request),
-        )
+            artifacts,
+            &BTreeSet::from([comparison.evidence.clone()]),
+        ) {
+            *controller = EvolutionController::restore(before)
+                .expect("previously valid evolution snapshot restores");
+            return Err(error);
+        }
+        Ok(comparison)
     }
 
     /// Record one terminal rollout observation and checkpoint before gating.
@@ -306,6 +325,38 @@ fn apply_and_checkpoint<S: DurableStore, T>(
         return Err(error);
     }
     Ok(result)
+}
+
+fn checkpoint_artifacts<S: DurableStore>(
+    coordinator: &mut DurableCoordinator<S>,
+    controller: &EvolutionController,
+    journal_id: &str,
+    checkpoint_id: &str,
+    artifacts: Vec<ArtifactRecord>,
+    required: &BTreeSet<ArtifactRef>,
+) -> EvolutionResult<()> {
+    let record = checkpoint_record(coordinator, controller, journal_id, checkpoint_id)?;
+    let mut machine = coordinator.restore_machine().map_err(durable_error)?;
+    for artifact in artifacts {
+        let derived = machine.put_artifact(artifact.reference.kind.clone(), artifact.bytes);
+        if derived != artifact.reference {
+            return Err(EvolutionError::Validation(format!(
+                "Artifact {} does not match plugin output bytes",
+                artifact.reference.artifact_id
+            )));
+        }
+    }
+    coordinator
+        .checkpoint_artifact_journals(
+            &machine,
+            required,
+            &[JournalBatch {
+                journal_id: journal_id.to_owned(),
+                records: vec![record],
+            }],
+        )
+        .map(|_| ())
+        .map_err(durable_error)
 }
 
 fn checkpoint_record<S: DurableStore>(

@@ -58,3 +58,7 @@
 - Login, capability advertisement, permission, policy, credential access, and
   effect release are separate decisions and must remain fail closed.
 - Add reducer and end-to-end tests for every new update or interaction state.
+- Keep host-kind failures/refusals in `fault_matrix.rs`, real process-death
+  journal windows in `process_kill.rs`, stream atomicity in `streaming.rs`, and
+  ordinary controller semantics in `interaction.rs`; do not collapse these
+  independent witnesses into one slow test file.

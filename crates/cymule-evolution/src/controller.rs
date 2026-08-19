@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use cymule_core::{ArtifactRef, SealedPlan, canonical_digest, content_id};
+use cymule_core::{ArtifactRecord, ArtifactRef, Machine, SealedPlan, canonical_digest, content_id};
 use cymule_durable::Continuation;
 use serde::Serialize;
 
@@ -406,6 +406,16 @@ impl EvolutionController {
         request: MigrationRequest,
         safe_point: &MigrationSafePoint,
     ) -> EvolutionResult<MigrationReceipt> {
+        self.execute_migration_with_artifacts(adapter, request, safe_point)
+            .map(|(receipt, _)| receipt)
+    }
+
+    pub(crate) fn execute_migration_with_artifacts<A: MigrationAdapter>(
+        &mut self,
+        adapter: &mut A,
+        request: MigrationRequest,
+        safe_point: &MigrationSafePoint,
+    ) -> EvolutionResult<(MigrationReceipt, Vec<ArtifactRecord>)> {
         safe_point.verify()?;
         if request.safe_point_id != safe_point.safe_point_id
             || request.source_epoch != safe_point.epoch
@@ -437,13 +447,16 @@ impl EvolutionController {
                 && existing.from_schema == descriptor.from_schema
                 && existing.to_schema == descriptor.to_schema
             {
-                return Ok(existing.clone());
+                return Ok((existing.clone(), Vec::new()));
             }
             return Err(EvolutionError::Conflict(
                 "migration ID was reused with a different request or adapter".to_owned(),
             ));
         }
         let output = adapter.migrate(&request)?;
+        verify_artifact_record(&output.output_state)?;
+        verify_artifact_record(&output.evidence)?;
+        let artifacts = vec![output.output_state.clone(), output.evidence.clone()];
         let receipt = MigrationReceipt {
             migration_id: request.migration_id,
             run_id: request.run_id,
@@ -456,11 +469,11 @@ impl EvolutionController {
             from_schema: descriptor.from_schema,
             to_schema: descriptor.to_schema,
             input_state: request.input_state,
-            output_state: output.output_state,
-            evidence: output.evidence,
+            output_state: output.output_state.reference,
+            evidence: output.evidence.reference,
         };
         self.record_migration(receipt.clone(), safe_point)?;
-        Ok(receipt)
+        Ok((receipt, artifacts))
     }
 
     /// Authorize a replacement Run under one exact target Plan at a verified
@@ -586,6 +599,15 @@ impl EvolutionController {
         driver: &mut D,
         request: ShadowRequest,
     ) -> EvolutionResult<ShadowComparison> {
+        self.execute_shadow_with_artifacts(driver, request)
+            .map(|(comparison, _)| comparison)
+    }
+
+    pub(crate) fn execute_shadow_with_artifacts<D: ShadowDriver>(
+        &mut self,
+        driver: &mut D,
+        request: ShadowRequest,
+    ) -> EvolutionResult<(ShadowComparison, Vec<ArtifactRecord>)> {
         let decision = self
             .snapshot
             .rollout_decisions
@@ -612,13 +634,15 @@ impl EvolutionController {
                 && existing.driver_revision == descriptor.driver_revision
                 && existing.comparison_policy == request.comparison_policy
             {
-                return Ok(existing.clone());
+                return Ok((existing.clone(), Vec::new()));
             }
             return Err(EvolutionError::Conflict(
                 "shadow comparison ID was reused with a different request or driver".to_owned(),
             ));
         }
         let output = driver.execute(&request)?;
+        verify_artifact_record(&output.evidence)?;
+        let artifacts = vec![output.evidence.clone()];
         let comparison = ShadowComparison {
             comparison_id: request.comparison_id,
             subject: request.subject,
@@ -631,10 +655,10 @@ impl EvolutionController {
             primary_digest: output.primary_digest,
             shadow_digest: output.shadow_digest,
             equivalent: output.equivalent,
-            evidence: output.evidence,
+            evidence: output.evidence.reference,
         };
         self.record_shadow(comparison.clone())?;
-        Ok(comparison)
+        Ok((comparison, artifacts))
     }
 
     /// Record one terminal occurrence observation exactly once.
@@ -1270,6 +1294,18 @@ fn diff_named<T: Serialize>(
             before: old_digest,
             after: new_digest,
         });
+    }
+    Ok(())
+}
+
+fn verify_artifact_record(record: &ArtifactRecord) -> EvolutionResult<()> {
+    let mut machine = Machine::new();
+    let derived = machine.put_artifact(record.reference.kind.clone(), record.bytes.clone());
+    if derived != record.reference {
+        return Err(EvolutionError::Validation(format!(
+            "Artifact {} does not match its immutable bytes",
+            record.reference.artifact_id
+        )));
     }
     Ok(())
 }

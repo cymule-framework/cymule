@@ -8,18 +8,19 @@ Status: implemented for the Semantic Interpreter and Embedded profiles.
 | --- | --- | --- |
 | Semantic Interpreter M0 | Implemented | frozen IR, canonical stores, admission, reducer, exact state replay |
 | Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
-| Durable Single Domain | Partial | snapshot/base-plus-suffix restore, CAS, nested Continuation frames, identified bounded wait-source drivers, leases, commit-gated/eager/explicit outbox policy, occurrence replay, atomic Resource handoff input activation, directory-store reopen, history compaction, ambiguous-effect reconciliation, and one black-box M1/M3 external process-kill campaign; production plugins and exhaustive process-kill coverage remain |
-| Optional Agent Interaction plugin | Partial plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces; not a framework profile |
+| Durable Single Domain | Implemented | multi-Run atomic creation, snapshot/base-plus-suffix restore, CAS, complete Continuations, identified persistent wait sources, leases, commit-gated/eager/explicit outbox policy, occurrence replay, atomic Resource handoff input activation, history compaction, ambiguous-effect reconciliation, four-language controls, production local adapters, and real process-death CAS sweeps |
+| Optional Agent Interaction plugin | Implemented plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces, including all-host-kind and real process-death matrices; not a framework profile |
 | Large Virtual Graph M3 | Implemented | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker slot leases/recovery, four SDK controls, and restore |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
-| Live Evolution M4 | Implemented | reusable modules, default transitive latest-compatible relinking with reachable no-widening admission, exact patch admission, durable registry recovery, conservative extensible impact, Continuation-proved migration, explicit replacement-Run restart, isolated shadow plugins, immutable mixed-version pins, deterministic canary gates, promotion/rollback, four SDK controls, and lost-receipt recovery |
+| Live Evolution M4 | Implemented | unified registry/DAG/rollout/pin authority, reusable modules, default transitive latest-compatible relinking with reachable no-widening admission, template-plus-Plan history, exact patch admission, conservative extensible impact, Continuation-proved migration, explicit replacement-Run restart, isolated shadow plugins, immutable mixed-version pins, deterministic canary gates, promotion/rollback, four SDK controls, and lost-receipt recovery |
 
-The M0 rows do not claim persistence. The partial M1 implementation does prove
-single-domain durable wait and nested-scope resumption, exact replay of recorded
-component outputs, three dispatch policies, and reconciliation after an
-ambiguous dispatch. It does not yet claim production source plugins, snapshot
-suffix recovery, or process-kill coverage of every crash window.
+The M0 rows do not claim persistence. M1 proves single-domain durable wait and
+nested-scope resumption, exact replay of recorded component outputs, three
+dispatch policies, reconciliation after an ambiguous dispatch, production
+source adapters, authenticated suffix recovery, and real process death on both
+sides of every discovered Run CAS. It does not imply distributed consensus,
+provider-level exactly-once behavior, or multi-domain failover.
 
 ## Required semantic cases
 
@@ -50,10 +51,17 @@ The local suite verifies:
 - eager observations can bind a settled Artifact while their scope remains
   open, and explicit effects dispatch only after a stable caller release;
 - reconciliation retains the original occurrence binding;
-- Run creation atomically publishes its initial Machine and Continuation; a
-  generated boundary sweep injects one failure before every CAS and one lost
+- first and later Run creation atomically publish exact Plan/input/start data
+  and the initial Continuation without resetting existing Runs; identical start
+  replay is non-mutating, conflicting Plan/input reuse fails, and later Run
+  creation reopens after a lost receipt; a generated boundary sweep injects one
+  failure before every CAS and one lost
   acknowledgement after every committed CAS, then reopens, validates the whole
   durable state, replays the Machine, and proves at-most-once dispatch;
+- a second black-box sweep replaces injected errors with actual child-process
+  termination at both sides of every automatically discovered Run CAS; an
+  independent SQLite provider ledger proves dispatch is never repeated and
+  only reconciliation can settle a killed post-claim window;
 - identical signal/timer activation redelivery returns the original durable
   decision, source mismatch and conflicting ID reuse fail, one signal token
   consumes at most one consume-once wait, and stale writers commit nothing;
@@ -72,6 +80,9 @@ The local suite verifies:
 - work claims pin binding and epoch before execution; identical disposition
   replay is idempotent, conflicts and stale owners fail, retry creates a later
   occurrence, and cancellation rejects late success;
+- live-evolution selection and virtual capacity-slot claim share one CAS; lost
+  receipt reopen retains both the template-scoped Plan pin and the exact claim,
+  and replay fails if either coupled journal record is absent or different;
 - a resolution command replayed after later claims returns its original
   occurrence receipt, while semantic command-ID reuse fails without state change;
 - weighted backlogged Runs receive deterministic cost-normalized shares (1:3
@@ -105,6 +116,8 @@ The local suite verifies:
   idempotently, survive reopen, and reject stale CAS or conflicting ID reuse;
 - TypeScript, Python, Rust, and Go construct the same claim, renewal, recovery,
   and Run-weight commands without reading clocks or implementing a scheduler;
+- TypeScript, Python, Rust, and Go construct and validate the same unified
+  template-scoped live-evolution command through the Rust Engine;
 - M3 claim/result checkpoints survive reopen, stale CAS rolls back scheduler
   state, and result/evidence Artifacts commit with occurrence state;
 - TypeScript, Python, Rust, and Go parse one occurrence fixture and construct one
@@ -120,20 +133,27 @@ The local suite verifies:
   Rust resource sealer and receive the same Resource ID;
 - TypeScript, Python, Rust, and Go construct the same identified wait activation
   fixture and validate its closed wire contract through the Rust Engine;
+- TypeScript, Python, Rust, and Go construct the same closed durable-domain
+  query command and validate it through the Rust Engine; Rust restart-level
+  conformance then drives start, signal admission, resume, terminal replay, Run
+  query, and domain query through the stateful authority;
 - Resource identity ignores locations, public credential-bearing URLs fail,
   bounded reads/lists reject malformed adapters, content bytes are verified,
   and Run-to-Run handoffs survive M1 reopen and reject conflicting transfer IDs.
 
 The optional Agent interaction plugin runs a separate Rust conformance suite for
 Session projection replay, binding-pinned occurrences, atomic input and stream
-checkpoints, workspace effects, and receipt-loss recovery. Those cases validate
-the plugin's use of M1 interfaces; they are not required behavior of the core
-CLI or four language SDKs.
+checkpoints, workspace effects, receipt-loss recovery, failures across all six
+host call kinds, permission refusal, caller stop reasons, and real process death
+around occurrence, Session, and stream journals. Those cases validate the
+plugin's use of M1 interfaces; they are not required behavior of the core CLI
+or four language SDKs.
 
 ## Cross-axis scenario
 
-Status: partial. The current suite composes a mutating effect, ambiguous
-dispatch, future binding update, pinned reconciliation, obligation settlement,
-and replay. Stale-command and epoch-fencing axes are covered independently. A
-single crash-injected scenario that also includes a speculative scope is an M1
-durable-profile gate and is not claimed by version 0.1.0.
+Status: implemented as independent fault families plus black-box campaigns.
+The suite composes mutating effects, ambiguous dispatch, future binding update,
+pinned reconciliation, obligation settlement, nested/speculative scopes,
+stale-command and epoch fencing, then runs end-to-end process-death campaigns.
+These witnesses remain partitioned so a change in one axis does not force every
+unrelated fault family into the developer feedback loop.

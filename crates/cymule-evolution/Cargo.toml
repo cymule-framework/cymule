@@ -14,11 +14,14 @@ publish.workspace = true
 [dependencies]
 cymule-core.workspace = true
 cymule-durable.workspace = true
+cymule-virtual.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 cymule-runtime.workspace = true
+cymule-store-sqlite = { path = "../../plugins/store-sqlite" }
+tempfile = "3.27.0"
 
 [lints]
 workspace = true

@@ -25,6 +25,12 @@
   through all four SDKs and the Rust verifier. Rust stateful tests separately
   prove transitive relinking, checked adapters, promotion/rollback, mixed Plan
   execution, stale CAS, and acknowledgement-loss recovery.
+- The shared live-evolution fixture wraps one occurrence selection in an exact
+  parent-template scope. Stateful Rust tests separately prove atomic transitive
+  relink/rollout publication and version-selection/worker-claim CAS coupling.
+- The shared durable-control fixture is the exact four-language query envelope.
+  Rust restart-level tests exercise every mutation variant; SDKs transport the
+  union and never become a second state reducer.
 - The shared restart fixture proves the `/2` safe-point and replacement-Run wire
   contract across all SDKs. Stateful Rust tests must reject stale durable proofs
   and preserve one restart receipt after acknowledgement loss.
@@ -45,6 +51,10 @@
 - Plugin suites remain split by store, Resource, activation, executor,
   observability, and Agent-protocol ownership. A plugin change runs its leaf;
   manifest/catalog changes additionally run package verification.
+- Real process-death tests may wrap a production `DurableStore` to place a
+  marker immediately before or after CAS, then let the parent send `SIGKILL`.
+  The wrapper belongs only in integration tests; never add a pause or crash
+  switch to a reducer or production adapter.
 - Effect fault matrices distinguish prepare-response loss, durable enqueue,
   scope commit, dispatch-start claim, provider application, Applied settlement,
   and Unknown observation. Assert exact provider call counts and reject

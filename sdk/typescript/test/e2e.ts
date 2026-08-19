@@ -4,8 +4,10 @@ import test from "node:test";
 
 import {
   CliEngine,
+  DurableControlBuilder,
   EvolutionControlBuilder,
   FlowBuilder,
+  LiveEvolutionControlBuilder,
   ResourceBuilder,
   VirtualSchedulingControlBuilder,
   VirtualWorkControlBuilder,
@@ -89,6 +91,25 @@ test("TypeScript wait activation validates through the Rust engine", () => {
   );
   assert.deepEqual(activation, JSON.parse(readFileSync(fixturePath, "utf8")));
   assert.deepEqual(new CliEngine(enginePath).verifyWaitActivation(activation), activation);
+});
+
+test("TypeScript durable control fixture validates through the Rust engine", () => {
+  const enginePath = process.env.CYMULE_BIN;
+  const fixturePath = process.env.CYMULE_DURABLE_CONTROL_FIXTURE;
+  if (enginePath === undefined || fixturePath === undefined) return;
+  const command = DurableControlBuilder.queryDomain("query:cross-language-domain");
+  assert.deepEqual(command, JSON.parse(readFileSync(fixturePath, "utf8")));
+  assert.deepEqual(new CliEngine(enginePath).verifyDurableCommand(command), command);
+
+  const activation = DurableControlBuilder.activateSignal(
+    "activation:sdk",
+    "signal:sdk",
+    ["wait:z", "wait:a", "wait:z"],
+    { accepted: true },
+  );
+  assert.equal(activation.type, "activate_wait");
+  if (activation.type !== "activate_wait") throw new Error("activation builder returned wrong type");
+  assert.deepEqual(activation.wait_ids, ["wait:a", "wait:z"]);
 });
 
 test("TypeScript virtual work query and control fixtures stay exact", () => {
@@ -220,4 +241,18 @@ test("TypeScript evolution control validates through the Rust engine", () => {
   );
   assert.deepEqual(restart, restartExpected);
   assert.deepEqual(new CliEngine(enginePath).verifyEvolutionCommand(restart), restart);
+});
+
+test("TypeScript unified live evolution validates through the Rust engine", () => {
+  const enginePath = process.env.CYMULE_BIN;
+  const fixturePath = process.env.CYMULE_LIVE_EVOLUTION_CONTROL_FIXTURE;
+  if (enginePath === undefined || fixturePath === undefined) return;
+  const expected = JSON.parse(readFileSync(fixturePath, "utf8"));
+  const command = LiveEvolutionControlBuilder.apply(
+    "command:live-evolution:fixture:select",
+    "template:review-parent",
+    expected.command,
+  );
+  assert.deepEqual(command, expected);
+  assert.deepEqual(new CliEngine(enginePath).verifyLiveEvolutionCommand(command), command);
 });

@@ -2,7 +2,7 @@
 
 Status: implemented.
 
-## Implemented foundation
+## Implemented profile
 
 - provider-neutral `RegionSource` with opaque versioned cursors and bounded page
   materialization;

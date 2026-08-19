@@ -1,4 +1,4 @@
-use cymule_core::{ArtifactRef, ROOT_SCOPE_ID, canonical_digest, content_id};
+use cymule_core::{ArtifactRecord, ArtifactRef, ROOT_SCOPE_ID, canonical_digest, content_id};
 use cymule_durable::{Continuation, ContinuationStatus};
 use serde::{Deserialize, Serialize};
 
@@ -180,10 +180,10 @@ pub struct MigrationRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MigrationOutput {
-    /// Migrated state artifact.
-    pub output_state: ArtifactRef,
-    /// Verification or transformation evidence.
-    pub evidence: ArtifactRef,
+    /// Migrated state bytes and their verified content reference.
+    pub output_state: ArtifactRecord,
+    /// Verification or transformation evidence bytes.
+    pub evidence: ArtifactRecord,
 }
 
 /// Provider plugin interface for state transformation.
@@ -255,8 +255,8 @@ pub struct ShadowOutput {
     pub shadow_digest: String,
     /// Policy-specific equivalence result.
     pub equivalent: bool,
-    /// Immutable execution and comparison evidence.
-    pub evidence: ArtifactRef,
+    /// Immutable execution and comparison evidence bytes.
+    pub evidence: ArtifactRecord,
 }
 
 /// Provider plugin interface for isolated shadow execution.

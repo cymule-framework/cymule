@@ -13,6 +13,8 @@ ArtifactRef = dict[str, str]
 ParkReason = dict[str, str]
 WorkResolution = dict[str, Any]
 EvolutionCommand = dict[str, Any]
+LiveEvolutionCommand = dict[str, Any]
+DurableCommand = dict[str, Any]
 
 
 class RolloutDecision(TypedDict):
@@ -375,6 +377,18 @@ class EvolutionControl(Protocol):
     def submit(self, command: EvolutionCommand) -> Any: ...
 
 
+class LiveEvolutionControl(Protocol):
+    """Unified registry, DAG, rollout, migration, and pin transport."""
+
+    def submit(self, command: LiveEvolutionCommand) -> Any: ...
+
+
+class DurableControl(Protocol):
+    """Transport-neutral M1 mutation and query interface."""
+
+    def submit(self, command: DurableCommand) -> Any: ...
+
+
 class VirtualWorkControl(Protocol):
     """Transport-neutral M3 occurrence query and control interface."""
 
@@ -654,6 +668,105 @@ class WaitActivationBuilder:
         }
 
 
+class DurableControlBuilder:
+    """Build closed M1 controls without reducing durable state locally."""
+
+    @staticmethod
+    def start_run(run_id: str, candidate: dict[str, Any], input_value: Json) -> DurableCommand:
+        DurableControlBuilder._identity("Run", run_id)
+        return {
+            "type": "start_run",
+            "control_version": "cymule.durable-control/1",
+            "run_id": run_id,
+            "candidate": copy.deepcopy(candidate),
+            "input": copy.deepcopy(input_value),
+        }
+
+    @staticmethod
+    def resume_run(run_id: str) -> DurableCommand:
+        DurableControlBuilder._identity("Run", run_id)
+        return {
+            "type": "resume_run",
+            "control_version": "cymule.durable-control/1",
+            "run_id": run_id,
+        }
+
+    @staticmethod
+    def activate_signal(
+        activation_id: str, key: str, wait_ids: list[str], value: Json
+    ) -> DurableCommand:
+        return DurableControlBuilder._activate(
+            activation_id, {"kind": "signal", "key": key}, wait_ids, value
+        )
+
+    @staticmethod
+    def activate_timer(
+        activation_id: str, timer_id: str, wait_id: str, value: Json
+    ) -> DurableCommand:
+        return DurableControlBuilder._activate(
+            activation_id,
+            {"kind": "timer", "timer_id": timer_id},
+            [wait_id],
+            value,
+        )
+
+    @staticmethod
+    def release_effect(intent_id: str) -> DurableCommand:
+        DurableControlBuilder._identity("effect intent", intent_id)
+        return {
+            "type": "release_effect",
+            "control_version": "cymule.durable-control/1",
+            "intent_id": intent_id,
+        }
+
+    @staticmethod
+    def query_run(query_id: str, run_id: str) -> DurableCommand:
+        DurableControlBuilder._identity("query", query_id)
+        DurableControlBuilder._identity("Run", run_id)
+        return {
+            "type": "query_run",
+            "control_version": "cymule.durable-control/1",
+            "query_id": query_id,
+            "run_id": run_id,
+        }
+
+    @staticmethod
+    def query_domain(query_id: str) -> DurableCommand:
+        DurableControlBuilder._identity("query", query_id)
+        return {
+            "type": "query_domain",
+            "control_version": "cymule.durable-control/1",
+            "query_id": query_id,
+        }
+
+    @staticmethod
+    def _activate(
+        activation_id: str,
+        source: dict[str, str],
+        wait_ids: list[str],
+        value: Json,
+    ) -> DurableCommand:
+        DurableControlBuilder._identity("activation", activation_id)
+        targets = sorted(set(wait_ids))
+        if not targets or any(not target for target in targets):
+            raise ValueError("durable activation requires at least one wait identity")
+        return {
+            "type": "activate_wait",
+            "control_version": "cymule.durable-control/1",
+            "activation_id": activation_id,
+            "source": dict(source),
+            "wait_ids": targets,
+            "value": copy.deepcopy(value),
+        }
+
+    @staticmethod
+    def _identity(kind: str, value: str) -> None:
+        if not value or len(value) > 512:
+            raise ValueError(
+                f"durable {kind} identity must contain 1..=512 characters"
+            )
+
+
 class EvolutionControlBuilder:
     """Build closed idempotent M4 commands without reducing state locally."""
 
@@ -726,6 +839,72 @@ class EvolutionControlBuilder:
             raise ValueError("evolution control requires a command identity")
         return {
             "control_version": "cymule.evolution-control/2",
+            "command_id": command_id,
+            **copy.deepcopy(operation),
+        }
+
+
+class LiveEvolutionControlBuilder:
+    """Build commands for the complete durable live-evolution authority."""
+
+    @staticmethod
+    def publish_definition(
+        command_id: str,
+        logical_ref: str,
+        definition: dict[str, Any],
+    ) -> LiveEvolutionCommand:
+        return LiveEvolutionControlBuilder._build(
+            command_id,
+            {
+                "operation": "publish_definition",
+                "logical_ref": logical_ref,
+                "definition": definition,
+            },
+        )
+
+    @staticmethod
+    def register_template(
+        command_id: str, template: dict[str, Any]
+    ) -> LiveEvolutionCommand:
+        return LiveEvolutionControlBuilder._build(
+            command_id, {"operation": "register_template", "template": template}
+        )
+
+    @staticmethod
+    def publish_and_relink(
+        command_id: str, publication: dict[str, Any]
+    ) -> LiveEvolutionCommand:
+        return LiveEvolutionControlBuilder._build(
+            command_id,
+            {"operation": "publish_and_relink", "publication": publication},
+        )
+
+    @staticmethod
+    def apply(
+        command_id: str,
+        template_id: str,
+        command: EvolutionCommand,
+        safe_point: dict[str, Any] | None = None,
+    ) -> LiveEvolutionCommand:
+        if not template_id:
+            raise ValueError("live evolution requires a template identity")
+        operation: dict[str, Any] = {
+            "operation": "apply",
+            "template_id": template_id,
+            "command": command,
+        }
+        if safe_point is not None:
+            operation["safe_point"] = safe_point
+        return LiveEvolutionControlBuilder._build(command_id, operation)
+
+    @staticmethod
+    def _build(
+        command_id: str, operation: dict[str, Any]
+    ) -> LiveEvolutionCommand:
+        if not command_id:
+            raise ValueError("live-evolution control requires a command identity")
+        return {
+            "control_version": "cymule.live-evolution-control/1",
             "command_id": command_id,
             **copy.deepcopy(operation),
         }
@@ -1082,12 +1261,32 @@ class CliEngine:
             raise RuntimeError(f"unexpected engine response: {response!r}")
         return response["activation"]
 
+    def verify_durable_command(self, command: DurableCommand) -> DurableCommand:
+        """Validate one closed M1 control envelope with the Rust engine."""
+        response = self._request(
+            {"type": "verify_durable_command", "command": command}
+        )
+        if response.get("type") != "verified_durable_command":
+            raise RuntimeError(f"unexpected engine response: {response!r}")
+        return response["command"]
+
     def verify_evolution_command(self, command: EvolutionCommand) -> EvolutionCommand:
         """Validate one closed M4 control envelope with the Rust engine."""
         response = self._request(
             {"type": "verify_evolution_command", "command": command}
         )
         if response.get("type") != "verified_evolution_command":
+            raise RuntimeError(f"unexpected engine response: {response!r}")
+        return response["command"]
+
+    def verify_live_evolution_command(
+        self, command: LiveEvolutionCommand
+    ) -> LiveEvolutionCommand:
+        """Validate one unified live-evolution envelope with the Rust engine."""
+        response = self._request(
+            {"type": "verify_live_evolution_command", "command": command}
+        )
+        if response.get("type") != "verified_live_evolution_command":
             raise RuntimeError(f"unexpected engine response: {response!r}")
         return response["command"]
 
@@ -1128,9 +1327,15 @@ class CliEngine:
 __all__ = [
     "ArtifactRef",
     "CliEngine",
+    "DurableCommand",
+    "DurableControl",
+    "DurableControlBuilder",
     "EvolutionCommand",
     "EvolutionControl",
     "EvolutionControlBuilder",
+    "LiveEvolutionCommand",
+    "LiveEvolutionControl",
+    "LiveEvolutionControlBuilder",
     "FlowBuilder",
     "Json",
     "MigrationRequest",

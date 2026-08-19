@@ -7,7 +7,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cymule_core::{Machine, canonical_bytes, content_id, sha256_bytes};
 use cymule_durable::DurableCoordinator;
-use cymule_evolution::{DefinitionRegistry, DurableDefinitionRegistry};
+use cymule_evolution::{
+    DurableLiveEvolutionController, LiveEvolutionController, LivePublicationCommand,
+    LiveVirtualClaimCommand, RolloutMode,
+};
 use cymule_executor_process::{ProcessExecutor, ProcessExecutorConfig};
 use cymule_resource::{
     ArtifactStore, MAX_WRITE_CHUNK, ResourceClient, ResourceHandle, ResourceIntegrity,
@@ -17,10 +20,9 @@ use cymule_resource_fs::FsResourceStore;
 use cymule_runtime::EmbeddedRuntime;
 use cymule_store_sqlite::SqliteStore;
 use cymule_virtual::{
-    ClaimedWork, DurableVirtualController, FrontierLimits, VIRTUAL_CLAIM_CONTROL_VERSION,
-    VIRTUAL_RECOVERY_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualClaimCommand,
-    VirtualCursor, VirtualRecoveryCommand, VirtualRegion, WorkOccurrenceState, WorkResolution,
-    WorkResolutionCommand,
+    ClaimedWork, DurableVirtualController, FrontierLimits, VIRTUAL_RECOVERY_CONTROL_VERSION,
+    VIRTUAL_WORK_CONTROL_VERSION, VirtualCursor, VirtualRecoveryCommand, VirtualRegion,
+    WorkOccurrenceState, WorkResolution, WorkResolutionCommand,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +36,7 @@ use crate::model::{
 use crate::source::{CURSOR_VERSION, CaseSource, case_reference, parse_suite};
 
 const VIRTUAL_JOURNAL: &str = "example:virtual-work";
-const DEFINITIONS_JOURNAL: &str = "example:definitions";
+const LIVE_EVOLUTION_JOURNAL: &str = "example:live-evolution";
 const REGION_ID: &str = "region:evaluation-suite";
 const RESOURCE_BINDING: &str = "example.fs-resources@1";
 const DEFAULT_LEASE_TTL: u64 = 60_000;
@@ -198,7 +200,7 @@ pub fn run(options: &CampaignOptions) -> CampaignResult<CampaignRun> {
         FsResourceStore::open(options.state_dir.join("resources"), RESOURCE_BINDING)?;
     let (metadata, cases) =
         load_or_initialize_suite(options, &mut coordinator, &mut machine, &mut resource_store)?;
-    let mut registry = initialize_registry(&mut coordinator)?;
+    let mut evolution = initialize_evolution(&mut coordinator)?;
     let mut scheduler =
         DurableVirtualController::load(&coordinator, VIRTUAL_JOURNAL, frontier_limits())?;
     if !scheduler.snapshot().regions.contains_key(REGION_ID) {
@@ -236,12 +238,11 @@ pub fn run(options: &CampaignOptions) -> CampaignResult<CampaignRun> {
         let now = logical_now(options)?;
         recover_expired_claims(&mut coordinator, &mut scheduler, &mut machine, options, now)?;
 
-        let current = current_plan(&registry)?;
         let claim = claim_next(
             &mut coordinator,
             &mut scheduler,
+            &mut evolution,
             options,
-            &current.plan.plan_id,
             now,
         )?;
         let Some(claim) = claim else {
@@ -279,7 +280,7 @@ pub fn run(options: &CampaignOptions) -> CampaignResult<CampaignRun> {
         if options.fault == FaultPoint::AfterClaim(claimed_this_process) {
             return Ok(CampaignRun {
                 disposition: RunDisposition::SimulatedCrash,
-                report: build_report(options, &coordinator, &scheduler, &registry, &metadata)?,
+                report: build_report(options, &coordinator, &scheduler, &evolution, &metadata)?,
             });
         }
 
@@ -287,7 +288,7 @@ pub fn run(options: &CampaignOptions) -> CampaignResult<CampaignRun> {
             &mut coordinator,
             &mut scheduler,
             &mut machine,
-            &registry,
+            &evolution,
             options,
             &claim,
             &cases,
@@ -296,14 +297,14 @@ pub fn run(options: &CampaignOptions) -> CampaignResult<CampaignRun> {
         if options.fault == FaultPoint::AfterCommit(committed_this_process) {
             return Ok(CampaignRun {
                 disposition: RunDisposition::SimulatedCrash,
-                report: build_report(options, &coordinator, &scheduler, &registry, &metadata)?,
+                report: build_report(options, &coordinator, &scheduler, &evolution, &metadata)?,
             });
         }
-        registry = DurableDefinitionRegistry::load(&coordinator, DEFINITIONS_JOURNAL)?;
+        evolution = DurableLiveEvolutionController::load(&coordinator, LIVE_EVOLUTION_JOURNAL)?;
     }
     Ok(CampaignRun {
         disposition: RunDisposition::Complete,
-        report: build_report(options, &coordinator, &scheduler, &registry, &metadata)?,
+        report: build_report(options, &coordinator, &scheduler, &evolution, &metadata)?,
     })
 }
 
@@ -317,62 +318,52 @@ pub fn status(options: &CampaignOptions) -> CampaignResult<CampaignReport> {
     verify_metadata_run(&metadata, &options.run_id)?;
     verify_suite_resource(&metadata.suite, &mut resource_store)?;
     verify_requested_suite(options.suite_path.as_deref(), &metadata.suite)?;
-    let registry = DurableDefinitionRegistry::load(&coordinator, DEFINITIONS_JOURNAL)?;
+    let evolution = DurableLiveEvolutionController::load(&coordinator, LIVE_EVOLUTION_JOURNAL)?;
     let scheduler =
         DurableVirtualController::load(&coordinator, VIRTUAL_JOURNAL, frontier_limits())?;
-    build_report(options, &coordinator, &scheduler, &registry, &metadata)
+    build_report(options, &coordinator, &scheduler, &evolution, &metadata)
 }
 
 /// Publish a compatible or deliberately incompatible scorer revision.
 pub fn evolve(options: &CampaignOptions, policy: &str) -> CampaignResult<EvolutionReport> {
     validate_options(options)?;
     let (mut coordinator, _machine) = open_existing_coordinator(options)?;
-    let mut registry = DurableDefinitionRegistry::load(&coordinator, DEFINITIONS_JOURNAL)?;
-    let previous = current_plan(&registry)?;
+    let mut evolution = DurableLiveEvolutionController::load(&coordinator, LIVE_EVOLUTION_JOURNAL)?;
+    let previous = current_plan(&evolution)?;
     let compatible = match policy {
         "weighted" => true,
         "incompatible" => false,
         _ => return Err("policy must be weighted or incompatible".into()),
     };
     let definition = scorer_definition(policy, compatible);
-    if let Some(existing) = registry
-        .snapshot()
-        .revisions
-        .get(SCORER_REF)
-        .and_then(|revisions| {
-            revisions
-                .iter()
-                .find(|revision| revision.definition == definition)
-        })
-        .cloned()
-    {
-        let current = current_plan(&registry)?;
-        return Ok(EvolutionReport {
-            policy: policy.to_owned(),
-            compatible,
-            previous_plan_id: previous.plan.plan_id.clone(),
-            current_plan_id: current.plan.plan_id.clone(),
-            advanced: previous.plan.plan_id != current.plan.plan_id,
-            revision_id: existing.revision_id,
-        });
-    }
     let checkpoint_id = stable_id("evolve", &(policy, &definition))?;
-    let (revision, _relinked) = DurableDefinitionRegistry::publish_and_relink_and_checkpoint(
+    let mut machine = coordinator.restore_machine()?;
+    let evidence = machine.put_artifact(
+        "example.evolution-review/1",
+        canonical_bytes(&(policy, &definition))?,
+    );
+    let receipt = DurableLiveEvolutionController::publish_and_relink_and_checkpoint(
         &mut coordinator,
-        &mut registry,
-        DEFINITIONS_JOURNAL,
+        &mut evolution,
+        &machine,
+        LIVE_EVOLUTION_JOURNAL,
         &checkpoint_id,
-        SCORER_REF,
-        definition,
+        LivePublicationCommand {
+            logical_ref: SCORER_REF.to_owned(),
+            definition,
+            evidence,
+            mode: RolloutMode::Active,
+        },
     )?;
-    let current = current_plan(&registry)?;
+    let current = current_plan(&evolution)?;
+    let advanced = receipt.updates.iter().any(|update| update.advanced);
     Ok(EvolutionReport {
         policy: policy.to_owned(),
         compatible,
         previous_plan_id: previous.plan.plan_id.clone(),
         current_plan_id: current.plan.plan_id.clone(),
-        advanced: previous.plan.plan_id != current.plan.plan_id,
-        revision_id: revision.revision_id,
+        advanced,
+        revision_id: receipt.revision.revision_id,
     })
 }
 
@@ -522,37 +513,37 @@ fn store_suite_bytes(
     Ok(resource)
 }
 
-fn initialize_registry(
+fn initialize_evolution(
     coordinator: &mut DurableCoordinator<SqliteStore>,
-) -> CampaignResult<DefinitionRegistry> {
-    let mut registry = DurableDefinitionRegistry::load(coordinator, DEFINITIONS_JOURNAL)?;
-    if registry.snapshot().revisions.is_empty() {
-        DurableDefinitionRegistry::publish_and_relink_and_checkpoint(
+) -> CampaignResult<LiveEvolutionController> {
+    let mut controller = DurableLiveEvolutionController::load(coordinator, LIVE_EVOLUTION_JOURNAL)?;
+    if controller.snapshot().registry.revisions.is_empty() {
+        DurableLiveEvolutionController::publish_and_checkpoint(
             coordinator,
-            &mut registry,
-            DEFINITIONS_JOURNAL,
+            &mut controller,
+            LIVE_EVOLUTION_JOURNAL,
             "definitions:strict-scorer",
             SCORER_REF,
             scorer_definition("strict", true),
         )?;
     }
-    if registry.current_link(TEMPLATE_ID).is_none() {
-        DurableDefinitionRegistry::register_template_and_checkpoint(
+    if controller.current_link(TEMPLATE_ID).is_none() {
+        DurableLiveEvolutionController::register_template_and_checkpoint(
             coordinator,
-            &mut registry,
-            DEFINITIONS_JOURNAL,
+            &mut controller,
+            LIVE_EVOLUTION_JOURNAL,
             "definitions:campaign-template",
             campaign_template(),
         )?;
     }
-    Ok(registry)
+    Ok(controller)
 }
 
 fn claim_next(
     coordinator: &mut DurableCoordinator<SqliteStore>,
     scheduler: &mut cymule_virtual::VirtualScheduler,
+    evolution: &mut LiveEvolutionController,
     options: &CampaignOptions,
-    plan_id: &str,
     now: u64,
 ) -> CampaignResult<Option<ClaimedWork>> {
     if let Some(active) = scheduler.snapshot().active.values().next().cloned() {
@@ -562,34 +553,40 @@ fn claim_next(
         return Ok(None);
     }
     let snapshot = scheduler.snapshot();
-    let command = VirtualClaimCommand {
-        control_version: VIRTUAL_CLAIM_CONTROL_VERSION.to_owned(),
-        command_id: stable_id(
-            "claim",
-            &(
-                options.run_id.as_str(),
-                cymule_core::canonical_digest(&snapshot)?,
-                options.worker_id.as_str(),
-                now,
-            ),
-        )?,
-        owner: options.worker_id.clone(),
-        slot_id: stable_id(
-            "slot",
-            &(options.run_id.as_str(), options.worker_id.as_str()),
-        )?,
-        occurrence_binding: plan_id.to_owned(),
-        capabilities: BTreeSet::from(["evaluation".to_owned()]),
-        logical_now: now,
-        lease_ttl: options.lease_ttl,
-    };
-    Ok(DurableVirtualController::claim_command_and_checkpoint(
+    if !snapshot.ready.values().any(|queue| !queue.is_empty()) {
+        return Ok(None);
+    }
+    let command_id = stable_id(
+        "claim",
+        &(
+            options.run_id.as_str(),
+            cymule_core::canonical_digest(&snapshot)?,
+            options.worker_id.as_str(),
+            now,
+        ),
+    )?;
+    let selection_id = stable_id("plan-selection", &command_id)?;
+    let receipt = DurableLiveEvolutionController::claim_virtual_work_and_checkpoint(
         coordinator,
+        evolution,
         scheduler,
-        &command,
+        LIVE_EVOLUTION_JOURNAL,
         VIRTUAL_JOURNAL,
-    )?
-    .claim)
+        &LiveVirtualClaimCommand {
+            template_id: TEMPLATE_ID.to_owned(),
+            selection_id,
+            command_id,
+            owner: options.worker_id.clone(),
+            slot_id: stable_id(
+                "slot",
+                &(options.run_id.as_str(), options.worker_id.as_str()),
+            )?,
+            capabilities: BTreeSet::from(["evaluation".to_owned()]),
+            logical_now: now,
+            lease_ttl: options.lease_ttl,
+        },
+    )?;
+    Ok(receipt.claim.claim)
 }
 
 fn recover_expired_claims(
@@ -647,13 +644,13 @@ fn execute_claim(
     coordinator: &mut DurableCoordinator<SqliteStore>,
     scheduler: &mut cymule_virtual::VirtualScheduler,
     machine: &mut Machine,
-    registry: &DefinitionRegistry,
+    evolution: &LiveEvolutionController,
     options: &CampaignOptions,
     claim: &ClaimedWork,
     cases: &[EvaluationCase],
 ) -> CampaignResult<()> {
-    let linked = registry
-        .historical_link(&claim.occurrence_binding)
+    let linked = evolution
+        .historical_link_for(TEMPLATE_ID, &claim.occurrence_binding)
         .ok_or_else(|| {
             format!(
                 "occurrence references unknown Plan {}",
@@ -723,7 +720,7 @@ fn build_report(
     options: &CampaignOptions,
     coordinator: &DurableCoordinator<SqliteStore>,
     scheduler: &cymule_virtual::VirtualScheduler,
-    registry: &DefinitionRegistry,
+    evolution: &LiveEvolutionController,
     metadata: &CampaignMetadata,
 ) -> CampaignResult<CampaignReport> {
     let machine = coordinator.restore_machine()?;
@@ -793,7 +790,7 @@ fn build_report(
     Ok(CampaignReport {
         run_id: options.run_id.clone(),
         suite_resource_id: metadata.suite.resource_id.clone(),
-        current_plan_id: current_plan(registry)?.plan.plan_id,
+        current_plan_id: current_plan(evolution)?.plan.plan_id,
         total_cases: metadata.case_count,
         total_occurrences,
         recovered_attempts,

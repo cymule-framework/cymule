@@ -8,8 +8,10 @@ import unittest
 
 from cymule import (
     CliEngine,
+    DurableControlBuilder,
     EvolutionControlBuilder,
     FlowBuilder,
+    LiveEvolutionControlBuilder,
     ResourceBuilder,
     VirtualSchedulingControlBuilder,
     VirtualWorkControlBuilder,
@@ -18,6 +20,46 @@ from cymule import (
 
 
 class EndToEndTest(unittest.TestCase):
+    def test_python_durable_control_validates(self) -> None:
+        engine_path = os.environ.get("CYMULE_BIN")
+        fixture_path = os.environ.get("CYMULE_DURABLE_CONTROL_FIXTURE")
+        if engine_path is None or fixture_path is None:
+            self.skipTest("durable control conformance is not configured")
+        command = DurableControlBuilder.query_domain(
+            "query:cross-language-domain"
+        )
+        with open(fixture_path, encoding="utf-8") as source:
+            self.assertEqual(command, json.load(source))
+        self.assertEqual(
+            CliEngine(engine_path).verify_durable_command(command), command
+        )
+        self.assertEqual(
+            DurableControlBuilder.activate_signal(
+                "activation:sdk",
+                "signal:sdk",
+                ["wait:z", "wait:a", "wait:z"],
+                {"accepted": True},
+            )["wait_ids"],
+            ["wait:a", "wait:z"],
+        )
+
+    def test_python_unified_live_evolution_validates(self) -> None:
+        engine_path = os.environ.get("CYMULE_BIN")
+        fixture_path = os.environ.get("CYMULE_LIVE_EVOLUTION_CONTROL_FIXTURE")
+        if engine_path is None or fixture_path is None:
+            self.skipTest("live-evolution conformance is not configured")
+        with open(fixture_path, encoding="utf-8") as source:
+            expected = json.load(source)
+        command = LiveEvolutionControlBuilder.apply(
+            "command:live-evolution:fixture:select",
+            "template:review-parent",
+            expected["command"],
+        )
+        self.assertEqual(command, expected)
+        self.assertEqual(
+            CliEngine(engine_path).verify_live_evolution_command(command), command
+        )
+
     def test_python_evolution_control_validates(self) -> None:
         engine_path = os.environ.get("CYMULE_BIN")
         fixture_path = os.environ.get("CYMULE_EVOLUTION_CONTROL_FIXTURE")
