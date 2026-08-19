@@ -28,7 +28,8 @@ commands independently of transport. `VirtualWorkControlBuilder` provides
 success, retry, failure, and cancellation command helpers.
 Region migration commands wrap adapter-produced split/merge plans; cursor
 partitioning and coverage proof stay outside the SDK.
-M3 also exposes certified compaction and exact partial-rehydration controls. A
+Virtual work also exposes certified compaction and exact partial-rehydration
+controls. A
 `VirtualArchive` adapter stores immutable bytes only; Rust owns manifest
 identity, certificate verification, and durable admission.
 `VirtualSchedulingControl` adds capacity-slot claim, renewal, explicit expired

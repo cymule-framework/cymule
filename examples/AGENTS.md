@@ -1,8 +1,8 @@
 # Example Guidance
 
 - Examples are user-facing product surfaces, not conformance fixtures.
-- Keep each example self-contained, copyable, and honest about the profile it
-  exercises.
+- Keep each example self-contained, copyable, and honest about the capabilities
+  and limits it exercises; do not require users to understand milestone labels.
 - Example commands must avoid test-only paths, ambient credentials,
   machine-global state, and generated setup files.
 - Run examples in repository verification so README commands cannot drift.

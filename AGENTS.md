@@ -118,6 +118,9 @@ Use this precedence order when guidance conflicts:
   expose only technology-neutral semantic and substrate contracts.
 - Keep all source code, comments, documentation, commit messages, schemas, and
   user-facing project metadata in English.
+- User-facing README files describe observable capabilities and limits without
+  M0-M6 milestone labels. Keep milestone sequencing in the roadmap and
+  maintainer profile/specification documents.
 - GitHub Actions is the only publication authority for every public artifact,
   including packages, release assets, and future registry distributions. Local
   commands may build, test, stage, and inspect release bytes, but must never

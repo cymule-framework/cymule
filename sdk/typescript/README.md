@@ -5,8 +5,8 @@ Engine. It does not implement canonical sealing or runtime semantics.
 
 `FlowBuilder.definition()` adds a reusable definition to the same immutable
 Plan and `invoke()` calls it with explicit input and result binding. Logical
-latest-compatible registry resolution is performed by the Rust M4 linker before
-sealing, never by the SDK.
+latest-compatible registry resolution is performed by the Rust live-evolution
+linker before sealing, never by the SDK.
 
 ```sh
 npm install cymule
@@ -34,8 +34,8 @@ the durable runtime remains responsible for matching pending waits and admitting
 the activation through CAS.
 
 `VirtualWorkControl` is a transport-neutral interface for querying identified
-M3 attempt occurrences and submitting owner/work/lease/time-fenced resolution
-commands.
+virtual-work attempt occurrences and submitting owner/work/lease/time-fenced
+resolution commands.
 `VirtualWorkControlBuilder` creates success, retry, failure, and cancellation
 commands without choosing a scheduler or worker transport.
 The same interface accepts adapter-produced region split/merge plans with
@@ -43,7 +43,8 @@ opaque cursor preconditions and coverage evidence; SDK code never partitions
 cursor strings itself.
 It also carries completed-region compaction and exact-occurrence rehydration
 commands. `VirtualArchive` is only an immutable byte seam; the Rust controller
-computes and verifies manifest and certificate identity before M1 admission.
+computes and verifies manifest and certificate identity before durable
+admission.
 
 `VirtualSchedulingControl` carries capacity-slot claims, lease renewals,
 explicit expired-claim recovery, and future Run-weight updates. Builders require

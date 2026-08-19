@@ -6,6 +6,8 @@
   silently create new semantics.
 - Keep one canonical explanation for each concept and link to it instead of
   copying it across files.
+- User-facing documentation names capabilities directly. Reserve M0-M6 labels
+  for the roadmap and maintainer-facing profile/specification cross-references.
 - Any semantic object or transition added to documentation must map to code,
   schema, and a conformance test, or be explicitly marked proposed.
 - Prefer technology-neutral property names. Concrete products may appear in

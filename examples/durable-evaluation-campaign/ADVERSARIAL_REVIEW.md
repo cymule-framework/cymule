@@ -74,14 +74,14 @@ A compatible definition produces a new immutable parent Plan for future claims.
 A definition with a changed input schema is stored as history but cannot move
 the current link. Existing occurrence bindings never change in either case.
 
-The broader M4 controller additionally checks new component, effect,
+The broader live-evolution controller additionally checks new component, effect,
 capability, authority, migration, canary, shadow, and rollback evidence. This
 example focuses on reusable-definition compatibility and occurrence pinning;
 it does not pretend to demonstrate every rollout mode in one CLI flow.
 
 ## Residual boundaries
 
-- The suite parser retains at most 8 MiB in memory while M3 keeps only a bounded
+- The suite parser retains at most 8 MiB in memory while the scheduler keeps only a bounded
   schedulable frontier. A production billion-case source should implement a
   paged Resource/index adapter rather than raise this example limit.
 - Process execution is isolation by protocol and resource bounds, not a
@@ -90,8 +90,8 @@ it does not pretend to demonstrate every rollout mode in one CLI flow.
   mutating subject needs Effect idempotency and reconciliation instead.
 - SQLite provides one local durable domain. Cross-host ownership and failover
   require a different DurableStore and deployment-level coordination.
-- The external process-kill campaign covers this M1/M3 application path, not
-  every internal M1 effect, wait, compaction, or migration crash window. Those
+- The external process-kill campaign covers this durable virtual-work path, not
+  every internal effect, wait, compaction, or migration crash window. Those
   deterministic fault matrices remain independent evidence until equivalent
   black-box kill campaigns are added deliberately.
 - The local filesystem Resource adapter protects content integrity, not secrecy

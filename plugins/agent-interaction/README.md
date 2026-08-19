@@ -9,7 +9,7 @@ It provides:
 
 - protocol-neutral Session and content types;
 - caller-driven Agent-host occurrence and recovery controllers;
-- M1-backed input, workspace, and stream checkpoints;
+- durable input, workspace, and stream checkpoints;
 - plugin-owned schemas, fixtures, and fault-oriented tests.
 
 It deliberately does not implement an Agent Loop or a transport protocol. ACP,

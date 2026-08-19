@@ -24,10 +24,10 @@ than framework semantics.
 
 > **Project status:** Cymule `0.1.x` is an early executable reference
 > implementation of this model, not yet a complete production fabric. The
-> bounded M0 semantic, single-domain M3 large-virtual-work, and provider-neutral
-> M4 live-evolution profiles are implemented; M1 provides a fault-tested but
-> partial durable-execution foundation. Optional Agent integration is
-> maintained as a plugin. See
+> exact semantic kernel, bounded virtual-work scheduler, and provider-neutral
+> live-evolution controls are executable today. Single-domain durable execution
+> is fault-tested but remains partial. Optional Agent integration is maintained
+> as a plugin. See
 > the [roadmap](docs/roadmap.md) for the exact implemented and remaining
 > boundaries.
 
@@ -83,7 +83,7 @@ turn, or wire protocol. Those are application-domain concerns. The separately
 owned [`plugins/agent-interaction`](plugins/agent-interaction/README.md) package
 shows how an Agent integration can lower Session updates, input waits, host
 occurrences, workspace changes, and finalized streams onto generic Cymule waits,
-effects, resources, and M1 application journals. ACP, MCP, A2A, editor, and
+effects, resources, and durable application journals. ACP, MCP, A2A, editor, and
 provider support belongs in additional plugins above that package, not in
 framework core, CLI, or SDK semantics.
 
@@ -160,10 +160,11 @@ This is not a scripted transcript. The demo composes the published framework
 boundaries:
 
 - the suite is a content-verified Resource rather than an ambient path;
-- M3 materializes a bounded work frontier and records each claimed occurrence;
+- the scheduler materializes a bounded work frontier and records each claimed
+  occurrence;
 - SQLite CAS preserves the first three results across process death;
 - every occurrence pins the exact immutable Plan selected before execution;
-- M4 `latest_compatible` relinks only future work to the new scorer;
+- `latest_compatible` relinks only future work to the new scorer;
 - a scorer with a changed input contract is retained but cannot silently take
   over the default.
 
@@ -434,12 +435,12 @@ See [Architecture](docs/architecture.md) and the
 | TypeScript SDK | Implemented | Builder and CLI-backed engine client. |
 | Python SDK | Implemented | Dependency-light builder and engine client. |
 | Go SDK | Implemented | Builder and engine client. |
-| Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, M1 handoff journal and atomic input activation. |
+| Cross-Run Resources | Implemented foundation | Four SDK builders, Rust sealing, bounded resolver/store interfaces, durable handoff journal, and atomic input activation. |
 | Durable wait activation | Implemented foundation | Identified signal/timer records, bounded parked indexes, replaceable source drivers, acknowledgement-loss replay, reopen-safe epoch advance, and four SDK wire validation. |
 | Durable effect policies | Implemented foundation | Nested commit gates, eager observation binding, explicit caller release, exact outbox deltas, and ambiguity reconciliation. |
-| Large virtual work M3 | Implemented | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker recovery, M1 checkpoints, and four SDK controls. |
+| Large virtual work | Implemented | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker recovery, durable checkpoints, and four SDK controls. |
 | Virtual work control | Implemented | Binding-pinned attempts, work/lease fencing, explicit recovery, closed dispositions, and four SDK transport interfaces. |
-| Live evolution M4 | Partial | Deterministic Plan diff/DAG, future rollout, durable occurrence pins, safe-point migration receipts, shadow evidence, and rollback. |
+| Live evolution | Implemented foundation | Deterministic Plan diff/DAG, compatible future relinking, durable occurrence pins, safe-point migration receipts, shadow evidence, canary gates, and rollback. |
 | Agent interaction plugin | Optional, partial | Rust plugin with Session, occurrence, input, workspace, and stream conformance tests. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
 | JSON Schema contracts | Implemented | Draft 2020-12 Plan and protocol schemas. |
@@ -455,18 +456,18 @@ publishing and provenance; local development commands never publish releases.
 
 ## Capabilities and limits
 
-Cymule implements four bounded profiles:
+Today Cymule provides:
 
-- **M0 semantic execution:** sealed Plans, canonical identities, typed
+- **Exact semantic execution:** sealed Plans, canonical identities, typed
   idempotent Commands, causal replay, fenced attempts and effects, and explicit
   reconciliation of ambiguous outcomes.
-- **M1 durable single-domain foundation (partial):** CAS state,
+- **Durable single-domain execution (partial):** CAS state,
   Continuations, waits, outbox records, component occurrences, compaction, and
   acknowledgement-loss recovery.
-- **M3 large virtual work:** bounded materialization, deterministic fairness,
+- **Large virtual work:** bounded materialization, deterministic fairness,
   portable snapshots, verified region changes, cold-history archival, and
   fenced worker leases.
-- **M4 live evolution:** immutable Plan DAGs, latest-compatible reusable-module
+- **Live evolution:** immutable Plan DAGs, latest-compatible reusable-module
   linking, future-only rollout, safe-point migration, shadow evidence, and
   deterministic promotion or rollback.
 
@@ -477,23 +478,23 @@ framework core.
 
 Cymule does not claim distributed consensus or failover, strong multi-tenant
 isolation, provider-level exactly-once behavior, production certification for
-every adapter, or a complete MLIR dialect and lowering pipeline. Exact M0 replay
+every adapter, or a complete MLIR dialect and lowering pipeline. Exact replay
 requires retained Events and Artifacts; exact execution replay additionally
 requires a durably recorded component occurrence.
 
-See [Conformance](docs/conformance.md) for precise profile claims and
+See [Conformance](docs/conformance.md) for precise behavioral claims and
 [Roadmap](docs/roadmap.md) for the implementation sequence.
 
 ## Repository layout
 
 ```text
 crates/cymule-core      trusted Rust semantic kernel
-crates/cymule-durable   provider-neutral M1 persistence and recovery contracts
-crates/cymule-evolution provider-neutral M4 Plan DAG and rollout semantics
+crates/cymule-durable   provider-neutral persistence and recovery contracts
+crates/cymule-evolution provider-neutral Plan DAG and rollout semantics
 crates/cymule-runtime   embedded interpreter and plugin host
 crates/cymule-resource  provider-neutral Resource Handles and Run handoffs
 crates/cymule-sdk       native Rust facade, published as the `cymule` crate
-crates/cymule-virtual   provider-neutral M3 bounded virtual-work scheduler
+crates/cymule-virtual   provider-neutral bounded virtual-work scheduler
 crates/cymule-cli       command-line and JSON engine boundary
 sdk/typescript          TypeScript SDK
 sdk/python              Python SDK
@@ -501,9 +502,9 @@ sdk/go                  Go SDK
 schemas                 frozen JSON Schema contracts
 compiler/mlir           optional, partial MLIR workbench
 examples/hello-world    code-first Flow, Embedded runtime, and example plugin
-examples/durable-evaluation-campaign durable M1/M3/M4 user path and process plugin
+examples/durable-evaluation-campaign durable recovery/evolution user path
 plugins/test-adapter    deterministic conformance plugin
-plugins/directory-store atomic local M1 DurableStore reference adapter
+plugins/directory-store atomic local DurableStore reference adapter
 plugins/agent-interaction optional Agent-domain integration plugin
 plugins/store-sqlite    SQLite single-domain DurableStore adapter
 plugins/resource-fs     content-addressed files and directory manifests

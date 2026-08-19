@@ -19,17 +19,17 @@ into Plans and Events.
 | `cymule-activation-timer` | timer `WaitSourceDriver` | SQLite through `rusqlite` | durable schedules, injected clock, exact redelivery until acknowledgement |
 | `cymule-executor-process` | `PluginHost` | `std::process`, `wait-timeout` | cleared environment, explicit args/env, bounded pipes, concurrent draining, timeout kill/reap |
 | `cymule-observability-otel` | derived observation | `tracing`, OpenTelemetry Rust, OTLP | bounded identity records, caller-composed layer, no global subscriber or semantic authority |
-| `cymule-agent` | optional Agent-domain contracts | Cymule M1 journals | Sessions/projections, pinned host occurrences, input/workspace/stream durability without an Agent Loop |
+| `cymule-agent` | optional Agent-domain contracts | Cymule durable journals | Sessions/projections, pinned host occurrences, input/workspace/stream durability without an Agent Loop |
 | `cymule-agent-mcp` | MCP tool adapter | official `rmcp` | exact tool argument mapping, binding retention, explicit incomplete/error handling, Resource references without loop ownership |
 
 The object-store adapter initially accepts `object` Resources. Filesystem
 directory manifests provide the day-one hierarchical implementation; a
 provider-neutral paginated object-manifest format remains a later additive
-profile rather than an unbounded list fallback.
+capability rather than an unbounded list fallback.
 
-HTTP ingress initially owns signals. Typed external input remains with the M1
-or Agent input controller until a generic typed-input source contract exists;
-the plugin does not disguise input completion as a signal.
+HTTP ingress initially owns signals. Typed external input remains with the
+durable or Agent input controller until a generic typed-input source contract
+exists; the plugin does not disguise input completion as a signal.
 
 ## RocksDB assessment
 

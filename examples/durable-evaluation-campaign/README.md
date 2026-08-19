@@ -141,7 +141,7 @@ keeps the previous future-default Plan.
 | --- | --- | --- |
 | Durable authority | complete-state CAS and application journals | `cymule-store-sqlite` |
 | Suite and artifacts | content-verified Resource Handle | `cymule-resource-fs` |
-| Large case space | bounded M3 cursor and ready frontier | pages of 16, frontier of 32 |
+| Large case space | bounded cursor and ready frontier | pages of 16, frontier of 32 |
 | Worker ownership | CAS-backed capacity-slot lease and attempt epoch | one process worker slot |
 | Subject and scorer | abstract component plugin calls | bounded child process |
 | Scorer evolution | reusable definition with `latest_compatible` | strict to weighted policy |
