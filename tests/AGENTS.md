@@ -7,6 +7,9 @@
 - A seeded property/fuzz failure must print its seed and be minimized into a
   permanent regression fixture. Do not rely on wall-clock races when a CAS
   revision, epoch, counter, or explicit barrier can identify the interleaving.
+- User-example crash tests should execute the built binary and use explicit
+  logical clock values. Exit after an identified durable boundary, reopen from
+  public adapters, and assert the retained occurrence and Resource identities.
 - Property tests run a bounded default case count in focused suites and honor
   `PROPTEST_CASES` in `rust-soak`; do not make ordinary test latency depend on
   soak-scale generation.

@@ -1,0 +1,12 @@
+{"id":"account-locked","input":{"message":"I am locked out after changing my password"},"expected":{"category":"identity","urgency":"normal"}}
+{"id":"login-urgent","input":{"message":"Urgent: nobody can login to the admin console"},"expected":{"category":"identity","urgency":"high"}}
+{"id":"duplicate-charge","input":{"message":"The latest invoice has a duplicate charge"},"expected":{"category":"billing","urgency":"normal"}}
+{"id":"refund-status","input":{"message":"Where is the refund from last week's invoice?"},"expected":{"category":"billing","urgency":"normal"}}
+{"id":"regional-outage","input":{"message":"Production is down in the EU region"},"expected":{"category":"reliability","urgency":"high"}}
+{"id":"intermittent-api","input":{"message":"The API is intermittently unavailable"},"expected":{"category":"reliability","urgency":"normal"}}
+{"id":"feature-question","input":{"message":"How do I export a monthly report?"},"expected":{"category":"general","urgency":"normal"}}
+{"id":"sales-question","input":{"message":"Can I add another workspace to my plan?"},"expected":{"category":"general","urgency":"normal"}}
+{"id":"security-wording","input":{"message":"Our SSO certificate expires tomorrow"},"expected":{"category":"identity","urgency":"high"}}
+{"id":"payment-outage","input":{"message":"Checkout payments are down for every customer"},"expected":{"category":"billing","urgency":"high"}}
+{"id":"slow-dashboard","input":{"message":"The dashboard is slow but still usable"},"expected":{"category":"reliability","urgency":"normal"}}
+{"id":"password-question","input":{"message":"Where can I update my password?"},"expected":{"category":"identity","urgency":"normal"}}

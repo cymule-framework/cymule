@@ -49,6 +49,33 @@ fn chunk_retry_commit_and_reopen_preserve_exact_bytes() {
 }
 
 #[test]
+fn file_import_replays_after_publication_without_changing_bytes() {
+    let directory = tempdir().expect("temporary directory");
+    let source = directory.path().join("suite.jsonl");
+    fs::write(&source, b"one\ntwo\n").expect("source writes");
+    let mut store =
+        FsResourceStore::open(directory.path().join("store"), "fs:test").expect("store opens");
+    let first = store
+        .import_file(&source, "import:suite", "application/x-ndjson")
+        .expect("first import publishes");
+    let replay = store
+        .import_file(&source, "import:suite", "application/x-ndjson")
+        .expect("published import replays");
+    assert_eq!(replay, first);
+
+    fs::write(&source, b"one\nBAD\n").expect("source changes");
+    assert!(matches!(
+        store.import_file(&source, "import:suite", "application/x-ndjson"),
+        Err(ResourceError::Conflict(_))
+    ));
+    fs::write(&source, b"one\n").expect("source truncates");
+    assert!(matches!(
+        store.import_file(&source, "import:suite", "application/x-ndjson"),
+        Err(ResourceError::Conflict(_))
+    ));
+}
+
+#[test]
 fn recursive_directory_import_lists_bounded_sorted_pages() {
     let directory = tempdir().expect("temporary directory");
     let source = directory.path().join("source");

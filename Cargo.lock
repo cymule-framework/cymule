@@ -453,6 +453,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cymule-example-durable-evaluation-campaign"
+version = "0.1.4"
+dependencies = [
+ "cymule-core",
+ "cymule-durable",
+ "cymule-evolution",
+ "cymule-executor-process",
+ "cymule-resource",
+ "cymule-resource-fs",
+ "cymule-runtime",
+ "cymule-store-sqlite",
+ "cymule-virtual",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cymule-example-hello-world"
 version = "0.1.4"
 dependencies = [

@@ -63,7 +63,7 @@ runner:
 | Durable anomaly harness | CAS, reopen, receipt loss, unknown effects, fencing | deterministic Rust fault adapters |
 | Protocol verifier | frozen JSON and rejection of malformed/unknown fields | Rust CLI plus Python JSON Schema validation |
 | Cross-language differential | one Rust-sealed identity and execution result | native Rust, TypeScript, Python, and Go SDK tests |
-| Black-box user path | built engine plus a real process or embedded plugin | CLI and hello-world example scripts |
+| Black-box user path | built engine plus a real process or embedded plugin | Hello World plus durable campaign crash/evolution tests |
 | Plugin conformance | only the optional capability's public seam | one leaf suite per plugin |
 
 The suite inventory is a dependency graph, not a checklist that every edit must
@@ -80,7 +80,7 @@ evolve without coupling unrelated toolchains.
 | Durable fault | stale CAS, receipt loss, reopen, ambiguity, and atomicity | M1 stores/controllers and M1-backed profiles |
 | Frozen protocol | schemas, unknown-field rejection, and Rust-owned IDs | schemas, CLI, fixtures, or public wire types |
 | SDK conformance | one real Rust engine contract from a language projection | that SDK alone, or any shared semantic wire change |
-| User example | install-shaped success and reconciliation path | CLI, runtime, or example changes |
+| User example | install-shaped success, reconciliation, crash recovery, Resource integrity, and future-only evolution | CLI, runtime, or example changes |
 | Packaging | exact public package contents without publication | TypeScript packaging or release metadata |
 | Documentation | repository-local references resolve | authored Markdown or handbook changes |
 | Workbench | optional MLIR lowering smoke | compiler workbench changes or a complete run |

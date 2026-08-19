@@ -4,7 +4,9 @@
   a non-secret digest interpreted only under the configured immutable binding.
 - Upload IDs derive from caller write IDs. Chunk retry at an already persisted
   offset succeeds only when the retained bytes match exactly; gaps and changed
-  bytes fail closed.
+  bytes fail closed. A whole-file import must also replay after publication by
+  comparing every submitted chunk with the committed content; this closes the
+  Resource-published/consumer-checkpoint-not-yet-acknowledged recovery window.
 - Write and fsync a unique staging object before linking it into the content
   namespace. Never expose partial bytes at a committed Resource location.
 - Directory and snapshot resources are sorted JSON-lines manifests of child

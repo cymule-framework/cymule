@@ -16,6 +16,10 @@
 - Do not hide skipped coverage. Optional-tool skips must print the exact reason.
 - Cross-language tests must use freshly built Rust binaries and a Plan ID sealed
   from the checked-in shared fixture.
+- The example leaf owns both the minimal Hello World path and the durable
+  evaluation campaign's black-box crash, Resource, lease, and M4 tests. Keep it
+  independently runnable; do not scatter those user-path checks across SDK or
+  plugin leaves.
 - Export the Resource ID sealed from the checked-in Resource Candidate so every
   SDK verifies the same Rust-owned identity.
 - Every SDK submits the shared wait activation fixture to the Rust Engine. This

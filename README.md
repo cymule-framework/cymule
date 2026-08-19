@@ -181,6 +181,27 @@ outcome as `unknown` and reconciles the original intent instead of creating a
 duplicate effect. The [example guide](examples/hello-world/README.md) explains
 the execution and suggests useful first modifications.
 
+For a production-shaped local example, run the
+[durable evaluation campaign](examples/durable-evaluation-campaign/README.md).
+It imports an immutable evaluation suite as a Resource, materializes cases
+through a bounded M3 frontier, invokes a process plugin, survives process exit
+through SQLite, and updates the scorer for future cases through M4
+`latest_compatible` linking:
+
+```sh
+cargo build -p cymule-example-durable-evaluation-campaign
+CAMPAIGN_STATE=$(mktemp -d)
+
+./target/debug/cymule-example-durable-evaluation-campaign run \
+  --state "$CAMPAIGN_STATE" \
+  --suite examples/durable-evaluation-campaign/fixtures/support-tickets.jsonl \
+  --run-id run:support-evaluation
+```
+
+The default subject is deterministic and credential-free. Replace its process
+plugin with a model, Agent, script, sandbox, or remote evaluator without moving
+that system's internal loop into Cymule.
+
 Contributors should first select the smallest conservative suite for their
 change:
 
@@ -485,6 +506,7 @@ sdk/go                  Go SDK
 schemas                 frozen JSON Schema contracts
 compiler/mlir           optional, partial MLIR workbench
 examples/hello-world    code-first Flow, Embedded runtime, and example plugin
+examples/durable-evaluation-campaign durable M1/M3/M4 user path and process plugin
 plugins/test-adapter    deterministic conformance plugin
 plugins/directory-store atomic local M1 DurableStore reference adapter
 plugins/agent-interaction optional Agent-domain integration plugin

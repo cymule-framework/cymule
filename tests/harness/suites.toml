@@ -91,7 +91,7 @@ tools = ["rust", "go"]
 commands = [["./scripts/verify-sdk.sh", "go"]]
 
 [suites.example]
-description = "Run the user quick-start example through success and reconciliation."
+description = "Run Hello World plus durable campaign crash, integrity, lease, and evolution paths."
 lane = "protocol"
 tools = ["rust"]
 commands = [["./scripts/verify-example.sh"]]

@@ -119,7 +119,16 @@ impl FsResourceStore {
                 .checked_add(count as u64)
                 .ok_or_else(|| ResourceError::Integrity("file size overflow".to_owned()))?;
         }
-        self.commit_write(&session)
+        let handle = self.commit_write(&session)?;
+        if !matches!(
+            handle.integrity,
+            ResourceIntegrity::Content { size, .. } if size == offset
+        ) {
+            return Err(ResourceError::Conflict(
+                "filesystem import length changed committed bytes".to_owned(),
+            ));
+        }
+        Ok(handle)
     }
 
     /// Import a directory recursively as a manifest Resource.
@@ -324,7 +333,41 @@ impl ArtifactStore for FsResourceStore {
         }
         let _claim = self.claim(&session.upload_id)?;
         let record = self.load_record(&session.upload_id)?;
-        if record.write_id() != session.write_id || record.state != UploadState::Open {
+        if record.write_id() != session.write_id {
+            return Err(ResourceError::Conflict(
+                "filesystem upload identity changed".to_owned(),
+            ));
+        }
+        if record.state == UploadState::Committed {
+            let handle = record.handle.as_ref().ok_or_else(|| {
+                ResourceError::Integrity(
+                    "committed filesystem upload has no Resource Handle".to_owned(),
+                )
+            })?;
+            handle.verify()?;
+            let path = self.resource_path(handle)?;
+            let size = fs::metadata(&path).map_err(substrate)?.len();
+            let end = offset
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| ResourceError::Integrity("resource size overflow".to_owned()))?;
+            if end > size {
+                return Err(ResourceError::Conflict(
+                    "filesystem write retry exceeds committed bytes".to_owned(),
+                ));
+            }
+            let mut file = File::open(path).map_err(substrate)?;
+            file.seek(SeekFrom::Start(offset)).map_err(substrate)?;
+            let mut retained = vec![0_u8; bytes.len()];
+            file.read_exact(&mut retained).map_err(substrate)?;
+            return if retained == bytes {
+                Ok(())
+            } else {
+                Err(ResourceError::Conflict(
+                    "filesystem write retry changed committed bytes".to_owned(),
+                ))
+            };
+        }
+        if record.state != UploadState::Open {
             return Err(ResourceError::Conflict(
                 "filesystem upload is not open for this write".to_owned(),
             ));
