@@ -6,6 +6,8 @@ use serde_json::Value;
 
 use crate::{CoreError, Result, content_id};
 
+const JSON_SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
+
 /// Frozen canonical IR version.
 pub const IR_VERSION: &str = "cymule.ir/2";
 
@@ -570,12 +572,11 @@ fn validate_schema(kind: &str, schema: &Value) -> Result<()> {
             "{kind} schema must be a JSON object or boolean"
         )));
     }
-    const DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
     if let Some(declared) = schema.get("$schema")
-        && declared.as_str() != Some(DIALECT)
+        && declared.as_str() != Some(JSON_SCHEMA_DIALECT)
     {
         return Err(CoreError::Validation(format!(
-            "{kind} schema dialect must be exactly {DIALECT:?}"
+            "{kind} schema dialect must be exactly {JSON_SCHEMA_DIALECT:?}"
         )));
     }
     jsonschema::draft202012::options()
