@@ -64,6 +64,11 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 "durable store is already initialized".to_owned(),
             ));
         }
+        ensure_run_start_machine(
+            &Machine::new().snapshot(),
+            &machine.snapshot(),
+            &continuation,
+        )?;
         let mut state = DurableState::new(machine.snapshot());
         state
             .continuations
@@ -1451,6 +1456,7 @@ fn ensure_run_start_machine(
             "new Run execution binding Artifact identity is invalid".to_owned(),
         ));
     }
+    binding_descriptor.admit_plan(plan)?;
     let events = ensure_canonical_machine_delta_with_plan(
         current,
         next,

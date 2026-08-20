@@ -21,7 +21,16 @@
 - Run creation stores the canonical `cymule.execution-binding/1` Artifact in
   the same Machine delta as the input, Plan, start Event, Attempt, and initial
   Continuation. Reopen must resolve and verify that exact Artifact; a newly
-  selected provider revision cannot reinterpret historical work.
+  selected provider revision cannot reinterpret historical work. The
+  coordinator itself must use that resolved binding to admit the Plan before
+  the creation CAS; callers cannot bypass authority admission by avoiding the
+  resumable executor.
+- Every `ArtifactRef` persisted outside the canonical Machine must validate as
+  `cymule.artifact/2` and resolve to the exact typed record in that same
+  Machine snapshot. This includes Continuation state, frame inputs and locals,
+  wait/activation results, outbox inputs/results, and component occurrence
+  inputs/outputs. Public coordinator methods never accept dangling or legacy
+  references.
 - Compile the admitted Plan through `cymule-runtime` and validate Run,
   invocation, component, effect, typed-wait, definition-result, and terminal
   Result values at their exact boundary. Invalid input may not create its

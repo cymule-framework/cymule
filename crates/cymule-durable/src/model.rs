@@ -87,6 +87,7 @@ impl DurableState {
                     "continuation key {run_id} does not match its Run"
                 )));
             }
+            validate_continuation_artifacts(&machine, continuation)?;
         }
         for (wait_id, wait) in &self.waits {
             if &wait.wait_id != wait_id {
@@ -94,6 +95,7 @@ impl DurableState {
                     "wait key {wait_id} does not match its identity"
                 )));
             }
+            validate_wait_artifacts(&machine, wait)?;
         }
         let mut activated_waits = BTreeSet::new();
         for (activation_id, activation) in &self.wait_activations {
@@ -103,11 +105,11 @@ impl DurableState {
                 )));
             }
             activation.verify()?;
-            if machine.artifact(&activation.result).is_none() {
-                return Err(DurableError::Validation(format!(
-                    "wait activation {activation_id} result artifact is missing"
-                )));
-            }
+            require_artifact(
+                &machine,
+                &activation.result,
+                &format!("wait activation {activation_id} result"),
+            )?;
             let mut consume_once_targets = 0usize;
             for wait_id in &activation.wait_ids {
                 if !activated_waits.insert(wait_id) {
@@ -146,6 +148,45 @@ impl DurableState {
             activation
                 .source
                 .validate_target_cardinality(activation.wait_ids.len(), consume_once_targets)?;
+        }
+        for (resource, lease) in &self.leases {
+            if &lease.resource != resource {
+                return Err(DurableError::Validation(format!(
+                    "lease key {resource} does not match its resource"
+                )));
+            }
+        }
+        for (intent_id, dispatch) in &self.outbox {
+            if &dispatch.intent_id != intent_id {
+                return Err(DurableError::Validation(format!(
+                    "outbox key {intent_id} does not match its Effect intent"
+                )));
+            }
+            validate_dispatch_artifacts(&machine, dispatch)?;
+        }
+        for (occurrence_id, occurrence) in &self.component_occurrences {
+            if &occurrence.occurrence_id != occurrence_id {
+                return Err(DurableError::Validation(format!(
+                    "component occurrence key {occurrence_id} does not match its identity"
+                )));
+            }
+            require_artifact(
+                &machine,
+                &occurrence.input,
+                &format!("component occurrence {occurrence_id} input"),
+            )?;
+            require_artifact(
+                &machine,
+                &occurrence.output,
+                &format!("component occurrence {occurrence_id} output"),
+            )?;
+        }
+        for (snapshot_id, snapshot) in &self.snapshots {
+            if &snapshot.snapshot_id != snapshot_id {
+                return Err(DurableError::Validation(format!(
+                    "snapshot key {snapshot_id} does not match its identity"
+                )));
+            }
         }
         for (journal_id, records) in &self.application_journals {
             if journal_id.is_empty() {
@@ -216,6 +257,110 @@ impl DurableState {
         self.validate()?;
         canonical_digest(self).map_err(Into::into)
     }
+}
+
+fn validate_continuation_artifacts(
+    machine: &Machine,
+    continuation: &Continuation,
+) -> DurableResult<()> {
+    match continuation.status {
+        ContinuationStatus::Ready
+        | ContinuationStatus::Waiting
+        | ContinuationStatus::Running
+        | ContinuationStatus::Completed => {}
+    }
+    if let Some(state) = &continuation.state {
+        require_artifact(
+            machine,
+            state,
+            &format!("Continuation {} state", continuation.run_id),
+        )?;
+    }
+    for (index, frame) in continuation.frames.iter().enumerate() {
+        require_artifact(
+            machine,
+            &frame.input,
+            &format!("Continuation {} frame {index} input", continuation.run_id),
+        )?;
+        for (name, local) in &frame.locals {
+            require_artifact(
+                machine,
+                local,
+                &format!(
+                    "Continuation {} frame {index} local {name}",
+                    continuation.run_id
+                ),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_wait_artifacts(machine: &Machine, wait: &WaitCondition) -> DurableResult<()> {
+    match &wait.kind {
+        WaitKind::Signal { key } if key.is_empty() => {
+            return Err(DurableError::Validation(format!(
+                "wait {} signal key must not be empty",
+                wait.wait_id
+            )));
+        }
+        WaitKind::Timer { timer_id } if timer_id.is_empty() => {
+            return Err(DurableError::Validation(format!(
+                "wait {} timer identity must not be empty",
+                wait.wait_id
+            )));
+        }
+        WaitKind::Input { correlation, .. } if correlation.is_empty() => {
+            return Err(DurableError::Validation(format!(
+                "wait {} input correlation must not be empty",
+                wait.wait_id
+            )));
+        }
+        WaitKind::Signal { .. } | WaitKind::Timer { .. } | WaitKind::Input { .. } => {}
+    }
+    match wait.state {
+        WaitState::Pending | WaitState::Completed | WaitState::Cancelled => {}
+    }
+    if let Some(result) = &wait.result {
+        require_artifact(machine, result, &format!("wait {} result", wait.wait_id))?;
+    }
+    Ok(())
+}
+
+fn validate_dispatch_artifacts(machine: &Machine, dispatch: &EffectDispatch) -> DurableResult<()> {
+    match dispatch.state {
+        OutboxState::Pending
+        | OutboxState::Claimed
+        | OutboxState::Applied
+        | OutboxState::NotApplied
+        | OutboxState::Unknown => {}
+    }
+    require_artifact(
+        machine,
+        &dispatch.input,
+        &format!("Effect intent {} input", dispatch.intent_id),
+    )?;
+    if let Some(result) = &dispatch.result {
+        require_artifact(
+            machine,
+            result,
+            &format!("Effect intent {} result", dispatch.intent_id),
+        )?;
+    }
+    Ok(())
+}
+
+fn require_artifact(machine: &Machine, reference: &ArtifactRef, owner: &str) -> DurableResult<()> {
+    reference
+        .validate()
+        .map_err(|error| DurableError::Validation(format!("{owner}: {error}")))?;
+    if machine.artifact(reference).is_none() {
+        return Err(DurableError::Validation(format!(
+            "{owner} Artifact {} is missing from the canonical Machine",
+            reference.artifact_id
+        )));
+    }
+    Ok(())
 }
 
 /// One idempotent M1 Event-prefix compaction receipt.

@@ -5,15 +5,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cymule_core::{
-    COMMAND_VERSION, Command, CommandEnvelope, Definition, DispatchPolicy, EffectContract,
-    EffectProfile, EffectTransition, Expression, Machine, MutationKind, PlanCandidate,
-    ROOT_SCOPE_ID, ReconciliationMode, Region, WorldOutcome, effect_intent_id,
+    COMMAND_VERSION, Command, CommandEnvelope, ComponentContract, Definition, DispatchPolicy,
+    EffectContract, EffectProfile, EffectTransition, Expression, Machine, MutationKind,
+    PlanCandidate, ROOT_SCOPE_ID, ReconciliationMode, Region, WorldOutcome, effect_intent_id,
 };
 use cymule_durable::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
     DurableResult, DurableState, DurableStore, EffectDispatch, FrameState, JournalBatch,
     JournalRecord, MemoryStore, OutboxState, StoreCommit, StoredState, WaitActivation,
     WaitActivationSource, WaitCondition, WaitKind, WaitState,
+};
+use cymule_runtime::{
+    EXECUTION_BINDING_VERSION, ExecutionBinding, PLUGIN_VERSION, PluginManifest, PluginOperation,
 };
 use serde_json::json;
 
@@ -77,6 +80,9 @@ fn machine_with_run() -> (Machine, String) {
             },
         })
         .expect("run starts");
+    machine
+        .put_artifact("test/input", b"durable input".to_vec())
+        .expect("Continuation input stores");
     (machine, plan.plan_id)
 }
 
@@ -140,6 +146,9 @@ fn prepared_effect_transition() -> (Machine, Machine, Continuation, EffectDispat
             },
         })
         .expect("Run starts");
+    machine
+        .put_artifact("test/input", b"durable input".to_vec())
+        .expect("Continuation input stores");
     let base = machine.clone();
     let args = machine
         .put_artifact("cymule.effect-args/1", b"{}".to_vec())
@@ -205,11 +214,8 @@ fn continuation(plan_id: String) -> Continuation {
         frames: vec![FrameState {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
-            input: cymule_core::ArtifactRef {
-                identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
-                artifact_id: format!("sha256:{}", "0".repeat(64)),
-                kind: "test/input".to_owned(),
-            },
+            input: cymule_core::artifact_ref("test/input", b"durable input")
+                .expect("Continuation input reference derives"),
             region_path: Vec::new(),
             next_step: 0,
             locals: BTreeMap::new(),
@@ -224,6 +230,217 @@ fn continuation(plan_id: String) -> Continuation {
         epoch: 0,
         status: ContinuationStatus::Ready,
     }
+}
+
+fn direct_run(candidate: PlanCandidate, binding: &ExecutionBinding) -> (Machine, Continuation) {
+    let mut machine = Machine::new();
+    let plan = machine.seal_plan(candidate).expect("direct Plan seals");
+    let binding_ref = machine
+        .put_artifact(
+            EXECUTION_BINDING_VERSION,
+            binding.canonical_bytes().expect("binding encodes"),
+        )
+        .expect("binding Artifact stores");
+    machine
+        .submit(CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: "run:direct:start".to_owned(),
+            actor: "actor:test".to_owned(),
+            run_id: "run:direct".to_owned(),
+            expected_precondition: None,
+            command: Command::StartRun {
+                plan_id: plan.plan_id.clone(),
+                binding_context: binding_ref.artifact_id.clone(),
+            },
+        })
+        .expect("direct Run starts");
+    submit(
+        &mut machine,
+        "run:direct",
+        "run:direct:begin",
+        Command::BeginAttempt {
+            attempt_id: "attempt:run:direct:0".to_owned(),
+            continuation_id: "continuation:run:direct".to_owned(),
+            occurrence_binding: binding_ref.artifact_id.clone(),
+            epoch: 0,
+        },
+    );
+    let input = machine
+        .put_artifact("test/direct-input", b"direct input".to_vec())
+        .expect("direct input stores");
+    let continuation = Continuation {
+        run_id: "run:direct".to_owned(),
+        plan_id: plan.plan_id,
+        binding_context: binding_ref.artifact_id,
+        frames: vec![FrameState {
+            definition_id: "main".to_owned(),
+            invocation_id: "main".to_owned(),
+            input: input.clone(),
+            region_path: Vec::new(),
+            next_step: 0,
+            locals: BTreeMap::new(),
+        }],
+        state: Some(input),
+        wait_set: BTreeSet::new(),
+        scope_stack: vec![ROOT_SCOPE_ID.to_owned()],
+        effect_obligations: BTreeSet::new(),
+        authority_leases: BTreeSet::new(),
+        budget: BTreeMap::new(),
+        causal_frontier: BTreeSet::new(),
+        epoch: 0,
+        status: ContinuationStatus::Running,
+    };
+    (machine, continuation)
+}
+
+#[test]
+fn direct_run_creation_cannot_bypass_execution_binding_admission() {
+    let manifest = PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: "direct-coordinator-plugin@1".to_owned(),
+        components: BTreeMap::from([(
+            "provided.component".to_owned(),
+            PluginOperation {
+                implementation_revision: "1".to_owned(),
+            },
+        )]),
+        effects: BTreeMap::new(),
+    };
+    let binding = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .expect("binding seals");
+    let candidate = PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "direct_admission".to_owned(),
+        entry: "main".to_owned(),
+        components: vec![ComponentContract {
+            id: "required.component".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            requirements: BTreeMap::new(),
+        }],
+        effects: Vec::new(),
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: Vec::new(),
+                result: Expression::Literal { value: json!(null) },
+            },
+        }],
+        metadata: BTreeMap::new(),
+    };
+    let (machine, continuation) = direct_run(candidate, &binding);
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store.clone()).expect("store opens");
+
+    assert!(matches!(
+        coordinator.create_run(&machine, continuation),
+        Err(DurableError::Validation(message))
+            if message.contains("required.component")
+    ));
+    assert!(
+        DurableCoordinator::open(store)
+            .expect("store reopens")
+            .revision()
+            .is_none()
+    );
+}
+
+#[test]
+fn public_coordinator_rejects_every_dangling_or_legacy_artifact_reference() {
+    let (machine, plan_id) = machine_with_run();
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let initial_revision = coordinator.revision().expect("revision").to_owned();
+    let valid = continuation(plan_id);
+    let mut missing = valid.frames[0].input.clone();
+    missing.artifact_id = format!("sha256:{}", "f".repeat(64));
+    let mut legacy = valid.frames[0].input.clone();
+    legacy.identity_version = "cymule.artifact/1".to_owned();
+
+    for invalid in [missing.clone(), legacy] {
+        for site in ["frame", "state", "local"] {
+            let mut proposed = valid.clone();
+            match site {
+                "frame" => proposed.frames[0].input = invalid.clone(),
+                "state" => proposed.state = Some(invalid.clone()),
+                "local" => {
+                    proposed.frames[0]
+                        .locals
+                        .insert("invalid".to_owned(), invalid.clone());
+                }
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                coordinator.put_continuation(proposed),
+                Err(DurableError::Validation(_))
+            ));
+            assert_eq!(coordinator.revision(), Some(initial_revision.as_str()));
+        }
+    }
+
+    coordinator
+        .put_continuation(valid)
+        .expect("valid Continuation persists");
+    let valid_revision = coordinator.revision().expect("revision").to_owned();
+    coordinator
+        .register_wait(WaitCondition {
+            wait_id: "wait:dangling".to_owned(),
+            run_id: "run:durable".to_owned(),
+            kind: WaitKind::Input {
+                correlation: "dangling".to_owned(),
+                schema: json!({}),
+            },
+            consume_once: true,
+            state: WaitState::Pending,
+            result: None,
+        })
+        .expect("wait registers");
+    let wait_revision = coordinator.revision().expect("revision").to_owned();
+    assert!(matches!(
+        coordinator.complete_wait("wait:dangling", missing.clone()),
+        Err(DurableError::Validation(_))
+    ));
+    assert_eq!(coordinator.revision(), Some(wait_revision.as_str()));
+
+    assert!(matches!(
+        coordinator.enqueue_effect(EffectDispatch {
+            intent_id: "intent:dangling".to_owned(),
+            run_id: "run:durable".to_owned(),
+            operation: "test.effect".to_owned(),
+            input: missing.clone(),
+            occurrence_binding: "binding:test".to_owned(),
+            state: OutboxState::Pending,
+            claim_epoch: 0,
+            claim_owner: None,
+            result: None,
+        }),
+        Err(DurableError::Validation(_))
+    ));
+    assert_eq!(coordinator.revision(), Some(wait_revision.as_str()));
+
+    assert!(matches!(
+        coordinator.record_component(ComponentOccurrence {
+            occurrence_id: "occurrence:dangling".to_owned(),
+            run_id: "run:durable".to_owned(),
+            site_id: "site:test".to_owned(),
+            component: "test.component".to_owned(),
+            input: missing.clone(),
+            output: missing,
+            occurrence_binding: "binding:test".to_owned(),
+            implementation_revision: "1".to_owned(),
+        }),
+        Err(DurableError::Validation(_))
+    ));
+    assert_eq!(coordinator.revision(), Some(wait_revision.as_str()));
+    assert_ne!(valid_revision, wait_revision);
 }
 
 #[test]
