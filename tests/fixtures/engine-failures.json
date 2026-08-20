@@ -7,6 +7,12 @@
       "code": "validation_failed",
       "retry_disposition": "correct_and_retry"
     },
+    "expected_plugin_failure": {
+      "category": "expected_plugin_failure",
+      "phase": "execute_plan",
+      "code": "evaluation_rejected",
+      "retry_disposition": "never"
+    },
     "plugin_defect": {
       "category": "plugin_defect",
       "phase": "execute_plan",
@@ -16,7 +22,7 @@
     "substrate_failure": {
       "category": "substrate_failure",
       "phase": "execute_plan",
-      "code": "plugin_start_failed",
+      "code": "process_executable_read_failed",
       "retry_disposition": "retry_same_request"
     }
   }

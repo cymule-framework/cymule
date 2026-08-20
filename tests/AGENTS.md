@@ -25,6 +25,8 @@
 - Engine negative fixtures assert category, phase, code, and only an explicitly
   justified retry disposition through the real Rust CLI in all four SDKs.
   Transport loss must not manufacture replay safety.
+- The shared failure fixture includes every exercised typed plugin outcome;
+  protocol categories and stable codes may not live only in one SDK test.
 - The expected Plan ID is always computed by the Rust kernel from the checked-in
   candidate; never duplicate canonicalization in a test script.
 - Cross-language tests must seal and execute through the real engine and process
