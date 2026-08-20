@@ -19,6 +19,9 @@
 - Do not hide skipped coverage. Optional-tool skips must print the exact reason.
 - Cross-language tests must use freshly built Rust binaries and a Plan ID sealed
   from the checked-in shared fixture.
+- Every SDK also runs the same structured Engine negative fixture through that
+  binary. Keep missing-envelope transport failure separate from remote semantic
+  failure and assert retry disposition only where the Rust boundary proves it.
 - The example leaf owns both the minimal Hello World path and the durable
   evaluation campaign's black-box crash, Resource, lease, and M4 tests. Keep it
   independently runnable; do not scatter those user-path checks across SDK or

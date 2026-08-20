@@ -1,59 +1,129 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-  "title": "Cymule Engine Request",
+  "title": "Cymule Engine Protocol cymule.engine/1",
   "oneOf": [
-    {
-      "type": "object", "additionalProperties": false, "required": ["type", "candidate"],
-      "properties": { "type": { "const": "seal" }, "candidate": { "$ref": "plan-candidate.schema.json" } }
-    },
-    {
-      "type": "object", "additionalProperties": false, "required": ["type", "plan"],
-      "properties": { "type": { "const": "verify" }, "plan": { "$ref": "sealed-plan.schema.json" } }
-    },
-    {
-      "type": "object", "additionalProperties": false, "required": ["type", "candidate"],
-      "properties": {
-        "type": { "const": "seal_resource" },
-        "candidate": { "$ref": "resource.schema.json#/$defs/resourceCandidate" }
-      }
-    },
-    {
-      "type": "object", "additionalProperties": false, "required": ["type", "activation"],
-      "properties": {
-        "type": { "const": "verify_wait_activation" },
-        "activation": { "$ref": "wait-activation.schema.json" }
-      }
-    },
-    {
-      "type": "object", "additionalProperties": false, "required": ["type", "command"],
-      "properties": {
-        "type": { "const": "verify_durable_command" },
-        "command": { "$ref": "durable-control.schema.json" }
-      }
-    },
-    {
-      "type": "object", "additionalProperties": false, "required": ["type", "command"],
-      "properties": {
-        "type": { "const": "verify_evolution_command" },
-        "command": { "$ref": "evolution-control.schema.json" }
-      }
-    },
-    {
-      "type": "object", "additionalProperties": false, "required": ["type", "command"],
-      "properties": {
-        "type": { "const": "verify_live_evolution_command" },
-        "command": { "$ref": "live-evolution-control.schema.json" }
-      }
-    },
-    {
+    { "$ref": "#/$defs/requestEnvelope" },
+    { "$ref": "#/$defs/responseEnvelope" }
+  ],
+  "$defs": {
+    "requestEnvelope": {
       "type": "object", "additionalProperties": false,
-      "required": ["type", "plan", "input", "plugin", "run_id"],
+      "required": ["engine_protocol", "request"],
       "properties": {
-        "type": { "const": "run" }, "plan": { "$ref": "sealed-plan.schema.json" },
-        "input": true, "plugin": { "type": "string", "minLength": 1 },
-        "run_id": { "type": "string", "minLength": 1, "maxLength": 200 }
+        "engine_protocol": { "const": "cymule.engine/1" },
+        "request": { "$ref": "#/$defs/request" }
+      }
+    },
+    "request": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "candidate"],
+          "properties": { "type": { "const": "seal" }, "candidate": { "$ref": "plan-candidate.schema.json" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "plan"],
+          "properties": { "type": { "const": "verify" }, "plan": { "$ref": "sealed-plan.schema.json" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "candidate"],
+          "properties": { "type": { "const": "seal_resource" }, "candidate": { "$ref": "resource.schema.json#/$defs/resourceCandidate" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "activation"],
+          "properties": { "type": { "const": "verify_wait_activation" }, "activation": { "$ref": "wait-activation.schema.json" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "command"],
+          "properties": { "type": { "const": "verify_durable_command" }, "command": { "$ref": "durable-control.schema.json" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "command"],
+          "properties": { "type": { "const": "verify_evolution_command" }, "command": { "$ref": "evolution-control.schema.json" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "command"],
+          "properties": { "type": { "const": "verify_live_evolution_command" }, "command": { "$ref": "live-evolution-control.schema.json" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "plan", "input", "plugin", "run_id"],
+          "properties": {
+            "type": { "const": "run" }, "plan": { "$ref": "sealed-plan.schema.json" }, "input": true,
+            "plugin": { "type": "string", "minLength": 1 }, "run_id": { "type": "string", "minLength": 1, "maxLength": 200 }
+          }
+        }
+      ]
+    },
+    "responseEnvelope": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["outcome", "engine_protocol", "response"],
+          "properties": {
+            "outcome": { "const": "success" }, "engine_protocol": { "const": "cymule.engine/1" },
+            "response": { "$ref": "#/$defs/successResponse" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["outcome", "engine_protocol", "error"],
+          "properties": {
+            "outcome": { "const": "failure" }, "engine_protocol": { "const": "cymule.engine/1" },
+            "error": { "$ref": "#/$defs/failure" }
+          }
+        }
+      ]
+    },
+    "successResponse": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["type", "plan"], "properties": { "type": { "const": "sealed" }, "plan": { "$ref": "sealed-plan.schema.json" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "verified" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "resource"], "properties": { "type": { "const": "sealed_resource" }, "resource": { "$ref": "resource.schema.json#/$defs/resourceHandle" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "activation"], "properties": { "type": { "const": "verified_wait_activation" }, "activation": { "$ref": "wait-activation.schema.json" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "command"], "properties": { "type": { "const": "verified_durable_command" }, "command": { "$ref": "durable-control.schema.json" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "command"], "properties": { "type": { "const": "verified_evolution_command" }, "command": { "$ref": "evolution-control.schema.json" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "command"], "properties": { "type": { "const": "verified_live_evolution_command" }, "command": { "$ref": "live-evolution-control.schema.json" } } },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "result"],
+          "properties": {
+            "type": { "const": "executed" },
+            "result": {
+              "type": "object", "additionalProperties": false,
+              "required": ["run_id", "plan_id", "value", "projection_digest", "precondition_token", "effects"],
+              "properties": {
+                "run_id": { "type": "string" }, "plan_id": { "type": "string" }, "value": true,
+                "projection_digest": { "type": "string" }, "precondition_token": { "type": "string" },
+                "effects": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "failure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["category", "phase", "code", "message"],
+      "properties": {
+        "category": { "enum": ["transport_failure", "validation", "contract_violation", "admission_denied", "conflict", "not_found", "expected_plugin_failure", "plugin_defect", "substrate_failure", "cancelled", "timed_out", "unknown_world_outcome"] },
+        "phase": { "enum": ["transport", "decode_request", "validate_request", "seal_plan", "verify_plan", "seal_resource", "verify_wait_activation", "verify_durable_command", "verify_evolution_command", "verify_live_evolution_command", "execute_plan", "plugin_describe", "plugin_call", "effect_prepare", "effect_dispatch", "effect_reconcile", "encode_response"] },
+        "code": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[a-z][a-z0-9_]*$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "contract": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "contract_side": { "enum": ["schema", "input", "output"] },
+        "path": { "type": "string", "pattern": "^(|/.*)$", "maxLength": 1000 },
+        "issues": {
+          "type": "array", "maxItems": 100,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "message": { "type": "string", "minLength": 1, "maxLength": 2000 },
+              "path": { "type": "string", "pattern": "^(|/.*)$", "maxLength": 1000 }
+            }
+          }
+        },
+        "retry_disposition": { "enum": ["never", "correct_and_retry", "refresh_and_retry", "retry_same_request", "reconcile"] }
       }
     }
-  ]
+  }
 }

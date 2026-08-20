@@ -34,6 +34,7 @@ The following domains evolve independently:
 | Canonical encoding | `cymule.jcs/1` | RFC 8785 JSON, SHA-256 IDs |
 | Event schema | `cymule.event/1` | readers reject unknown semantic events |
 | Command protocol | `cymule.command/1` | typed envelope and stable error codes |
+| Engine protocol | `cymule.engine/1` | one versioned request and success-or-failure response envelope |
 | Plugin protocol | `cymule.plugin/1` | capability negotiation is explicit |
 | Resource descriptor | `cymule.resource/1` | identity excludes realization locations |
 | Resource handoff | `cymule.resource-handoff/1` | transfer IDs are idempotent per target Run |
@@ -56,6 +57,25 @@ The following domains evolve independently:
 
 Changing effect identity, scope isolation, authority, causal admission, replay,
 or migration meaning requires a new semantic specification version.
+
+### 3.1 Engine failures
+
+Every CLI Engine request and response MUST use `cymule.engine/1`. A semantic
+failure MUST be a successful transport response containing exactly one closed
+failure object with category, phase, stable code, and display-only message.
+Contract identity, side, JSON Pointer, bounded issues, and retry disposition are
+present only when the Engine has authoritative evidence for them.
+
+Failure categories distinguish transport, validation, contract violation,
+admission denial, conflict, absence, declared plugin failure, plugin defect,
+substrate failure, cancellation, timeout, and unknown external-world outcome.
+An adapter error is not a declared plugin failure unless the selected operation
+contract declares it. Failure to receive an Engine envelope MUST NOT imply that
+replaying a potentially mutating request is safe. `reconcile` is the only retry
+disposition for an admitted external intent whose world outcome is unknown.
+
+SDKs MUST preserve the complete failure object. Process status and stderr are
+transport diagnostics only and MUST NOT become a parallel semantic error path.
 
 ## 4. Canonical stores
 

@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   CliEngine,
   DurableControlBuilder,
+  EngineError,
   EvolutionControlBuilder,
   FlowBuilder,
   LiveEvolutionControlBuilder,
@@ -13,6 +14,7 @@ import {
   VirtualWorkControlBuilder,
   WaitActivationBuilder,
   type EffectProfile,
+  type PlanCandidate,
 } from "../src/index.js";
 
 const profile: EffectProfile = {
@@ -256,3 +258,50 @@ test("TypeScript unified live evolution validates through the Rust engine", () =
   assert.deepEqual(command, expected);
   assert.deepEqual(new CliEngine(enginePath).verifyLiveEvolutionCommand(command), command);
 });
+
+test("TypeScript preserves structured Rust Engine failures", () => {
+  const enginePath = process.env.CYMULE_BIN;
+  const failurePath = process.env.CYMULE_ENGINE_FAILURE_FIXTURE;
+  if (enginePath === undefined || failurePath === undefined) return;
+  const expected = JSON.parse(readFileSync(failurePath, "utf8")).cases as Record<
+    string,
+    Record<string, string>
+  >;
+  const candidate = JSON.parse(
+    readFileSync(failurePath.replace("engine-failures.json", "cross-language-plan.json"), "utf8"),
+  ) as PlanCandidate;
+  const engine = new CliEngine(enginePath);
+  const invalid = {
+    ...candidate,
+    ir_version: "cymule.ir/unsupported",
+  } as unknown as PlanCandidate;
+  assertEngineFailure(() => engine.seal(invalid), expected.invalid_plan_version!);
+  const plan = engine.seal(candidate);
+  assertEngineFailure(
+    () => engine.run(plan, { message: "defect" }, enginePath, "run:ts-defect"),
+    expected.plugin_defect!,
+  );
+  assertEngineFailure(
+    () =>
+      engine.run(
+        plan,
+        { message: "substrate" },
+        "/cymule-conformance/missing-plugin",
+        "run:ts-substrate",
+      ),
+    expected.substrate_failure!,
+  );
+});
+
+function assertEngineFailure(operation: () => unknown, expected: Record<string, string>): void {
+  try {
+    operation();
+    assert.fail("operation unexpectedly succeeded");
+  } catch (error) {
+    assert.ok(error instanceof EngineError);
+    assert.equal(error.failure.category, expected.category);
+    assert.equal(error.failure.phase, expected.phase);
+    assert.equal(error.failure.code, expected.code);
+    assert.equal(error.failure.retry_disposition, expected.retry_disposition);
+  }
+}

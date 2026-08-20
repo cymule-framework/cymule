@@ -126,6 +126,10 @@ The local suite verifies:
 - replay availability is not reported as exact when an artifact is missing;
 - TypeScript, Python, Rust, and Go author the same plan and execute through the
   same Rust kernel and external plugin;
+- TypeScript, Python, Rust, and Go receive the same structured validation,
+  plugin-defect, and pre-dispatch substrate failures through
+  `cymule.engine/1`; missing-envelope transport failures carry no inferred
+  retry permission;
 - that shared Plan invokes a reusable definition, so all four SDKs produce one
   `cymule.ir/2` Plan ID and the Rust runtime binds the invoked result before its
   effect;

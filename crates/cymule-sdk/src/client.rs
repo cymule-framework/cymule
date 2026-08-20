@@ -2,38 +2,37 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use cymule_core::{CoreError, PlanCandidate, SealedPlan};
+use cymule_core::{PlanCandidate, SealedPlan};
 use cymule_durable::{DurableCommand, WaitActivation};
 use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
-use cymule_runtime::ExecutionResult;
+use cymule_runtime::{
+    EngineFailure, EngineFailureCategory, EnginePhase, EngineRequestEnvelope,
+    EngineResponseEnvelope, EngineResult, ExecutionResult,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Engine operations shared by SDK transports.
 pub trait Engine {
     /// Validate and seal a candidate with the trusted Rust kernel.
-    fn seal(&self, candidate: &PlanCandidate) -> Result<SealedPlan, CoreError>;
+    fn seal(&self, candidate: &PlanCandidate) -> EngineResult<SealedPlan>;
     /// Validate and seal a provider-neutral Resource Candidate.
-    fn seal_resource(&self, candidate: &ResourceCandidate) -> Result<ResourceHandle, CoreError>;
+    fn seal_resource(&self, candidate: &ResourceCandidate) -> EngineResult<ResourceHandle>;
     /// Validate a provider-neutral signal or timer activation record.
-    fn verify_wait_activation(
-        &self,
-        activation: &WaitActivation,
-    ) -> Result<WaitActivation, CoreError>;
+    fn verify_wait_activation(&self, activation: &WaitActivation) -> EngineResult<WaitActivation>;
     /// Validate one closed, versioned M1 control envelope.
-    fn verify_durable_command(&self, command: &DurableCommand)
-    -> Result<DurableCommand, CoreError>;
+    fn verify_durable_command(&self, command: &DurableCommand) -> EngineResult<DurableCommand>;
     /// Validate one closed, versioned M4 control envelope.
     fn verify_evolution_command(
         &self,
         command: &EvolutionCommand,
-    ) -> Result<EvolutionCommand, CoreError>;
+    ) -> EngineResult<EvolutionCommand>;
     /// Validate one complete unified live-evolution control envelope.
     fn verify_live_evolution_command(
         &self,
         command: &LiveEvolutionCommand,
-    ) -> Result<LiveEvolutionCommand, CoreError>;
+    ) -> EngineResult<LiveEvolutionCommand>;
     /// Execute a sealed plan through a selected plugin realization.
     fn run(
         &self,
@@ -41,7 +40,7 @@ pub trait Engine {
         input: &Value,
         plugin: &Path,
         run_id: &str,
-    ) -> Result<ExecutionResult, CoreError>;
+    ) -> EngineResult<ExecutionResult>;
 }
 
 /// CLI-backed Engine transport used for cross-language parity.
@@ -58,140 +57,135 @@ impl CliEngine {
         }
     }
 
-    fn request(&self, request: &EngineRequest) -> Result<EngineResponse, CoreError> {
+    fn request(&self, request: &EngineRequest) -> EngineResult<EngineResponse> {
         let mut child = Command::new(&self.executable)
             .arg("rpc")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| CoreError::Encoding(error.to_string()))?;
+            .map_err(|error| EngineFailure::transport("engine_start_failed", error.to_string()))?;
         child
             .stdin
             .take()
-            .ok_or_else(|| CoreError::Encoding("CLI stdin was not captured".to_owned()))?
-            .write_all(&serde_json::to_vec(request)?)
-            .map_err(|error| CoreError::Encoding(error.to_string()))?;
+            .ok_or_else(|| {
+                EngineFailure::transport("engine_stdin_unavailable", "CLI stdin was not captured")
+            })?
+            .write_all(
+                &serde_json::to_vec(&EngineRequestEnvelope::new(request)).map_err(|error| {
+                    EngineFailure::transport("request_encoding_failed", error.to_string())
+                })?,
+            )
+            .map_err(|error| EngineFailure::transport("engine_write_failed", error.to_string()))?;
         let output = child
             .wait_with_output()
-            .map_err(|error| CoreError::Encoding(error.to_string()))?;
+            .map_err(|error| EngineFailure::transport("engine_wait_failed", error.to_string()))?;
         if !output.status.success() {
-            return Err(CoreError::Validation(
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            let diagnostic = bounded_diagnostic(&output.stderr);
+            return Err(EngineFailure::transport(
+                "engine_process_failed",
+                if diagnostic.is_empty() {
+                    format!("engine exited with {}", output.status)
+                } else {
+                    diagnostic
+                },
             ));
         }
-        serde_json::from_slice(&output.stdout).map_err(Into::into)
+        let envelope: EngineResponseEnvelope<EngineResponse> =
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                EngineFailure::transport("invalid_engine_response", error.to_string())
+            })?;
+        envelope.into_result()
     }
 
-    fn seal_resource(&self, candidate: &ResourceCandidate) -> Result<ResourceHandle, CoreError> {
+    fn seal_resource(&self, candidate: &ResourceCandidate) -> EngineResult<ResourceHandle> {
         match self.request(&EngineRequest::SealResource {
             candidate: candidate.clone(),
         })? {
             EngineResponse::SealedResource { resource } => Ok(resource),
-            response => Err(CoreError::Validation(format!(
-                "CLI returned unexpected response {response:?}"
-            ))),
+            response => Err(unexpected_response("sealed_resource", &response)),
         }
     }
 
-    fn verify_wait_activation(
-        &self,
-        activation: &WaitActivation,
-    ) -> Result<WaitActivation, CoreError> {
+    fn verify_wait_activation(&self, activation: &WaitActivation) -> EngineResult<WaitActivation> {
         match self.request(&EngineRequest::VerifyWaitActivation {
             activation: activation.clone(),
         })? {
             EngineResponse::VerifiedWaitActivation { activation } => Ok(activation),
-            response => Err(CoreError::Validation(format!(
-                "CLI returned unexpected response {response:?}"
-            ))),
+            response => Err(unexpected_response("verified_wait_activation", &response)),
         }
     }
 
-    fn verify_durable_command(
-        &self,
-        command: &DurableCommand,
-    ) -> Result<DurableCommand, CoreError> {
+    fn verify_durable_command(&self, command: &DurableCommand) -> EngineResult<DurableCommand> {
         match self.request(&EngineRequest::VerifyDurableCommand {
             command: command.clone(),
         })? {
             EngineResponse::VerifiedDurableCommand { command } => Ok(command),
-            response => Err(CoreError::Validation(format!(
-                "CLI returned unexpected response {response:?}"
-            ))),
+            response => Err(unexpected_response("verified_durable_command", &response)),
         }
     }
 
     fn verify_evolution_command(
         &self,
         command: &EvolutionCommand,
-    ) -> Result<EvolutionCommand, CoreError> {
+    ) -> EngineResult<EvolutionCommand> {
         match self.request(&EngineRequest::VerifyEvolutionCommand {
             command: command.clone(),
         })? {
             EngineResponse::VerifiedEvolutionCommand { command } => Ok(command),
-            response => Err(CoreError::Validation(format!(
-                "CLI returned unexpected response {response:?}"
-            ))),
+            response => Err(unexpected_response("verified_evolution_command", &response)),
         }
     }
 
     fn verify_live_evolution_command(
         &self,
         command: &LiveEvolutionCommand,
-    ) -> Result<LiveEvolutionCommand, CoreError> {
+    ) -> EngineResult<LiveEvolutionCommand> {
         match self.request(&EngineRequest::VerifyLiveEvolutionCommand {
             command: command.clone(),
         })? {
             EngineResponse::VerifiedLiveEvolutionCommand { command } => Ok(command),
-            response => Err(CoreError::Validation(format!(
-                "CLI returned unexpected response {response:?}"
-            ))),
+            response => Err(unexpected_response(
+                "verified_live_evolution_command",
+                &response,
+            )),
         }
     }
 }
 
 impl Engine for CliEngine {
-    fn seal(&self, candidate: &PlanCandidate) -> Result<SealedPlan, CoreError> {
+    fn seal(&self, candidate: &PlanCandidate) -> EngineResult<SealedPlan> {
         match self.request(&EngineRequest::Seal {
             candidate: candidate.clone(),
         })? {
             EngineResponse::Sealed { plan } => Ok(plan),
-            response => Err(CoreError::Validation(format!(
-                "CLI returned unexpected response {response:?}"
-            ))),
+            response => Err(unexpected_response("sealed", &response)),
         }
     }
 
-    fn seal_resource(&self, candidate: &ResourceCandidate) -> Result<ResourceHandle, CoreError> {
+    fn seal_resource(&self, candidate: &ResourceCandidate) -> EngineResult<ResourceHandle> {
         CliEngine::seal_resource(self, candidate)
     }
 
-    fn verify_wait_activation(
-        &self,
-        activation: &WaitActivation,
-    ) -> Result<WaitActivation, CoreError> {
+    fn verify_wait_activation(&self, activation: &WaitActivation) -> EngineResult<WaitActivation> {
         CliEngine::verify_wait_activation(self, activation)
     }
 
-    fn verify_durable_command(
-        &self,
-        command: &DurableCommand,
-    ) -> Result<DurableCommand, CoreError> {
+    fn verify_durable_command(&self, command: &DurableCommand) -> EngineResult<DurableCommand> {
         CliEngine::verify_durable_command(self, command)
     }
 
     fn verify_evolution_command(
         &self,
         command: &EvolutionCommand,
-    ) -> Result<EvolutionCommand, CoreError> {
+    ) -> EngineResult<EvolutionCommand> {
         CliEngine::verify_evolution_command(self, command)
     }
 
     fn verify_live_evolution_command(
         &self,
         command: &LiveEvolutionCommand,
-    ) -> Result<LiveEvolutionCommand, CoreError> {
+    ) -> EngineResult<LiveEvolutionCommand> {
         CliEngine::verify_live_evolution_command(self, command)
     }
 
@@ -201,7 +195,7 @@ impl Engine for CliEngine {
         input: &Value,
         plugin: &Path,
         run_id: &str,
-    ) -> Result<ExecutionResult, CoreError> {
+    ) -> EngineResult<ExecutionResult> {
         match self.request(&EngineRequest::Run {
             plan: plan.clone(),
             input: input.clone(),
@@ -209,15 +203,13 @@ impl Engine for CliEngine {
             run_id: run_id.to_owned(),
         })? {
             EngineResponse::Executed { result } => Ok(result),
-            response => Err(CoreError::Validation(format!(
-                "CLI returned unexpected response {response:?}"
-            ))),
+            response => Err(unexpected_response("executed", &response)),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum EngineRequest {
     Seal {
         candidate: PlanCandidate,
@@ -246,7 +238,7 @@ enum EngineRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum EngineResponse {
     Sealed { plan: SealedPlan },
     SealedResource { resource: ResourceHandle },
@@ -256,4 +248,19 @@ enum EngineResponse {
     VerifiedLiveEvolutionCommand { command: LiveEvolutionCommand },
     Executed { result: ExecutionResult },
     Verified,
+}
+
+fn unexpected_response(expected: &str, response: &EngineResponse) -> EngineFailure {
+    EngineFailure::new(
+        EngineFailureCategory::ContractViolation,
+        EnginePhase::Transport,
+        "unexpected_engine_response",
+        format!("expected {expected}, received {response:?}"),
+    )
+}
+
+fn bounded_diagnostic(bytes: &[u8]) -> String {
+    const MAX_DIAGNOSTIC_BYTES: usize = 8 * 1024;
+    let end = bytes.len().min(MAX_DIAGNOSTIC_BYTES);
+    String::from_utf8_lossy(&bytes[..end]).trim().to_owned()
 }

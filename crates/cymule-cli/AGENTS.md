@@ -14,6 +14,10 @@
   `cymule.evolution-control/2` envelope. Plan linking, adapter execution,
   evidence counting, and durable promotion remain `cymule-evolution` authority.
 - Write only the response JSON to stdout. Diagnostics go to stderr.
+- RPC domain failures return a successful process transport containing one
+  `cymule.engine/1` failure envelope. A nonzero process status is reserved for
+  failure to carry the protocol itself; never duplicate a semantic failure on
+  stderr or emit an unversioned success payload.
 - Never expose unrestricted raw event append.
 - The package is `cymule-cli` and installs the `cymule` binary. Keep binary
   rustdoc disabled so it cannot collide with the public `cymule` facade library;

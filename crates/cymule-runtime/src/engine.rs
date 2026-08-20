@@ -111,7 +111,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             .definitions
             .iter()
             .find(|definition| definition.id == plan.candidate.entry)
-            .ok_or_else(|| RuntimeError::Plugin("entry definition disappeared".to_owned()))?
+            .ok_or_else(|| RuntimeError::plugin_defect("entry definition disappeared"))?
             .clone();
         let mut environment = BTreeMap::new();
         let outcome = self.execute_region(
@@ -154,7 +154,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             .projection()
             .runs
             .get(&run_id)
-            .ok_or_else(|| RuntimeError::Plugin("Run projection is missing".to_owned()))?;
+            .ok_or_else(|| RuntimeError::plugin_defect("Run projection is missing"))?;
         Ok(ExecutionResult {
             run_id,
             plan_id: plan.plan_id,
@@ -191,7 +191,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         input: value,
                     })?;
                     let PluginResponse::CallResult { value } = response else {
-                        return Err(RuntimeError::Plugin(format!(
+                        return Err(RuntimeError::plugin_defect(format!(
                             "component {component} returned unexpected response {response:?}"
                         )));
                     };
@@ -283,7 +283,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                     })? {
                         PluginResponse::Prepared => {}
                         response => {
-                            return Err(RuntimeError::Plugin(format!(
+                            return Err(RuntimeError::plugin_defect(format!(
                                 "effect {effect} prepare returned {response:?}"
                             )));
                         }
@@ -311,7 +311,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         }
                     } else {
                         if bind.is_some() {
-                            return Err(RuntimeError::Plugin(format!(
+                            return Err(RuntimeError::plugin_defect(format!(
                                 "deferred mutating effect {effect} cannot bind a value inside its open scope"
                             )));
                         }
@@ -405,7 +405,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             input: input.clone(),
         })?;
         let PluginResponse::EffectResult { outcome, mut value } = response else {
-            return Err(RuntimeError::Plugin(format!(
+            return Err(RuntimeError::plugin_defect(format!(
                 "effect {operation} dispatch returned {response:?}"
             )));
         };
@@ -427,7 +427,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 value: reconciled_value,
             } = response
             else {
-                return Err(RuntimeError::Plugin(format!(
+                return Err(RuntimeError::plugin_defect(format!(
                     "effect {operation} reconciliation returned {response:?}"
                 )));
             };
@@ -459,7 +459,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                     .projection()
                     .runs
                     .get(run_id)
-                    .ok_or_else(|| RuntimeError::Plugin(format!("Run {run_id} is missing")))?
+                    .ok_or_else(|| RuntimeError::plugin_defect(format!("Run {run_id} is missing")))?
                     .precondition_token(),
             )
         };
@@ -472,7 +472,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             command,
         })?;
         if receipt.status != CommandReceiptStatus::Applied {
-            return Err(RuntimeError::Plugin(format!(
+            return Err(RuntimeError::plugin_defect(format!(
                 "runtime command unexpectedly conflicted: {receipt:?}"
             )));
         }
@@ -485,14 +485,14 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             .runs
             .get(run_id)
             .map(|run| run.epoch)
-            .ok_or_else(|| RuntimeError::Plugin(format!("Run {run_id} is missing")))
+            .ok_or_else(|| RuntimeError::plugin_defect(format!("Run {run_id} is missing")))
     }
 }
 
 fn validate_manifest(plan: &SealedPlan, manifest: &PluginManifest) -> RuntimeResult<()> {
     for contract in &plan.candidate.components {
         if !manifest.components.contains_key(&contract.id) {
-            return Err(RuntimeError::Plugin(format!(
+            return Err(RuntimeError::plugin_defect(format!(
                 "plugin does not implement component {}",
                 contract.id
             )));
@@ -500,7 +500,7 @@ fn validate_manifest(plan: &SealedPlan, manifest: &PluginManifest) -> RuntimeRes
     }
     for contract in &plan.candidate.effects {
         if !manifest.effects.contains_key(&contract.id) {
-            return Err(RuntimeError::Plugin(format!(
+            return Err(RuntimeError::plugin_defect(format!(
                 "plugin does not implement effect {}",
                 contract.id
             )));
@@ -518,7 +518,7 @@ fn evaluate(
         Expression::Input => Ok(input.clone()),
         Expression::Literal { value } => Ok(value.clone()),
         Expression::Binding { name } => environment.get(name).cloned().ok_or_else(|| {
-            RuntimeError::Plugin(format!("binding {name} is unavailable during execution"))
+            RuntimeError::plugin_defect(format!("binding {name} is unavailable during execution"))
         }),
         Expression::Object { fields } => {
             let mut object = serde_json::Map::new();

@@ -139,19 +139,19 @@ pub trait PluginHost {
         match self.invoke(PluginRequest::Describe)? {
             PluginResponse::Manifest { manifest } => {
                 if manifest.plugin_version != PLUGIN_VERSION {
-                    return Err(RuntimeError::Plugin(format!(
+                    return Err(RuntimeError::plugin_defect(format!(
                         "unsupported plugin version {:?}",
                         manifest.plugin_version
                     )));
                 }
                 if manifest.implementation_id.is_empty() {
-                    return Err(RuntimeError::Plugin(
-                        "plugin implementation_id is empty".to_owned(),
+                    return Err(RuntimeError::plugin_defect(
+                        "plugin implementation_id is empty",
                     ));
                 }
                 Ok(manifest)
             }
-            response => Err(RuntimeError::Plugin(format!(
+            response => Err(RuntimeError::plugin_defect(format!(
                 "describe returned unexpected response {response:?}"
             ))),
         }
@@ -181,29 +181,44 @@ impl PluginHost for ProcessPlugin {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| {
-                RuntimeError::Io(format!(
-                    "failed to start plugin {}: {error}",
-                    self.executable.display()
-                ))
+                RuntimeError::substrate(
+                    "plugin_start_failed",
+                    format!(
+                        "failed to start plugin {}: {error}",
+                        self.executable.display()
+                    ),
+                )
             })?;
         let input = serde_json::to_vec(&request)?;
         child
             .stdin
             .take()
-            .ok_or_else(|| RuntimeError::Io("plugin stdin was not captured".to_owned()))?
+            .ok_or_else(|| {
+                RuntimeError::substrate("plugin_stdin_unavailable", "plugin stdin was not captured")
+            })?
             .write_all(&input)?;
         let output = child.wait_with_output()?;
         if !output.status.success() {
-            return Err(RuntimeError::Plugin(format!(
-                "plugin {} exited with {}: {}",
-                self.executable.display(),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
+            return Err(RuntimeError::PluginDefect {
+                code: "plugin_process_failed".to_owned(),
+                message: format!(
+                    "plugin {} exited with {}: {}",
+                    self.executable.display(),
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
         }
-        let response: PluginResponse = serde_json::from_slice(&output.stdout)?;
+        let response: PluginResponse =
+            serde_json::from_slice(&output.stdout).map_err(|error| RuntimeError::PluginDefect {
+                code: "invalid_plugin_response".to_owned(),
+                message: error.to_string(),
+            })?;
         if let PluginResponse::Error { code, message } = &response {
-            return Err(RuntimeError::Plugin(format!("{code}: {message}")));
+            return Err(RuntimeError::PluginDefect {
+                code: "plugin_reported_error".to_owned(),
+                message: format!("{code}: {message}"),
+            });
         }
         Ok(response)
     }

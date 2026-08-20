@@ -3,9 +3,61 @@ package cymule
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+func TestStructuredEngineFailures(t *testing.T) {
+	enginePath := os.Getenv("CYMULE_BIN")
+	failurePath := os.Getenv("CYMULE_ENGINE_FAILURE_FIXTURE")
+	if enginePath == "" || failurePath == "" {
+		t.Skip("Engine failure conformance is not configured")
+	}
+	fixtureBytes, err := os.ReadFile(failurePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Cases map[string]EngineFailure `json:"cases"`
+	}
+	if err := json.Unmarshal(fixtureBytes, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	candidateBytes, err := os.ReadFile(filepath.Join(filepath.Dir(failurePath), "cross-language-plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate PlanCandidate
+	if err := json.Unmarshal(candidateBytes, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	engine := CliEngine{Executable: enginePath}
+	invalid := candidate
+	invalid.IRVersion = "cymule.ir/unsupported"
+	_, err = engine.Seal(invalid)
+	assertEngineFailure(t, err, fixture.Cases["invalid_plan_version"])
+	plan, err := engine.Seal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Run(plan, map[string]any{"message": "defect"}, enginePath, "run:go-defect")
+	assertEngineFailure(t, err, fixture.Cases["plugin_defect"])
+	_, err = engine.Run(plan, map[string]any{"message": "substrate"}, "/cymule-conformance/missing-plugin", "run:go-substrate")
+	assertEngineFailure(t, err, fixture.Cases["substrate_failure"])
+}
+
+func assertEngineFailure(t *testing.T, err error, expected EngineFailure) {
+	t.Helper()
+	failure, ok := err.(EngineFailure)
+	if !ok {
+		t.Fatalf("expected EngineFailure, got %T: %v", err, err)
+	}
+	if failure.Category != expected.Category || failure.Phase != expected.Phase ||
+		failure.Code != expected.Code || failure.RetryDisposition != expected.RetryDisposition {
+		t.Fatalf("failure %#v does not match expected %#v", failure, expected)
+	}
+}
 
 func TestJSONResourcePreservesNullValue(t *testing.T) {
 	encoded, err := json.Marshal(JSONResource(nil, nil))

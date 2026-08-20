@@ -1293,19 +1293,87 @@ export class ResourceBuilder {
   }
 }
 
+export const ENGINE_PROTOCOL_VERSION = "cymule.engine/1" as const;
+
+export type EngineFailureCategory =
+  | "transport_failure"
+  | "validation"
+  | "contract_violation"
+  | "admission_denied"
+  | "conflict"
+  | "not_found"
+  | "expected_plugin_failure"
+  | "plugin_defect"
+  | "substrate_failure"
+  | "cancelled"
+  | "timed_out"
+  | "unknown_world_outcome";
+
+export type EnginePhase =
+  | "transport"
+  | "decode_request"
+  | "validate_request"
+  | "seal_plan"
+  | "verify_plan"
+  | "seal_resource"
+  | "verify_wait_activation"
+  | "verify_durable_command"
+  | "verify_evolution_command"
+  | "verify_live_evolution_command"
+  | "execute_plan"
+  | "plugin_describe"
+  | "plugin_call"
+  | "effect_prepare"
+  | "effect_dispatch"
+  | "effect_reconcile"
+  | "encode_response";
+
+export type EngineContractSide = "schema" | "input" | "output";
+export type EngineRetryDisposition =
+  | "never"
+  | "correct_and_retry"
+  | "refresh_and_retry"
+  | "retry_same_request"
+  | "reconcile";
+
+export interface EngineIssue {
+  code: string;
+  message: string;
+  path?: string;
+}
+
+export interface EngineFailure {
+  category: EngineFailureCategory;
+  phase: EnginePhase;
+  code: string;
+  message: string;
+  contract?: string;
+  contract_side?: EngineContractSide;
+  path?: string;
+  issues?: EngineIssue[];
+  retry_disposition?: EngineRetryDisposition;
+}
+
+export class EngineError extends Error {
+  constructor(readonly failure: EngineFailure) {
+    super(`${failure.code}: ${failure.message}`);
+    this.name = "EngineError";
+  }
+}
+
 export class CliEngine {
   constructor(readonly executable: string) {}
 
   seal(candidate: PlanCandidate): SealedPlan {
     const response = this.request({ type: "seal", candidate });
-    if (response.type !== "sealed") throw new Error(`unexpected response ${response.type}`);
+    if (response.type !== "sealed") throw unexpectedResponse("sealed", response.type);
     return response.plan;
   }
 
   sealResource(candidate: ResourceCandidate): ResourceHandle {
     const response = this.request({ type: "seal_resource", candidate });
     if (response.type !== "sealed_resource") {
-      throw new Error(`unexpected response ${response.type}`);
+      throw unexpectedResponse("sealed_resource", response.type);
     }
     return response.resource;
   }
@@ -1313,7 +1381,7 @@ export class CliEngine {
   verifyWaitActivation(activation: WaitActivation): WaitActivation {
     const response = this.request({ type: "verify_wait_activation", activation });
     if (response.type !== "verified_wait_activation") {
-      throw new Error(`unexpected response ${response.type}`);
+      throw unexpectedResponse("verified_wait_activation", response.type);
     }
     return response.activation;
   }
@@ -1321,7 +1389,7 @@ export class CliEngine {
   verifyDurableCommand(command: DurableCommand): DurableCommand {
     const response = this.request({ type: "verify_durable_command", command });
     if (response.type !== "verified_durable_command") {
-      throw new Error(`unexpected response ${response.type}`);
+      throw unexpectedResponse("verified_durable_command", response.type);
     }
     return response.command;
   }
@@ -1329,7 +1397,7 @@ export class CliEngine {
   verifyEvolutionCommand(command: EvolutionCommand): EvolutionCommand {
     const response = this.request({ type: "verify_evolution_command", command });
     if (response.type !== "verified_evolution_command") {
-      throw new Error(`unexpected response ${response.type}`);
+      throw unexpectedResponse("verified_evolution_command", response.type);
     }
     return response.command;
   }
@@ -1337,27 +1405,77 @@ export class CliEngine {
   verifyLiveEvolutionCommand(command: LiveEvolutionCommand): LiveEvolutionCommand {
     const response = this.request({ type: "verify_live_evolution_command", command });
     if (response.type !== "verified_live_evolution_command") {
-      throw new Error(`unexpected response ${response.type}`);
+      throw unexpectedResponse("verified_live_evolution_command", response.type);
     }
     return response.command;
   }
 
   run(plan: SealedPlan, input: Json, plugin: string, runId: string): ExecutionResult {
     const response = this.request({ type: "run", plan, input, plugin, run_id: runId });
-    if (response.type !== "executed") throw new Error(`unexpected response ${response.type}`);
+    if (response.type !== "executed") throw unexpectedResponse("executed", response.type);
     return response.result;
   }
 
   private request(request: EngineRequest): EngineResponse {
     const child = spawnSync(this.executable, ["rpc"], {
-      input: JSON.stringify(request),
+      input: JSON.stringify({ engine_protocol: ENGINE_PROTOCOL_VERSION, request }),
       encoding: "utf8",
       maxBuffer: 16 * 1024 * 1024,
     });
-    if (child.error !== undefined) throw child.error;
-    if (child.status !== 0) throw new Error(child.stderr.trim() || `engine exited ${child.status}`);
-    return JSON.parse(child.stdout) as EngineResponse;
+    if (child.error !== undefined) {
+      throw transportError("engine_start_failed", child.error.message);
+    }
+    if (child.status !== 0) {
+      throw transportError(
+        "engine_process_failed",
+        child.stderr.slice(0, 8192).trim() || `engine exited ${child.status}`,
+      );
+    }
+    let envelope: EngineResponseEnvelope;
+    try {
+      envelope = parseEngineEnvelope(JSON.parse(child.stdout) as unknown);
+    } catch (error) {
+      throw transportError(
+        "invalid_engine_response",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (envelope.engine_protocol !== ENGINE_PROTOCOL_VERSION) {
+      throw new EngineError({
+        category: "contract_violation",
+        phase: "transport",
+        code: "unsupported_engine_protocol",
+        message: `expected ${ENGINE_PROTOCOL_VERSION}, received ${JSON.stringify(envelope.engine_protocol)}`,
+        contract: ENGINE_PROTOCOL_VERSION,
+        contract_side: "schema",
+        retry_disposition: "never",
+      });
+    }
+    if (envelope.outcome === "failure") throw new EngineError(envelope.error);
+    if (envelope.outcome !== "success") {
+      throw transportError("invalid_engine_response", "response outcome is not closed");
+    }
+    return envelope.response;
   }
+}
+
+function transportError(code: string, message: string): EngineError {
+  return new EngineError({
+    category: "transport_failure",
+    phase: "transport",
+    code,
+    message,
+  });
+}
+
+function unexpectedResponse(expected: string, received: string): EngineError {
+  return new EngineError({
+    category: "contract_violation",
+    phase: "transport",
+    code: "unexpected_engine_response",
+    message: `expected ${expected}, received ${received}`,
+    retry_disposition: "never",
+  });
 }
 
 type EngineRequest =
@@ -1378,3 +1496,122 @@ type EngineResponse =
   | { type: "verified_live_evolution_command"; command: LiveEvolutionCommand }
   | { type: "executed"; result: ExecutionResult }
   | { type: "verified" };
+
+type EngineResponseEnvelope =
+  | {
+      outcome: "success";
+      engine_protocol: typeof ENGINE_PROTOCOL_VERSION;
+      response: EngineResponse;
+    }
+  | {
+      outcome: "failure";
+      engine_protocol: typeof ENGINE_PROTOCOL_VERSION;
+      error: EngineFailure;
+    };
+
+const ENGINE_FAILURE_CATEGORIES = new Set<EngineFailureCategory>([
+  "transport_failure", "validation", "contract_violation", "admission_denied", "conflict",
+  "not_found", "expected_plugin_failure", "plugin_defect", "substrate_failure", "cancelled",
+  "timed_out", "unknown_world_outcome",
+]);
+const ENGINE_PHASES = new Set<EnginePhase>([
+  "transport", "decode_request", "validate_request", "seal_plan", "verify_plan",
+  "seal_resource", "verify_wait_activation", "verify_durable_command",
+  "verify_evolution_command", "verify_live_evolution_command", "execute_plan",
+  "plugin_describe", "plugin_call", "effect_prepare", "effect_dispatch", "effect_reconcile",
+  "encode_response",
+]);
+const ENGINE_RETRIES = new Set<EngineRetryDisposition>([
+  "never", "correct_and_retry", "refresh_and_retry", "retry_same_request", "reconcile",
+]);
+
+function parseEngineEnvelope(value: unknown): EngineResponseEnvelope {
+  if (!isRecord(value) || (value.outcome !== "success" && value.outcome !== "failure")) {
+    throw transportError("invalid_engine_response", "response envelope is not closed");
+  }
+  const keys = Object.keys(value).sort().join(",");
+  const expected = value.outcome === "success"
+    ? "engine_protocol,outcome,response"
+    : "engine_protocol,error,outcome";
+  if (keys !== expected) {
+    throw transportError("invalid_engine_response", "response envelope fields are not closed");
+  }
+  if (value.outcome === "failure") {
+    validateEngineFailure(value.error);
+  } else {
+    validateSuccessResponse(value.response);
+  }
+  return value as EngineResponseEnvelope;
+}
+
+function validateSuccessResponse(value: unknown): void {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    throw transportError("invalid_engine_response", "success response is not tagged");
+  }
+  const payload = new Map<string, string>([
+    ["sealed", "plan,type"], ["sealed_resource", "resource,type"],
+    ["verified_wait_activation", "activation,type"],
+    ["verified_durable_command", "command,type"],
+    ["verified_evolution_command", "command,type"],
+    ["verified_live_evolution_command", "command,type"],
+    ["executed", "result,type"], ["verified", "type"],
+  ]).get(value.type);
+  if (payload === undefined || Object.keys(value).sort().join(",") !== payload) {
+    throw transportError("invalid_engine_response", "success response fields are not closed");
+  }
+}
+
+function validateEngineFailure(value: unknown): asserts value is EngineFailure {
+  if (!isRecord(value)) {
+    throw transportError("invalid_engine_response", "Engine failure is not an object");
+  }
+  const allowed = new Set([
+    "category", "phase", "code", "message", "contract", "contract_side", "path", "issues",
+    "retry_disposition",
+  ]);
+  if (
+    !Object.keys(value).every((key) => allowed.has(key)) ||
+    typeof value.category !== "string" || !ENGINE_FAILURE_CATEGORIES.has(value.category as EngineFailureCategory) ||
+    typeof value.phase !== "string" || !ENGINE_PHASES.has(value.phase as EnginePhase) ||
+    typeof value.code !== "string" || !/^[a-z][a-z0-9_]{0,199}$/.test(value.code) ||
+    typeof value.message !== "string" || value.message.length < 1 || Buffer.byteLength(value.message) > 8192
+  ) {
+    throw transportError("invalid_engine_response", "Engine failure fields are invalid");
+  }
+  if (
+    value.retry_disposition !== undefined &&
+    (typeof value.retry_disposition !== "string" || !ENGINE_RETRIES.has(value.retry_disposition as EngineRetryDisposition))
+  ) {
+    throw transportError("invalid_engine_response", "retry disposition is unknown");
+  }
+  if (value.contract !== undefined && (typeof value.contract !== "string" || Buffer.byteLength(value.contract) < 1 || Buffer.byteLength(value.contract) > 500)) {
+    throw transportError("invalid_engine_response", "contract identity is invalid");
+  }
+  if (value.contract_side !== undefined && !["schema", "input", "output"].includes(String(value.contract_side))) {
+    throw transportError("invalid_engine_response", "contract side is unknown");
+  }
+  validateEnginePath(value.path);
+  if (value.issues !== undefined) {
+    if (!Array.isArray(value.issues) || value.issues.length > 100) {
+      throw transportError("invalid_engine_response", "Engine issue set is invalid");
+    }
+    for (const issue of value.issues) {
+      if (!isRecord(issue) || !Object.keys(issue).every((key) => ["code", "message", "path"].includes(key)) ||
+        typeof issue.code !== "string" || Buffer.byteLength(issue.code) < 1 || Buffer.byteLength(issue.code) > 200 ||
+        typeof issue.message !== "string" || Buffer.byteLength(issue.message) < 1 || Buffer.byteLength(issue.message) > 2000) {
+        throw transportError("invalid_engine_response", "Engine issue is invalid");
+      }
+      validateEnginePath(issue.path);
+    }
+  }
+}
+
+function validateEnginePath(value: unknown): void {
+  if (value !== undefined && (typeof value !== "string" || Buffer.byteLength(value) > 1000 || (value !== "" && !value.startsWith("/")))) {
+    throw transportError("invalid_engine_response", "Engine failure path is invalid");
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

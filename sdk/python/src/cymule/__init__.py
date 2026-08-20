@@ -15,6 +15,40 @@ WorkResolution = dict[str, Any]
 EvolutionCommand = dict[str, Any]
 LiveEvolutionCommand = dict[str, Any]
 DurableCommand = dict[str, Any]
+ENGINE_PROTOCOL_VERSION = "cymule.engine/1"
+
+
+class EngineIssue(TypedDict, total=False):
+    """One machine-readable validation or contract issue."""
+
+    code: str
+    message: str
+    path: str
+
+
+class _EngineFailureRequired(TypedDict):
+    category: str
+    phase: str
+    code: str
+    message: str
+
+
+class EngineFailure(_EngineFailureRequired, total=False):
+    """Closed structured failure returned by the Rust Engine."""
+
+    contract: str
+    contract_side: str
+    path: str
+    issues: list[EngineIssue]
+    retry_disposition: str
+
+
+class EngineError(RuntimeError):
+    """Typed Engine transport or semantic failure."""
+
+    def __init__(self, failure: EngineFailure) -> None:
+        self.failure = failure
+        super().__init__(f"{failure['code']}: {failure['message']}")
 
 
 class RolloutDecision(TypedDict):
@@ -1242,14 +1276,14 @@ class CliEngine:
     def seal(self, candidate: dict[str, Any]) -> dict[str, Any]:
         response = self._request({"type": "seal", "candidate": candidate})
         if response.get("type") != "sealed":
-            raise RuntimeError(f"unexpected engine response: {response!r}")
+            raise _unexpected_response("sealed", response)
         return response["plan"]
 
     def seal_resource(self, candidate: dict[str, Any]) -> dict[str, Any]:
         """Validate and seal a Resource Candidate with the Rust engine."""
         response = self._request({"type": "seal_resource", "candidate": candidate})
         if response.get("type") != "sealed_resource":
-            raise RuntimeError(f"unexpected engine response: {response!r}")
+            raise _unexpected_response("sealed_resource", response)
         return response["resource"]
 
     def verify_wait_activation(self, activation: dict[str, Any]) -> dict[str, Any]:
@@ -1258,7 +1292,7 @@ class CliEngine:
             {"type": "verify_wait_activation", "activation": activation}
         )
         if response.get("type") != "verified_wait_activation":
-            raise RuntimeError(f"unexpected engine response: {response!r}")
+            raise _unexpected_response("verified_wait_activation", response)
         return response["activation"]
 
     def verify_durable_command(self, command: DurableCommand) -> DurableCommand:
@@ -1267,7 +1301,7 @@ class CliEngine:
             {"type": "verify_durable_command", "command": command}
         )
         if response.get("type") != "verified_durable_command":
-            raise RuntimeError(f"unexpected engine response: {response!r}")
+            raise _unexpected_response("verified_durable_command", response)
         return response["command"]
 
     def verify_evolution_command(self, command: EvolutionCommand) -> EvolutionCommand:
@@ -1276,7 +1310,7 @@ class CliEngine:
             {"type": "verify_evolution_command", "command": command}
         )
         if response.get("type") != "verified_evolution_command":
-            raise RuntimeError(f"unexpected engine response: {response!r}")
+            raise _unexpected_response("verified_evolution_command", response)
         return response["command"]
 
     def verify_live_evolution_command(
@@ -1287,7 +1321,7 @@ class CliEngine:
             {"type": "verify_live_evolution_command", "command": command}
         )
         if response.get("type") != "verified_live_evolution_command":
-            raise RuntimeError(f"unexpected engine response: {response!r}")
+            raise _unexpected_response("verified_live_evolution_command", response)
         return response["command"]
 
     def run(
@@ -1307,32 +1341,195 @@ class CliEngine:
             }
         )
         if response.get("type") != "executed":
-            raise RuntimeError(f"unexpected engine response: {response!r}")
+            raise _unexpected_response("executed", response)
         return response["result"]
 
     def _request(self, request: dict[str, Any]) -> dict[str, Any]:
-        completed = subprocess.run(
-            [self.executable, "rpc"],
-            input=json.dumps(request, separators=(",", ":")),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
+        try:
+            completed = subprocess.run(
+                [self.executable, "rpc"],
+                input=json.dumps(
+                    {"engine_protocol": ENGINE_PROTOCOL_VERSION, "request": request},
+                    separators=(",", ":"),
+                ),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        except OSError as error:
+            raise _transport_error("engine_start_failed", str(error)) from error
+        except subprocess.TimeoutExpired as error:
+            if request.get("type") == "run":
+                raise EngineError(
+                    {
+                        "category": "unknown_world_outcome",
+                        "phase": "transport",
+                        "code": "engine_response_timed_out",
+                        "message": "the Engine response deadline elapsed after execution began",
+                        "retry_disposition": "reconcile",
+                    }
+                ) from error
+            raise _transport_error("engine_response_timed_out", str(error)) from error
         if completed.returncode != 0:
-            raise RuntimeError(completed.stderr.strip() or f"engine exited {completed.returncode}")
-        return json.loads(completed.stdout)
+            message = completed.stderr[:8192].strip() or f"engine exited {completed.returncode}"
+            raise _transport_error("engine_process_failed", message)
+        try:
+            envelope = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise _transport_error("invalid_engine_response", str(error)) from error
+        _validate_engine_envelope(envelope)
+        if envelope.get("engine_protocol") != ENGINE_PROTOCOL_VERSION:
+            raise EngineError(
+                {
+                    "category": "contract_violation",
+                    "phase": "transport",
+                    "code": "unsupported_engine_protocol",
+                    "message": (
+                        f"expected {ENGINE_PROTOCOL_VERSION}, received "
+                        f"{envelope.get('engine_protocol')!r}"
+                    ),
+                    "contract": ENGINE_PROTOCOL_VERSION,
+                    "contract_side": "schema",
+                    "retry_disposition": "never",
+                }
+            )
+        if envelope.get("outcome") == "failure":
+            raise EngineError(envelope["error"])
+        if envelope.get("outcome") != "success":
+            raise _transport_error(
+                "invalid_engine_response", "response outcome is not closed"
+            )
+        return envelope["response"]
+
+
+def _transport_error(code: str, message: str) -> EngineError:
+    return EngineError(
+        {
+            "category": "transport_failure",
+            "phase": "transport",
+            "code": code,
+            "message": message,
+        }
+    )
+
+
+def _unexpected_response(expected: str, response: dict[str, Any]) -> EngineError:
+    return EngineError(
+        {
+            "category": "contract_violation",
+            "phase": "transport",
+            "code": "unexpected_engine_response",
+            "message": f"expected {expected}, received {response.get('type')!r}",
+            "retry_disposition": "never",
+        }
+    )
+
+
+def _validate_engine_envelope(envelope: object) -> None:
+    if not isinstance(envelope, dict):
+        raise _transport_error("invalid_engine_response", "response envelope is not an object")
+    outcome = envelope.get("outcome")
+    expected_keys = (
+        {"outcome", "engine_protocol", "response"}
+        if outcome == "success"
+        else {"outcome", "engine_protocol", "error"}
+    )
+    if outcome not in {"success", "failure"} or set(envelope) != expected_keys:
+        raise _transport_error("invalid_engine_response", "response envelope is not closed")
+    if outcome == "failure":
+        _validate_engine_failure(envelope["error"])
+
+
+def _validate_engine_failure(value: object) -> None:
+    if not isinstance(value, dict):
+        raise _transport_error("invalid_engine_response", "Engine failure is not an object")
+    required = {"category", "phase", "code", "message"}
+    optional = {
+        "contract",
+        "contract_side",
+        "path",
+        "issues",
+        "retry_disposition",
+    }
+    if not required <= set(value) or not set(value) <= required | optional:
+        raise _transport_error("invalid_engine_response", "Engine failure fields are not closed")
+    categories = {
+        "transport_failure", "validation", "contract_violation", "admission_denied",
+        "conflict", "not_found", "expected_plugin_failure", "plugin_defect",
+        "substrate_failure", "cancelled", "timed_out", "unknown_world_outcome",
+    }
+    phases = {
+        "transport", "decode_request", "validate_request", "seal_plan", "verify_plan",
+        "seal_resource", "verify_wait_activation", "verify_durable_command",
+        "verify_evolution_command", "verify_live_evolution_command", "execute_plan",
+        "plugin_describe", "plugin_call", "effect_prepare", "effect_dispatch",
+        "effect_reconcile", "encode_response",
+    }
+    retries = {
+        "never", "correct_and_retry", "refresh_and_retry", "retry_same_request", "reconcile"
+    }
+    if value["category"] not in categories or value["phase"] not in phases:
+        raise _transport_error("invalid_engine_response", "Engine failure enum is unknown")
+    code = value["code"]
+    message = value["message"]
+    if (
+        not isinstance(code, str)
+        or not 1 <= len(code) <= 200
+        or not code[0].islower()
+        or not all(character.islower() or character.isdigit() or character == "_" for character in code)
+        or not isinstance(message, str)
+        or not 1 <= len(message.encode()) <= 8192
+    ):
+        raise _transport_error("invalid_engine_response", "Engine failure bounds are invalid")
+    if "retry_disposition" in value and value["retry_disposition"] not in retries:
+        raise _transport_error("invalid_engine_response", "retry disposition is unknown")
+    contract = value.get("contract")
+    if contract is not None and (
+        not isinstance(contract, str) or not 1 <= len(contract.encode()) <= 500
+    ):
+        raise _transport_error("invalid_engine_response", "contract identity is invalid")
+    if value.get("contract_side") not in {None, "schema", "input", "output"}:
+        raise _transport_error("invalid_engine_response", "contract side is unknown")
+    _validate_engine_path(value.get("path"), "failure path")
+    issues = value.get("issues", [])
+    if not isinstance(issues, list) or len(issues) > 100:
+        raise _transport_error("invalid_engine_response", "Engine issue set is invalid")
+    for issue in issues:
+        if not isinstance(issue, dict) or not {"code", "message"} <= set(issue) or not set(issue) <= {"code", "message", "path"}:
+            raise _transport_error("invalid_engine_response", "Engine issue fields are not closed")
+        if (
+            not isinstance(issue["code"], str)
+            or not 1 <= len(issue["code"].encode()) <= 200
+            or not isinstance(issue["message"], str)
+            or not 1 <= len(issue["message"].encode()) <= 2000
+        ):
+            raise _transport_error("invalid_engine_response", "Engine issue bounds are invalid")
+        _validate_engine_path(issue.get("path"), "issue path")
+
+
+def _validate_engine_path(value: object, label: str) -> None:
+    if value is not None and (
+        not isinstance(value, str)
+        or len(value.encode()) > 1000
+        or bool(value) and not value.startswith("/")
+    ):
+        raise _transport_error("invalid_engine_response", f"{label} is invalid")
 
 
 __all__ = [
     "ArtifactRef",
     "CliEngine",
+    "ENGINE_PROTOCOL_VERSION",
     "DurableCommand",
     "DurableControl",
     "DurableControlBuilder",
     "EvolutionCommand",
     "EvolutionControl",
     "EvolutionControlBuilder",
+    "EngineError",
+    "EngineFailure",
+    "EngineIssue",
     "LiveEvolutionCommand",
     "LiveEvolutionControl",
     "LiveEvolutionControlBuilder",

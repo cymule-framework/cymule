@@ -5,9 +5,108 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"sort"
 )
+
+// EngineProtocolVersion is the frozen Engine transport contract.
+const EngineProtocolVersion = "cymule.engine/1"
+
+// EngineIssue is one machine-readable validation or contract issue.
+type EngineIssue struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Path    string `json:"path,omitempty"`
+}
+
+// EngineFailure is one closed semantic or transport failure.
+type EngineFailure struct {
+	Category         string        `json:"category"`
+	Phase            string        `json:"phase"`
+	Code             string        `json:"code"`
+	Message          string        `json:"message"`
+	Contract         string        `json:"contract,omitempty"`
+	ContractSide     string        `json:"contract_side,omitempty"`
+	Path             string        `json:"path,omitempty"`
+	Issues           []EngineIssue `json:"issues,omitempty"`
+	RetryDisposition string        `json:"retry_disposition,omitempty"`
+}
+
+// Error implements error without requiring callers to parse text.
+func (failure EngineFailure) Error() string {
+	return failure.Code + ": " + failure.Message
+}
+
+func (failure EngineFailure) validate() error {
+	if !closedEngineCategory(failure.Category) || !closedEnginePhase(failure.Phase) ||
+		!validEngineCode(failure.Code) || len(failure.Message) < 1 || len(failure.Message) > 8192 {
+		return fmt.Errorf("Engine failure fields are invalid")
+	}
+	if failure.Contract != "" && len(failure.Contract) > 500 {
+		return fmt.Errorf("Engine failure contract is invalid")
+	}
+	if failure.ContractSide != "" && failure.ContractSide != "schema" &&
+		failure.ContractSide != "input" && failure.ContractSide != "output" {
+		return fmt.Errorf("Engine failure contract side is unknown")
+	}
+	if !validEnginePath(failure.Path) || len(failure.Issues) > 100 {
+		return fmt.Errorf("Engine failure path or issue set is invalid")
+	}
+	for _, issue := range failure.Issues {
+		if len(issue.Code) < 1 || len(issue.Code) > 200 || len(issue.Message) < 1 ||
+			len(issue.Message) > 2000 || !validEnginePath(issue.Path) {
+			return fmt.Errorf("Engine issue is invalid")
+		}
+	}
+	if failure.RetryDisposition != "" && failure.RetryDisposition != "never" &&
+		failure.RetryDisposition != "correct_and_retry" &&
+		failure.RetryDisposition != "refresh_and_retry" &&
+		failure.RetryDisposition != "retry_same_request" && failure.RetryDisposition != "reconcile" {
+		return fmt.Errorf("Engine retry disposition is unknown")
+	}
+	return nil
+}
+
+func closedEngineCategory(value string) bool {
+	switch value {
+	case "transport_failure", "validation", "contract_violation", "admission_denied", "conflict",
+		"not_found", "expected_plugin_failure", "plugin_defect", "substrate_failure", "cancelled",
+		"timed_out", "unknown_world_outcome":
+		return true
+	default:
+		return false
+	}
+}
+
+func closedEnginePhase(value string) bool {
+	switch value {
+	case "transport", "decode_request", "validate_request", "seal_plan", "verify_plan",
+		"seal_resource", "verify_wait_activation", "verify_durable_command",
+		"verify_evolution_command", "verify_live_evolution_command", "execute_plan",
+		"plugin_describe", "plugin_call", "effect_prepare", "effect_dispatch", "effect_reconcile",
+		"encode_response":
+		return true
+	default:
+		return false
+	}
+}
+
+func validEngineCode(value string) bool {
+	if len(value) < 1 || len(value) > 200 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range []byte(value[1:]) {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func validEnginePath(value string) bool {
+	return len(value) <= 1000 && (value == "" || value[0] == '/')
+}
 
 // Expression is one frozen IR expression.
 type Expression map[string]any
@@ -1399,7 +1498,7 @@ func (engine CliEngine) Seal(candidate PlanCandidate) (SealedPlan, error) {
 	}
 	err := engine.request(map[string]any{"type": "seal", "candidate": candidate}, &response)
 	if err == nil && response.Type != "sealed" {
-		err = fmt.Errorf("unexpected engine response %q", response.Type)
+		err = unexpectedEngineResponse("sealed", response.Type)
 	}
 	return response.Plan, err
 }
@@ -1412,7 +1511,7 @@ func (engine CliEngine) SealResource(candidate ResourceCandidate) (ResourceHandl
 	}
 	err := engine.request(map[string]any{"type": "seal_resource", "candidate": candidate}, &response)
 	if err == nil && response.Type != "sealed_resource" {
-		err = fmt.Errorf("unexpected engine response %q", response.Type)
+		err = unexpectedEngineResponse("sealed_resource", response.Type)
 	}
 	return response.Resource, err
 }
@@ -1427,7 +1526,7 @@ func (engine CliEngine) VerifyWaitActivation(activation WaitActivation) (WaitAct
 		"type": "verify_wait_activation", "activation": activation,
 	}, &response)
 	if err == nil && response.Type != "verified_wait_activation" {
-		err = fmt.Errorf("unexpected engine response %q", response.Type)
+		err = unexpectedEngineResponse("verified_wait_activation", response.Type)
 	}
 	return response.Activation, err
 }
@@ -1442,7 +1541,7 @@ func (engine CliEngine) VerifyDurableCommand(command DurableCommand) (DurableCom
 		"type": "verify_durable_command", "command": command,
 	}, &response)
 	if err == nil && response.Type != "verified_durable_command" {
-		err = fmt.Errorf("unexpected engine response %q", response.Type)
+		err = unexpectedEngineResponse("verified_durable_command", response.Type)
 	}
 	return response.Command, err
 }
@@ -1457,7 +1556,7 @@ func (engine CliEngine) VerifyEvolutionCommand(command EvolutionCommand) (Evolut
 		"type": "verify_evolution_command", "command": command,
 	}, &response)
 	if err == nil && response.Type != "verified_evolution_command" {
-		err = fmt.Errorf("unexpected engine response %q", response.Type)
+		err = unexpectedEngineResponse("verified_evolution_command", response.Type)
 	}
 	return response.Command, err
 }
@@ -1474,7 +1573,7 @@ func (engine CliEngine) VerifyLiveEvolutionCommand(
 		"type": "verify_live_evolution_command", "command": command,
 	}, &response)
 	if err == nil && response.Type != "verified_live_evolution_command" {
-		err = fmt.Errorf("unexpected engine response %q", response.Type)
+		err = unexpectedEngineResponse("verified_live_evolution_command", response.Type)
 	}
 	return response.Command, err
 }
@@ -1489,15 +1588,18 @@ func (engine CliEngine) Run(plan SealedPlan, input any, plugin, runID string) (E
 		"type": "run", "plan": plan, "input": input, "plugin": plugin, "run_id": runID,
 	}, &response)
 	if err == nil && response.Type != "executed" {
-		err = fmt.Errorf("unexpected engine response %q", response.Type)
+		err = unexpectedEngineResponse("executed", response.Type)
 	}
 	return response.Result, err
 }
 
 func (engine CliEngine) request(request any, response any) error {
-	input, err := json.Marshal(request)
+	input, err := json.Marshal(struct {
+		EngineProtocol string `json:"engine_protocol"`
+		Request        any    `json:"request"`
+	}{EngineProtocolVersion, request})
 	if err != nil {
-		return err
+		return transportFailure("request_encoding_failed", err.Error())
 	}
 	command := exec.Command(engine.Executable, "rpc")
 	command.Stdin = bytes.NewReader(input)
@@ -1506,7 +1608,76 @@ func (engine CliEngine) request(request any, response any) error {
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
-		return fmt.Errorf("engine failed: %w: %s", err, stderr.String())
+		message := stderr.String()
+		if len(message) > 8192 {
+			message = message[:8192]
+		}
+		if message == "" {
+			message = err.Error()
+		}
+		return transportFailure("engine_process_failed", message)
 	}
-	return json.Unmarshal(stdout.Bytes(), response)
+	var envelope struct {
+		Outcome        string          `json:"outcome"`
+		EngineProtocol string          `json:"engine_protocol"`
+		Response       json.RawMessage `json:"response"`
+		Error          *EngineFailure  `json:"error"`
+	}
+	if err := decodeClosedJSON(stdout.Bytes(), &envelope); err != nil {
+		return transportFailure("invalid_engine_response", err.Error())
+	}
+	if envelope.EngineProtocol != EngineProtocolVersion {
+		return EngineFailure{
+			Category: "contract_violation", Phase: "transport",
+			Code:     "unsupported_engine_protocol",
+			Message:  fmt.Sprintf("expected %s, received %q", EngineProtocolVersion, envelope.EngineProtocol),
+			Contract: EngineProtocolVersion, ContractSide: "schema", RetryDisposition: "never",
+		}
+	}
+	switch envelope.Outcome {
+	case "failure":
+		if envelope.Error == nil {
+			return transportFailure("invalid_engine_response", "failure response omitted error")
+		}
+		if err := envelope.Error.validate(); err != nil {
+			return transportFailure("invalid_engine_response", err.Error())
+		}
+		return *envelope.Error
+	case "success":
+		if err := decodeClosedJSON(envelope.Response, response); err != nil {
+			return transportFailure("invalid_engine_response", err.Error())
+		}
+		return nil
+	default:
+		return transportFailure("invalid_engine_response", "response outcome is not closed")
+	}
+}
+
+func decodeClosedJSON(input []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(input))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("unexpected trailing JSON value")
+		}
+		return err
+	}
+	return nil
+}
+
+func transportFailure(code, message string) EngineFailure {
+	return EngineFailure{
+		Category: "transport_failure", Phase: "transport", Code: code, Message: message,
+	}
+}
+
+func unexpectedEngineResponse(expected, received string) EngineFailure {
+	return EngineFailure{
+		Category: "contract_violation", Phase: "transport", Code: "unexpected_engine_response",
+		Message: fmt.Sprintf("expected %s, received %q", expected, received), RetryDisposition: "never",
+	}
 }

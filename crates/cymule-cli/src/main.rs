@@ -9,12 +9,16 @@ use cymule_core::{PlanCandidate, SealedPlan};
 use cymule_durable::{DurableCommand, WaitActivation};
 use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
-use cymule_runtime::{EmbeddedRuntime, ExecutionResult, ProcessPlugin};
+use cymule_runtime::{
+    ENGINE_PROTOCOL_VERSION, EmbeddedRuntime, EngineFailure, EngineFailureCategory, EnginePhase,
+    EngineRequestEnvelope, EngineResponseEnvelope, EngineRetryDisposition, ExecutionResult,
+    ProcessPlugin,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum EngineRequest {
     Seal {
         candidate: PlanCandidate,
@@ -46,7 +50,7 @@ enum EngineRequest {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum EngineResponse {
     Sealed { plan: SealedPlan },
     SealedResource { resource: ResourceHandle },
@@ -125,33 +129,83 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn rpc() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = Vec::new();
-    io::stdin().read_to_end(&mut input)?;
-    let request: EngineRequest = serde_json::from_slice(&input)?;
-    let response = match request {
+    let response = match io::stdin().read_to_end(&mut input) {
+        Ok(_) => decode_and_execute_request(&input),
+        Err(error) => Err(EngineFailure::transport(
+            "engine_read_failed",
+            error.to_string(),
+        )),
+    };
+    print_json(&match response {
+        Ok(response) => EngineResponseEnvelope::success(response),
+        Err(error) => EngineResponseEnvelope::<EngineResponse>::failure(error),
+    })
+}
+
+fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFailure> {
+    let envelope: EngineRequestEnvelope<EngineRequest> =
+        serde_json::from_slice(input).map_err(|error| {
+            let mut failure = EngineFailure::new(
+                EngineFailureCategory::Validation,
+                EnginePhase::DecodeRequest,
+                "invalid_engine_request",
+                error.to_string(),
+            );
+            failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
+            failure
+        })?;
+    if envelope.engine_protocol != ENGINE_PROTOCOL_VERSION {
+        let mut failure = EngineFailure::new(
+            EngineFailureCategory::ContractViolation,
+            EnginePhase::ValidateRequest,
+            "unsupported_engine_protocol",
+            format!(
+                "expected {ENGINE_PROTOCOL_VERSION}, received {:?}",
+                envelope.engine_protocol
+            ),
+        );
+        failure.contract = Some(ENGINE_PROTOCOL_VERSION.into());
+        failure.retry_disposition = Some(EngineRetryDisposition::Never);
+        return Err(failure);
+    }
+    let response = match envelope.request {
         EngineRequest::Seal { candidate } => EngineResponse::Sealed {
-            plan: candidate.seal()?,
+            plan: candidate
+                .seal()
+                .map_err(|error| EngineFailure::from_core(&error, EnginePhase::SealPlan))?,
         },
         EngineRequest::Verify { plan } => {
-            plan.verify()?;
+            plan.verify()
+                .map_err(|error| EngineFailure::from_core(&error, EnginePhase::VerifyPlan))?;
             EngineResponse::Verified
         }
         EngineRequest::SealResource { candidate } => EngineResponse::SealedResource {
-            resource: candidate.seal()?,
+            resource: candidate
+                .seal()
+                .map_err(|error| map_resource_error(&error))?,
         },
         EngineRequest::VerifyWaitActivation { activation } => {
-            activation.verify()?;
+            activation
+                .verify()
+                .map_err(|error| map_durable_error(&error, EnginePhase::VerifyWaitActivation))?;
             EngineResponse::VerifiedWaitActivation { activation }
         }
         EngineRequest::VerifyDurableCommand { command } => {
-            command.verify()?;
+            command
+                .verify()
+                .map_err(|error| map_durable_error(&error, EnginePhase::VerifyDurableCommand))?;
             EngineResponse::VerifiedDurableCommand { command }
         }
         EngineRequest::VerifyEvolutionCommand { command } => {
-            command.verify()?;
+            command.verify().map_err(|error| {
+                map_evolution_error(&error, EnginePhase::VerifyEvolutionCommand)
+            })?;
             EngineResponse::VerifiedEvolutionCommand { command }
         }
         EngineRequest::VerifyLiveEvolutionCommand { command } => {
-            command.verify()?;
+            command.verify().map_err(|error| {
+                map_evolution_error(&error, EnginePhase::VerifyLiveEvolutionCommand)
+            })?;
             EngineResponse::VerifiedLiveEvolutionCommand { command }
         }
         EngineRequest::Run {
@@ -162,11 +216,108 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let mut runtime = EmbeddedRuntime::new(ProcessPlugin::new(plugin));
             EngineResponse::Executed {
-                result: runtime.execute(plan, &input, run_id)?,
+                result: runtime.execute(plan, &input, run_id).map_err(|error| {
+                    EngineFailure::from_runtime(error, EnginePhase::ExecutePlan)
+                })?,
             }
         }
     };
-    print_json(&response)
+    Ok(response)
+}
+
+fn map_resource_error(error: &cymule_resource::ResourceError) -> EngineFailure {
+    use cymule_resource::ResourceError;
+
+    let (category, code, retry) = match &error {
+        ResourceError::Validation(_) => (
+            EngineFailureCategory::Validation,
+            "resource_validation_failed",
+            Some(EngineRetryDisposition::CorrectAndRetry),
+        ),
+        ResourceError::Conflict(_) => (
+            EngineFailureCategory::Conflict,
+            "resource_conflict",
+            Some(EngineRetryDisposition::Never),
+        ),
+        ResourceError::NotFound(_) => (EngineFailureCategory::NotFound, "resource_not_found", None),
+        ResourceError::Substrate(_) | ResourceError::Persistence(_) => (
+            EngineFailureCategory::SubstrateFailure,
+            "resource_substrate_failed",
+            Some(EngineRetryDisposition::RetrySameRequest),
+        ),
+        ResourceError::Integrity(_) => (
+            EngineFailureCategory::ContractViolation,
+            "resource_integrity_failed",
+            Some(EngineRetryDisposition::Never),
+        ),
+    };
+    let mut failure =
+        EngineFailure::new(category, EnginePhase::SealResource, code, error.to_string());
+    failure.retry_disposition = retry;
+    failure
+}
+
+fn map_durable_error(error: &cymule_durable::DurableError, phase: EnginePhase) -> EngineFailure {
+    use cymule_durable::DurableError;
+
+    let (category, code, retry) = match &error {
+        DurableError::Validation(_) | DurableError::Encoding(_) => (
+            EngineFailureCategory::Validation,
+            "durable_command_validation_failed",
+            Some(EngineRetryDisposition::CorrectAndRetry),
+        ),
+        DurableError::Conflict { .. } => (
+            EngineFailureCategory::Conflict,
+            "durable_revision_conflict",
+            Some(EngineRetryDisposition::RefreshAndRetry),
+        ),
+        DurableError::NotFound(_) => (
+            EngineFailureCategory::NotFound,
+            "durable_object_not_found",
+            None,
+        ),
+        DurableError::IllegalTransition(_) => (
+            EngineFailureCategory::AdmissionDenied,
+            "durable_transition_denied",
+            Some(EngineRetryDisposition::CorrectAndRetry),
+        ),
+        DurableError::Substrate(_) => (
+            EngineFailureCategory::SubstrateFailure,
+            "durable_substrate_failed",
+            Some(EngineRetryDisposition::RetrySameRequest),
+        ),
+    };
+    let mut failure = EngineFailure::new(category, phase, code, error.to_string());
+    failure.retry_disposition = retry;
+    failure
+}
+
+fn map_evolution_error(
+    error: &cymule_evolution::EvolutionError,
+    phase: EnginePhase,
+) -> EngineFailure {
+    use cymule_evolution::EvolutionError;
+
+    let (category, code, retry) = match &error {
+        EvolutionError::Validation(_) => (
+            EngineFailureCategory::Validation,
+            "evolution_command_validation_failed",
+            Some(EngineRetryDisposition::CorrectAndRetry),
+        ),
+        EvolutionError::NotFound(_) => (
+            EngineFailureCategory::NotFound,
+            "evolution_object_not_found",
+            None,
+        ),
+        EvolutionError::Conflict(_) => (
+            EngineFailureCategory::Conflict,
+            "evolution_conflict",
+            Some(EngineRetryDisposition::Never),
+        ),
+    };
+    let mut failure = EngineFailure::new(category, phase, code, error.to_string());
+    failure.retry_disposition = retry;
+    failure
 }
 
 fn argument_value<'a>(arguments: &'a [String], flag: &str) -> Result<&'a str, String> {

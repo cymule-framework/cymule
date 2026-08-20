@@ -5,6 +5,9 @@
   wire names.
 - Subprocess errors must include bounded stderr and never expose environment
   variables or credentials.
+- Raise `EngineError` with the exact structured `failure` object for all Engine
+  responses. A timed-out mutating Run is an unknown-world outcome, not a safe
+  generic retry.
 - The Rust engine remains the only authoritative sealer and reducer.
 - `definition()` and `invoke()` emit exact `cymule.ir/2` wire records. Python
   must not resolve or cache logical subflow heads.

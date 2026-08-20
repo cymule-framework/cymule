@@ -5,6 +5,7 @@ mod contract;
 mod engine;
 mod error;
 mod plugin;
+mod protocol;
 
 pub use composition::{
     BINDING_CONTEXT_ID_DOMAIN, BindingContextDescriptor, CompositionError,
@@ -20,4 +21,9 @@ pub use error::{RuntimeError, RuntimeResult};
 pub use plugin::{
     PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginOperation, PluginRequest,
     PluginResponse, ProcessPlugin,
+};
+pub use protocol::{
+    ENGINE_PROTOCOL_VERSION, EngineContractSide, EngineFailure, EngineFailureCategory, EngineIssue,
+    EnginePhase, EngineRequestEnvelope, EngineResponseEnvelope, EngineResult,
+    EngineRetryDisposition,
 };

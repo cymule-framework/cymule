@@ -4,6 +4,9 @@
 - Public wire structs use explicit JSON tags and avoid interface-based semantic
   dispatch when a closed type can express the contract.
 - The CLI Engine is a transport; do not add a Go reducer or authoritative hash.
+- Return `EngineFailure` as the typed Go error for remote failures and
+  response-less transport failures. Callers use fields or `errors.As`, never
+  parse `Error()` text for control flow.
 - `Definition` and `Invoke` author exact local reusable calls; logical subflow
   registry resolution remains Rust M4 authority.
 - Keep Resource Candidate, Handle, Integrity, Location, and Handoff wire structs

@@ -9,22 +9,54 @@ pub enum RuntimeError {
     /// Trusted semantic kernel rejected an operation.
     Core(cymule_core::CoreError),
     /// Plugin protocol or behavior was invalid.
-    Plugin(String),
+    PluginDefect {
+        /// Stable host-owned defect code.
+        code: String,
+        /// Human-readable defect summary.
+        message: String,
+    },
     /// IR execution reached a durable wait unsupported by one-shot execution.
     Suspended(String),
-    /// Local process I/O failed.
-    Io(String),
+    /// A concrete process or I/O substrate failed.
+    Substrate {
+        /// Stable substrate failure code.
+        code: String,
+        /// Human-readable failure summary.
+        message: String,
+    },
     /// JSON encoding failed.
     Encoding(String),
+}
+
+impl RuntimeError {
+    /// Construct a host-classified plugin protocol defect.
+    pub(crate) fn plugin_defect(message: impl Into<String>) -> Self {
+        Self::PluginDefect {
+            code: "plugin_protocol_violation".to_owned(),
+            message: message.into(),
+        }
+    }
+
+    /// Construct a process substrate failure.
+    pub(crate) fn substrate(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Substrate {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
 }
 
 impl Display for RuntimeError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Core(error) => Display::fmt(error, formatter),
-            Self::Plugin(message) => write!(formatter, "plugin_error: {message}"),
+            Self::PluginDefect { code, message } => {
+                write!(formatter, "plugin_defect: {code}: {message}")
+            }
             Self::Suspended(message) => write!(formatter, "run_suspended: {message}"),
-            Self::Io(message) => write!(formatter, "io_error: {message}"),
+            Self::Substrate { code, message } => {
+                write!(formatter, "substrate_failed: {code}: {message}")
+            }
             Self::Encoding(message) => write!(formatter, "encoding_error: {message}"),
         }
     }
@@ -40,7 +72,10 @@ impl From<cymule_core::CoreError> for RuntimeError {
 
 impl From<std::io::Error> for RuntimeError {
     fn from(error: std::io::Error) -> Self {
-        Self::Io(error.to_string())
+        Self::Substrate {
+            code: "process_io_failed".to_owned(),
+            message: error.to_string(),
+        }
     }
 }
 

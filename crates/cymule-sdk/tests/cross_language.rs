@@ -2,13 +2,15 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::path::Path;
 
 use cymule::{
-    CliEngine, DispatchPolicy, DurableCommand, EffectProfile, Engine, EvolutionCommand, Expression,
-    FlowBuilder, LiveEvolutionCommand, MutationKind, Operation, ReconciliationMode, Region,
-    RegionMigrationCommand, ResourceCandidate, Step, VirtualClaimCommand, VirtualCompactionCommand,
-    VirtualLeaseRenewalCommand, VirtualRecoveryCommand, VirtualRehydrationCommand,
-    VirtualRunWeightCommand, WaitActivation, WorkOccurrence, WorkResolutionCommand,
+    CliEngine, DispatchPolicy, DurableCommand, EffectProfile, Engine, EngineFailure,
+    EvolutionCommand, Expression, FlowBuilder, LiveEvolutionCommand, MutationKind, Operation,
+    PlanCandidate, ReconciliationMode, Region, RegionMigrationCommand, ResourceCandidate, Step,
+    VirtualClaimCommand, VirtualCompactionCommand, VirtualLeaseRenewalCommand,
+    VirtualRecoveryCommand, VirtualRehydrationCommand, VirtualRunWeightCommand, WaitActivation,
+    WorkOccurrence, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -238,5 +240,73 @@ fn rust_unified_live_evolution_validates_through_the_cli() {
             .verify_live_evolution_command(&command)
             .expect("Rust engine verifies live-evolution command"),
         command
+    );
+}
+
+#[test]
+fn rust_engine_preserves_structured_negative_outcomes() {
+    let (Ok(engine_path), Ok(fixture_path)) = (
+        env::var("CYMULE_BIN"),
+        env::var("CYMULE_ENGINE_FAILURE_FIXTURE"),
+    ) else {
+        return;
+    };
+    let fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(fixture_path).expect("Engine failure fixture reads"),
+    )
+    .expect("Engine failure fixture parses");
+    let engine = CliEngine::new(&engine_path);
+    let mut invalid: PlanCandidate = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/cross-language-plan.json"
+    ))
+    .expect("candidate parses");
+    invalid.ir_version = "cymule.ir/unsupported".to_owned();
+    assert_failure(
+        &engine.seal(&invalid).expect_err("invalid version fails"),
+        &fixture["cases"]["invalid_plan_version"],
+    );
+
+    let candidate: PlanCandidate = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/cross-language-plan.json"
+    ))
+    .expect("candidate parses");
+    let plan = engine.seal(&candidate).expect("valid candidate seals");
+    assert_failure(
+        &engine
+            .run(
+                &plan,
+                &json!({"message": "plugin defect"}),
+                engine_path.as_ref(),
+                "run:rust-plugin-defect",
+            )
+            .expect_err("invalid plugin process fails"),
+        &fixture["cases"]["plugin_defect"],
+    );
+    assert_failure(
+        &engine
+            .run(
+                &plan,
+                &json!({"message": "substrate"}),
+                Path::new("/cymule-conformance/missing-plugin"),
+                "run:rust-substrate-failure",
+            )
+            .expect_err("missing plugin substrate fails"),
+        &fixture["cases"]["substrate_failure"],
+    );
+}
+
+fn assert_failure(failure: &EngineFailure, expected: &serde_json::Value) {
+    let category = serde_json::to_value(failure.category).expect("category serializes");
+    let phase = serde_json::to_value(failure.phase).expect("phase serializes");
+    let retry = serde_json::to_value(failure.retry_disposition).expect("retry serializes");
+    assert_eq!(category, expected["category"]);
+    assert_eq!(phase, expected["phase"]);
+    assert_eq!(failure.code.as_ref(), expected["code"].as_str().unwrap());
+    assert_eq!(
+        retry,
+        expected
+            .get("retry_disposition")
+            .cloned()
+            .unwrap_or_default()
     );
 }

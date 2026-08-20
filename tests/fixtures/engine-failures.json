@@ -1,0 +1,23 @@
+{
+  "protocol": "cymule.engine/1",
+  "cases": {
+    "invalid_plan_version": {
+      "category": "validation",
+      "phase": "seal_plan",
+      "code": "validation_failed",
+      "retry_disposition": "correct_and_retry"
+    },
+    "plugin_defect": {
+      "category": "plugin_defect",
+      "phase": "execute_plan",
+      "code": "plugin_process_failed",
+      "retry_disposition": "never"
+    },
+    "substrate_failure": {
+      "category": "substrate_failure",
+      "phase": "execute_plan",
+      "code": "plugin_start_failed",
+      "retry_disposition": "retry_same_request"
+    }
+  }
+}

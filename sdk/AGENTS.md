@@ -1,6 +1,10 @@
 # SDK Guidance
 
 - Every SDK emits the same frozen `cymule.ir/2` JSON shape and calls an Engine.
+- Every CLI client sends and receives only `cymule.engine/1`. Surface a typed
+  Engine error that preserves the Rust failure object; never parse stderr or a
+  human message into semantic categories, and never recommend replay merely
+  because the transport ended without a response.
 - Every SDK exposes reusable definition declaration and `invoke` authoring with
   the same explicit local definition ID, input expression, site ID, and result
   binding. Linking logical latest-compatible references remains Rust authority.

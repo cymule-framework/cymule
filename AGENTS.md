@@ -89,6 +89,10 @@ Use this precedence order when guidance conflicts:
   and must surface contention instead of waiting indefinitely.
 - Cross-language SDKs author the same frozen IR and use the same engine contract.
   They must not implement a second reducer or invent language-specific semantics.
+- `cymule.engine/1` is the only CLI Engine transport. Every request and every
+  success or failure uses its versioned envelope; stderr and process status are
+  transport diagnostics, never a second semantic error channel. A missing
+  response never implies that retrying a potentially mutating request is safe.
 - `cymule.ir/2` reusable definition calls resolve inside one immutable Plan.
   Logical latest-compatible references are linked by M4 into a new parent Plan;
   a sealed Plan never dereferences a mutable `latest` alias at runtime.

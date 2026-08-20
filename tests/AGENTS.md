@@ -22,6 +22,9 @@
   `PROPTEST_CASES` in `rust-soak`; do not make ordinary test latency depend on
   soak-scale generation.
 - Fixtures are shared across language SDKs and must stay language-neutral.
+- Engine negative fixtures assert category, phase, code, and only an explicitly
+  justified retry disposition through the real Rust CLI in all four SDKs.
+  Transport loss must not manufacture replay safety.
 - The expected Plan ID is always computed by the Rust kernel from the checked-in
   candidate; never duplicate canonicalization in a test script.
 - Cross-language tests must seal and execute through the real engine and process

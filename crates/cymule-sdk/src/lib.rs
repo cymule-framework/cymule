@@ -33,7 +33,10 @@ pub use cymule_resource::{
     InlineData, ResourceCandidate, ResourceHandle, ResourceHandoff, ResourceIntegrity,
     ResourceLocation, ResourceReplayClass, ResourceShape,
 };
-pub use cymule_runtime::ExecutionResult;
+pub use cymule_runtime::{
+    ENGINE_PROTOCOL_VERSION, EngineContractSide, EngineFailure, EngineFailureCategory, EngineIssue,
+    EnginePhase, EngineResult, EngineRetryDisposition, ExecutionResult,
+};
 pub use cymule_virtual::{
     ArchivedWorkIndex, CompactedWorkIndex, ParkReason, RegionMigrationCommand, RegionMigrationKind,
     RegionMigrationPlan, RegionMigrationReceipt, RegionMigrationRequest, RegionMigrator,

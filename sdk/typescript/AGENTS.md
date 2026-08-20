@@ -24,6 +24,8 @@
   work/lease fences, logical times, TTL, and recovery disposition. They never
   read `Date.now()`, manage workers, or infer retryability.
 - Use discriminated unions for IR and Engine protocol types.
+- Throw `EngineError` for both remote failures and local transport failure. Its
+  `failure` field is authoritative; message text is display-only.
 - Keep `invoke` as a closed discriminated variant and `definition()` as a pure
   candidate authoring operation; neither may resolve logical latest heads.
 - Keep M4 operations as the closed `EvolutionCommand` discriminated union.

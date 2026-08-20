@@ -39,3 +39,7 @@
   provider object. Ordinary Rust ownership and provider adapters manage
   process-local resources; durable cleanup remains an explicit effect
   obligation and reconciliation concern.
+- `EngineFailure` is the cross-language failure projection. Keep its categories,
+  phases, bounded issue tree, contract detail, and retry dispositions closed and
+  versioned. Validate every deserialized failure; do not infer retry safety from
+  transport loss or classify an undeclared plugin error as an expected failure.

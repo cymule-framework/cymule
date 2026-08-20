@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from collections.abc import Callable
 
 from cymule import (
     CliEngine,
     DurableControlBuilder,
+    EngineError,
     EvolutionControlBuilder,
     FlowBuilder,
     LiveEvolutionControlBuilder,
@@ -20,6 +22,54 @@ from cymule import (
 
 
 class EndToEndTest(unittest.TestCase):
+    def test_python_preserves_structured_engine_failures(self) -> None:
+        engine_path = os.environ.get("CYMULE_BIN")
+        failure_path = os.environ.get("CYMULE_ENGINE_FAILURE_FIXTURE")
+        if engine_path is None or failure_path is None:
+            self.skipTest("Engine failure conformance is not configured")
+        with open(failure_path, encoding="utf-8") as source:
+            expected = json.load(source)["cases"]
+        candidate_path = failure_path.replace(
+            "engine-failures.json", "cross-language-plan.json"
+        )
+        with open(candidate_path, encoding="utf-8") as source:
+            candidate = json.load(source)
+        engine = CliEngine(engine_path)
+        invalid = dict(candidate)
+        invalid["ir_version"] = "cymule.ir/unsupported"
+        self._assert_engine_failure(
+            lambda: engine.seal(invalid), expected["invalid_plan_version"]
+        )
+        plan = engine.seal(candidate)
+        self._assert_engine_failure(
+            lambda: engine.run(
+                plan, {"message": "defect"}, engine_path, "run:python-defect"
+            ),
+            expected["plugin_defect"],
+        )
+        self._assert_engine_failure(
+            lambda: engine.run(
+                plan,
+                {"message": "substrate"},
+                "/cymule-conformance/missing-plugin",
+                "run:python-substrate",
+            ),
+            expected["substrate_failure"],
+        )
+
+    def _assert_engine_failure(
+        self, operation: Callable[[], object], expected: dict[str, str]
+    ) -> None:
+        with self.assertRaises(EngineError) as raised:
+            operation()
+        failure = raised.exception.failure
+        self.assertEqual(failure["category"], expected["category"])
+        self.assertEqual(failure["phase"], expected["phase"])
+        self.assertEqual(failure["code"], expected["code"])
+        self.assertEqual(
+            failure.get("retry_disposition"), expected.get("retry_disposition")
+        )
+
     def test_python_durable_control_validates(self) -> None:
         engine_path = os.environ.get("CYMULE_BIN")
         fixture_path = os.environ.get("CYMULE_DURABLE_CONTROL_FIXTURE")

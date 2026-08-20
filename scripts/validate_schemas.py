@@ -30,6 +30,14 @@ def main() -> int:
         (schema["$id"], Resource.from_contents(schema)) for schema in schemas
     )
     by_title = {schema["title"]: schema for schema in schemas}
+    engine_validator = Draft202012Validator(
+        by_title["Cymule Engine Protocol cymule.engine/1"], registry=registry
+    )
+
+    def validate_engine_request(request: object) -> None:
+        engine_validator.validate(
+            {"engine_protocol": "cymule.engine/1", "request": request}
+        )
 
     candidate_validator = Draft202012Validator(
         by_title["Cymule Plan Candidate cymule.ir/2"], registry=registry
@@ -54,9 +62,62 @@ def main() -> int:
     Draft202012Validator(
         by_title["Cymule Sealed Plan"], registry=registry
     ).validate(sealed)
-    Draft202012Validator(
-        by_title["Cymule Engine Request"], registry=registry
-    ).validate({"type": "seal", "candidate": candidate})
+    validate_engine_request({"type": "seal", "candidate": candidate})
+    engine_validator.validate(
+        {
+            "outcome": "success",
+            "engine_protocol": "cymule.engine/1",
+            "response": {"type": "sealed", "plan": sealed},
+        }
+    )
+    engine_categories = [
+        "transport_failure",
+        "validation",
+        "contract_violation",
+        "admission_denied",
+        "conflict",
+        "not_found",
+        "expected_plugin_failure",
+        "plugin_defect",
+        "substrate_failure",
+        "cancelled",
+        "timed_out",
+        "unknown_world_outcome",
+    ]
+    for category in engine_categories:
+        engine_validator.validate(
+            {
+                "outcome": "failure",
+                "engine_protocol": "cymule.engine/1",
+                "error": {
+                    "category": category,
+                    "phase": "transport",
+                    "code": "fixture_failure",
+                    "message": "shared structured Engine failure fixture",
+                },
+            }
+        )
+    malformed_rpc = json.loads(
+        subprocess.run(
+            [str(engine), "rpc"],
+            input=json.dumps(
+                {
+                    "engine_protocol": "cymule.engine/1",
+                    "request": {"type": "seal", "candidate": candidate, "extra": True},
+                }
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    engine_validator.validate(malformed_rpc)
+    if (
+        malformed_rpc["outcome"] != "failure"
+        or malformed_rpc["error"]["category"] != "validation"
+        or malformed_rpc["error"]["phase"] != "decode_request"
+    ):
+        raise AssertionError("Rust Engine did not return a structured decode failure")
 
     plugin_validator = Draft202012Validator(
         by_title["Cymule Process Plugin Message"], registry=registry
@@ -91,9 +152,7 @@ def main() -> int:
         ).stdout
     )
     resource_validator.validate(sealed_resource)
-    Draft202012Validator(
-        by_title["Cymule Engine Request"], registry=registry
-    ).validate({"type": "seal_resource", "candidate": resource_candidate})
+    validate_engine_request({"type": "seal_resource", "candidate": resource_candidate})
     resource_validator.validate(
         {
             "handoff_version": "cymule.resource-handoff/1",
@@ -135,9 +194,9 @@ def main() -> int:
     )
     if verified_activation != wait_activation:
         raise AssertionError("Rust Engine changed the wait activation fixture")
-    Draft202012Validator(
-        by_title["Cymule Engine Request"], registry=registry
-    ).validate({"type": "verify_wait_activation", "activation": wait_activation})
+    validate_engine_request(
+        {"type": "verify_wait_activation", "activation": wait_activation}
+    )
     malformed_activation = dict(wait_activation)
     malformed_activation["provider"] = "must-not-enter-wait-activation"
     try:
@@ -201,9 +260,9 @@ def main() -> int:
             raise AssertionError(
                 f"Rust Engine changed durable command {command['type']}"
             )
-    Draft202012Validator(
-        by_title["Cymule Engine Request"], registry=registry
-    ).validate({"type": "verify_durable_command", "command": durable_control})
+    validate_engine_request(
+        {"type": "verify_durable_command", "command": durable_control}
+    )
     malformed_durable = dict(durable_control)
     malformed_durable["provider"] = "must-not-enter-durable-control"
     try:
@@ -349,9 +408,9 @@ def main() -> int:
             raise AssertionError(
                 f"Rust Engine changed evolution operation {command['operation']}"
             )
-    Draft202012Validator(
-        by_title["Cymule Engine Request"], registry=registry
-    ).validate({"type": "verify_evolution_command", "command": evolution_control})
+    validate_engine_request(
+        {"type": "verify_evolution_command", "command": evolution_control}
+    )
     malformed_evolution = dict(evolution_control)
     malformed_evolution["provider"] = "must-not-enter-evolution-control"
     try:
@@ -385,9 +444,7 @@ def main() -> int:
     )
     if verified_live_evolution != live_evolution:
         raise AssertionError("Rust Engine changed the live-evolution fixture")
-    Draft202012Validator(
-        by_title["Cymule Engine Request"], registry=registry
-    ).validate(
+    validate_engine_request(
         {"type": "verify_live_evolution_command", "command": live_evolution}
     )
     malformed_live_evolution = dict(live_evolution)

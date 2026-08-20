@@ -68,6 +68,9 @@ runner:
 
 Cross-language differential also validates the unified
 `cymule.live-evolution-control/1` fixture in Rust, TypeScript, Python, and Go.
+The same leaf runs a shared negative fixture through the real Rust Engine and
+compares failure category, phase, code, and explicitly justified retry
+disposition. It never parses stderr to recover semantic meaning.
 Stateful Rust tests separately prove that transitive registry relinking, Plan
 DAG edges, rollout decisions, occurrence pins, and virtual worker claims share
 the intended single-domain CAS boundaries.
