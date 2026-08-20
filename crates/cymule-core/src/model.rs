@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::sha256_bytes;
 use crate::{CoreError, Result, canonical_digest, content_id};
 
 /// Semantic specification version.
@@ -31,6 +32,24 @@ pub struct ArtifactRecord {
     pub reference: ArtifactRef,
     /// Immutable bytes.
     pub bytes: Vec<u8>,
+}
+
+/// Derive the canonical content reference for immutable typed bytes.
+///
+/// This is the sole implementation of the `cymule.artifact/1` identity
+/// preimage. Stores and typed codec layers must call it rather than duplicate
+/// the domain separator or framing.
+pub fn artifact_ref(kind: impl Into<String>, bytes: &[u8]) -> ArtifactRef {
+    let kind = kind.into();
+    let mut preimage = Vec::with_capacity(kind.len() + bytes.len() + 20);
+    preimage.extend_from_slice(b"cymule.artifact/1\0");
+    preimage.extend_from_slice(kind.as_bytes());
+    preimage.push(0);
+    preimage.extend_from_slice(bytes);
+    ArtifactRef {
+        artifact_id: format!("sha256:{}", sha256_bytes(&preimage)),
+        kind,
+    }
 }
 
 /// A preconditioned, idempotent command proposal.

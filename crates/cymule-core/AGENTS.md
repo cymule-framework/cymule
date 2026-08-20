@@ -5,6 +5,8 @@
 - Never read the clock, random source, environment, filesystem, or network.
 - Canonical IDs are computed only after semantic validation with the versioned
   JCS encoding in `canonical.rs`.
+- `artifact_ref` is the sole authority for the `cymule.artifact/1` identity
+  preimage. Higher layers must call it rather than copy its framing.
 - Reducers are pure over prior projection plus event. Do not hide mutations in
   caches or global state.
 - Preserve closed effect, scope, attempt, and Run state machines. Illegal jumps

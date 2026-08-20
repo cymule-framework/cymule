@@ -1,12 +1,17 @@
 //! Provider-neutral cross-Run resource descriptors and transfer contracts.
 
+mod codec;
 mod error;
 mod handoff;
 mod model;
 mod resolver;
 mod store;
 
-pub use error::{ResourceError, ResourceResult};
+pub use codec::{
+    ARTIFACT_CODEC_VERSION, ArtifactCodecCandidate, ArtifactCodecDescriptor, ArtifactCodecRegistry,
+    CANONICAL_JSON_MEDIA_TYPE, JSON_SCHEMA_DIALECT,
+};
+pub use error::{ResourceError, ResourceResult, ResourceSchemaIssue};
 pub use handoff::{
     RESOURCE_HANDOFF_ACTIVATION_VERSION, RESOURCE_HANDOFF_VERSION, ResourceHandoff,
     ResourceHandoffActivation, ResourceHandoffController,

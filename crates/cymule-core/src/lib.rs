@@ -23,5 +23,5 @@ pub use model::{
     EffectProjection, EffectTransition, Event, EventPayload, ObligationProjection, Projection,
     ROOT_SCOPE_ID, ReconciliationResolution, ReconciliationState, ReplayAvailability,
     RunProjection, RunStatus, SEMANTIC_VERSION, ScopeProjection, ScopeStatus, WorldOutcome,
-    effect_intent_id, effect_obligation_id,
+    artifact_ref, effect_intent_id, effect_obligation_id,
 };

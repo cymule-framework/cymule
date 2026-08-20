@@ -22,3 +22,9 @@
   one M1 CAS; lost receipts replay the same activation.
 - Concrete local, object-storage, drive, WebDAV, sandbox, and HTTP adapters live
   under `plugins/` and should reuse mature maintained libraries where practical.
+- Typed Artifact codecs are immutable, content-addressed, and pure. The
+  `cymule.artifact-codec/1` domain owns canonical JSON plus a complete local JSON
+  Schema Draft 2020-12 contract; schema evolution uses a new Artifact kind.
+  Resolver/store I/O and integrity verification finish before codec decode.
+  Opaque file, directory, collection, and snapshot bytes remain valid Resources
+  without a codec or schema.

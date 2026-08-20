@@ -5,8 +5,8 @@ use crate::model::{effect_intent_id, effect_obligation_id};
 use crate::{
     ArtifactRecord, ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, CommandReceipt,
     CommandReceiptStatus, CoreError, Event, EventPayload, ObligationProjection, PlanCandidate,
-    Projection, ReplayAvailability, Result, SealedPlan, WorldOutcome, canonical_digest, content_id,
-    sha256_bytes,
+    Projection, ReplayAvailability, Result, SealedPlan, WorldOutcome, artifact_ref,
+    canonical_digest, content_id,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -290,16 +290,7 @@ impl Machine {
 
     /// Store immutable typed bytes and return their content reference.
     pub fn put_artifact(&mut self, kind: impl Into<String>, bytes: Vec<u8>) -> ArtifactRef {
-        let kind = kind.into();
-        let mut preimage = Vec::with_capacity(kind.len() + bytes.len() + 20);
-        preimage.extend_from_slice(b"cymule.artifact/1\0");
-        preimage.extend_from_slice(kind.as_bytes());
-        preimage.push(0);
-        preimage.extend_from_slice(&bytes);
-        let reference = ArtifactRef {
-            artifact_id: format!("sha256:{}", sha256_bytes(&preimage)),
-            kind,
-        };
+        let reference = artifact_ref(kind, &bytes);
         self.artifacts
             .entry(reference.artifact_id.clone())
             .or_insert_with(|| ArtifactRecord {
