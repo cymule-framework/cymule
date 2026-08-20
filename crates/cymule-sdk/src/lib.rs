@@ -36,9 +36,9 @@ pub use cymule_resource::{
     ResourceShape,
 };
 pub use cymule_runtime::{
-    ENGINE_PROTOCOL_VERSION, EngineContractSide, EngineFailure, EngineFailureCategory, EngineIssue,
-    EnginePhase, EngineResult, EngineRetryDisposition, ExecutionOutcome, ExecutionResult,
-    SuspensionBoundary,
+    ENGINE_PROTOCOL_VERSION, EffectReconciliationBoundary, EffectReleaseBoundary,
+    EngineContractSide, EngineFailure, EngineFailureCategory, EngineIssue, EnginePhase,
+    EngineResult, EngineRetryDisposition, ExecutionOutcome, ExecutionResult, SuspensionBoundary,
 };
 pub use cymule_virtual::{
     ArchivedWorkIndex, CompactedWorkIndex, ParkReason, RegionMigrationCommand, RegionMigrationKind,

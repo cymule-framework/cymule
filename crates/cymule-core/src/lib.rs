@@ -21,7 +21,8 @@ pub use model::{
     ARTIFACT_IDENTITY_VERSION, ArtifactRecord, ArtifactRef, AttemptProjection, COMMAND_VERSION,
     Command, CommandEnvelope, CommandReceipt, CommandReceiptStatus, CompactionCertificate,
     EVENT_VERSION, EffectPhase, EffectProjection, EffectTransition, Event, EventPayload,
-    ObligationProjection, Projection, ROOT_SCOPE_ID, ReconciliationResolution, ReconciliationState,
-    ReplayAvailability, RunProjection, RunStatus, SEMANTIC_VERSION, ScopeProjection, ScopeStatus,
-    WorldOutcome, artifact_ref, effect_intent_id, effect_obligation_id,
+    InvocationPathSegment, ObligationProjection, Projection, ROOT_SCOPE_ID,
+    ReconciliationResolution, ReconciliationState, ReplayAvailability, RunProjection, RunStatus,
+    SEMANTIC_VERSION, ScopeProjection, ScopeStatus, WorldOutcome, artifact_ref, effect_intent_id,
+    effect_obligation_id, plan_invocation_id, plan_scope_id,
 };

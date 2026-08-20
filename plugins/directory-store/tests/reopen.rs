@@ -94,6 +94,7 @@ fn continuation(plan_id: String, input: cymule_core::ArtifactRef) -> Continuatio
         frames: vec![FrameState {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
+            invocation_path: Vec::new(),
             input,
             region_path: Vec::new(),
             next_step: 0,

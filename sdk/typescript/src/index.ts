@@ -608,9 +608,26 @@ export interface SuspensionBoundary {
   result_bind: string | null;
 }
 
+export interface EffectReleaseBoundary {
+  run_id: string;
+  plan_id: string;
+  intent_ids: string[];
+}
+
+export interface EffectReconciliationBoundary {
+  run_id: string;
+  plan_id: string;
+  intent_id: string;
+}
+
 export type ExecutionOutcome =
   | { status: "completed"; result: ExecutionResult }
-  | { status: "suspended"; suspension: SuspensionBoundary };
+  | { status: "suspended"; suspension: SuspensionBoundary }
+  | { status: "release_required"; release: EffectReleaseBoundary }
+  | {
+      status: "reconciliation_required";
+      reconciliation: EffectReconciliationBoundary;
+    };
 
 export class FlowBuilder {
   readonly #candidate: PlanCandidate;

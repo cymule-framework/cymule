@@ -7,11 +7,11 @@ use crate::sha256_bytes;
 use crate::{CoreError, Result, canonical_digest, content_id};
 
 /// Semantic specification version.
-pub const SEMANTIC_VERSION: &str = "cymule.semantic/3";
+pub const SEMANTIC_VERSION: &str = "cymule.semantic/4";
 /// Canonical event version.
-pub const EVENT_VERSION: &str = "cymule.event/3";
+pub const EVENT_VERSION: &str = "cymule.event/4";
 /// Public command version.
-pub const COMMAND_VERSION: &str = "cymule.command/2";
+pub const COMMAND_VERSION: &str = "cymule.command/3";
 /// Canonical Artifact reference identity version.
 pub const ARTIFACT_IDENTITY_VERSION: &str = "cymule.artifact/2";
 /// Stable root scope identifier within every Run.
@@ -169,6 +169,16 @@ pub enum Command {
         scope_id: String,
         /// Existing parent scope.
         parent_scope: String,
+        /// Exact dynamic invocation identity opening the scope.
+        invocation_id: String,
+        /// Entry-rooted invocation path.
+        invocation_path: Vec<InvocationPathSegment>,
+        /// Definition containing the scope site.
+        definition_id: String,
+        /// Region containing the scope site.
+        region_path: Vec<usize>,
+        /// Stable scope operation site.
+        site_id: String,
     },
     /// Propose a structurally identified external effect.
     ProposeEffect {
@@ -176,6 +186,12 @@ pub enum Command {
         scope_id: String,
         /// Invocation identity.
         invocation_id: String,
+        /// Entry-rooted invocation path proving the dynamic invocation.
+        invocation_path: Vec<InvocationPathSegment>,
+        /// Definition containing the effect site.
+        definition_id: String,
+        /// Exact lexical Region containing the effect site.
+        region_path: Vec<usize>,
         /// Stable IR effect site.
         site_id: String,
         /// Intentional occurrence key.
@@ -380,6 +396,8 @@ pub enum EventPayload {
     RunStarted {
         /// Plan identity.
         plan_id: String,
+        /// Immutable entry definition identity.
+        entry_definition: String,
         /// Future-default realization context.
         binding_context: String,
     },
@@ -412,6 +430,16 @@ pub enum EventPayload {
         scope_id: String,
         /// Parent scope identity.
         parent_scope: String,
+        /// Exact dynamic invocation identity that opened the scope.
+        invocation_id: String,
+        /// Entry-rooted invocation path.
+        invocation_path: Vec<InvocationPathSegment>,
+        /// Definition containing the scope site.
+        definition_id: String,
+        /// Region path of the opened scope body.
+        region_path: Vec<usize>,
+        /// Stable scope operation site.
+        site_id: String,
     },
     /// An effect was admitted with an immutable occurrence binding.
     EffectProposed {
@@ -421,6 +449,12 @@ pub enum EventPayload {
         scope_id: String,
         /// Exact dynamic invocation identity.
         invocation_id: String,
+        /// Entry-rooted invocation path proving the dynamic invocation.
+        invocation_path: Vec<InvocationPathSegment>,
+        /// Definition containing the effect site.
+        definition_id: String,
+        /// Exact lexical Region containing the effect site.
+        region_path: Vec<usize>,
         /// Stable reachable IR effect site.
         site_id: String,
         /// Intentional occurrence key declared at the site.
@@ -586,6 +620,16 @@ pub struct ScopeProjection {
     pub scope_id: String,
     /// Optional parent.
     pub parent_scope: Option<String>,
+    /// Invocation that opened the scope, or the entry invocation for root.
+    pub invocation_id: String,
+    /// Entry-rooted invocation path.
+    pub invocation_path: Vec<InvocationPathSegment>,
+    /// Definition containing this scope's body.
+    pub definition_id: String,
+    /// Exact Region path of this scope's body.
+    pub region_path: Vec<usize>,
+    /// Stable scope site, absent only for the synthetic root scope.
+    pub site_id: Option<String>,
     /// Scope lifecycle state.
     pub status: ScopeStatus,
     /// Effects admitted in the scope.
@@ -602,6 +646,18 @@ pub enum ScopeStatus {
     ClosedCommitted,
     /// Overlay and unreleased mutation were discarded.
     ClosedAborted,
+}
+
+/// One exact invoke edge in an entry-rooted dynamic invocation path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvocationPathSegment {
+    /// Stable invoke operation site.
+    pub site_id: String,
+    /// Lexical Region containing the invoke site.
+    pub region_path: Vec<usize>,
+    /// Dynamic scope active when the invoke occurred.
+    pub scope_id: String,
 }
 
 /// Effect control phase.
@@ -672,6 +728,12 @@ pub struct EffectProjection {
     pub scope_id: String,
     /// Exact dynamic invocation identity.
     pub invocation_id: String,
+    /// Entry-rooted invocation path proving the dynamic invocation.
+    pub invocation_path: Vec<InvocationPathSegment>,
+    /// Definition containing the effect site.
+    pub definition_id: String,
+    /// Exact lexical Region containing the effect site.
+    pub region_path: Vec<usize>,
     /// Stable reachable IR effect site.
     pub site_id: String,
     /// Intentional occurrence key declared at the site.
@@ -767,6 +829,7 @@ impl Projection {
         match &event.payload {
             EventPayload::RunStarted {
                 plan_id,
+                entry_definition,
                 binding_context,
             } => {
                 if self.runs.contains_key(&event.run_id) {
@@ -781,6 +844,11 @@ impl Projection {
                     ScopeProjection {
                         scope_id: ROOT_SCOPE_ID.to_owned(),
                         parent_scope: None,
+                        invocation_id: entry_definition.clone(),
+                        invocation_path: Vec::new(),
+                        definition_id: entry_definition.clone(),
+                        region_path: Vec::new(),
+                        site_id: None,
                         status: ScopeStatus::Open,
                         intents: BTreeSet::new(),
                     },
@@ -887,6 +955,11 @@ impl Projection {
             EventPayload::ScopeOpened {
                 scope_id,
                 parent_scope,
+                invocation_id,
+                invocation_path,
+                definition_id,
+                region_path,
+                site_id,
             } => {
                 if run.scopes.contains_key(scope_id) {
                     return Err(CoreError::IllegalTransition(format!(
@@ -906,6 +979,11 @@ impl Projection {
                     ScopeProjection {
                         scope_id: scope_id.clone(),
                         parent_scope: Some(parent_scope.clone()),
+                        invocation_id: invocation_id.clone(),
+                        invocation_path: invocation_path.clone(),
+                        definition_id: definition_id.clone(),
+                        region_path: region_path.clone(),
+                        site_id: Some(site_id.clone()),
                         status: ScopeStatus::Open,
                         intents: BTreeSet::new(),
                     },
@@ -915,6 +993,9 @@ impl Projection {
                 intent_id,
                 scope_id,
                 invocation_id,
+                invocation_path,
+                definition_id,
+                region_path,
                 site_id,
                 occurrence,
                 scope_epoch,
@@ -959,6 +1040,9 @@ impl Projection {
                         intent_id: intent_id.clone(),
                         scope_id: scope_id.clone(),
                         invocation_id: invocation_id.clone(),
+                        invocation_path: invocation_path.clone(),
+                        definition_id: definition_id.clone(),
+                        region_path: region_path.clone(),
                         site_id: site_id.clone(),
                         occurrence: occurrence.clone(),
                         scope_epoch: *scope_epoch,
@@ -1250,8 +1334,9 @@ fn reconciliation_transition_allowed(
     match mode {
         ReconciliationMode::Queryable | ReconciliationMode::ExternallyAttested => {
             state == ReconciliationState::Pending
+                && !matches!(resolution, ReconciliationResolution::GovernanceRequired)
         }
-        ReconciliationMode::Human => {
+        ReconciliationMode::Human | ReconciliationMode::Impossible => {
             state == ReconciliationState::GovernanceRequired
                 && matches!(
                     resolution,
@@ -1259,7 +1344,6 @@ fn reconciliation_transition_allowed(
                         | ReconciliationResolution::ResolvedNotApplied
                 )
         }
-        ReconciliationMode::Impossible => false,
     }
 }
 
@@ -1315,6 +1399,45 @@ pub fn effect_intent_id(
             args,
             effect_schema_version,
         },
+    )
+}
+
+/// Derive the exact dynamic invocation identity from its entry-rooted path.
+pub fn plan_invocation_id(
+    run_id: &str,
+    plan_id: &str,
+    entry_definition: &str,
+    invocation_path: &[InvocationPathSegment],
+    epoch: u64,
+) -> Result<String> {
+    if invocation_path.is_empty() {
+        return Ok(entry_definition.to_owned());
+    }
+    content_id(
+        "cymule.invocation/1",
+        &(run_id, plan_id, entry_definition, invocation_path, epoch),
+    )
+}
+
+/// Derive one exact dynamic scope identity from its lexical body location.
+pub fn plan_scope_id(
+    run_id: &str,
+    plan_id: &str,
+    invocation_id: &str,
+    definition_id: &str,
+    body_region_path: &[usize],
+    epoch: u64,
+) -> Result<String> {
+    content_id(
+        "cymule.scope/1",
+        &(
+            run_id,
+            plan_id,
+            invocation_id,
+            definition_id,
+            body_region_path,
+            epoch,
+        ),
     )
 }
 

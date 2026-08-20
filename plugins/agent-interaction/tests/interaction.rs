@@ -305,6 +305,7 @@ fn agent_continuation(run_id: &str) -> Continuation {
         frames: vec![FrameState {
             definition_id: "agent-turn".to_owned(),
             invocation_id: "agent-turn".to_owned(),
+            invocation_path: Vec::new(),
             input: cymule_core::artifact_ref("test/input", b"agent test input")
                 .expect("test input reference derives"),
             region_path: Vec::new(),

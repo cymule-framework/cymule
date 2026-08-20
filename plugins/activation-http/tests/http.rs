@@ -24,6 +24,7 @@ fn index() -> ParkedWaitIndex {
             frames: vec![FrameState {
                 definition_id: "main".to_owned(),
                 invocation_id: "main".to_owned(),
+                invocation_path: Vec::new(),
                 input: ArtifactRef {
                     identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
                     artifact_id: format!("sha256:{}", "0".repeat(64)),

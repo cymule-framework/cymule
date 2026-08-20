@@ -15,7 +15,7 @@
   `defect`. Effects return exact world outcomes.
 - Every public `ArtifactRef` requires `identity_version = cymule.artifact/2`, a
   lowercase SHA-256 ID, and a closed lowercase path kind. The v2 identity and
-  machine snapshot v3 replace their predecessors without fallback. The
+  machine snapshot v5 replace their predecessors without fallback. The
   `artifact-type-contract.schema.json` file freezes recoverable canonical JSON
   contracts; opaque Artifacts do not use that schema.
 - Keep this exact Artifact reference shape identical in every owning public
@@ -25,7 +25,8 @@
   require a new IR version rather than widening this frozen schema in place.
 - The existing `wait` operation has an optional `bind`; omission intentionally
   ignores the result. Engine success distinguishes completion from typed
-  Embedded suspension without publishing a fake Continuation.
+  Embedded suspension, explicit release, and reconciliation boundaries without
+  publishing a fake Continuation or string failure.
 - Keep semantic validation in the Rust kernel. JSON Schema validates wire shape;
   it does not replace transition or authority rules.
 - `execution-binding.schema.json` freezes `cymule.execution-binding/1`. Rust

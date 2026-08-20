@@ -92,7 +92,38 @@ class SuspendedExecution(TypedDict):
     suspension: SuspensionBoundary
 
 
-ExecutionOutcome = CompletedExecution | SuspendedExecution
+class EffectReleaseBoundary(TypedDict):
+    """Exact explicit Effect intents requiring caller release."""
+
+    run_id: str
+    plan_id: str
+    intent_ids: list[str]
+
+
+class ReleaseRequiredExecution(TypedDict):
+    status: Literal["release_required"]
+    release: EffectReleaseBoundary
+
+
+class EffectReconciliationBoundary(TypedDict):
+    """Original ambiguous Effect intent requiring reconciliation."""
+
+    run_id: str
+    plan_id: str
+    intent_id: str
+
+
+class ReconciliationRequiredExecution(TypedDict):
+    status: Literal["reconciliation_required"]
+    reconciliation: EffectReconciliationBoundary
+
+
+ExecutionOutcome = (
+    CompletedExecution
+    | SuspendedExecution
+    | ReleaseRequiredExecution
+    | ReconciliationRequiredExecution
+)
 
 
 class RolloutDecision(TypedDict):
@@ -1591,6 +1622,9 @@ __all__ = [
     "EngineError",
     "EngineFailure",
     "EngineIssue",
+    "EffectReconciliationBoundary",
+    "EffectReleaseBoundary",
+    "ExecutionOutcome",
     "LiveEvolutionCommand",
     "LiveEvolutionControl",
     "LiveEvolutionControlBuilder",

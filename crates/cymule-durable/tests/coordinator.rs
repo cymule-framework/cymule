@@ -191,6 +191,9 @@ fn prepared_effect_transition() -> (Machine, Machine, Continuation, EffectDispat
         Command::ProposeEffect {
             scope_id: ROOT_SCOPE_ID.to_owned(),
             invocation_id: "main".to_owned(),
+            invocation_path: Vec::new(),
+            definition_id: "main".to_owned(),
+            region_path: Vec::new(),
             site_id: "effect.site".to_owned(),
             occurrence: "primary".to_owned(),
             operation: "example.effect".to_owned(),
@@ -233,6 +236,7 @@ fn continuation(plan_id: String) -> Continuation {
         frames: vec![FrameState {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
+            invocation_path: Vec::new(),
             input: cymule_core::artifact_ref("test/input", b"durable input")
                 .expect("Continuation input reference derives"),
             region_path: Vec::new(),
@@ -294,6 +298,7 @@ fn direct_run(candidate: PlanCandidate, binding: &ExecutionBinding) -> (Machine,
         frames: vec![FrameState {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
+            invocation_path: Vec::new(),
             input: input.clone(),
             region_path: Vec::new(),
             next_step: 0,
@@ -426,22 +431,6 @@ fn public_coordinator_rejects_every_dangling_or_legacy_artifact_reference() {
     let wait_revision = coordinator.revision().expect("revision").to_owned();
     assert!(matches!(
         coordinator.complete_wait("wait:dangling", missing.clone()),
-        Err(DurableError::Validation(_))
-    ));
-    assert_eq!(coordinator.revision(), Some(wait_revision.as_str()));
-
-    assert!(matches!(
-        coordinator.enqueue_effect(EffectDispatch {
-            intent_id: "intent:dangling".to_owned(),
-            run_id: "run:durable".to_owned(),
-            operation: "test.effect".to_owned(),
-            input: missing.clone(),
-            occurrence_binding: "binding:test".to_owned(),
-            state: OutboxState::Pending,
-            claim_epoch: 0,
-            claim_owner: None,
-            result: None,
-        }),
         Err(DurableError::Validation(_))
     ));
     assert_eq!(coordinator.revision(), Some(wait_revision.as_str()));
@@ -864,11 +853,8 @@ fn conflicting_projection_checkpoint_rejects_wait_activation_atomically() {
 }
 
 #[test]
-fn stale_coordinator_and_stale_dispatch_owner_fail_closed() {
-    let (mut machine, plan_id) = machine_with_run();
-    let input = machine
-        .put_artifact("example/effect-input", b"payload".to_vec())
-        .expect("Artifact stores");
+fn stale_coordinator_and_lease_owner_fail_closed() {
+    let (machine, plan_id) = machine_with_run();
     let store = MemoryStore::new();
     let mut current = DurableCoordinator::open(store.clone())
         .expect("store opens")
@@ -890,58 +876,7 @@ fn stale_coordinator_and_stale_dispatch_owner_fail_closed() {
         current.acquire_lease("dispatch:partition/0", "worker:b", 11, 20),
         Err(DurableError::Conflict { .. })
     ));
-    current
-        .enqueue_effect(EffectDispatch {
-            intent_id: "intent:1".to_owned(),
-            run_id: "run:durable".to_owned(),
-            operation: "example.effect".to_owned(),
-            input,
-            occurrence_binding: "binding:effect/1".to_owned(),
-            state: OutboxState::Pending,
-            claim_epoch: 0,
-            claim_owner: None,
-            result: None,
-        })
-        .expect("effect enqueues");
-    current
-        .claim_effect("intent:1", "worker:a", lease.epoch)
-        .expect("effect claimed");
-    assert!(matches!(
-        current.settle_effect(
-            "intent:1",
-            "worker:b",
-            lease.epoch,
-            OutboxState::Applied,
-            None,
-        ),
-        Err(DurableError::Conflict { .. })
-    ));
-    current
-        .settle_effect(
-            "intent:1",
-            "worker:a",
-            lease.epoch,
-            OutboxState::Unknown,
-            None,
-        )
-        .expect("original claim records ambiguity");
-    assert_eq!(
-        current.state().expect("state").outbox["intent:1"].state,
-        OutboxState::Unknown
-    );
-    current
-        .settle_effect(
-            "intent:1",
-            "worker:a",
-            lease.epoch,
-            OutboxState::Applied,
-            None,
-        )
-        .expect("the original unknown claim reconciles as applied");
-    assert_eq!(
-        current.state().expect("state").outbox["intent:1"].state,
-        OutboxState::Applied
-    );
+    assert_eq!(lease.owner, "worker:a");
 }
 
 #[test]

@@ -20,7 +20,8 @@ pub use contract::{
     PlanAdmissionResult, PlanContracts,
 };
 pub use engine::{
-    EmbeddedRuntime, ExecutionOutcome, ExecutionResult, SuspensionBoundary, verify_plan,
+    EffectReconciliationBoundary, EffectReleaseBoundary, EmbeddedRuntime, ExecutionOutcome,
+    ExecutionResult, SuspensionBoundary, verify_plan,
 };
 pub use error::{RuntimeError, RuntimeResult};
 pub use plugin::{

@@ -1403,11 +1403,27 @@ type SuspensionBoundary struct {
 	ResultBind   *string        `json:"result_bind"`
 }
 
-// ExecutionOutcome is the closed Embedded terminal-or-suspended boundary.
+// EffectReleaseBoundary identifies exact explicit Effects requiring caller release.
+type EffectReleaseBoundary struct {
+	RunID     string   `json:"run_id"`
+	PlanID    string   `json:"plan_id"`
+	IntentIDs []string `json:"intent_ids"`
+}
+
+// EffectReconciliationBoundary identifies one ambiguous Effect requiring reconciliation.
+type EffectReconciliationBoundary struct {
+	RunID    string `json:"run_id"`
+	PlanID   string `json:"plan_id"`
+	IntentID string `json:"intent_id"`
+}
+
+// ExecutionOutcome is the closed Embedded execution boundary.
 type ExecutionOutcome struct {
-	Status     string              `json:"status"`
-	Result     *ExecutionResult    `json:"result,omitempty"`
-	Suspension *SuspensionBoundary `json:"suspension,omitempty"`
+	Status         string                        `json:"status"`
+	Result         *ExecutionResult              `json:"result,omitempty"`
+	Suspension     *SuspensionBoundary           `json:"suspension,omitempty"`
+	Release        *EffectReleaseBoundary        `json:"release,omitempty"`
+	Reconciliation *EffectReconciliationBoundary `json:"reconciliation,omitempty"`
 }
 
 // FlowBuilder builds one-definition Plan Candidates.
