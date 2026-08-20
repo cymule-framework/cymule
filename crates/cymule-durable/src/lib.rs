@@ -5,6 +5,7 @@ mod coordinator;
 mod error;
 mod executor;
 mod model;
+mod retry;
 mod store;
 mod wait_source;
 
@@ -20,6 +21,11 @@ pub use model::{
     EffectDispatch, FrameState, HISTORY_COMPACTION_VERSION, HistoryCompactionReceipt, JournalBatch,
     JournalRecord, OutboxState, SnapshotRecord, StoredState, WAIT_ACTIVATION_VERSION,
     WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitState,
+};
+pub use retry::{
+    FailureClass, FailureOperation, JitterEvidence, JitterStrategy, RETRY_DECISION_VERSION,
+    RETRY_POLICY_VERSION, RetryCommand, RetryDecision, RetryDelay, RetryDisposition, RetryFailure,
+    RetryPolicy, RetryStopReason,
 };
 pub use store::{DurableStore, MemoryStore, StoreCommit};
 pub use wait_source::{
