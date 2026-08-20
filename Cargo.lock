@@ -518,6 +518,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "serde",
+ "serde_json",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -1712,6 +1713,7 @@ dependencies = [
  "portable-atomic",
  "rand 0.9.5",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
