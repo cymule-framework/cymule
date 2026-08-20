@@ -4,6 +4,13 @@
   interfaces. It must not redefine core identities or transition laws.
 - `PluginHost` is the authority boundary for external execution. A manifest is a
   capability advertisement, not authorization.
+- `PlanContracts` compiles every submitted schema as Draft 2020-12 without an
+  external resolver. Keep this executable contract layer outside `cymule-core`,
+  preserve the submitted schema bytes in Plan identity, and return typed
+  `ContractViolation` values with masked instance content.
+- Validate definition, component, effect, typed-wait, and terminal-result values
+  at their exact boundary. Input validation must finish before plugin dispatch;
+  output validation must finish before recording or binding the response.
 - Every plugin call pins an immutable occurrence binding before execution.
 - Reusable definition calls create a distinct deterministic invocation identity,
   receive only their explicit input, and return only their declared result.

@@ -567,6 +567,7 @@ name = "cymule-runtime"
 version = "0.1.4"
 dependencies = [
  "cymule-core",
+ "jsonschema",
  "serde",
  "serde_json",
 ]
