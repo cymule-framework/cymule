@@ -245,8 +245,9 @@ fn rust_unified_live_evolution_validates_through_the_cli() {
 
 #[test]
 fn rust_engine_preserves_structured_negative_outcomes() {
-    let (Ok(engine_path), Ok(fixture_path)) = (
+    let (Ok(engine_path), Ok(plugin_path), Ok(fixture_path)) = (
         env::var("CYMULE_BIN"),
+        env::var("CYMULE_TEST_PLUGIN"),
         env::var("CYMULE_ENGINE_FAILURE_FIXTURE"),
     ) else {
         return;
@@ -271,6 +272,17 @@ fn rust_engine_preserves_structured_negative_outcomes() {
     ))
     .expect("candidate parses");
     let plan = engine.seal(&candidate).expect("valid candidate seals");
+    assert_failure(
+        &engine
+            .run(
+                &plan,
+                &json!({"simulate": "expected_failure"}),
+                plugin_path.as_ref(),
+                "run:rust-expected-failure",
+            )
+            .expect_err("declared application failure remains expected"),
+        &fixture["cases"]["expected_plugin_failure"],
+    );
     assert_failure(
         &engine
             .run(

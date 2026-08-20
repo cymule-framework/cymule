@@ -1553,15 +1553,16 @@ fn crash_after_provider_application_reconciles_without_redispatch() {
         },
     )
     .expect("runtime opens");
-    assert!(
+    assert!(matches!(
         runtime
             .start(
                 effect_candidate(),
                 &json!({"value": 1}),
                 "run:effect-recovery"
             )
-            .is_err()
-    );
+            .expect("ambiguous dispatch is durably classified"),
+        DriveOutcome::ReconciliationRequired { .. }
+    ));
     assert_eq!(dispatches.load(Ordering::SeqCst), 1);
 
     let (store, _) = runtime.into_parts();
@@ -1615,7 +1616,7 @@ fn recovery_survives_lost_unknown_receipt_after_provider_crash() {
             )
             .is_err()
     );
-    assert!(!lost.load(Ordering::SeqCst));
+    assert!(lost.load(Ordering::SeqCst));
     assert_eq!(dispatches.load(Ordering::SeqCst), 1);
 
     let (store, _) = runtime.into_parts();
@@ -1629,29 +1630,9 @@ fn recovery_survives_lost_unknown_receipt_after_provider_crash() {
         },
     )
     .expect("first recovery opens");
-    assert!(
-        first_recovery
-            .resume("run:compound-effect-recovery")
-            .is_err()
-    );
-    assert!(lost.load(Ordering::SeqCst));
-    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
-    assert_eq!(reconciliations.load(Ordering::SeqCst), 0);
-
-    let (store, _) = first_recovery.into_parts();
-    let mut second_recovery = open_runtime(
-        store,
-        CrashAfterApplyPlugin {
-            dispatches: dispatches.clone(),
-            reconciliations: reconciliations.clone(),
-            crash_after_apply: false,
-            unknown_reconciliations: 0,
-        },
-    )
-    .expect("second recovery opens");
-    let DriveOutcome::Completed(result) = second_recovery
+    let DriveOutcome::Completed(result) = first_recovery
         .resume("run:compound-effect-recovery")
-        .expect("second recovery reconciles")
+        .expect("lost Unknown acknowledgement reopens and reconciles")
     else {
         panic!("compound recovery should complete");
     };
@@ -1674,15 +1655,16 @@ fn unknown_outbox_reconciles_after_another_process_reopen_without_redispatch() {
         },
     )
     .expect("runtime opens");
-    assert!(
+    assert!(matches!(
         runtime
             .start(
                 effect_candidate(),
                 &json!({"value": 2}),
                 "run:repeated-effect-recovery",
             )
-            .is_err()
-    );
+            .expect("ambiguous dispatch is durably classified"),
+        DriveOutcome::ReconciliationRequired { .. }
+    ));
     let (store, _) = runtime.into_parts();
     let mut first_recovery = open_runtime(
         store,

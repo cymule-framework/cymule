@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ExecutionBinding, ExecutionOperationKind, PlanAdmissionResult, PlanContracts, PluginHost,
-    PluginRequest, PluginResponse, RuntimeError, RuntimeResult,
+    ExecutionBinding, ExecutionOperationKind, PlanAdmissionResult, PlanContracts,
+    PluginExpectedFailure, PluginHost, PluginRequest, PluginResponse, RuntimeError, RuntimeResult,
 };
 
 /// Validate every semantic and executable contract, then seal the unchanged
@@ -224,10 +224,19 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         component: component.clone(),
                         input: value,
                     })?;
-                    let PluginResponse::CallResult { value } = response else {
-                        return Err(RuntimeError::plugin_defect(format!(
-                            "component {component} returned unexpected response {response:?}"
-                        )));
+                    let value = match response {
+                        PluginResponse::CallResult { value } => value,
+                        PluginResponse::ExpectedFailure { error } => {
+                            return Err(expected_failure(error)?);
+                        }
+                        PluginResponse::Defect { code, message } => {
+                            return Err(plugin_reported_defect(code, message)?);
+                        }
+                        _ => {
+                            return Err(RuntimeError::plugin_defect(format!(
+                                "component {component} returned an invalid response variant"
+                            )));
+                        }
                     };
                     contracts.validate_component_output(component, &value)?;
                     if let Some(binding) = bind {
@@ -313,9 +322,15 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         input: value.clone(),
                     })? {
                         PluginResponse::Prepared => {}
-                        response => {
+                        PluginResponse::ExpectedFailure { error } => {
+                            return Err(expected_failure(error)?);
+                        }
+                        PluginResponse::Defect { code, message } => {
+                            return Err(plugin_reported_defect(code, message)?);
+                        }
+                        _ => {
                             return Err(RuntimeError::plugin_defect(format!(
-                                "effect {effect} prepare returned {response:?}"
+                                "effect {effect} prepare returned an invalid response variant"
                             )));
                         }
                     }
@@ -447,17 +462,27 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 transition: EffectTransition::StartDispatch,
             },
         )?;
-        let response = self.plugin.invoke(PluginRequest::DispatchEffect {
+        let response = match self.plugin.invoke(PluginRequest::DispatchEffect {
             operation: operation.to_owned(),
             intent_id: intent_id.clone(),
             input: input.clone(),
-        })?;
-        let PluginResponse::EffectResult { outcome, mut value } = response else {
-            return Err(RuntimeError::plugin_defect(format!(
-                "effect {operation} dispatch returned {response:?}"
-            )));
+        }) {
+            Ok(response) => response,
+            Err(_) => {
+                self.observe_unknown(run_id, &intent_id)?;
+                return Err(RuntimeError::unknown_world(
+                    "effect_dispatch_response_lost",
+                    "effect dispatch started but no authoritative outcome was received",
+                ));
+            }
         };
-        validate_optional_effect_output(contracts, operation, outcome, value.as_ref())?;
+        let PluginResponse::EffectResult { outcome, mut value } = response else {
+            self.observe_unknown(run_id, &intent_id)?;
+            return Err(RuntimeError::unknown_world(
+                "effect_dispatch_response_invalid",
+                "effect dispatch started but returned no authoritative world outcome",
+            ));
+        };
         self.submit(
             run_id,
             Command::TransitionEffect {
@@ -465,20 +490,30 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 transition: EffectTransition::Observe(outcome),
             },
         )?;
+        validate_optional_effect_output(contracts, operation, outcome, value.as_ref())?;
         if outcome == WorldOutcome::Unknown {
-            let response = self.plugin.invoke(PluginRequest::ReconcileEffect {
-                operation: operation.to_owned(),
-                intent_id: intent_id.clone(),
-                input,
-            })?;
+            let response = self
+                .plugin
+                .invoke(PluginRequest::ReconcileEffect {
+                    operation: operation.to_owned(),
+                    intent_id: intent_id.clone(),
+                    input,
+                })
+                .map_err(|_| {
+                    RuntimeError::unknown_world(
+                        "effect_reconciliation_response_lost",
+                        "effect outcome remains unknown because reconciliation returned no authoritative result",
+                    )
+                })?;
             let PluginResponse::ReconciliationResult {
                 resolution,
                 value: reconciled_value,
             } = response
             else {
-                return Err(RuntimeError::plugin_defect(format!(
-                    "effect {operation} reconciliation returned {response:?}"
-                )));
+                return Err(RuntimeError::unknown_world(
+                    "effect_reconciliation_response_invalid",
+                    "effect outcome remains unknown because reconciliation returned an invalid response",
+                ));
             };
             validate_optional_reconciliation_output(
                 contracts,
@@ -502,6 +537,16 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             }
         }
         Ok(value)
+    }
+
+    fn observe_unknown(&mut self, run_id: &str, intent_id: &str) -> RuntimeResult<()> {
+        self.submit(
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.to_owned(),
+                transition: EffectTransition::Observe(WorldOutcome::Unknown),
+            },
+        )
     }
 
     fn submit(&mut self, run_id: &str, command: Command) -> RuntimeResult<()> {
@@ -542,6 +587,20 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             .map(|run| run.epoch)
             .ok_or_else(|| RuntimeError::plugin_defect(format!("Run {run_id} is missing")))
     }
+}
+
+fn expected_failure(error: PluginExpectedFailure) -> RuntimeResult<RuntimeError> {
+    error.verify()?;
+    Ok(RuntimeError::ExpectedPluginFailure(error))
+}
+
+fn plugin_reported_defect(code: String, message: String) -> RuntimeResult<RuntimeError> {
+    PluginExpectedFailure {
+        code: code.clone(),
+        message: message.clone(),
+    }
+    .verify()?;
+    Ok(RuntimeError::PluginDefect { code, message })
 }
 
 fn validate_optional_effect_output(

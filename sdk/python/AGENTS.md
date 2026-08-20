@@ -3,8 +3,9 @@
 - Support maintained CPython versions with no runtime dependencies.
 - Use typed dictionaries or dataclasses for public contracts and preserve exact
   wire names.
-- Subprocess errors must include bounded stderr and never expose environment
-  variables or credentials.
+- Subprocess stderr is diagnostic-only and must never enter an `EngineFailure`
+  message. Response-less errors use bounded SDK-owned text without exposing
+  environment variables, credentials, or child output.
 - Raise `EngineError` with the exact structured `failure` object for all Engine
   responses. A timed-out mutating Run is an unknown-world outcome, not a safe
   generic retry.

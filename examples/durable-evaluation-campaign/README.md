@@ -185,7 +185,7 @@ changing the application-level behavior demonstrated here.
 
 The binary launches itself in process-plugin mode only to make the default
 experience self-contained. To integrate a real evaluator, keep the published
-component contracts and pass an executable implementing `cymule.plugin/1`:
+component contracts and pass an executable implementing `cymule.plugin/2`:
 
 ```sh
 ./target/debug/cymule-example-durable-evaluation-campaign run \

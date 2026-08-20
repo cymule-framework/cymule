@@ -5,7 +5,8 @@ use std::io::{self, Read};
 
 use cymule_core::{ReconciliationResolution, WorldOutcome};
 use cymule_runtime::{
-    PLUGIN_VERSION, PluginEffect, PluginManifest, PluginOperation, PluginRequest, PluginResponse,
+    PLUGIN_VERSION, PluginEffect, PluginExpectedFailure, PluginManifest, PluginOperation,
+    PluginRequest, PluginResponse,
 };
 
 fn main() {
@@ -39,6 +40,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 )]),
             },
         },
+        PluginRequest::Call { component, input }
+            if component == "test.echo"
+                && input.get("simulate").and_then(serde_json::Value::as_str)
+                    == Some("expected_failure") =>
+        {
+            PluginResponse::ExpectedFailure {
+                error: PluginExpectedFailure {
+                    code: "evaluation_rejected".to_owned(),
+                    message: "the test evaluation was rejected".to_owned(),
+                },
+            }
+        }
         PluginRequest::Call { component, input } if component == "test.echo" => {
             PluginResponse::CallResult { value: input }
         }
@@ -67,7 +80,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             resolution: ReconciliationResolution::ResolvedApplied,
             value: Some(input),
         },
-        request => PluginResponse::Error {
+        request => PluginResponse::Defect {
             code: "unsupported_request".to_owned(),
             message: format!("unsupported test request: {request:?}"),
         },

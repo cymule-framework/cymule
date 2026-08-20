@@ -9,6 +9,10 @@
   Failure categories, phases, contract sides, issue bounds, and retry
   dispositions are closed and must match Rust plus every SDK. Contract issues
   preserve separate instance `path` and `schema_path` JSON Pointers.
+- `plugin-protocol.schema.json` owns both request and response variants of
+  `cymule.plugin/2`. There is no generic error response: a component may return
+  a bounded `expected_failure`, while a protocol failure is an explicit
+  `defect`. Effects return exact world outcomes.
 - Every public `ArtifactRef` requires `identity_version = cymule.artifact/2`, a
   lowercase SHA-256 ID, and a closed lowercase path kind. The v2 identity and
   machine snapshot v3 replace their predecessors without fallback. The

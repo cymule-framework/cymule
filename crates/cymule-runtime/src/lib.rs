@@ -22,8 +22,8 @@ pub use contract::{
 pub use engine::{EmbeddedRuntime, ExecutionResult, seal_plan, verify_plan};
 pub use error::{RuntimeError, RuntimeResult};
 pub use plugin::{
-    PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginOperation, PluginRequest,
-    PluginResponse, ProcessPlugin,
+    PLUGIN_VERSION, PluginEffect, PluginExpectedFailure, PluginHost, PluginManifest,
+    PluginOperation, PluginRequest, PluginResponse,
 };
 pub use protocol::{
     ENGINE_PROTOCOL_VERSION, EngineContractSide, EngineFailure, EngineFailureCategory, EngineIssue,

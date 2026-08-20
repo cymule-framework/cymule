@@ -24,8 +24,9 @@ from cymule import (
 class EndToEndTest(unittest.TestCase):
     def test_python_preserves_structured_engine_failures(self) -> None:
         engine_path = os.environ.get("CYMULE_BIN")
+        plugin_path = os.environ.get("CYMULE_TEST_PLUGIN")
         failure_path = os.environ.get("CYMULE_ENGINE_FAILURE_FIXTURE")
-        if engine_path is None or failure_path is None:
+        if engine_path is None or plugin_path is None or failure_path is None:
             self.skipTest("Engine failure conformance is not configured")
         with open(failure_path, encoding="utf-8") as source:
             expected = json.load(source)["cases"]
@@ -41,6 +42,15 @@ class EndToEndTest(unittest.TestCase):
             lambda: engine.seal(invalid), expected["invalid_plan_version"]
         )
         plan = engine.seal(candidate)
+        self._assert_engine_failure(
+            lambda: engine.run(
+                plan,
+                {"simulate": "expected_failure"},
+                plugin_path,
+                "run:python-expected",
+            ),
+            expected["expected_plugin_failure"],
+        )
         self._assert_engine_failure(
             lambda: engine.run(
                 plan, {"message": "defect"}, engine_path, "run:python-defect"

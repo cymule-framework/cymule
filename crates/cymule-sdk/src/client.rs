@@ -81,14 +81,12 @@ impl CliEngine {
             .wait_with_output()
             .map_err(|error| EngineFailure::transport("engine_wait_failed", error.to_string()))?;
         if !output.status.success() {
-            let diagnostic = bounded_diagnostic(&output.stderr);
             return Err(EngineFailure::transport(
                 "engine_process_failed",
-                if diagnostic.is_empty() {
-                    format!("engine exited with {}", output.status)
-                } else {
-                    diagnostic
-                },
+                format!(
+                    "engine exited without a protocol response ({})",
+                    output.status
+                ),
             ));
         }
         let envelope: EngineResponseEnvelope<EngineResponse> =
@@ -257,10 +255,4 @@ fn unexpected_response(expected: &str, response: &EngineResponse) -> EngineFailu
         "unexpected_engine_response",
         format!("expected {expected}, received {response:?}"),
     )
-}
-
-fn bounded_diagnostic(bytes: &[u8]) -> String {
-    const MAX_DIAGNOSTIC_BYTES: usize = 8 * 1024;
-    let end = bytes.len().min(MAX_DIAGNOSTIC_BYTES);
-    String::from_utf8_lossy(&bytes[..end]).trim().to_owned()
 }

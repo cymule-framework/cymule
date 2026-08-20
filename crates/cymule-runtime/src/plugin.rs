@@ -1,7 +1,4 @@
 use std::collections::BTreeMap;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use cymule_core::{ReconciliationResolution, WorldOutcome};
 use serde::{Deserialize, Serialize};
@@ -10,7 +7,37 @@ use serde_json::Value;
 use crate::{RuntimeError, RuntimeResult};
 
 /// Process plugin protocol version.
-pub const PLUGIN_VERSION: &str = "cymule.plugin/1";
+pub const PLUGIN_VERSION: &str = "cymule.plugin/2";
+
+/// Declared application failure returned by a component implementation.
+///
+/// This value is distinct from a plugin defect. Callers may branch on `code`;
+/// `message` is display-only and never carries control semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginExpectedFailure {
+    /// Stable application-owned failure code.
+    pub code: String,
+    /// Human-readable summary.
+    pub message: String,
+}
+
+impl PluginExpectedFailure {
+    /// Validate the bounded, machine-readable failure value.
+    pub fn verify(&self) -> RuntimeResult<()> {
+        let valid_code = !self.code.is_empty()
+            && self.code.len() <= 200
+            && self.code.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_lowercase() || (index > 0 && (byte.is_ascii_digit() || byte == b'_'))
+            });
+        if !valid_code || self.message.is_empty() || self.message.len() > 8192 {
+            return Err(RuntimeError::plugin_defect(
+                "plugin expected failure is not a bounded closed value",
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// One abstract component operation advertised by a plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +129,11 @@ pub enum PluginResponse {
         /// Typed output.
         value: Value,
     },
+    /// A component completed with a declared application failure.
+    ExpectedFailure {
+        /// Closed application failure value.
+        error: PluginExpectedFailure,
+    },
     /// Preparation succeeded.
     Prepared,
     /// Dispatch produced an observed outcome.
@@ -120,8 +152,8 @@ pub enum PluginResponse {
         #[serde(default)]
         value: Option<Value>,
     },
-    /// Structured adapter error.
-    Error {
+    /// The plugin reports that it could not honor the protocol correctly.
+    Defect {
         /// Stable adapter code.
         code: String,
         /// Human-readable summary.
@@ -151,75 +183,12 @@ pub trait PluginHost {
                 }
                 Ok(manifest)
             }
+            PluginResponse::Defect { code, message } => {
+                Err(RuntimeError::PluginDefect { code, message })
+            }
             response => Err(RuntimeError::plugin_defect(format!(
                 "describe returned unexpected response {response:?}"
             ))),
         }
-    }
-}
-
-/// One-request-per-process plugin transport used by the Embedded profile.
-#[derive(Debug, Clone)]
-pub struct ProcessPlugin {
-    executable: PathBuf,
-}
-
-impl ProcessPlugin {
-    /// Create a process plugin transport.
-    pub fn new(executable: impl AsRef<Path>) -> Self {
-        Self {
-            executable: executable.as_ref().to_path_buf(),
-        }
-    }
-}
-
-impl PluginHost for ProcessPlugin {
-    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
-        let mut child = Command::new(&self.executable)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                RuntimeError::substrate(
-                    "plugin_start_failed",
-                    format!(
-                        "failed to start plugin {}: {error}",
-                        self.executable.display()
-                    ),
-                )
-            })?;
-        let input = serde_json::to_vec(&request)?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| {
-                RuntimeError::substrate("plugin_stdin_unavailable", "plugin stdin was not captured")
-            })?
-            .write_all(&input)?;
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            return Err(RuntimeError::PluginDefect {
-                code: "plugin_process_failed".to_owned(),
-                message: format!(
-                    "plugin {} exited with {}: {}",
-                    self.executable.display(),
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            });
-        }
-        let response: PluginResponse =
-            serde_json::from_slice(&output.stdout).map_err(|error| RuntimeError::PluginDefect {
-                code: "invalid_plugin_response".to_owned(),
-                message: error.to_string(),
-            })?;
-        if let PluginResponse::Error { code, message } = &response {
-            return Err(RuntimeError::PluginDefect {
-                code: "plugin_reported_error".to_owned(),
-                message: format!("{code}: {message}"),
-            });
-        }
-        Ok(response)
     }
 }

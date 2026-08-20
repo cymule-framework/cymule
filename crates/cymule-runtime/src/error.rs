@@ -1,5 +1,7 @@
 use std::fmt::{Display, Formatter};
 
+use crate::PluginExpectedFailure;
+
 /// Runtime result type.
 pub type RuntimeResult<T> = std::result::Result<T, RuntimeError>;
 
@@ -10,6 +12,8 @@ pub enum RuntimeError {
     Core(cymule_core::CoreError),
     /// An executable Plan contract failed admission or value validation.
     Contract(crate::ContractViolation),
+    /// A component returned an explicit application failure value.
+    ExpectedPluginFailure(PluginExpectedFailure),
     /// Plugin protocol or behavior was invalid.
     PluginDefect {
         /// Stable host-owned defect code.
@@ -24,6 +28,20 @@ pub enum RuntimeError {
         /// Stable substrate failure code.
         code: String,
         /// Human-readable failure summary.
+        message: String,
+    },
+    /// A bounded plugin invocation exceeded its admitted deadline.
+    TimedOut {
+        /// Stable timeout code.
+        code: String,
+        /// Human-readable timeout summary.
+        message: String,
+    },
+    /// Dispatch may have changed the external world without an observation.
+    UnknownWorld {
+        /// Stable ambiguity code.
+        code: String,
+        /// Human-readable ambiguity summary.
         message: String,
     },
     /// JSON encoding failed.
@@ -46,6 +64,22 @@ impl RuntimeError {
             message: message.into(),
         }
     }
+
+    /// Construct a bounded invocation timeout.
+    pub fn timed_out(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::TimedOut {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Construct an ambiguous external-world outcome.
+    pub fn unknown_world(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::UnknownWorld {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
 }
 
 impl Display for RuntimeError {
@@ -53,12 +87,23 @@ impl Display for RuntimeError {
         match self {
             Self::Core(error) => Display::fmt(error, formatter),
             Self::Contract(error) => write!(formatter, "contract_violation: {error}"),
+            Self::ExpectedPluginFailure(error) => {
+                write!(
+                    formatter,
+                    "expected_plugin_failure: {}: {}",
+                    error.code, error.message
+                )
+            }
             Self::PluginDefect { code, message } => {
                 write!(formatter, "plugin_defect: {code}: {message}")
             }
             Self::Suspended(message) => write!(formatter, "run_suspended: {message}"),
             Self::Substrate { code, message } => {
                 write!(formatter, "substrate_failed: {code}: {message}")
+            }
+            Self::TimedOut { code, message } => write!(formatter, "timed_out: {code}: {message}"),
+            Self::UnknownWorld { code, message } => {
+                write!(formatter, "unknown_world: {code}: {message}")
             }
             Self::Encoding(message) => write!(formatter, "encoding_error: {message}"),
         }

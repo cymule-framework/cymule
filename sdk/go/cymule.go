@@ -1611,14 +1611,7 @@ func (engine CliEngine) request(request any, response any) error {
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
-		message := stderr.String()
-		if len(message) > 8192 {
-			message = message[:8192]
-		}
-		if message == "" {
-			message = err.Error()
-		}
-		return transportFailure("engine_process_failed", message)
+		return transportFailure("engine_process_failed", "engine exited without a protocol response")
 	}
 	var envelope struct {
 		Outcome        string          `json:"outcome"`

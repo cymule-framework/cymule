@@ -48,3 +48,8 @@
   phases, bounded issue tree, contract detail, and retry dispositions closed and
   versioned. Validate every deserialized failure; do not infer retry safety from
   transport loss or classify an undeclared plugin error as an expected failure.
+- The runtime defines `cymule.plugin/2` messages but no process launcher.
+  `ExpectedFailure` is an explicit application outcome; `Defect`, process
+  termination, and malformed responses remain defects. Once Effect dispatch
+  starts, every missing or unusable outcome first records `Unknown` and projects
+  reconciliation, never same-request retry.

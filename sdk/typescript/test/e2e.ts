@@ -263,8 +263,9 @@ test("TypeScript unified live evolution validates through the Rust engine", () =
 
 test("TypeScript preserves structured Rust Engine failures", () => {
   const enginePath = process.env.CYMULE_BIN;
+  const pluginPath = process.env.CYMULE_TEST_PLUGIN;
   const failurePath = process.env.CYMULE_ENGINE_FAILURE_FIXTURE;
-  if (enginePath === undefined || failurePath === undefined) return;
+  if (enginePath === undefined || pluginPath === undefined || failurePath === undefined) return;
   const expected = JSON.parse(readFileSync(failurePath, "utf8")).cases as Record<
     string,
     Record<string, string>
@@ -279,6 +280,10 @@ test("TypeScript preserves structured Rust Engine failures", () => {
   } as unknown as PlanCandidate;
   assertEngineFailure(() => engine.seal(invalid), expected.invalid_plan_version!);
   const plan = engine.seal(candidate);
+  assertEngineFailure(
+    () => engine.run(plan, { simulate: "expected_failure" }, pluginPath, "run:ts-expected"),
+    expected.expected_plugin_failure!,
+  );
   assertEngineFailure(
     () => engine.run(plan, { message: "defect" }, enginePath, "run:ts-defect"),
     expected.plugin_defect!,

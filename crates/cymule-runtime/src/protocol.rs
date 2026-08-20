@@ -322,6 +322,16 @@ impl EngineFailure {
         match error {
             RuntimeError::Core(error) => Self::from_core(&error, phase),
             RuntimeError::Contract(error) => Self::from_contract_violation(&error, phase),
+            RuntimeError::ExpectedPluginFailure(error) => {
+                let mut failure = Self::new(
+                    EngineFailureCategory::ExpectedPluginFailure,
+                    phase,
+                    error.code,
+                    error.message,
+                );
+                failure.retry_disposition = Some(EngineRetryDisposition::Never);
+                failure
+            }
             RuntimeError::PluginDefect { code, message } => {
                 let mut failure =
                     Self::new(EngineFailureCategory::PluginDefect, phase, code, message);
@@ -346,6 +356,21 @@ impl EngineFailure {
                     message,
                 );
                 failure.retry_disposition = Some(EngineRetryDisposition::RetrySameRequest);
+                failure
+            }
+            RuntimeError::TimedOut { code, message } => {
+                let mut failure = Self::new(EngineFailureCategory::TimedOut, phase, code, message);
+                failure.retry_disposition = Some(EngineRetryDisposition::RetrySameRequest);
+                failure
+            }
+            RuntimeError::UnknownWorld { code, message } => {
+                let mut failure = Self::new(
+                    EngineFailureCategory::UnknownWorldOutcome,
+                    phase,
+                    code,
+                    message,
+                );
+                failure.retry_disposition = Some(EngineRetryDisposition::Reconcile);
                 failure
             }
             RuntimeError::Encoding(message) => {

@@ -1380,8 +1380,10 @@ class CliEngine:
                 ) from error
             raise _transport_error("engine_response_timed_out", str(error)) from error
         if completed.returncode != 0:
-            message = completed.stderr[:8192].strip() or f"engine exited {completed.returncode}"
-            raise _transport_error("engine_process_failed", message)
+            raise _transport_error(
+                "engine_process_failed",
+                f"engine exited without a protocol response (status {completed.returncode})",
+            )
         try:
             envelope = json.loads(completed.stdout)
         except json.JSONDecodeError as error:

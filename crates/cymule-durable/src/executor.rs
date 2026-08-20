@@ -976,19 +976,38 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     owner,
                     lease.epoch,
                 )?;
-                let response = self
-                    .plugin
-                    .invoke(PluginRequest::DispatchEffect {
-                        operation: entry.operation.clone(),
-                        intent_id: entry.intent_id.clone(),
-                        input: input.clone(),
-                    })
-                    .map_err(|error| DurableError::Substrate(error.to_string()))?;
+                let response = match self.plugin.invoke(PluginRequest::DispatchEffect {
+                    operation: entry.operation.clone(),
+                    intent_id: entry.intent_id.clone(),
+                    input: input.clone(),
+                }) {
+                    Ok(response) => response,
+                    Err(_) => {
+                        record_unknown_dispatch(
+                            &mut self.coordinator,
+                            &mut machine,
+                            run_id,
+                            &entry.intent_id,
+                            owner,
+                            lease.epoch,
+                        )?;
+                        return Ok(Some(DriveOutcome::ReconciliationRequired {
+                            intent_id: entry.intent_id,
+                        }));
+                    }
+                };
                 let PluginResponse::EffectResult { outcome, value } = response else {
-                    return Err(DurableError::Substrate(format!(
-                        "effect {} dispatch returned {response:?}",
-                        entry.operation
-                    )));
+                    record_unknown_dispatch(
+                        &mut self.coordinator,
+                        &mut machine,
+                        run_id,
+                        &entry.intent_id,
+                        owner,
+                        lease.epoch,
+                    )?;
+                    return Ok(Some(DriveOutcome::ReconciliationRequired {
+                        intent_id: entry.intent_id,
+                    }));
                 };
                 validate_optional_effect_output(
                     &contracts,
@@ -1071,19 +1090,22 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 (owner, entry.claim_epoch)
             };
 
-            let response = self
-                .plugin
-                .invoke(PluginRequest::ReconcileEffect {
-                    operation: entry.operation.clone(),
-                    intent_id: entry.intent_id.clone(),
-                    input,
-                })
-                .map_err(|error| DurableError::Substrate(error.to_string()))?;
+            let response = match self.plugin.invoke(PluginRequest::ReconcileEffect {
+                operation: entry.operation.clone(),
+                intent_id: entry.intent_id.clone(),
+                input,
+            }) {
+                Ok(response) => response,
+                Err(_) => {
+                    return Ok(Some(DriveOutcome::ReconciliationRequired {
+                        intent_id: entry.intent_id,
+                    }));
+                }
+            };
             let PluginResponse::ReconciliationResult { resolution, value } = response else {
-                return Err(DurableError::Substrate(format!(
-                    "effect {} reconciliation returned {response:?}",
-                    entry.operation
-                )));
+                return Ok(Some(DriveOutcome::ReconciliationRequired {
+                    intent_id: entry.intent_id,
+                }));
             };
             validate_optional_reconciliation_output(
                 &contracts,
@@ -1132,6 +1154,34 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
         }
         Ok(None)
     }
+}
+
+fn record_unknown_dispatch<S: DurableStore>(
+    coordinator: &mut DurableCoordinator<S>,
+    machine: &mut Machine,
+    run_id: &str,
+    intent_id: &str,
+    owner: &str,
+    claim_epoch: u64,
+) -> DurableResult<()> {
+    submit(
+        machine,
+        run_id,
+        format!("{run_id}:effect-unknown:{intent_id}"),
+        Command::TransitionEffect {
+            intent_id: intent_id.to_owned(),
+            transition: EffectTransition::Observe(WorldOutcome::Unknown),
+        },
+    )?;
+    coordinator.checkpoint_effect_settlement(
+        machine,
+        intent_id,
+        owner,
+        claim_epoch,
+        OutboxState::Unknown,
+        None,
+    )?;
+    Ok(())
 }
 
 const fn reconciliation_suffix(resolution: ReconciliationResolution) -> &'static str {

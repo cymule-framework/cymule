@@ -5,15 +5,15 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
-use cymule_core::{PlanCandidate, SealedPlan, sha256_bytes};
+use cymule_core::{PlanCandidate, SealedPlan};
 use cymule_durable::{DurableCommand, WaitActivation};
 use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
+use cymule_executor_process::{ProcessExecutor, ProcessExecutorConfig};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{
     ENGINE_PROTOCOL_VERSION, EmbeddedRuntime, EngineContractSide, EngineFailure,
     EngineFailureCategory, EngineIssue, EnginePhase, EngineRequestEnvelope, EngineResponseEnvelope,
-    EngineRetryDisposition, ExecutionBinding, ExecutionResult, PluginHost, ProcessPlugin,
-    seal_plan, verify_plan,
+    EngineRetryDisposition, ExecutionBinding, ExecutionResult, PluginHost, seal_plan, verify_plan,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -230,18 +230,9 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
 
 fn local_process_runtime(
     executable: impl AsRef<Path>,
-) -> cymule_runtime::RuntimeResult<EmbeddedRuntime<ProcessPlugin>> {
-    let bytes = fs::read(executable.as_ref()).map_err(|error| {
-        cymule_runtime::RuntimeError::substrate(
-            "plugin_start_failed",
-            format!(
-                "failed to read plugin {}: {error}",
-                executable.as_ref().display()
-            ),
-        )
-    })?;
-    let implementation_revision = format!("sha256:{}", sha256_bytes(&bytes));
-    let mut plugin = ProcessPlugin::new(executable);
+) -> cymule_runtime::RuntimeResult<EmbeddedRuntime<ProcessExecutor>> {
+    let mut plugin = ProcessExecutor::new(ProcessExecutorConfig::new(executable))?;
+    let implementation_revision = plugin.implementation_revision().to_owned();
     let manifest = plugin.describe()?;
     let binding = ExecutionBinding::for_local_process(&manifest, implementation_revision)?;
     EmbeddedRuntime::new(plugin, binding)

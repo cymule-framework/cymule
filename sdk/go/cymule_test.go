@@ -10,8 +10,9 @@ import (
 
 func TestStructuredEngineFailures(t *testing.T) {
 	enginePath := os.Getenv("CYMULE_BIN")
+	pluginPath := os.Getenv("CYMULE_TEST_PLUGIN")
 	failurePath := os.Getenv("CYMULE_ENGINE_FAILURE_FIXTURE")
-	if enginePath == "" || failurePath == "" {
+	if enginePath == "" || pluginPath == "" || failurePath == "" {
 		t.Skip("Engine failure conformance is not configured")
 	}
 	fixtureBytes, err := os.ReadFile(failurePath)
@@ -41,6 +42,8 @@ func TestStructuredEngineFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = engine.Run(plan, map[string]any{"simulate": "expected_failure"}, pluginPath, "run:go-expected")
+	assertEngineFailure(t, err, fixture.Cases["expected_plugin_failure"])
 	_, err = engine.Run(plan, map[string]any{"message": "defect"}, enginePath, "run:go-defect")
 	assertEngineFailure(t, err, fixture.Cases["plugin_defect"])
 	_, err = engine.Run(plan, map[string]any{"message": "substrate"}, "/cymule-conformance/missing-plugin", "run:go-substrate")

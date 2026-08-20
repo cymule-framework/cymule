@@ -19,10 +19,11 @@
   failure to carry the protocol itself; never duplicate a semantic failure on
   stderr or emit an unversioned success payload.
 - Never expose unrestricted raw event append.
-- Local process execution hashes the selected executable bytes and explicitly
-  seals the advertised manifest into `cymule.execution-binding/1` before
-  constructing the runtime. There is no ambient or implementation-ID-only
-  binding fallback.
+- Local process execution uses only `cymule-executor-process`. It copies the
+  selected executable into a private sealed location, hashes those exact launch
+  bytes, and seals the advertised manifest into `cymule.execution-binding/1`
+  before constructing the runtime. There is no second launcher, mutable-path,
+  ambient-environment, or implementation-ID-only binding fallback.
 - The package is `cymule-cli` and installs the `cymule` binary. Keep binary
   rustdoc disabled so it cannot collide with the public `cymule` facade library;
   user API documentation belongs to the facade and profile crates.

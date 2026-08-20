@@ -43,6 +43,7 @@ cymule-agent = { version = "0.1.4", path = "plugins/agent-interaction" }
 cymule-core = { version = "0.1.4", path = "crates/cymule-core" }
 cymule-durable = { version = "0.1.4", path = "crates/cymule-durable" }
 cymule-evolution = { version = "0.1.4", path = "crates/cymule-evolution" }
+cymule-executor-process = { version = "0.1.4", path = "plugins/executor-process" }
 cymule-resource = { version = "0.1.4", path = "crates/cymule-resource" }
 cymule-runtime = { version = "0.1.4", path = "crates/cymule-runtime" }
 cymule-virtual = { version = "0.1.4", path = "crates/cymule-virtual" }
@@ -60,6 +61,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_json_canonicalizer = "0.3.2"
 sha2 = "0.11.0"
+tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"

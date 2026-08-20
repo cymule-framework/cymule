@@ -7,6 +7,8 @@
 - Return `EngineFailure` as the typed Go error for remote failures and
   response-less transport failures. Callers use fields or `errors.As`, never
   parse `Error()` text for control flow.
+- Engine-process stderr is diagnostic-only and never becomes an
+  `EngineFailure.Message`; response-less exits use bounded SDK-owned status.
 - Every `ArtifactRef` carries the exact `cymule.artifact/2` identity version;
   Go preserves it without deriving or upgrading identities.
 - `Definition` and `Invoke` author exact local reusable calls; logical subflow

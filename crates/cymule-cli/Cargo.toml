@@ -20,6 +20,7 @@ doc = false
 cymule-core.workspace = true
 cymule-durable.workspace = true
 cymule-evolution.workspace = true
+cymule-executor-process.workspace = true
 cymule-resource.workspace = true
 cymule-runtime.workspace = true
 serde.workspace = true

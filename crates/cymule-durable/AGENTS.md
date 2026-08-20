@@ -66,6 +66,9 @@
   original claim. Reopen must query them again and may settle them as applied or
   not applied; it must never redispatch the original Effect or reuse one command
   ID for different reconciliation decisions.
+- After `StartDispatch` is claimed, a missing, malformed, timed-out, or defective
+  plugin response commits `Unknown` with the outbox settlement before returning
+  `ReconciliationRequired`; it never reports same-request retry.
 - Retry policy is a content-addressed, provider-neutral algebra, not a
   scheduler. `RetryStream` is only its serializable pure reducer state: it
   retains the complete canonical Policy, consumes a closed failure class, the

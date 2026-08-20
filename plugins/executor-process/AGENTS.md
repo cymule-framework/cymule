@@ -7,7 +7,7 @@
 - A timeout or lost process response is ambiguous for an effect. Kill and reap
   the child, return an error to the runtime, and let the existing outbox move
   the intent to `unknown`; never retry dispatch inside this plugin.
-- Validate the response through the frozen `cymule.plugin/1` types. Stderr is
+- Validate the response through the frozen `cymule.plugin/2` types. Stderr is
   diagnostic only and must not become a result channel.
 - Conformance process fixtures must consume the complete request before writing
   a response. An early child exit that closes stdin is a failed dispatch, even

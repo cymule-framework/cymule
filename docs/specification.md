@@ -38,7 +38,7 @@ The following domains evolve independently:
 | Event schema | `cymule.event/2` | readers reject unknown semantic events |
 | Command protocol | `cymule.command/2` | typed envelope and stable error codes |
 | Engine protocol | `cymule.engine/1` | one versioned request and success-or-failure response envelope |
-| Plugin protocol | `cymule.plugin/1` | capability negotiation is explicit |
+| Plugin protocol | `cymule.plugin/2` | capability negotiation and expected failure are explicit |
 | Resource descriptor | `cymule.resource/1` | identity excludes realization locations |
 | Resource handoff | `cymule.resource-handoff/1` | transfer IDs are idempotent per target Run |
 | Wait activation | `cymule.wait-activation/1` | external delivery ID fixes source, targets, and result |

@@ -1,18 +1,88 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/plugin-protocol.schema.json",
-  "title": "Cymule Process Plugin Message",
+  "title": "Cymule Process Plugin Protocol cymule.plugin/2",
   "oneOf": [
-    { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "describe" } } },
-    {
-      "type": "object", "additionalProperties": false, "required": ["type", "component", "input"],
-      "properties": { "type": { "const": "call" }, "component": { "$ref": "#/$defs/id" }, "input": true }
-    },
-    {
-      "type": "object", "additionalProperties": false, "required": ["type", "operation", "intent_id", "input"],
-      "properties": { "type": { "enum": ["prepare_effect", "dispatch_effect", "reconcile_effect"] }, "operation": { "$ref": "#/$defs/id" }, "intent_id": { "$ref": "#/$defs/id" }, "input": true }
-    }
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/response" }
   ],
-  "$defs": { "id": { "type": "string", "minLength": 1, "maxLength": 200 } }
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "code": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[a-z][a-z0-9_]*$" },
+    "message": { "type": "string", "minLength": 1, "maxLength": 8192 },
+    "request": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "describe" } } },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "component", "input"],
+          "properties": { "type": { "const": "call" }, "component": { "$ref": "#/$defs/id" }, "input": true }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "operation", "intent_id", "input"],
+          "properties": { "type": { "enum": ["prepare_effect", "dispatch_effect", "reconcile_effect"] }, "operation": { "$ref": "#/$defs/id" }, "intent_id": { "$ref": "#/$defs/id" }, "input": true }
+        }
+      ]
+    },
+    "response": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "manifest"],
+          "properties": { "type": { "const": "manifest" }, "manifest": { "$ref": "#/$defs/manifest" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "value"],
+          "properties": { "type": { "const": "call_result" }, "value": true }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "error"],
+          "properties": { "type": { "const": "expected_failure" }, "error": { "$ref": "#/$defs/failure" } }
+        },
+        { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "prepared" } } },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "outcome"],
+          "properties": {
+            "type": { "const": "effect_result" },
+            "outcome": { "enum": ["applied", "not_applied", "unknown"] },
+            "value": true
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "resolution"],
+          "properties": {
+            "type": { "const": "reconciliation_result" },
+            "resolution": { "enum": ["resolved_applied", "resolved_not_applied", "still_unknown", "governance_required"] },
+            "value": true
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["type", "code", "message"],
+          "properties": { "type": { "const": "defect" }, "code": { "$ref": "#/$defs/code" }, "message": { "$ref": "#/$defs/message" } }
+        }
+      ]
+    },
+    "failure": {
+      "type": "object", "additionalProperties": false, "required": ["code", "message"],
+      "properties": { "code": { "$ref": "#/$defs/code" }, "message": { "$ref": "#/$defs/message" } }
+    },
+    "manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["plugin_version", "implementation_id", "components", "effects"],
+      "properties": {
+        "plugin_version": { "const": "cymule.plugin/2" },
+        "implementation_id": { "$ref": "#/$defs/id" },
+        "components": {
+          "type": "object", "additionalProperties": {
+            "type": "object", "additionalProperties": false, "required": ["implementation_revision"],
+            "properties": { "implementation_revision": { "$ref": "#/$defs/id" } }
+          }
+        },
+        "effects": {
+          "type": "object", "additionalProperties": {
+            "type": "object", "additionalProperties": false, "required": ["implementation_revision", "can_reconcile"],
+            "properties": { "implementation_revision": { "$ref": "#/$defs/id" }, "can_reconcile": { "type": "boolean" } }
+          }
+        }
+      }
+    }
+  }
 }
-

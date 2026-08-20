@@ -1430,7 +1430,7 @@ export class CliEngine {
     if (child.status !== 0) {
       throw transportError(
         "engine_process_failed",
-        child.stderr.slice(0, 8192).trim() || `engine exited ${child.status}`,
+        `engine exited without a protocol response (status ${child.status})`,
       );
     }
     let envelope: EngineResponseEnvelope;

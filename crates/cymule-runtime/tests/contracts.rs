@@ -594,7 +594,7 @@ fn output_failures_never_bind_or_record_terminal_results() {
         .values()
         .next()
         .expect("effect intent exists");
-    assert_eq!(effect.outcome, cymule_core::WorldOutcome::Unobserved);
+    assert_eq!(effect.outcome, cymule_core::WorldOutcome::Applied);
 }
 
 #[test]

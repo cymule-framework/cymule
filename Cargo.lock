@@ -411,6 +411,7 @@ dependencies = [
  "cymule-core",
  "cymule-durable",
  "cymule-evolution",
+ "cymule-executor-process",
  "cymule-resource",
  "cymule-runtime",
  "serde",
@@ -505,8 +506,10 @@ dependencies = [
 name = "cymule-executor-process"
 version = "0.1.4"
 dependencies = [
+ "cymule-core",
  "cymule-runtime",
  "serde_json",
+ "tempfile",
  "wait-timeout",
 ]
 
