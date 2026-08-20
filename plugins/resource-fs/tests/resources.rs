@@ -207,6 +207,11 @@ fn same_size_object_and_manifest_tampering_fail_digest_verification() {
         store.write_chunk(&session, 0, b"abcdefgh"),
         Err(ResourceError::Integrity(message)) if message.contains("digest")
     ));
+    let mut copied = Vec::new();
+    assert!(matches!(
+        ResourceClient::new(store).copy_to(&object, 3, &mut copied),
+        Err(ResourceError::Integrity(message)) if message.contains("digest")
+    ));
 
     let directory_root = directory.path().join("directory-store");
     let source_directory = directory.path().join("source-directory");

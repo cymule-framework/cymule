@@ -596,9 +596,16 @@ impl ArtifactResolver for FsResourceStore {
                 "filesystem read limit must be positive".to_owned(),
             ));
         }
-        self.stat(resource)?;
-        let mut file = File::open(self.resource_path(resource)?).map_err(substrate)?;
+        resource.verify()?;
+        let path = self.resource_path(resource)?;
+        let mut file = File::open(path).map_err(substrate)?;
         let size = file.metadata().map_err(substrate)?.len();
+        if !matches!(resource.integrity, ResourceIntegrity::Content { size: expected, .. } if expected == size)
+        {
+            return Err(ResourceError::Integrity(
+                "filesystem object size changed".to_owned(),
+            ));
+        }
         if offset > size {
             return Err(ResourceError::Validation(
                 "filesystem read offset exceeds resource size".to_owned(),

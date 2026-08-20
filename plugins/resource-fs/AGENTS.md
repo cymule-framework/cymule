@@ -13,9 +13,12 @@
   Sync bytes and a newly created upload directory entry before atomically
   advancing that frontier. On reopen, truncate only bytes beyond it; bytes below
   it are immutable and missing acknowledged bytes are corruption.
-- Every content-addressed read, stat, and manifest list verifies the complete
-  SHA-256 digest, not only size or pathname. Sync both sides of cross-directory
-  record publication and staging removal before acknowledging completion.
+- Every content-addressed stat and manifest list verifies the complete SHA-256
+  digest, not only size or pathname. Object reads go through `ResourceClient`:
+  stat verifies before streaming and the client independently hashes the exact
+  streamed bytes once, avoiding an O(n-squared) hash per chunk. Sync both sides
+  of cross-directory record publication and staging removal before acknowledging
+  completion.
 - Directory and snapshot resources are sorted JSON-lines manifests of child
   Resource Handles. Reject symlinks, unsafe names, duplicates, and malformed
   manifests; list with an opaque byte-offset cursor instead of materializing a
