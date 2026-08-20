@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
-use cymule_core::{PlanCandidate, SealedPlan};
+use cymule_core::{PlanCandidate, SealedPlan, decode_json};
 use cymule_durable::{DurableCommand, WaitActivation};
 use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
 use cymule_executor_process::{ProcessExecutor, ProcessExecutorConfig};
@@ -144,17 +144,16 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFailure> {
-    let envelope: EngineRequestEnvelope<EngineRequest> =
-        serde_json::from_slice(input).map_err(|error| {
-            let mut failure = EngineFailure::new(
-                EngineFailureCategory::Validation,
-                EnginePhase::DecodeRequest,
-                "invalid_engine_request",
-                error.to_string(),
-            );
-            failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
-            failure
-        })?;
+    let envelope: EngineRequestEnvelope<EngineRequest> = decode_json(input).map_err(|error| {
+        let mut failure = EngineFailure::new(
+            EngineFailureCategory::Validation,
+            EnginePhase::DecodeRequest,
+            "invalid_engine_request",
+            error.to_string(),
+        );
+        failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
+        failure
+    })?;
     if envelope.engine_protocol != ENGINE_PROTOCOL_VERSION {
         let mut failure = EngineFailure::new(
             EngineFailureCategory::ContractViolation,
@@ -376,10 +375,25 @@ fn read_path<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Box<dyn st
     } else {
         fs::read(Path::new(path))?
     };
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(decode_json(&bytes)?)
 }
 
 fn print_json<T: Serialize>(value: &T) -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_and_execute_request;
+
+    #[test]
+    fn rpc_rejects_nested_duplicate_plan_members_before_typed_decode() {
+        let error = decode_and_execute_request(
+            br#"{"engine_protocol":"cymule.engine/1","request":{"type":"seal","candidate":{"ir_version":"cymule.ir/2","ir_version":"changed"}}}"#,
+        )
+        .expect_err("duplicate Plan member is rejected");
+        assert_eq!(error.code.as_ref(), "invalid_engine_request");
+        assert!(error.message.contains("duplicate JSON object member"));
+    }
 }

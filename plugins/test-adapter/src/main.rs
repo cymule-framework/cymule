@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 
-use cymule_core::{ReconciliationResolution, WorldOutcome};
+use cymule_core::{ReconciliationResolution, WorldOutcome, decode_json};
 use cymule_runtime::{
     PLUGIN_VERSION, PluginEffect, PluginExpectedFailure, PluginManifest, PluginOperation,
     PluginRequest, PluginResponse,
@@ -19,7 +19,7 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
     io::stdin().read_to_end(&mut bytes)?;
-    let request: PluginRequest = serde_json::from_slice(&bytes)?;
+    let request: PluginRequest = decode_json(&bytes)?;
     let response = match request {
         PluginRequest::Describe => PluginResponse::Manifest {
             manifest: PluginManifest {

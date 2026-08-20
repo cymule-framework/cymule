@@ -161,7 +161,7 @@ impl ObjectResourceStore {
         let bytes = self
             .block_on(async move { result.bytes().await })?
             .map_err(object_error)?;
-        let record: UploadRecord = serde_json::from_slice(&bytes).map_err(substrate)?;
+        let record: UploadRecord = cymule_core::decode_json(&bytes).map_err(substrate)?;
         if record.upload_id != upload_id {
             return Err(ResourceError::Integrity(
                 "object-store upload record identity changed".to_owned(),

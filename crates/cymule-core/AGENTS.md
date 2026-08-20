@@ -5,6 +5,9 @@
 - Never read the clock, random source, environment, filesystem, or network.
 - Canonical IDs are computed only after semantic validation with the versioned
   JCS encoding in `canonical.rs`.
+- `decode_json` is the sole raw JSON decoder for trusted Rust wire and canonical
+  bytes. It rejects duplicate object members recursively before typed Serde
+  decoding; do not add a permissive parser or fallback path.
 - `artifact_ref` is the sole authority for the collision-free,
   length-prefixed `cymule.artifact/2` identity preimage. Artifact references pin
   this identity version; higher layers must call the helper rather than copy its
@@ -24,6 +27,9 @@
   with an authenticated base projection plus exact compacted Event identities.
   Resume replays the full retained suffix from that base, command receipts keep
   deduplication authority, and a parent outside base plus suffix fails closed.
+- Snapshot restore also closes Event and command authority in both directions:
+  every Event has exactly one applied receipt, every applied receipt names a
+  retained or compacted Event, and retained command IDs and hashes match.
 - Property failures persist under `proptest-regressions/`. Commit the minimized
   corpus file with its fix; never depend on an ephemeral CI seed alone.
 - Changes here require specification, schema, conformance, and SDK review.

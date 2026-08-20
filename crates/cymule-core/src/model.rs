@@ -133,7 +133,7 @@ pub struct CommandEnvelope {
 
 /// Commands admitted by the semantic kernel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
     /// Start a new Run under an immutable plan and future-default binding context.
     StartRun {
@@ -225,7 +225,12 @@ pub enum Command {
 
 /// Legal effect transitions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum EffectTransition {
     /// Preparation completed.
     Prepare,
@@ -328,6 +333,15 @@ impl Event {
                 self.event_version
             )));
         }
+        if self
+            .parents
+            .windows(2)
+            .any(|pair| pair[0].as_str() >= pair[1].as_str())
+        {
+            return Err(CoreError::Validation(
+                "event parents must be strictly sorted and duplicate-free".to_owned(),
+            ));
+        }
         match &self.payload {
             EventPayload::EffectProposed { args, .. } => args.validate()?,
             EventPayload::RunCompleted {
@@ -359,7 +373,7 @@ impl Event {
 
 /// Canonical transition payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EventPayload {
     /// A Run became canonical.
     RunStarted {
@@ -693,7 +707,7 @@ pub struct AttemptProjection {
 
 /// Explicit exact-replay capability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReplayAvailability {
     /// All required canonical inputs are available.
     Exact,
@@ -927,6 +941,14 @@ impl Projection {
                 scope_id,
                 obligations,
             } => {
+                if run.scopes.values().any(|candidate| {
+                    candidate.parent_scope.as_deref() == Some(scope_id)
+                        && candidate.status == ScopeStatus::Open
+                }) {
+                    return Err(CoreError::IllegalTransition(format!(
+                        "scope {scope_id} has an open child"
+                    )));
+                }
                 let scope = run.scopes.get_mut(scope_id).ok_or_else(|| {
                     CoreError::NotFound(format!("scope {scope_id} does not exist"))
                 })?;
@@ -956,6 +978,14 @@ impl Projection {
                 }
             }
             EventPayload::ScopeAborted { scope_id } => {
+                if run.scopes.values().any(|candidate| {
+                    candidate.parent_scope.as_deref() == Some(scope_id)
+                        && candidate.status == ScopeStatus::Open
+                }) {
+                    return Err(CoreError::IllegalTransition(format!(
+                        "scope {scope_id} has an open child"
+                    )));
+                }
                 let scope = run.scopes.get_mut(scope_id).ok_or_else(|| {
                     CoreError::NotFound(format!("scope {scope_id} does not exist"))
                 })?;

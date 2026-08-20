@@ -137,6 +137,21 @@ fn plan_identity_is_canonical_and_tamper_evident() {
 }
 
 #[test]
+fn flattened_step_and_closed_ir_unions_reject_unknown_members() {
+    let mut value = serde_json::to_value(candidate()).expect("candidate encodes");
+    value["definitions"][0]["body"]["steps"][0]["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<PlanCandidate>(value).is_err());
+
+    let mut expression = json!({"kind": "literal", "value": null, "unexpected": true});
+    assert!(serde_json::from_value::<Expression>(expression.clone()).is_err());
+    expression
+        .as_object_mut()
+        .expect("object")
+        .remove("unexpected");
+    assert!(serde_json::from_value::<Expression>(expression).is_ok());
+}
+
+#[test]
 fn public_validation_errors_and_effect_policy_boundaries_are_stable() {
     let cases = [
         (
@@ -433,12 +448,9 @@ fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
         ))
         .expect("fact records");
     let fact = machine.events().last().expect("fact event");
-    assert_eq!(fact.reads, BTreeSet::new());
-    assert_eq!(
-        fact.writes,
-        BTreeSet::from([format!("fact:{run_id}:fact:stable")])
-    );
-    assert_eq!(fact.coordination_key, None);
+    assert_eq!(fact.reads, BTreeSet::from(["fact:fact:stable".to_owned()]));
+    assert_eq!(fact.writes, BTreeSet::from(["fact:fact:stable".to_owned()]));
+    assert_eq!(fact.coordination_key.as_deref(), Some("fact:fact:stable"));
     let after_fact = machine.projection().digest().expect("projection hashes");
     assert_eq!(after_fact.len(), 64);
     assert_ne!(before_fact, after_fact);
@@ -513,20 +525,93 @@ fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
             },
         ))
         .expect("child scope opens");
+    let scope_open = machine.events().last().expect("scope open event");
+    assert_eq!(
+        scope_open.coordination_key.as_deref(),
+        Some("scope-tree:run:invariants")
+    );
+    assert!(
+        scope_open
+            .writes
+            .contains("scope:run:invariants:scope:root")
+    );
+    assert!(scope_open.writes.contains("scope-tree:run:invariants"));
     machine
         .submit(envelope(
             &machine,
             9,
+            run_id,
+            Command::OpenScope {
+                scope_id: "scope:sibling".to_owned(),
+                parent_scope: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            },
+        ))
+        .expect("sibling scope opens on the ordered Run frontier");
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            10,
+            run_id,
+            Command::CommitScope {
+                scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            },
+        )),
+        Err(CoreError::IllegalTransition(message)) if message.contains("open child")
+    ));
+    machine
+        .submit(envelope(
+            &machine,
+            11,
             run_id,
             Command::CommitScope {
                 scope_id: "scope:child".to_owned(),
             },
         ))
         .expect("child scope commits");
+    assert_eq!(
+        machine
+            .events()
+            .last()
+            .expect("scope commit event")
+            .coordination_key
+            .as_deref(),
+        Some("scope-tree:run:invariants")
+    );
     assert!(matches!(
         machine.submit(envelope(
             &machine,
-            10,
+            12,
+            run_id,
+            Command::CommitScope {
+                scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            },
+        )),
+        Err(CoreError::IllegalTransition(message)) if message.contains("open child")
+    ));
+    machine
+        .submit(envelope(
+            &machine,
+            13,
+            run_id,
+            Command::AbortScope {
+                scope_id: "scope:sibling".to_owned(),
+            },
+        ))
+        .expect("sibling scope aborts");
+    machine
+        .submit(envelope(
+            &machine,
+            14,
+            run_id,
+            Command::CommitScope {
+                scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            },
+        ))
+        .expect("parent closes after every sibling closes");
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            15,
             run_id,
             Command::OpenScope {
                 scope_id: "scope:grandchild".to_owned(),
@@ -538,13 +623,77 @@ fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
     assert!(matches!(
         machine.submit(envelope(
             &machine,
-            11,
+            16,
             run_id,
             Command::AbortScope {
                 scope_id: "scope:child".to_owned(),
             },
         )),
         Err(CoreError::IllegalTransition(_))
+    ));
+}
+
+#[test]
+fn machine_snapshot_requires_bidirectional_event_receipt_hash_closure() {
+    let mut machine = Machine::new();
+    let plan = machine.seal_plan(candidate()).expect("plan seals");
+    machine
+        .submit(envelope(
+            &machine,
+            1,
+            "run:snapshot-closure",
+            Command::StartRun {
+                plan_id: plan.plan_id,
+                binding_context: "binding:v1".to_owned(),
+            },
+        ))
+        .expect("run starts");
+    let snapshot = machine.snapshot();
+    let event_id = snapshot.events[0].event_id.clone();
+
+    let mut missing_receipt = serde_json::to_value(&snapshot).expect("snapshot encodes");
+    missing_receipt["commands"] = json!({});
+    let missing_receipt = serde_json::from_value(missing_receipt).expect("shape decodes");
+    assert!(matches!(
+        Machine::restore(missing_receipt),
+        Err(CoreError::NotFound(message)) if message.contains("no command receipt")
+    ));
+
+    let mut mismatched_hash = serde_json::to_value(&snapshot).expect("snapshot encodes");
+    mismatched_hash["commands"]["command:1"]["semantic_hash"] = json!("different");
+    let mismatched_hash = serde_json::from_value(mismatched_hash).expect("shape decodes");
+    assert!(matches!(
+        Machine::restore(mismatched_hash),
+        Err(CoreError::IdentityMismatch(message)) if message.contains("does not match retained event")
+    ));
+
+    let mut duplicate_receipt = serde_json::to_value(&snapshot).expect("snapshot encodes");
+    let mut second = duplicate_receipt["commands"]["command:1"].clone();
+    second["receipt"]["command_id"] = json!("command:2");
+    duplicate_receipt["commands"]["command:2"] = second;
+    let duplicate_receipt = serde_json::from_value(duplicate_receipt).expect("shape decodes");
+    assert!(matches!(
+        Machine::restore(duplicate_receipt),
+        Err(CoreError::IdentityMismatch(message))
+            if message.contains(&event_id) && message.contains("claimed by commands")
+    ));
+
+    let mut applied_with_error = serde_json::to_value(&snapshot).expect("snapshot encodes");
+    applied_with_error["commands"]["command:1"]["receipt"]["error_code"] =
+        json!("impossible_error");
+    let applied_with_error = serde_json::from_value(applied_with_error).expect("shape decodes");
+    assert!(matches!(
+        Machine::restore(applied_with_error),
+        Err(CoreError::IdentityMismatch(message)) if message.contains("one event and no error")
+    ));
+
+    let mut untyped_conflict = serde_json::to_value(&snapshot).expect("snapshot encodes");
+    untyped_conflict["commands"]["command:1"]["receipt"]["status"] = json!("conflict");
+    untyped_conflict["commands"]["command:1"]["receipt"]["event_id"] = json!(null);
+    let untyped_conflict = serde_json::from_value(untyped_conflict).expect("shape decodes");
+    assert!(matches!(
+        Machine::restore(untyped_conflict),
+        Err(CoreError::IdentityMismatch(message)) if message.contains("no typed error")
     ));
 }
 
@@ -757,9 +906,9 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
             "hash:orphan-suffix".to_owned(),
             run_id.to_owned(),
             vec![format!("sha256:{}", "f".repeat(64))],
-            BTreeSet::new(),
             BTreeSet::from(["fact:orphan-suffix".to_owned()]),
-            None,
+            BTreeSet::from(["fact:orphan-suffix".to_owned()]),
+            Some("fact:orphan-suffix".to_owned()),
             EventPayload::FactRecorded {
                 key: "orphan-suffix".to_owned(),
                 value: "1".to_owned(),
@@ -1172,9 +1321,9 @@ fn replay_orders_a_causal_set_and_reports_retention_loss() {
         "hash:a".to_owned(),
         run_id.to_owned(),
         vec![start.event_id.clone()],
-        BTreeSet::new(),
         BTreeSet::from(["fact:a".to_owned()]),
-        None,
+        BTreeSet::from(["fact:a".to_owned()]),
+        Some("fact:a".to_owned()),
         EventPayload::FactRecorded {
             key: "a".to_owned(),
             value: "1".to_owned(),
@@ -1186,9 +1335,9 @@ fn replay_orders_a_causal_set_and_reports_retention_loss() {
         "hash:b".to_owned(),
         run_id.to_owned(),
         vec![start.event_id.clone()],
-        BTreeSet::new(),
         BTreeSet::from(["fact:b".to_owned()]),
-        None,
+        BTreeSet::from(["fact:b".to_owned()]),
+        Some("fact:b".to_owned()),
         EventPayload::FactRecorded {
             key: "b".to_owned(),
             value: "2".to_owned(),
@@ -1203,6 +1352,13 @@ fn replay_orders_a_causal_set_and_reports_retention_loss() {
         .append_event(start.clone())
         .expect("identical trusted event append is idempotent");
     assert_eq!(appended.events().count(), 1);
+    appended
+        .append_event(fact_a.clone())
+        .expect("first child extends the Run frontier");
+    assert!(matches!(
+        appended.append_event(fact_b.clone()),
+        Err(CoreError::Causal(message)) if message.contains("causal frontier")
+    ));
     let duplicate_replay =
         Machine::replay([start.clone(), start.clone()]).expect("identical event set deduplicates");
     assert_eq!(duplicate_replay.runs.len(), 1);
@@ -1212,14 +1368,39 @@ fn replay_orders_a_causal_set_and_reports_retention_loss() {
         tampered.verify(),
         Err(CoreError::IdentityMismatch(_))
     ));
+    let mut duplicate_parent = fact_a.clone();
+    duplicate_parent.parents.push(start.event_id.clone());
+    duplicate_parent.parents.sort();
+    assert!(matches!(
+        duplicate_parent.verify(),
+        Err(CoreError::Validation(message)) if message.contains("duplicate-free")
+    ));
+    let false_footprint = Event::new(
+        "command:false-footprint".to_owned(),
+        "hash:false-footprint".to_owned(),
+        run_id.to_owned(),
+        vec![fact_a.event_id.clone()],
+        BTreeSet::new(),
+        BTreeSet::new(),
+        None,
+        EventPayload::FactRecorded {
+            key: "false-footprint".to_owned(),
+            value: "1".to_owned(),
+        },
+    )
+    .expect("self-consistent but semantically false Event constructs");
+    assert!(matches!(
+        appended.append_event(false_footprint),
+        Err(CoreError::IdentityMismatch(message)) if message.contains("semantic footprint")
+    ));
     let missing_parent = Event::new(
         "command:orphan".to_owned(),
         "hash:orphan".to_owned(),
         run_id.to_owned(),
         vec![format!("sha256:{}", "f".repeat(64))],
-        BTreeSet::new(),
-        BTreeSet::new(),
-        None,
+        BTreeSet::from(["fact:orphan".to_owned()]),
+        BTreeSet::from(["fact:orphan".to_owned()]),
+        Some("fact:orphan".to_owned()),
         EventPayload::FactRecorded {
             key: "orphan".to_owned(),
             value: "1".to_owned(),
@@ -1286,14 +1467,15 @@ proptest! {
             .enumerate()
             .map(|(index, (priority, value))| {
                 let key = format!("property:{index}");
+                let fact_key = format!("fact:{key}");
                 let event = Event::new(
                     format!("command:property:{index}"),
                     format!("hash:property:{index}:{value}"),
                     run_id.to_owned(),
                     vec![start.event_id.clone()],
-                    BTreeSet::new(),
-                    BTreeSet::from([format!("fact:{key}")]),
-                    None,
+                    BTreeSet::from([fact_key.clone()]),
+                    BTreeSet::from([fact_key.clone()]),
+                    Some(fact_key),
                     EventPayload::FactRecorded {
                         key,
                         value: value.to_string(),

@@ -19,9 +19,17 @@ from cymule import (
     VirtualWorkControlBuilder,
     WaitActivationBuilder,
 )
+from cymule import _unique_json_object
 
 
 class EndToEndTest(unittest.TestCase):
+    def test_engine_json_rejects_duplicate_object_members(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate JSON object member"):
+            json.loads(
+                '{"response":{"type":"verified","type":"executed"}}',
+                object_pairs_hook=_unique_json_object,
+            )
+
     def test_python_preserves_structured_engine_failures(self) -> None:
         engine_path = os.environ.get("CYMULE_BIN")
         plugin_path = os.environ.get("CYMULE_TEST_PLUGIN")

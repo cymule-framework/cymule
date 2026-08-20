@@ -106,7 +106,7 @@ impl SqliteStore {
                 "unsupported SQLite store schema {schema}"
             )));
         }
-        let state: DurableState = serde_json::from_slice(&bytes)?;
+        let state: DurableState = cymule_core::decode_json(&bytes)?;
         let stored = StoredState { revision, state };
         stored.verify()?;
         Ok(Some(stored))

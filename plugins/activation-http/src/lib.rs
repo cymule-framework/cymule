@@ -355,7 +355,7 @@ impl SqliteHttpSignalDriver {
         max_targets: usize,
     ) -> DurableResult<Option<BTreeSet<String>>> {
         if let Some(selected) = selected {
-            let targets = serde_json::from_slice(&selected)?;
+            let targets = cymule_core::decode_json(&selected)?;
             validate_targets(&targets, max_targets)?;
             return Ok(Some(targets));
         }
@@ -381,7 +381,7 @@ impl SqliteHttpSignalDriver {
                 |row| row.get(0),
             )
             .map_err(sqlite_error)?;
-        let targets = serde_json::from_slice(&retained)?;
+        let targets = cymule_core::decode_json(&retained)?;
         validate_targets(&targets, max_targets)?;
         Ok(Some(targets))
     }
@@ -427,7 +427,7 @@ impl WaitSourceDriver for SqliteHttpSignalDriver {
                 activation_id,
                 source,
                 wait_ids,
-                value: serde_json::from_slice(&value)?,
+                value: cymule_core::decode_json(&value)?,
             }));
         }
         Ok(None)

@@ -878,7 +878,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 expected.artifact_id
             ))
         })?;
-        let stored: ExecutionBinding = serde_json::from_slice(&record.bytes)?;
+        let stored: ExecutionBinding = cymule_core::decode_json(&record.bytes)?;
         stored.verify()?;
         if stored != self.binding {
             return Err(DurableError::Validation(
@@ -1388,7 +1388,7 @@ fn read_value(machine: &Machine, reference: &cymule_core::ArtifactRef) -> Durabl
     let artifact = machine.artifact(reference).ok_or_else(|| {
         DurableError::NotFound(format!("artifact {} is missing", reference.artifact_id))
     })?;
-    serde_json::from_slice(&artifact.bytes).map_err(Into::into)
+    cymule_core::decode_json(&artifact.bytes).map_err(Into::into)
 }
 
 fn evaluate(

@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use cymule_core::sha256_bytes;
+use cymule_core::{decode_json, sha256_bytes};
 use cymule_runtime::{PluginHost, PluginRequest, PluginResponse, RuntimeError, RuntimeResult};
 use tempfile::{Builder, TempDir};
 use wait_timeout::ChildExt;
@@ -250,7 +250,7 @@ impl ProcessExecutor {
                 }
             });
         }
-        serde_json::from_slice(&stdout.expect("checked above")).map_err(|_| {
+        decode_json(&stdout.expect("checked above")).map_err(|_| {
             post_start_failure(
                 request,
                 "invalid_plugin_response",

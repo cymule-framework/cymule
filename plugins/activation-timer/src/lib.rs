@@ -164,7 +164,7 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
             let (activation_id, timer_id, bytes, retained_targets) = row.map_err(sqlite_error)?;
             let source = WaitActivationSource::Timer { timer_id };
             let wait_ids = if let Some(retained_targets) = retained_targets {
-                let wait_ids = serde_json::from_slice(&retained_targets)?;
+                let wait_ids = cymule_core::decode_json(&retained_targets)?;
                 validate_retained_targets(&wait_ids, max_targets)?;
                 wait_ids
             } else {
@@ -190,11 +190,11 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
                         |row| row.get(0),
                     )
                     .map_err(sqlite_error)?;
-                let wait_ids = serde_json::from_slice(&retained)?;
+                let wait_ids = cymule_core::decode_json(&retained)?;
                 validate_retained_targets(&wait_ids, max_targets)?;
                 wait_ids
             };
-            let value = serde_json::from_slice(&bytes)?;
+            let value = cymule_core::decode_json(&bytes)?;
             return Ok(Some(WaitDelivery {
                 activation_id,
                 source,

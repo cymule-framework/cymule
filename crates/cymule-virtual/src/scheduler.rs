@@ -1298,7 +1298,7 @@ impl VirtualScheduler {
             ));
         }
         let bytes = archive.get(&certificate.rehydration_manifest)?;
-        let manifest: VirtualArchiveManifest = serde_json::from_slice(&bytes)
+        let manifest: VirtualArchiveManifest = cymule_core::decode_json(&bytes)
             .map_err(|error| VirtualError::Source(error.to_string()))?;
         let record = virtual_archive_record(&manifest)?;
         if record.reference != certificate.rehydration_manifest || record.bytes != bytes {

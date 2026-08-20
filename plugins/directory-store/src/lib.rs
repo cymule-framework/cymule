@@ -64,7 +64,7 @@ impl DirectoryStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(substrate(error)),
         };
-        let stored: StoredState = serde_json::from_slice(&bytes)?;
+        let stored: StoredState = cymule_core::decode_json(&bytes)?;
         stored.verify()?;
         Ok(Some(stored))
     }

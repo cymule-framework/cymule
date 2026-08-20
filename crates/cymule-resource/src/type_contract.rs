@@ -444,7 +444,7 @@ fn verify_artifact(artifact: &ArtifactRecord) -> ResourceResult<()> {
 }
 
 fn decode_canonical_json(bytes: &[u8]) -> ResourceResult<Value> {
-    let value: Value = serde_json::from_slice(bytes)
+    let value: Value = cymule_core::decode_json(bytes)
         .map_err(|_| ResourceError::Validation("Artifact is not valid JSON".to_owned()))?;
     let canonical =
         canonical_bytes(&value).map_err(|error| ResourceError::Validation(error.to_string()))?;

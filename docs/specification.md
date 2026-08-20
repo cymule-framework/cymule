@@ -120,7 +120,13 @@ deterministic projections and MUST be rebuildable.
 Canonical objects are encoded with RFC 8785 JSON Canonicalization Scheme and
 identified as `sha256:<lowercase hex>`. The object identifier is not part of the
 hashed preimage. Duplicate JSON property names and non-finite numbers are
-invalid. A writer MUST validate the semantic schema before hashing.
+invalid. Every raw JSON ingress, including Plan, Engine, plugin, SDK, canonical
+Artifact, and persisted-state bytes, MUST reject duplicate property names at
+every nesting depth before typed decoding can collapse them. A permissive or
+fallback decoder is not a compatible reader. A writer MUST validate the
+semantic schema before hashing. This strengthens admission within the existing
+`cymule.jcs/1`, IR, Engine, plugin, and snapshot versions; it does not widen any
+wire shape.
 
 `PlanId` identifies a sealed plan. `EventId` identifies the event payload and
 causal parents. Every `ArtifactRef` MUST carry
@@ -450,6 +456,12 @@ A causal cut is a causally closed down-set of admitted events. Implementations
 may represent it with maximal frontier IDs. An event carries logical read/write
 footprints and an optional coordination key. Independent events MUST commute.
 
+Every non-start Event MUST extend the current causal frontier of its Run. A
+fact is one Machine-wide immutable authority keyed by its exact fact key, so a
+fact Event reads and writes that shared key and coordinates conflicting first
+writes across Runs. Run-local names MUST NOT disguise the shared fact
+authority.
+
 Non-monotone decisions, including consume-once delivery, scope decisions,
 effect release, budget reservation, authority widening, and default version
 advancement, MUST be coordinated within a declared semantic domain.
@@ -475,6 +487,12 @@ Embedded M0 scope state transitions are:
 open -> closed-committed
 open -> closed-aborted
 ```
+
+A parent scope MUST remain open while any direct child is open. Opening a child,
+changing scope membership, and closing either generation coordinate through the
+same Run scope-tree authority; commit or abort of a parent with an open child is
+illegal. Recursive closure follows because a child cannot close while its own
+child remains open.
 
 Commit atomically accepts declared state/evidence and transfers outstanding
 world-effect requirements into an `EffectObligationSet`. Scope closure does not
@@ -695,10 +713,13 @@ one-shot component calls are not an exact execution-replay implementation.
 authenticated base projection, cumulative prefix digest, and exact compacted
 Event identities. Every remaining Event stays in full and MUST have all parents
 in either the base or retained suffix. Restore verifies the base projection,
-every v2 Artifact reference, replays the suffix, and retains command receipts so
-old idempotent commands do not append duplicate Events. Older snapshot versions
-are rejected rather than upgraded implicitly. M1 compaction is a CAS transition
-with explicit
+every v2 Artifact reference, and an exact bidirectional Event/command-receipt
+closure before replaying the suffix. Every retained or compacted Event identity
+has exactly one applied receipt; every applied receipt names one such Event;
+and each retained Event's command ID and command hash match its command record.
+A conflict receipt names no Event. These are stricter restore invariants within
+snapshot v3, not a new wire shape. Older snapshot versions are rejected rather
+than upgraded implicitly. M1 compaction is a CAS transition with explicit
 lineage; stale writers lose and acknowledgement loss reopens to the committed
 base. Compaction preserves current state replay but does not claim the removed
 Event bodies remain available for historical inspection unless a higher-profile

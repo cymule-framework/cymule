@@ -157,11 +157,22 @@ impl Machine {
                 snapshot.snapshot_version
             )));
         }
+        let MachineSnapshot {
+            snapshot_version: _,
+            plans,
+            artifacts,
+            base,
+            events,
+            commands,
+        } = snapshot;
+        if let Some(base) = &base {
+            base.verify()?;
+        }
         let mut machine = Self::new();
-        for plan in snapshot.plans {
+        for plan in plans {
             machine.insert_plan(plan)?;
         }
-        for artifact in snapshot.artifacts {
+        for artifact in artifacts {
             artifact.reference.validate()?;
             let restored = machine.put_artifact(artifact.reference.kind.clone(), artifact.bytes)?;
             if restored != artifact.reference {
@@ -171,33 +182,18 @@ impl Machine {
                 )));
             }
         }
-        if let Some(base) = snapshot.base {
-            base.verify()?;
+        if let Some(base) = base {
             machine.projection = base.projection.clone();
             machine
                 .compacted_event_ids
                 .clone_from(&base.compacted_event_ids);
             machine.base = Some(base);
         }
-        for event in snapshot.events {
+        for event in events.iter().cloned() {
             machine.append_event(event)?;
         }
-        for (command_id, record) in &snapshot.commands {
-            if record.receipt.command_id != *command_id {
-                return Err(CoreError::IdentityMismatch(format!(
-                    "command snapshot key {command_id} does not match its receipt"
-                )));
-            }
-            if let Some(event_id) = &record.receipt.event_id
-                && !machine.events.contains_key(event_id)
-                && !machine.compacted_event_ids.contains(event_id)
-            {
-                return Err(CoreError::NotFound(format!(
-                    "command {command_id} references missing event {event_id}"
-                )));
-            }
-        }
-        machine.commands = snapshot.commands;
+        verify_command_event_closure(&events, machine.base.as_ref(), &commands)?;
+        machine.commands = commands;
         machine.verify_replay()?;
         Ok(machine)
     }
@@ -417,6 +413,7 @@ impl Machine {
     /// Append a trusted event after identity, parent, and transition validation.
     pub fn append_event(&mut self, event: Event) -> Result<()> {
         event.verify()?;
+        verify_event_footprint(&event)?;
         if self.compacted_event_ids.contains(&event.event_id) {
             return Err(CoreError::IdentityMismatch(format!(
                 "event {} belongs to the compacted prefix",
@@ -438,6 +435,26 @@ impl Machine {
                     "event {} references missing parent {parent}",
                     event.event_id
                 )));
+            }
+        }
+        match &event.payload {
+            EventPayload::RunStarted { .. } if !event.parents.is_empty() => {
+                return Err(CoreError::Causal(format!(
+                    "Run start event {} must not have a causal parent",
+                    event.event_id
+                )));
+            }
+            EventPayload::RunStarted { .. } => {}
+            _ => {
+                let run = self.projection.runs.get(&event.run_id).ok_or_else(|| {
+                    CoreError::NotFound(format!("Run {} does not exist", event.run_id))
+                })?;
+                if !event.parents.contains(&run.last_event) {
+                    return Err(CoreError::Causal(format!(
+                        "event {} does not extend Run {} causal frontier {}",
+                        event.event_id, event.run_id, run.last_event
+                    )));
+                }
             }
         }
         let mut next = self.projection.clone();
@@ -465,6 +482,7 @@ impl Machine {
         let mut remaining = BTreeMap::new();
         for event in events {
             event.verify()?;
+            verify_event_footprint(&event)?;
             if let Some(existing) = remaining.insert(event.event_id.clone(), event.clone())
                 && existing != event
             {
@@ -723,6 +741,102 @@ impl Machine {
     }
 }
 
+fn verify_command_event_closure(
+    events: &[Event],
+    base: Option<&MachineBaseSnapshot>,
+    commands: &BTreeMap<String, CommandRecord>,
+) -> Result<()> {
+    let retained_events: BTreeMap<&str, &Event> = events
+        .iter()
+        .map(|event| (event.event_id.as_str(), event))
+        .collect();
+    let compacted_event_ids = base.map(|base| &base.compacted_event_ids);
+    let mut receipt_by_event = BTreeMap::new();
+
+    for (command_id, record) in commands {
+        if record.receipt.command_id != *command_id {
+            return Err(CoreError::IdentityMismatch(format!(
+                "command snapshot key {command_id} does not match its receipt"
+            )));
+        }
+        match (&record.receipt.status, &record.receipt.event_id) {
+            (CommandReceiptStatus::Applied, Some(event_id))
+                if record.receipt.error_code.is_none() && record.receipt.message.is_none() =>
+            {
+                if let Some(prior_command) = receipt_by_event.insert(event_id, command_id) {
+                    return Err(CoreError::IdentityMismatch(format!(
+                        "event {event_id} is claimed by commands {prior_command} and {command_id}"
+                    )));
+                }
+                if let Some(event) = retained_events.get(event_id.as_str()) {
+                    if event.command_id != *command_id || event.command_hash != record.semantic_hash
+                    {
+                        return Err(CoreError::IdentityMismatch(format!(
+                            "command {command_id} does not match retained event {event_id}"
+                        )));
+                    }
+                } else if !compacted_event_ids.is_some_and(|ids| ids.contains(event_id)) {
+                    return Err(CoreError::NotFound(format!(
+                        "command {command_id} references missing event {event_id}"
+                    )));
+                }
+            }
+            (CommandReceiptStatus::Applied, _) => {
+                return Err(CoreError::IdentityMismatch(format!(
+                    "applied command {command_id} must have one event and no error"
+                )));
+            }
+            (CommandReceiptStatus::Conflict, Some(event_id)) => {
+                return Err(CoreError::IdentityMismatch(format!(
+                    "conflicting command {command_id} claims event {event_id}"
+                )));
+            }
+            (CommandReceiptStatus::Conflict, None)
+                if record
+                    .receipt
+                    .error_code
+                    .as_deref()
+                    .is_some_and(|code| !code.is_empty()) => {}
+            (CommandReceiptStatus::Conflict, None) => {
+                return Err(CoreError::IdentityMismatch(format!(
+                    "conflicting command {command_id} has no typed error"
+                )));
+            }
+        }
+    }
+
+    for event in events {
+        if !receipt_by_event.contains_key(&event.event_id) {
+            return Err(CoreError::NotFound(format!(
+                "event {} has no command receipt",
+                event.event_id
+            )));
+        }
+    }
+    if let Some(compacted_event_ids) = compacted_event_ids {
+        for event_id in compacted_event_ids {
+            if !receipt_by_event.contains_key(event_id) {
+                return Err(CoreError::NotFound(format!(
+                    "compacted event {event_id} has no command receipt"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_event_footprint(event: &Event) -> Result<()> {
+    let (reads, writes, coordination_key) = footprints(&event.run_id, &event.payload);
+    if event.reads != reads || event.writes != writes || event.coordination_key != coordination_key
+    {
+        return Err(CoreError::IdentityMismatch(format!(
+            "event {} does not match its semantic footprint",
+            event.event_id
+        )));
+    }
+    Ok(())
+}
+
 fn validate_envelope(envelope: &CommandEnvelope) -> Result<()> {
     if envelope.command_version != COMMAND_VERSION {
         return Err(CoreError::Validation(format!(
@@ -757,23 +871,55 @@ fn footprints(
             Some(run_key)
         }
         EventPayload::FactRecorded { key, .. } => {
-            writes.insert(format!("fact:{run_id}:{key}"));
-            None
-        }
-        EventPayload::EffectProposed { intent_id, .. }
-        | EventPayload::EffectTransitioned { intent_id, .. } => {
-            reads.insert(run_key);
-            let key = format!("effect:{run_id}:{intent_id}");
+            let key = format!("fact:{key}");
+            reads.insert(key.clone());
             writes.insert(key.clone());
             Some(key)
         }
-        EventPayload::ScopeOpened { scope_id, .. }
-        | EventPayload::ScopeCommitted { scope_id, .. }
-        | EventPayload::ScopeAborted { scope_id } => {
+        EventPayload::EffectProposed {
+            intent_id,
+            scope_id,
+            ..
+        } => {
             reads.insert(run_key);
-            let key = format!("scope:{run_id}:{scope_id}");
-            writes.insert(key.clone());
-            Some(key)
+            let effect_key = format!("effect:{run_id}:{intent_id}");
+            let scope_key = format!("scope:{run_id}:{scope_id}");
+            let tree_key = format!("scope-tree:{run_id}");
+            reads.insert(scope_key.clone());
+            writes.insert(effect_key);
+            writes.insert(scope_key.clone());
+            writes.insert(tree_key.clone());
+            Some(tree_key)
+        }
+        EventPayload::EffectTransitioned { intent_id, .. } => {
+            reads.insert(run_key);
+            let effect_key = format!("effect:{run_id}:{intent_id}");
+            reads.insert(effect_key.clone());
+            writes.insert(effect_key.clone());
+            Some(effect_key)
+        }
+        EventPayload::ScopeOpened {
+            scope_id,
+            parent_scope,
+        } => {
+            reads.insert(run_key);
+            let parent_key = format!("scope:{run_id}:{parent_scope}");
+            let child_key = format!("scope:{run_id}:{scope_id}");
+            let tree_key = format!("scope-tree:{run_id}");
+            reads.insert(parent_key.clone());
+            writes.insert(parent_key.clone());
+            writes.insert(child_key);
+            writes.insert(tree_key.clone());
+            Some(tree_key)
+        }
+        EventPayload::ScopeCommitted { scope_id, .. } | EventPayload::ScopeAborted { scope_id } => {
+            reads.insert(run_key);
+            let scope_key = format!("scope:{run_id}:{scope_id}");
+            let tree_key = format!("scope-tree:{run_id}");
+            reads.insert(scope_key.clone());
+            writes.insert(scope_key.clone());
+            writes.insert(tree_key.clone());
+            Some(tree_key)
         }
         EventPayload::AttemptStarted { attempt_id, .. }
         | EventPayload::AttemptYielded { attempt_id, .. } => {

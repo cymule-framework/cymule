@@ -1650,7 +1650,15 @@ func (engine CliEngine) request(request any, response any) error {
 }
 
 func decodeClosedJSON(input []byte, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(input))
+	value, err := decodeUniqueJSON(input)
+	if err != nil {
+		return err
+	}
+	normalized, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(normalized))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return err
@@ -1663,6 +1671,82 @@ func decodeClosedJSON(input []byte, target any) error {
 		return err
 	}
 	return nil
+}
+
+func decodeUniqueJSON(input []byte) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(input))
+	decoder.UseNumber()
+	value, err := readUniqueJSONValue(decoder)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("unexpected trailing JSON value")
+		}
+		return nil, err
+	}
+	return value, nil
+}
+
+func readUniqueJSONValue(decoder *json.Decoder) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return token, nil
+	}
+	switch delimiter {
+	case '{':
+		members := make(map[string]any)
+		for decoder.More() {
+			memberToken, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			member, ok := memberToken.(string)
+			if !ok {
+				return nil, fmt.Errorf("JSON object member name is not a string")
+			}
+			if _, exists := members[member]; exists {
+				return nil, fmt.Errorf("duplicate JSON object member %q", member)
+			}
+			value, err := readUniqueJSONValue(decoder)
+			if err != nil {
+				return nil, err
+			}
+			members[member] = value
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		if closing != json.Delim('}') {
+			return nil, fmt.Errorf("JSON object did not close")
+		}
+		return members, nil
+	case '[':
+		values := make([]any, 0)
+		for decoder.More() {
+			value, err := readUniqueJSONValue(decoder)
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, value)
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		if closing != json.Delim(']') {
+			return nil, fmt.Errorf("JSON array did not close")
+		}
+		return values, nil
+	default:
+		return nil, fmt.Errorf("unexpected JSON delimiter %q", delimiter)
+	}
 }
 
 func transportFailure(code, message string) EngineFailure {

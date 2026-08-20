@@ -83,6 +83,21 @@ fn process_output_exactly_at_limit_is_accepted() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn process_response_rejects_duplicate_protocol_members() {
+    let script = r#"
+      request=$(/bin/cat)
+      test -n "$request" || exit 8
+      printf '%s' '{"type":"manifest","type":"defect","manifest":{"plugin_version":"cymule.plugin/2","implementation_id":"process:test","components":{},"effects":{}}}'
+    "#;
+    let mut executor = shell(script);
+    assert!(matches!(
+        executor.describe(),
+        Err(RuntimeError::Substrate { code, .. }) if code == "invalid_plugin_response"
+    ));
+}
+
 #[test]
 fn relative_executable_is_rejected() {
     assert!(matches!(

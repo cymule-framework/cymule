@@ -5,6 +5,9 @@
   Engine error that preserves the Rust failure object; never parse stderr or a
   human message into semantic categories, and never recommend replay merely
   because the transport ended without a response.
+- Engine response JSON must reject duplicate object members recursively before
+  shape validation. SDKs must not rely on the host parser's last-key-wins
+  behavior or retry with a permissive decoder.
 - Contract issue decoding preserves both the failing value `path` and the
   failing `schema_path`; neither SDK may flatten them into display text.
 - Every SDK exposes reusable definition declaration and `invoke` authoring with

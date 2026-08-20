@@ -75,7 +75,7 @@ pub struct PluginManifest {
 
 /// Versioned process-plugin request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginRequest {
     /// Describe supported abstract operations.
     Describe,
@@ -117,7 +117,7 @@ pub enum PluginRequest {
 
 /// Versioned process-plugin response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginResponse {
     /// Capability advertisement.
     Manifest {

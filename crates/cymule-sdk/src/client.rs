@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use cymule_core::{PlanCandidate, SealedPlan};
+use cymule_core::{PlanCandidate, SealedPlan, decode_json};
 use cymule_durable::{DurableCommand, WaitActivation};
 use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
@@ -89,8 +89,8 @@ impl CliEngine {
                 ),
             ));
         }
-        let envelope: EngineResponseEnvelope<EngineResponse> =
-            serde_json::from_slice(&output.stdout).map_err(|error| {
+        let envelope: EngineResponseEnvelope<EngineResponse> = decode_json(&output.stdout)
+            .map_err(|error| {
                 EngineFailure::transport("invalid_engine_response", error.to_string())
             })?;
         envelope.into_result()

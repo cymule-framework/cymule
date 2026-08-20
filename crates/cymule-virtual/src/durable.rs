@@ -564,7 +564,7 @@ impl DurableVirtualController {
                 return Err(error);
             }
         };
-        let manifest: crate::VirtualArchiveManifest = match serde_json::from_slice(&bytes) {
+        let manifest: crate::VirtualArchiveManifest = match cymule_core::decode_json(&bytes) {
             Ok(manifest) => manifest,
             Err(error) => {
                 *scheduler = scheduler_before;

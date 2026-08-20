@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -74,6 +75,17 @@ func TestJSONResourcePreservesNullValue(t *testing.T) {
 	inline := wire["inline"].(map[string]any)
 	if value, exists := inline["value"]; !exists || value != nil {
 		t.Fatalf("inline JSON null was not preserved: %#v", inline)
+	}
+}
+
+func TestEngineJSONRejectsDuplicateObjectMembers(t *testing.T) {
+	var value map[string]any
+	err := decodeClosedJSON(
+		[]byte(`{"response":{"type":"verified","type":"executed"}}`),
+		&value,
+	)
+	if err == nil || !strings.Contains(err.Error(), "duplicate JSON object member") {
+		t.Fatalf("expected duplicate member rejection, got %v", err)
 	}
 }
 
