@@ -483,6 +483,9 @@ fn durable_machine_with_wait() -> (Machine, Continuation, WaitCondition) {
             },
         })
         .expect("Run starts");
+    let input = machine
+        .put_artifact("test/input", b"virtual wait input".to_vec())
+        .expect("input stores");
     let continuation = Continuation {
         run_id: "run:a".to_owned(),
         plan_id: plan.plan_id,
@@ -490,11 +493,7 @@ fn durable_machine_with_wait() -> (Machine, Continuation, WaitCondition) {
         frames: vec![FrameState {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
-            input: cymule_core::ArtifactRef {
-                identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
-                artifact_id: format!("sha256:{}", "0".repeat(64)),
-                kind: "test/input".to_owned(),
-            },
+            input,
             region_path: Vec::new(),
             next_step: 0,
             locals: BTreeMap::new(),

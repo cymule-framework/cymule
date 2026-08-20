@@ -81,6 +81,8 @@
   Cancellation fences late worker output.
 - Retry classification and limits belong to explicit policy/control callers.
   Never infer retryability from provider error strings or worker exit codes.
+- M1 integration fixtures retain every Continuation input Artifact before
+  checkpointing virtual waits; a digest-shaped dangling reference is invalid.
 - Claim and disposition checkpoints use stable command IDs. Result, failure, or
   cancellation Artifacts commit atomically with the occurrence and frontier.
 - Control checkpoints retain the exact command and occurrence receipt. Replaying
