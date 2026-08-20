@@ -10,9 +10,9 @@ use cymule_durable::{DurableCommand, WaitActivation};
 use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{
-    ENGINE_PROTOCOL_VERSION, EmbeddedRuntime, EngineFailure, EngineFailureCategory, EnginePhase,
-    EngineRequestEnvelope, EngineResponseEnvelope, EngineRetryDisposition, ExecutionResult,
-    ProcessPlugin,
+    ENGINE_PROTOCOL_VERSION, EmbeddedRuntime, EngineContractSide, EngineFailure,
+    EngineFailureCategory, EngineIssue, EnginePhase, EngineRequestEnvelope,
+    EngineResponseEnvelope, EngineRetryDisposition, ExecutionResult, ProcessPlugin,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -228,6 +228,25 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
 fn map_resource_error(error: &cymule_resource::ResourceError) -> EngineFailure {
     use cymule_resource::ResourceError;
 
+    if let ResourceError::Schema(issue) = error {
+        let mut failure = EngineFailure::new(
+            EngineFailureCategory::ContractViolation,
+            EnginePhase::SealResource,
+            "resource_schema_violation",
+            "typed Artifact value violates its declared schema",
+        );
+        failure.contract = Some(issue.codec_id.clone().into());
+        failure.contract_side = Some(EngineContractSide::Input);
+        failure.path = Some(issue.instance_path.clone().into());
+        failure.issues = vec![EngineIssue {
+            code: "schema_violation".into(),
+            message: issue.message.clone().into(),
+            path: Some(issue.instance_path.clone().into()),
+        }];
+        failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
+        return failure;
+    }
+
     let (category, code, retry) = match &error {
         ResourceError::Validation(_) => (
             EngineFailureCategory::Validation,
@@ -250,6 +269,7 @@ fn map_resource_error(error: &cymule_resource::ResourceError) -> EngineFailure {
             "resource_integrity_failed",
             Some(EngineRetryDisposition::Never),
         ),
+        ResourceError::Schema(_) => unreachable!("schema errors return above"),
     };
     let mut failure =
         EngineFailure::new(category, EnginePhase::SealResource, code, error.to_string());
