@@ -559,10 +559,45 @@ impl ManagedChild {
     ///
     /// Returns an error when status observation fails, the child exits, or the bound expires.
     pub fn wait_for_path(&mut self, path: &Path, timeout: Duration) -> TestWorldResult<()> {
+        self.wait_for_barrier(path, None, timeout)
+    }
+
+    /// Wait until a child atomically exposes one exact barrier payload.
+    ///
+    /// File existence alone is not a barrier: `write` may create a zero-length
+    /// file before its payload becomes visible. Crash tests use this method so
+    /// the parent never kills the child before the named boundary is complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when status observation fails, the child exits, or the
+    /// exact payload does not become visible before the bound expires.
+    pub fn wait_for_content(
+        &mut self,
+        path: &Path,
+        expected: &[u8],
+        timeout: Duration,
+    ) -> TestWorldResult<()> {
+        self.wait_for_barrier(path, Some(expected), timeout)
+    }
+
+    fn wait_for_barrier(
+        &mut self,
+        path: &Path,
+        expected: Option<&[u8]>,
+        timeout: Duration,
+    ) -> TestWorldResult<()> {
         let deadline = Instant::now() + timeout;
         loop {
-            if fs::metadata(path).is_ok() {
-                return Ok(());
+            match expected {
+                None if fs::metadata(path).is_ok() => return Ok(()),
+                Some(expected) => match fs::read(path) {
+                    Ok(actual) if actual == expected => return Ok(()),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                },
+                None => {}
             }
             let Some(child) = self.child.as_mut() else {
                 return Err(TestWorldError::Invalid(

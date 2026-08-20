@@ -7,7 +7,6 @@ suites = [
   "harness",
   "test-world-deterministic",
   "rust-core",
-  "rust-consumers",
   "rust-workspace",
   "rust-durable",
   "rust-virtual",
@@ -81,12 +80,6 @@ description = "Run formatting, static analysis, and documentation for the Rust w
 lane = "rust-static"
 tools = ["rust"]
 commands = [["./scripts/verify-rust-static.sh"]]
-
-[suites.rust-consumers]
-description = "Compile every workspace package and test target as the Cargo reverse-dependency witness."
-lane = "rust-static"
-tools = ["rust"]
-commands = [["cargo", "check", "--workspace", "--all-targets"]]
 
 [suites.rust-core]
 description = "Run the small Rust semantic kernel and its property tests."
@@ -291,7 +284,6 @@ requires = [
   "test-world-deterministic",
   "test-world-live-process",
   "rust-workspace",
-  "rust-consumers",
   "rust-core",
   "rust-durable",
   "rust-virtual",
@@ -317,6 +309,48 @@ requires = [
   "mlir",
 ]
 
+[suites.catalog]
+description = "Run every normal and scheduled verification leaf after harness catalog or runner changes."
+abstract = true
+requires = [
+  "full",
+  "rust-soak",
+  "rust-coverage",
+  "rust-coverage-plugins",
+  "rust-mutation",
+  "rust-mutation-evolution-m4",
+  "rust-mutation-plugins",
+  "rust-portability",
+]
+
+# Every workspace package owns one or more behavioral leaves. Source changes
+# select the owner plus the complete transitive Cargo reverse-dependency closure
+# through this table; compilation alone is not a behavioral witness.
+[package_suites]
+"cymule-core" = ["rust-core"]
+"cymule-runtime" = ["protocol"]
+"cymule-durable" = ["rust-durable"]
+"cymule-evolution" = ["rust-evolution"]
+"cymule-resource" = ["rust-resource"]
+"cymule" = ["sdk-rust"]
+"cymule-virtual" = ["rust-virtual"]
+"cymule-cli" = ["protocol"]
+"cymule-example-durable-evaluation-campaign" = ["example"]
+"cymule-example-hello-world" = ["example"]
+"cymule-directory-store" = ["rust-directory-plugin"]
+"cymule-store-sqlite" = ["rust-store-plugins"]
+"cymule-resource-fs" = ["rust-resource-plugins"]
+"cymule-resource-object-store" = ["rust-resource-plugins"]
+"cymule-activation-http" = ["rust-activation-http"]
+"cymule-activation-timer" = ["rust-activation-timer"]
+"cymule-clock-system" = ["rust-clock-system"]
+"cymule-executor-process" = ["rust-executor-plugin"]
+"cymule-observability-otel" = ["rust-observability-plugin"]
+"cymule-agent-mcp" = ["rust-agent-mcp-plugin"]
+"cymule-agent" = ["rust-agent-plugin"]
+"cymule-test-adapter" = ["protocol"]
+"cymule-test-world" = ["test-world-deterministic", "test-world-live-process"]
+
 # Ordered path ownership. Matching routes form a conservative union; a path
 # matching no route escalates the complete change to `full`.
 
@@ -334,7 +368,7 @@ suites = ["rust-core"]
 
 [[routes]]
 patterns = ["crates/cymule-core/src/**", "crates/cymule-core/Cargo.toml", "crates/cymule-runtime/**", "crates/cymule-cli/**"]
-suites = ["rust-workspace", "protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go", "example"]
+suites = ["protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go", "example"]
 
 [[routes]]
 patterns = ["crates/cymule-durable/tests/**", "crates/cymule-durable/src/executor.rs", "crates/cymule-durable/src/error.rs", "crates/cymule-durable/src/wait_source.rs"]
@@ -433,7 +467,15 @@ patterns = ["compiler/**"]
 suites = ["mlir"]
 
 [[routes]]
-patterns = ["tests/harness/**", "scripts/test_harness.py", "scripts/validate_docs.py"]
+patterns = ["tests/harness/suites.toml", "scripts/test_harness.py"]
+suites = ["catalog"]
+
+[[routes]]
+patterns = ["tests/harness/**"]
+suites = ["harness", "docs"]
+
+[[routes]]
+patterns = ["scripts/validate_docs.py"]
 suites = ["harness", "docs"]
 
 [[routes]]
@@ -453,5 +495,33 @@ patterns = [".gitignore"]
 suites = ["docs"]
 
 [[routes]]
-patterns = ["scripts/verify*.sh", ".github/workflows/**"]
+patterns = ["scripts/verify-soak.sh"]
+suites = ["rust-soak"]
+
+[[routes]]
+patterns = ["scripts/verify-analysis.sh"]
+suites = ["rust-coverage", "rust-coverage-plugins", "rust-mutation", "rust-mutation-evolution-m4", "rust-mutation-plugins"]
+
+[[routes]]
+patterns = ["scripts/verify-sdk.sh"]
+suites = ["sdk-rust", "sdk-typescript", "sdk-python", "sdk-go"]
+
+[[routes]]
+patterns = ["scripts/verify-protocol.sh"]
+suites = ["protocol"]
+
+[[routes]]
+patterns = ["scripts/verify-example.sh"]
+suites = ["example"]
+
+[[routes]]
+patterns = ["scripts/verify-typescript-package.sh"]
+suites = ["package-typescript"]
+
+[[routes]]
+patterns = ["scripts/verify-rust-static.sh"]
+suites = ["rust-workspace"]
+
+[[routes]]
+patterns = ["scripts/verify.sh", "scripts/verify-rust.sh", ".github/workflows/**"]
 suites = ["full"]

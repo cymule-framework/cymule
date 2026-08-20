@@ -417,7 +417,11 @@ fn every_agent_occurrence_journal_boundary_survives_real_process_death() {
                 .stderr(Stdio::inherit());
             let mut child = ManagedChild::spawn(&mut command).expect("kill worker starts");
             child
-                .wait_for_path(&marker, Duration::from_secs(20))
+                .wait_for_content(
+                    &marker,
+                    fail_at.to_string().as_bytes(),
+                    Duration::from_secs(20),
+                )
                 .expect("kill worker reaches the selected journal barrier");
             assert_eq!(
                 fs::read_to_string(&marker)
@@ -826,7 +830,11 @@ fn run_and_kill(
     }
     let mut child = ManagedChild::spawn(&mut command).expect("kill worker starts");
     child
-        .wait_for_path(marker, Duration::from_secs(20))
+        .wait_for_content(
+            marker,
+            expected_boundary.to_string().as_bytes(),
+            Duration::from_secs(20),
+        )
         .expect("kill worker reaches the selected journal barrier");
     assert_eq!(
         fs::read_to_string(marker)

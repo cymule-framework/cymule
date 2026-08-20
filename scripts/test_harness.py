@@ -74,7 +74,7 @@ def workspace_package_graph() -> tuple[dict[str, str], dict[str, set[str]]]:
 
 
 def cargo_affected_packages(paths: list[str]) -> dict[str, list[str]]:
-    """Map changed package source paths to owner plus direct Cargo consumers."""
+    """Map changed package source paths to owner plus transitive Cargo consumers."""
     roots, reverse = workspace_package_graph()
     affected: dict[str, list[str]] = {}
     for raw_path in sorted(set(paths)):
@@ -87,7 +87,15 @@ def cargo_affected_packages(paths: list[str]) -> dict[str, list[str]]:
         if not owners:
             continue
         _, owner = max(owners, key=lambda item: len(item[0]))
-        affected[path] = sorted({owner, *reverse[owner]})
+        closure = {owner}
+        frontier = [owner]
+        while frontier:
+            dependency = frontier.pop()
+            for consumer in reverse[dependency]:
+                if consumer not in closure:
+                    closure.add(consumer)
+                    frontier.append(consumer)
+        affected[path] = sorted(closure)
     return affected
 
 
@@ -173,6 +181,29 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         unknown = sorted(set(selected) - suites.keys())
         if unknown:
             raise ValueError(f"route {index} references unknown suites: {', '.join(unknown)}")
+    package_suites = manifest.get("package_suites")
+    if not isinstance(package_suites, dict):
+        raise ValueError("test harness manifest must define package_suites")
+    roots, _ = workspace_package_graph()
+    workspace_packages = set(roots.values())
+    if set(package_suites) != workspace_packages:
+        missing = sorted(workspace_packages - set(package_suites))
+        extra = sorted(set(package_suites) - workspace_packages)
+        raise ValueError(
+            f"package_suites must cover the workspace exactly; missing={missing}, extra={extra}"
+        )
+    for package, selected in package_suites.items():
+        if (
+            not isinstance(selected, list)
+            or not selected
+            or not all(isinstance(value, str) for value in selected)
+        ):
+            raise ValueError(f"package {package} has invalid behavioral suites")
+        unknown = sorted(set(selected) - suites.keys())
+        if unknown:
+            raise ValueError(
+                f"package {package} references unknown suites: {', '.join(unknown)}"
+            )
     return manifest
 
 
@@ -210,9 +241,13 @@ def select_suites(
             selected.add(suite)
             evidence.setdefault(suite, []).append(path)
     cargo_closure = cargo_affected_packages(paths)
-    if cargo_closure:
-        selected.add("rust-consumers")
-        evidence.setdefault("rust-consumers", []).extend(sorted(cargo_closure))
+    for path, packages in cargo_closure.items():
+        for package in packages:
+            for suite in manifest["package_suites"][package]:
+                selected.add(suite)
+                evidence.setdefault(suite, []).append(f"{path} -> {package}")
+    if "catalog" in selected:
+        return ["catalog"], {"catalog": sorted(set(sum(evidence.values(), [])))}
     if "full" in selected:
         return ["full"], {"full": sorted(set(sum(evidence.values(), [])))}
     return sorted(selected), evidence
@@ -339,6 +374,7 @@ def run_suites(names: list[str], manifest: dict[str, Any], keep_going: bool, rep
     }
     failed = False
     skipped = False
+    infrastructure_error = False
     try:
         for name in expanded:
             suite = manifest["suites"][name]
@@ -359,7 +395,7 @@ def run_suites(names: list[str], manifest: dict[str, Any], keep_going: bool, rep
                 command_started = time.monotonic()
                 try:
                     result = subprocess.run(command, cwd=ROOT, check=False)
-                except OSError as error:
+                except BaseException as error:
                     elapsed_ms = round((time.monotonic() - command_started) * 1000)
                     suite_result["commands"].append(
                         {
@@ -372,8 +408,27 @@ def run_suites(names: list[str], manifest: dict[str, Any], keep_going: bool, rep
                         }
                     )
                     failed = True
+                    infrastructure_error = True
                     suite_failed = True
                     suite_result["status"] = "infrastructure_error"
+                    if not isinstance(error, OSError):
+                        suite_result["duration_ms"] = round(
+                            (time.monotonic() - suite_started) * 1000
+                        )
+                        report["results"].append(suite_result)
+                        completed = set(expanded[: len(report["results"])])
+                        for pending_name in expanded:
+                            if pending_name not in completed:
+                                report["results"].append(
+                                    {
+                                        "suite": pending_name,
+                                        "execution_class": execution_classes[pending_name],
+                                        "commands": [],
+                                        "status": "not_run",
+                                        "duration_ms": 0,
+                                    }
+                                )
+                        raise
                     break
                 elapsed_ms = round((time.monotonic() - command_started) * 1000)
                 command_status = "passed"
@@ -412,9 +467,27 @@ def run_suites(names: list[str], manifest: dict[str, Any], keep_going: bool, rep
             if failed and not keep_going:
                 break
     finally:
+        reported = {result["suite"] for result in report["results"]}
+        for pending_name in expanded:
+            if pending_name not in reported:
+                report["results"].append(
+                    {
+                        "suite": pending_name,
+                        "execution_class": execution_classes[pending_name],
+                        "commands": [],
+                        "status": "not_run",
+                        "duration_ms": 0,
+                    }
+                )
         report["finished_at_unix_ms"] = int(time.time() * 1000)
         report["status"] = (
-            "failed" if failed else "passed_with_skips" if skipped else "passed"
+            "infrastructure_error"
+            if infrastructure_error
+            else "failed"
+            if failed
+            else "passed_with_skips"
+            if skipped
+            else "passed"
         )
         write_report(report, report_path)
         print(f"\nHarness report: {report_path}", flush=True)

@@ -82,6 +82,9 @@
 - Use `ManagedChild` for shared process-death tests. Its Drop path must kill and
   wait even when the caller forgets explicit termination; keep an independent
   leak probe in the live-process suite.
+- A crash barrier is the exact marker payload, not path existence. Use
+  `wait_for_content`; `fs::write` may expose a zero-length or partial file
+  before the named boundary is complete.
 - Effect fault matrices distinguish prepare-response loss, durable enqueue,
   scope commit, dispatch-start claim, provider application, Applied settlement,
   and Unknown observation. Assert exact provider call counts and reject

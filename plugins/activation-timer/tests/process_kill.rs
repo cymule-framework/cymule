@@ -307,7 +307,7 @@ fn timer_selection_activation_and_ack_survive_real_process_death() {
             .stderr(Stdio::inherit());
         let mut child = ManagedChild::spawn(&mut command).expect("timer worker starts");
         child
-            .wait_for_path(&marker, Duration::from_secs(20))
+            .wait_for_content(&marker, mode.as_bytes(), Duration::from_secs(20))
             .expect("timer worker reaches exact barrier");
         assert_eq!(fs::read_to_string(&marker).expect("barrier reads"), mode);
         assert_eq!(

@@ -85,7 +85,7 @@ fn logical_clock_survives_real_process_death_on_both_observation_sides() {
             .stderr(Stdio::inherit());
         let mut child = ManagedChild::spawn(&mut command).expect("clock worker starts");
         child
-            .wait_for_path(&marker, Duration::from_secs(20))
+            .wait_for_content(&marker, mode.as_bytes(), Duration::from_secs(20))
             .expect("clock worker reaches exact barrier");
         assert_eq!(fs::read_to_string(&marker).expect("barrier reads"), mode);
         assert_eq!(

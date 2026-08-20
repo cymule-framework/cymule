@@ -30,8 +30,9 @@ class ChangeRoutingTests(unittest.TestCase):
         self.assertEqual(
             set(suites),
             {
+                "example",
                 "protocol",
-                "rust-consumers",
+                "rust-evolution",
                 "rust-virtual",
                 "sdk-go",
                 "sdk-python",
@@ -50,35 +51,40 @@ class ChangeRoutingTests(unittest.TestCase):
 
     def test_durable_executor_change_does_not_run_unrelated_profiles(self) -> None:
         suites, _ = HARNESS.select_suites(["crates/cymule-durable/src/executor.rs"])
-        self.assertEqual(suites, ["rust-consumers", "rust-durable"])
+        self.assertIn("rust-durable", suites)
+        self.assertIn("rust-agent-plugin", suites)
+        self.assertIn("rust-store-plugins", suites)
+        self.assertNotIn("sdk-go", suites)
+        self.assertNotIn("sdk-python", suites)
+        self.assertNotIn("sdk-typescript", suites)
 
-    def test_durable_store_contract_change_selects_direct_consumers(self) -> None:
+    def test_durable_store_contract_change_selects_transitive_consumers(self) -> None:
         suites, _ = HARNESS.select_suites(["crates/cymule-durable/src/store.rs"])
-        self.assertEqual(
-            set(suites),
-            {
-                "rust-agent-plugin",
-                "rust-consumers",
-                "rust-directory-plugin",
-                "rust-durable",
-                "rust-resource",
-                "rust-virtual",
-            },
-        )
+        for expected in (
+            "rust-agent-plugin",
+            "rust-agent-mcp-plugin",
+            "rust-directory-plugin",
+            "rust-durable",
+            "rust-resource",
+            "rust-store-plugins",
+            "rust-virtual",
+        ):
+            self.assertIn(expected, suites)
 
-    def test_test_world_change_selects_its_three_existing_consumers(self) -> None:
+    def test_test_world_change_selects_every_behavioral_consumer(self) -> None:
         suites, _ = HARNESS.select_suites(["tests/test-world/src/lib.rs"])
-        self.assertEqual(
-            set(suites),
-            {
-                "test-world-deterministic",
-                "test-world-live-process",
-                "rust-consumers",
-                "rust-durable",
-                "rust-store-plugins",
-                "rust-agent-plugin",
-            },
-        )
+        for expected in (
+            "test-world-deterministic",
+            "test-world-live-process",
+            "rust-durable",
+            "rust-store-plugins",
+            "rust-agent-plugin",
+            "rust-resource-plugins",
+            "rust-activation-http",
+            "rust-activation-timer",
+            "rust-clock-system",
+        ):
+            self.assertIn(expected, suites)
 
     def test_unknown_path_escalates_to_full(self) -> None:
         suites, evidence = HARNESS.select_suites(["future-domain/meaning.rs"])
@@ -137,7 +143,7 @@ class ChangeRoutingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid command"):
             HARNESS.validate_manifest(manifest)
 
-    def test_cargo_source_change_reports_owner_and_direct_consumers(self) -> None:
+    def test_cargo_source_change_reports_owner_and_transitive_consumers(self) -> None:
         affected = HARNESS.cargo_affected_packages(
             ["crates/cymule-evolution/src/control.rs"]
         )
@@ -155,7 +161,20 @@ class ChangeRoutingTests(unittest.TestCase):
             affected["plugins/agent-interaction/src/lib.rs"],
         )
         suites, _ = HARNESS.select_suites(["plugins/agent-interaction/src/lib.rs"])
-        self.assertIn("rust-consumers", suites)
+        self.assertIn("rust-agent-plugin", suites)
+        self.assertIn("rust-agent-mcp-plugin", suites)
+
+    def test_harness_authority_changes_select_the_complete_catalog(self) -> None:
+        for path in ("scripts/test_harness.py", "tests/harness/suites.toml"):
+            suites, _ = HARNESS.select_suites([path])
+            self.assertEqual(suites, ["catalog"])
+            expanded = HARNESS.expand_suites(suites, HARNESS.load_manifest())
+            self.assertIn("rust-soak", expanded)
+            self.assertIn("rust-mutation", expanded)
+
+    def test_soak_runner_change_selects_only_the_soak_leaf(self) -> None:
+        suites, _ = HARNESS.select_suites(["scripts/verify-soak.sh"])
+        self.assertEqual(suites, ["rust-soak"])
 
     @staticmethod
     def _run_manifest(command: list[str], *, allow_skip: bool = False) -> dict:
@@ -188,6 +207,14 @@ class ChangeRoutingTests(unittest.TestCase):
 
     def test_executor_exception_is_reported_as_infrastructure_error(self) -> None:
         manifest = self._run_manifest(["missing-command"])
+        manifest["suites"]["second"] = {
+            "description": "second leaf",
+            "lane": "meta",
+            "tools": [],
+            "commands": [["never-runs"]],
+        }
+        manifest["suites"]["full"]["requires"].append("second")
+        manifest["execution_classes"]["deterministic"]["suites"].append("second")
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "report.json"
             with mock.patch.object(HARNESS, "git", return_value="head"), mock.patch.object(
@@ -195,15 +222,17 @@ class ChangeRoutingTests(unittest.TestCase):
                 "run",
                 side_effect=FileNotFoundError("missing-command"),
             ):
-                result = HARNESS.run_suites(["leaf"], manifest, False, report)
+                result = HARNESS.run_suites(["full"], manifest, False, report)
             payload = json.loads(report.read_text())
         self.assertEqual(result, 1)
-        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["status"], "infrastructure_error")
         self.assertEqual(payload["results"][0]["status"], "infrastructure_error")
         self.assertEqual(
             payload["results"][0]["commands"][0]["status"],
             "infrastructure_error",
         )
+        self.assertEqual(payload["results"][1]["suite"], "second")
+        self.assertEqual(payload["results"][1]["status"], "not_run")
 
     def test_optional_skip_is_distinct_from_pass(self) -> None:
         manifest = self._run_manifest(["optional-tool"], allow_skip=True)
@@ -220,6 +249,36 @@ class ChangeRoutingTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(payload["status"], "passed_with_skips")
         self.assertEqual(payload["results"][0]["status"], "skipped")
+
+    def test_keyboard_interrupt_is_reported_before_it_is_propagated(self) -> None:
+        manifest = self._run_manifest(["interrupt"])
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            with mock.patch.object(HARNESS, "git", return_value="head"), mock.patch.object(
+                HARNESS.subprocess,
+                "run",
+                side_effect=KeyboardInterrupt(),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    HARNESS.run_suites(["leaf"], manifest, False, report)
+            payload = json.loads(report.read_text())
+        self.assertEqual(payload["status"], "infrastructure_error")
+        self.assertEqual(payload["results"][0]["status"], "infrastructure_error")
+        self.assertEqual(payload["results"][0]["commands"][0]["status"], "infrastructure_error")
+
+    def test_unknown_runner_exception_is_never_reported_as_passed(self) -> None:
+        manifest = self._run_manifest(["explode"])
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            with mock.patch.object(HARNESS, "git", return_value="head"), mock.patch.object(
+                HARNESS.subprocess,
+                "run",
+                side_effect=RuntimeError("runner exploded"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "runner exploded"):
+                    HARNESS.run_suites(["leaf"], manifest, False, report)
+            payload = json.loads(report.read_text())
+        self.assertEqual(payload["status"], "infrastructure_error")
 
 
 if __name__ == "__main__":

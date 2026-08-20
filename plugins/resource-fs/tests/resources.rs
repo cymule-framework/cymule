@@ -299,7 +299,7 @@ fn filesystem_resource_recovers_from_real_process_death_before_and_after_publica
             .stderr(Stdio::inherit());
         let mut child = ManagedChild::spawn(&mut command).expect("kill worker starts");
         child
-            .wait_for_path(&marker, Duration::from_secs(20))
+            .wait_for_content(&marker, phase.as_bytes(), Duration::from_secs(20))
             .expect("worker reaches exact Resource barrier");
         assert_eq!(fs::read_to_string(&marker).expect("barrier reads"), phase);
         assert_eq!(
