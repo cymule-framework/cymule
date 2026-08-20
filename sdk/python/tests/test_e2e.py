@@ -205,7 +205,11 @@ class EndToEndTest(unittest.TestCase):
         plan = engine.seal(candidate)
         self.assertEqual(plan["plan_id"], expected_plan_id)
         input_value = {"message": "hello from Python"}
-        result = engine.run(plan, input_value, plugin_path, "run:python-e2e")
+        execution = engine.run(plan, input_value, plugin_path, "run:python-e2e")
+        self.assertEqual(execution["status"], "completed")
+        if execution["status"] != "completed":
+            self.fail("expected terminal execution")
+        result = execution["result"]
         self.assertEqual(result["value"], input_value)
         self.assertEqual(len(result["effects"]), 1)
 

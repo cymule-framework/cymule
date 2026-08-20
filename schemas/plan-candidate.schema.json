@@ -112,7 +112,8 @@
       "required": ["id", "op", "wait"],
       "properties": {
         "id": { "$ref": "#/$defs/id" }, "op": { "const": "wait" },
-        "wait": { "$ref": "#/$defs/waitSpec" }
+        "wait": { "$ref": "#/$defs/waitSpec" },
+        "bind": { "$ref": "#/$defs/id" }
       }
     },
     "effect": {

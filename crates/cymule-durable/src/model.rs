@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cymule_core::{
-    ArtifactRef, Machine, MachineCompaction, MachineSnapshot, canonical_digest, content_id,
+    ArtifactRef, Machine, MachineCompaction, MachineSnapshot, Operation, Region, canonical_digest,
+    content_id,
 };
 use serde::{Deserialize, Serialize};
 
@@ -95,7 +96,13 @@ impl DurableState {
                     "wait key {wait_id} does not match its identity"
                 )));
             }
-            validate_wait_artifacts(&machine, wait)?;
+            let continuation = self.continuations.get(&wait.run_id).ok_or_else(|| {
+                DurableError::Validation(format!(
+                    "wait {wait_id} references missing continuation {}",
+                    wait.run_id
+                ))
+            })?;
+            validate_wait_artifacts(&machine, continuation, wait)?;
         }
         let mut activated_waits = BTreeSet::new();
         for (activation_id, activation) in &self.wait_activations {
@@ -296,7 +303,11 @@ fn validate_continuation_artifacts(
     Ok(())
 }
 
-fn validate_wait_artifacts(machine: &Machine, wait: &WaitCondition) -> DurableResult<()> {
+fn validate_wait_artifacts(
+    machine: &Machine,
+    continuation: &Continuation,
+    wait: &WaitCondition,
+) -> DurableResult<()> {
     match &wait.kind {
         WaitKind::Signal { key } if key.is_empty() => {
             return Err(DurableError::Validation(format!(
@@ -324,7 +335,88 @@ fn validate_wait_artifacts(machine: &Machine, wait: &WaitCondition) -> DurableRe
     if let Some(result) = &wait.result {
         require_artifact(machine, result, &format!("wait {} result", wait.wait_id))?;
     }
+    if let Some(binding) = &wait.result_binding {
+        if binding.invocation_id.is_empty()
+            || binding.definition_id.is_empty()
+            || binding.site_id.is_empty()
+            || binding.local.is_empty()
+        {
+            return Err(DurableError::Validation(format!(
+                "wait {} result binding is incomplete",
+                wait.wait_id
+            )));
+        }
+        let frame = continuation.frames.iter().find(|frame| {
+            frame.invocation_id == binding.invocation_id
+                && frame.definition_id == binding.definition_id
+                && frame.region_path == binding.region_path
+        });
+        let plan = machine.plan(&continuation.plan_id).ok_or_else(|| {
+            DurableError::Validation(format!(
+                "wait {} owning Plan {} is missing",
+                wait.wait_id, continuation.plan_id
+            ))
+        })?;
+        let definition = plan
+            .candidate
+            .definitions
+            .iter()
+            .find(|definition| definition.id == binding.definition_id)
+            .ok_or_else(|| {
+                DurableError::Validation(format!(
+                    "wait {} owning definition {} is missing",
+                    wait.wait_id, binding.definition_id
+                ))
+            })?;
+        let region = region_at_path(&definition.body, &binding.region_path)?;
+        let step = region.steps.get(binding.step_index).ok_or_else(|| {
+            DurableError::Validation(format!("wait {} owning step is missing", wait.wait_id))
+        })?;
+        if step.id != binding.site_id
+            || !matches!(&step.operation, Operation::Wait { bind, .. } if bind.as_deref() == Some(binding.local.as_str()))
+        {
+            return Err(DurableError::Validation(format!(
+                "wait {} result binding does not match its Plan site",
+                wait.wait_id
+            )));
+        }
+        match (wait.state, wait.result.as_ref(), frame) {
+            (WaitState::Pending, None, Some(frame))
+                if frame.definition_id == binding.definition_id
+                    && frame.region_path == binding.region_path
+                    && frame.next_step == binding.step_index + 1
+                    && !frame.locals.contains_key(&binding.local) => {}
+            (WaitState::Completed, Some(result), Some(frame))
+                if frame.definition_id == binding.definition_id
+                    && frame.region_path == binding.region_path
+                    && frame.next_step > binding.step_index
+                    && frame.locals.get(&binding.local) == Some(result) => {}
+            (WaitState::Completed, Some(_), None) => {}
+            _ => {
+                return Err(DurableError::Validation(format!(
+                    "wait {} result binding is not reflected by its owning frame",
+                    wait.wait_id
+                )));
+            }
+        }
+    }
     Ok(())
+}
+
+fn region_at_path<'a>(root: &'a Region, path: &[usize]) -> DurableResult<&'a Region> {
+    let mut region = root;
+    for index in path {
+        let step = region.steps.get(*index).ok_or_else(|| {
+            DurableError::Validation("wait result binding Region path is invalid".to_owned())
+        })?;
+        let Operation::Scope { body, .. } = &step.operation else {
+            return Err(DurableError::Validation(
+                "wait result binding Region path crosses a non-scope step".to_owned(),
+            ));
+        };
+        region = body;
+    }
+    Ok(region)
 }
 
 fn validate_dispatch_artifacts(machine: &Machine, dispatch: &EffectDispatch) -> DurableResult<()> {
@@ -569,10 +661,31 @@ pub struct WaitCondition {
     pub kind: WaitKind,
     /// Whether only one completion may win.
     pub consume_once: bool,
+    /// Owning semantic frame local for a Plan-declared wait, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_binding: Option<WaitResultBinding>,
     /// Wait lifecycle.
     pub state: WaitState,
     /// Completion artifact when resolved.
     pub result: Option<ArtifactRef>,
+}
+
+/// Exact frame-local destination for one Plan-declared wait result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitResultBinding {
+    /// Structural invocation that owns the local.
+    pub invocation_id: String,
+    /// Definition containing the wait operation.
+    pub definition_id: String,
+    /// Stable wait operation site.
+    pub site_id: String,
+    /// Nested Region path within the definition.
+    pub region_path: Vec<usize>,
+    /// Wait step index within that Region.
+    pub step_index: usize,
+    /// Required local binding name declared by the wait operation.
+    pub local: String,
 }
 
 /// Provider-neutral wait kinds.

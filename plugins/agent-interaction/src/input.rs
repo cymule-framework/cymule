@@ -73,6 +73,7 @@ impl AgentInputController {
                         schema: request.schema,
                     },
                     consume_once: true,
+                    result_binding: None,
                     state: WaitState::Pending,
                     result: None,
                 },

@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use crate::PluginExpectedFailure;
+use crate::{PluginExpectedFailure, SuspensionBoundary};
 
 /// Runtime result type.
 pub type RuntimeResult<T> = std::result::Result<T, RuntimeError>;
@@ -22,7 +22,7 @@ pub enum RuntimeError {
         message: String,
     },
     /// IR execution reached a durable wait unsupported by one-shot execution.
-    Suspended(String),
+    Suspended(SuspensionBoundary),
     /// A concrete process or I/O substrate failed.
     Substrate {
         /// Stable substrate failure code.
@@ -97,7 +97,11 @@ impl Display for RuntimeError {
             Self::PluginDefect { code, message } => {
                 write!(formatter, "plugin_defect: {code}: {message}")
             }
-            Self::Suspended(message) => write!(formatter, "run_suspended: {message}"),
+            Self::Suspended(boundary) => write!(
+                formatter,
+                "run_suspended: wait site {} reached binding {:?}",
+                boundary.site_id, boundary.result_bind
+            ),
             Self::Substrate { code, message } => {
                 write!(formatter, "substrate_failed: {code}: {message}")
             }

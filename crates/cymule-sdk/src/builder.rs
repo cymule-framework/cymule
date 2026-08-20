@@ -142,10 +142,10 @@ impl FlowBuilder {
     }
 
     /// Append a durable suspension boundary.
-    pub fn wait(mut self, site: impl Into<String>, wait: WaitSpec) -> Self {
+    pub fn wait(mut self, site: impl Into<String>, wait: WaitSpec, bind: Option<String>) -> Self {
         self.steps.push(Step {
             id: site.into(),
-            operation: Operation::Wait { wait },
+            operation: Operation::Wait { wait, bind },
         });
         self
     }

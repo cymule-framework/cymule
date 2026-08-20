@@ -14,7 +14,7 @@ pub use error::{CoreError, Result};
 pub use ir::{
     ComponentContract, Definition, DispatchPolicy, EffectContract, EffectProfile, Expression,
     IR_VERSION, MutationKind, Operation, PlanCandidate, ReconciliationMode, Region, ScopeMode,
-    SealedPlan, Step, WaitSpec,
+    SealedPlan, Step, WaitSpec, seal_plan,
 };
 pub use machine::{Machine, MachineBaseSnapshot, MachineCompaction, MachineSnapshot};
 pub use model::{

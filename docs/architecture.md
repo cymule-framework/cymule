@@ -158,6 +158,12 @@ readiness in one CAS. Stable redelivery is safe, a consume-once signal token has
 at most one consuming winner, and a resumed Continuation receives a new fenced
 Attempt epoch.
 
+For a Plan wait, the parked record pins the owning frame, definition, Region
+path, site, step, and optional result local. The activation CAS writes the
+result Artifact into that local before the Continuation becomes ready, so later
+expressions consume durable frame state after reopen. Embedded execution exposes
+the typed boundary but creates no Continuation.
+
 Production HTTP and timer sources persist the exact selected targets before
 delivery, so an acknowledgement lost after M1 admission cannot cause target
 reselection on restart. `cymule-clock-system` separately converts OS wall-clock

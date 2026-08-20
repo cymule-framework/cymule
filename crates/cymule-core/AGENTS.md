@@ -16,6 +16,10 @@
 - `Operation::Invoke` targets a definition in the same sealed Plan. Keep
   definition lookup semantic and immutable; logical registries and future-head
   selection belong in `cymule-evolution`.
+- Reject self-recursion and every recursive invocation SCC before Plan identity
+  is computed; collect invokes through nested scopes and permit acyclic diamonds.
+- `seal_plan` is the sole Plan sealer. Its pure Draft 2020-12 compilation uses
+  the maintained schema library with external retrieval disabled.
 - Do not add a provider name or transport detail to IR, events, or projections.
 - `MachineSnapshot::command_digests` exposes only stable validation evidence for
   durable exact-delta checks. Keep the private command-record representation and

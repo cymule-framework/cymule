@@ -338,12 +338,15 @@ impl EngineFailure {
                 failure.retry_disposition = Some(EngineRetryDisposition::Never);
                 failure
             }
-            RuntimeError::Suspended(message) => {
+            RuntimeError::Suspended(boundary) => {
                 let mut failure = Self::new(
                     EngineFailureCategory::AdmissionDenied,
                     phase,
                     "embedded_profile_suspended",
-                    message,
+                    format!(
+                        "wait site {} reached binding {:?}",
+                        boundary.site_id, boundary.result_bind
+                    ),
                 );
                 failure.retry_disposition = Some(EngineRetryDisposition::Never);
                 failure

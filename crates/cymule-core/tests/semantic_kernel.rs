@@ -7,7 +7,7 @@ use cymule_core::{
     ComponentContract, CoreError, Definition, DispatchPolicy, EffectContract, EffectPhase,
     EffectProfile, EffectTransition, Event, EventPayload, Expression, Machine, MutationKind,
     Operation, PlanCandidate, ReconciliationMode, ReconciliationResolution, ReconciliationState,
-    Region, ReplayAvailability, ScopeStatus, Step, WorldOutcome, effect_intent_id,
+    Region, ReplayAvailability, ScopeStatus, SealedPlan, Step, WorldOutcome, effect_intent_id,
     effect_obligation_id,
 };
 use proptest::prelude::*;
@@ -88,6 +88,18 @@ fn candidate() -> PlanCandidate {
     }
 }
 
+fn seal_for_kernel(candidate: PlanCandidate) -> Result<SealedPlan, CoreError> {
+    cymule_core::seal_plan(candidate)
+}
+
+fn insert_plan(machine: &mut Machine, candidate: PlanCandidate) -> SealedPlan {
+    let plan = seal_for_kernel(candidate).expect("kernel test candidate validates");
+    machine
+        .insert_plan(plan.clone())
+        .expect("kernel test Plan inserts");
+    plan
+}
+
 fn envelope(machine: &Machine, sequence: u64, run_id: &str, command: Command) -> CommandEnvelope {
     CommandEnvelope {
         command_version: COMMAND_VERSION.to_owned(),
@@ -105,19 +117,19 @@ fn envelope(machine: &Machine, sequence: u64, run_id: &str, command: Command) ->
 
 #[test]
 fn plan_identity_is_canonical_and_tamper_evident() {
-    let first = candidate().seal().expect("candidate seals");
+    let first = seal_for_kernel(candidate()).expect("candidate seals");
     let mut reordered = candidate();
     reordered.metadata.insert("z".to_owned(), "last".to_owned());
     reordered
         .metadata
         .insert("a".to_owned(), "first".to_owned());
-    let reordered = reordered.seal().expect("candidate seals");
+    let reordered = seal_for_kernel(reordered).expect("candidate seals");
     let mut same = candidate();
     same.metadata.insert("a".to_owned(), "first".to_owned());
     same.metadata.insert("z".to_owned(), "last".to_owned());
     assert_eq!(
         reordered.plan_id,
-        same.seal().expect("candidate seals").plan_id
+        seal_for_kernel(same).expect("candidate seals").plan_id
     );
 
     let mut tampered = first;
@@ -133,7 +145,10 @@ fn plan_identity_is_canonical_and_tamper_evident() {
         panic!("fixture call exists");
     };
     *component = "missing.component".to_owned();
-    assert!(matches!(invalid.seal(), Err(CoreError::Validation(_))));
+    assert!(matches!(
+        seal_for_kernel(invalid),
+        Err(CoreError::Validation(_))
+    ));
 }
 
 #[test]
@@ -225,12 +240,28 @@ fn public_validation_errors_and_effect_policy_boundaries_are_stable() {
                 key: String::new(),
                 consume_once: true,
             },
+            bind: Some("wait_result".to_owned()),
         },
     });
     assert!(matches!(
         invalid_wait.validate(),
         Err(CoreError::Validation(message)) if message.contains("signal key")
     ));
+
+    let mut ignored_wait_result = candidate();
+    ignored_wait_result.definitions[0].body.steps.push(Step {
+        id: "wait.ignored".to_owned(),
+        operation: Operation::Wait {
+            wait: cymule_core::WaitSpec::Signal {
+                key: "signal:ignored".to_owned(),
+                consume_once: false,
+            },
+            bind: None,
+        },
+    });
+    ignored_wait_result
+        .validate()
+        .expect("wait results may be intentionally ignored");
 
     let mut undefined_binding = candidate();
     undefined_binding.definitions[0].body.result = Expression::Binding {
@@ -250,9 +281,127 @@ fn public_validation_errors_and_effect_policy_boundaries_are_stable() {
 }
 
 #[test]
+fn recursive_definition_sccs_fail_closed_and_diamonds_remain_valid() {
+    fn definition(id: &str, targets: &[(&str, &str)]) -> Definition {
+        Definition {
+            id: id.to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: targets
+                    .iter()
+                    .map(|(site, target)| Step {
+                        id: (*site).to_owned(),
+                        operation: Operation::Invoke {
+                            definition: (*target).to_owned(),
+                            input: Expression::Input,
+                            bind: None,
+                        },
+                    })
+                    .collect(),
+                result: Expression::Literal { value: json!(null) },
+            },
+        }
+    }
+
+    let mut self_cycle = candidate();
+    self_cycle.components.clear();
+    self_cycle.definitions = vec![definition("main", &[("invoke.self", "main")])];
+    assert!(matches!(
+        cymule_core::seal_plan(self_cycle),
+        Err(CoreError::Validation(message)) if message.contains("recursive definition invocation")
+    ));
+
+    for definitions in [
+        vec![
+            definition("main", &[("invoke.a-b", "b")]),
+            definition("b", &[("invoke.b-a", "main")]),
+        ],
+        vec![
+            definition("main", &[("invoke.a-b", "b")]),
+            definition("b", &[("invoke.b-c", "c")]),
+            definition("c", &[("invoke.c-a", "main")]),
+        ],
+    ] {
+        let mut cycle = candidate();
+        cycle.components.clear();
+        cycle.definitions = definitions;
+        assert!(matches!(
+            cymule_core::seal_plan(cycle),
+            Err(CoreError::Validation(message)) if message.contains("recursive definition invocation")
+        ));
+    }
+
+    let mut nested_cycle = candidate();
+    nested_cycle.components.clear();
+    nested_cycle.definitions = vec![Definition {
+        id: "main".to_owned(),
+        input_schema: json!({}),
+        output_schema: json!({}),
+        body: Region {
+            steps: vec![Step {
+                id: "scope.recursive".to_owned(),
+                operation: Operation::Scope {
+                    mode: cymule_core::ScopeMode::Transactional,
+                    body: Box::new(Region {
+                        steps: vec![Step {
+                            id: "invoke.nested-self".to_owned(),
+                            operation: Operation::Invoke {
+                                definition: "main".to_owned(),
+                                input: Expression::Input,
+                                bind: None,
+                            },
+                        }],
+                        result: Expression::Literal { value: json!(null) },
+                    }),
+                    bind: None,
+                },
+            }],
+            result: Expression::Literal { value: json!(null) },
+        },
+    }];
+    assert!(cymule_core::seal_plan(nested_cycle).is_err());
+
+    let mut diamond = candidate();
+    diamond.components.clear();
+    diamond.definitions = vec![
+        definition(
+            "main",
+            &[("invoke.left", "left"), ("invoke.right", "right")],
+        ),
+        definition("left", &[("invoke.left-leaf", "leaf")]),
+        definition("right", &[("invoke.right-leaf", "leaf")]),
+        definition("leaf", &[]),
+    ];
+    cymule_core::seal_plan(diamond).expect("acyclic diamond seals");
+}
+
+#[test]
+fn machine_insert_and_restore_reject_invalid_executable_plan_schemas() {
+    let mut malformed = candidate();
+    malformed.definitions[0].input_schema = json!({"type": 42});
+    let plan = SealedPlan {
+        plan_id: cymule_core::content_id("cymule.plan/1", &malformed)
+            .expect("malformed candidate still canonicalizes"),
+        candidate: malformed,
+    };
+    let mut machine = Machine::new();
+    assert!(matches!(
+        machine.insert_plan(plan.clone()),
+        Err(CoreError::Validation(message)) if message.contains("schema is invalid")
+    ));
+    let mut snapshot = Machine::new().snapshot();
+    snapshot.plans.push(plan);
+    assert!(matches!(
+        Machine::restore(snapshot),
+        Err(CoreError::Validation(message)) if message.contains("schema is invalid")
+    ));
+}
+
+#[test]
 fn command_idempotency_and_stale_action_are_explicit() {
     let mut machine = Machine::new();
-    let plan = machine.seal_plan(candidate()).expect("plan seals");
+    let plan = insert_plan(&mut machine, candidate());
     let start = envelope(
         &machine,
         1,
@@ -309,7 +458,7 @@ fn command_idempotency_and_stale_action_are_explicit() {
 
 #[test]
 fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
-    let sealed = candidate().seal().expect("Plan seals");
+    let sealed = seal_for_kernel(candidate()).expect("Plan seals");
     let invalid = [
         CommandEnvelope {
             command_version: "cymule.command/invalid".to_owned(),
@@ -551,7 +700,7 @@ fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
 #[test]
 fn machine_snapshot_restores_projection_artifacts_and_command_deduplication() {
     let mut machine = Machine::new();
-    let plan = machine.seal_plan(candidate()).expect("plan seals");
+    let plan = insert_plan(&mut machine, candidate());
     let start = envelope(
         &machine,
         1,
@@ -613,7 +762,7 @@ fn machine_snapshot_restores_projection_artifacts_and_command_deduplication() {
 #[test]
 fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
     let mut machine = Machine::new();
-    let plan = machine.seal_plan(candidate()).expect("plan seals");
+    let plan = insert_plan(&mut machine, candidate());
     let run_id = "run:compacted-snapshot";
     let start = envelope(
         &machine,
@@ -816,7 +965,7 @@ fn structural_effect_identifiers_are_content_sensitive() {
 #[test]
 fn binding_is_pinned_and_unknown_effect_must_reconcile() {
     let mut machine = Machine::new();
-    let plan = machine.seal_plan(candidate()).expect("plan seals");
+    let plan = insert_plan(&mut machine, candidate());
     let run_id = "run:effect";
     machine
         .submit(envelope(
@@ -1107,7 +1256,7 @@ fn binding_is_pinned_and_unknown_effect_must_reconcile() {
 #[test]
 fn epoch_fences_prior_attempts() {
     let mut machine = Machine::new();
-    let plan = machine.seal_plan(candidate()).expect("plan seals");
+    let plan = insert_plan(&mut machine, candidate());
     let run_id = "run:fence";
     machine
         .submit(envelope(
@@ -1153,7 +1302,7 @@ fn epoch_fences_prior_attempts() {
 #[test]
 fn replay_orders_a_causal_set_and_reports_retention_loss() {
     let mut machine = Machine::new();
-    let plan = machine.seal_plan(candidate()).expect("plan seals");
+    let plan = insert_plan(&mut machine, candidate());
     let run_id = "run:replay";
     machine
         .submit(envelope(
@@ -1268,7 +1417,7 @@ proptest! {
     ) {
         let run_id = "run:causal-property";
         let mut machine = Machine::new();
-        let plan = machine.seal_plan(candidate()).expect("plan seals");
+        let plan = insert_plan(&mut machine, candidate());
         machine
             .submit(envelope(
                 &machine,

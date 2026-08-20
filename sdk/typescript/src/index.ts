@@ -574,7 +574,7 @@ export interface PlanCandidate {
 export type Step =
   | { id: string; op: "call"; component: string; input: Expression; bind: string }
   | { id: string; op: "invoke"; definition: string; input: Expression; bind: string }
-  | { id: string; op: "wait"; wait: WaitSpec }
+  | { id: string; op: "wait"; wait: WaitSpec; bind?: string }
   | { id: string; op: "effect"; effect: string; input: Expression; occurrence: string }
   | {
       id: string;
@@ -597,6 +597,20 @@ export interface ExecutionResult {
   precondition_token: string;
   effects: string[];
 }
+
+export interface SuspensionBoundary {
+  run_id: string;
+  plan_id: string;
+  definition_id: string;
+  invocation_id: string;
+  site_id: string;
+  wait: WaitSpec;
+  result_bind: string | null;
+}
+
+export type ExecutionOutcome =
+  | { status: "completed"; result: ExecutionResult }
+  | { status: "suspended"; suspension: SuspensionBoundary };
 
 export class FlowBuilder {
   readonly #candidate: PlanCandidate;
@@ -674,8 +688,8 @@ export class FlowBuilder {
     return this;
   }
 
-  wait(site: string, wait: WaitSpec): this {
-    this.entry().body.steps.push({ id: site, op: "wait", wait });
+  wait(site: string, wait: WaitSpec, bind?: string): this {
+    this.entry().body.steps.push({ id: site, op: "wait", wait, ...(bind === undefined ? {} : { bind }) });
     return this;
   }
 
@@ -1412,10 +1426,12 @@ export class CliEngine {
     return response.command;
   }
 
-  run(plan: SealedPlan, input: Json, plugin: string, runId: string): ExecutionResult {
+  run(plan: SealedPlan, input: Json, plugin: string, runId: string): ExecutionOutcome {
     const response = this.request({ type: "run", plan, input, plugin, run_id: runId });
-    if (response.type !== "executed") throw unexpectedResponse("executed", response.type);
-    return response.result;
+    if (response.type !== "execution_boundary") {
+      throw unexpectedResponse("execution_boundary", response.type);
+    }
+    return response.execution;
   }
 
   private request(request: EngineRequest): EngineResponse {
@@ -1496,7 +1512,7 @@ type EngineResponse =
   | { type: "verified_durable_command"; command: DurableCommand }
   | { type: "verified_evolution_command"; command: EvolutionCommand }
   | { type: "verified_live_evolution_command"; command: LiveEvolutionCommand }
-  | { type: "executed"; result: ExecutionResult }
+  | { type: "execution_boundary"; execution: ExecutionOutcome }
   | { type: "verified" };
 
 type EngineResponseEnvelope =
@@ -1556,7 +1572,7 @@ function validateSuccessResponse(value: unknown): void {
     ["verified_durable_command", "command,type"],
     ["verified_evolution_command", "command,type"],
     ["verified_live_evolution_command", "command,type"],
-    ["executed", "result,type"], ["verified", "type"],
+    ["execution_boundary", "execution,type"], ["verified", "type"],
   ]).get(value.type);
   if (payload === undefined || Object.keys(value).sort().join(",") !== payload) {
     throw transportError("invalid_engine_response", "success response fields are not closed");

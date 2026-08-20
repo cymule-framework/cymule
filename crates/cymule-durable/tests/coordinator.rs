@@ -8,6 +8,7 @@ use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, ComponentContract, Definition, DispatchPolicy,
     EffectContract, EffectProfile, EffectTransition, Expression, Machine, MutationKind,
     PlanCandidate, ROOT_SCOPE_ID, ReconciliationMode, Region, WorldOutcome, effect_intent_id,
+    seal_plan,
 };
 use cymule_durable::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
@@ -46,10 +47,19 @@ impl DurableStore for LostCompactionReceiptStore {
     }
 }
 
+fn seal_into(machine: &mut Machine, candidate: PlanCandidate) -> cymule_core::SealedPlan {
+    let plan = seal_plan(candidate).expect("test Plan seals");
+    machine
+        .insert_plan(plan.clone())
+        .expect("test Plan inserts");
+    plan
+}
+
 fn machine_with_run() -> (Machine, String) {
     let mut machine = Machine::new();
-    let plan = machine
-        .seal_plan(PlanCandidate {
+    let plan = seal_into(
+        &mut machine,
+        PlanCandidate {
             ir_version: cymule_core::IR_VERSION.to_owned(),
             name: "durable_test".to_owned(),
             entry: "main".to_owned(),
@@ -65,8 +75,8 @@ fn machine_with_run() -> (Machine, String) {
                 },
             }],
             metadata: BTreeMap::new(),
-        })
-        .expect("plan seals");
+        },
+    );
     machine
         .submit(CommandEnvelope {
             command_version: COMMAND_VERSION.to_owned(),
@@ -102,8 +112,9 @@ fn submit(machine: &mut Machine, run_id: &str, command_id: &str, command: Comman
 
 fn prepared_effect_transition() -> (Machine, Machine, Continuation, EffectDispatch) {
     let mut machine = Machine::new();
-    let plan = machine
-        .seal_plan(PlanCandidate {
+    let plan = seal_into(
+        &mut machine,
+        PlanCandidate {
             ir_version: cymule_core::IR_VERSION.to_owned(),
             name: "effect_delta_test".to_owned(),
             entry: "main".to_owned(),
@@ -131,8 +142,8 @@ fn prepared_effect_transition() -> (Machine, Machine, Continuation, EffectDispat
                 },
             }],
             metadata: BTreeMap::new(),
-        })
-        .expect("plan seals");
+        },
+    );
     machine
         .submit(CommandEnvelope {
             command_version: COMMAND_VERSION.to_owned(),
@@ -234,7 +245,7 @@ fn continuation(plan_id: String) -> Continuation {
 
 fn direct_run(candidate: PlanCandidate, binding: &ExecutionBinding) -> (Machine, Continuation) {
     let mut machine = Machine::new();
-    let plan = machine.seal_plan(candidate).expect("direct Plan seals");
+    let plan = seal_into(&mut machine, candidate);
     let binding_ref = machine
         .put_artifact(
             EXECUTION_BINDING_VERSION,
@@ -399,6 +410,7 @@ fn public_coordinator_rejects_every_dangling_or_legacy_artifact_reference() {
                 schema: json!({}),
             },
             consume_once: true,
+            result_binding: None,
             state: WaitState::Pending,
             result: None,
         })
@@ -481,6 +493,7 @@ fn wait_completion_survives_reopen_and_readies_the_continuation() {
                 schema: json!({"type": "string"}),
             },
             consume_once: true,
+            result_binding: None,
             state: WaitState::Pending,
             result: None,
         })
@@ -526,6 +539,7 @@ fn identified_signal_activation_is_atomic_idempotent_and_reopenable() {
                     key: "signal:approved".to_owned(),
                 },
                 consume_once,
+                result_binding: None,
                 state: WaitState::Pending,
                 result: None,
             })
@@ -638,6 +652,7 @@ fn signal_activation_rejects_wrong_or_multiple_consume_once_targets_atomically()
                     key: "signal:exclusive".to_owned(),
                 },
                 consume_once: true,
+                result_binding: None,
                 state: WaitState::Pending,
                 result: None,
             })
@@ -730,6 +745,7 @@ fn timer_activation_is_exactly_identified_and_stale_writers_fail_closed() {
                 timer_id: "timer:deadline".to_owned(),
             },
             consume_once: false,
+            result_binding: None,
             state: WaitState::Pending,
             result: None,
         })
@@ -779,6 +795,7 @@ fn conflicting_projection_checkpoint_rejects_wait_activation_atomically() {
                 key: "signal:atomic-projection".to_owned(),
             },
             consume_once: true,
+            result_binding: None,
             state: WaitState::Pending,
             result: None,
         })

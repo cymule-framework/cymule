@@ -23,6 +23,9 @@
   uppercase digests, and invalid kinds.
 - `cymule.ir/2` adds the closed `invoke` operation. Future operation additions
   require a new IR version rather than widening this frozen schema in place.
+- The existing `wait` operation has an optional `bind`; omission intentionally
+  ignores the result. Engine success distinguishes completion from typed
+  Embedded suspension without publishing a fake Continuation.
 - Keep semantic validation in the Rust kernel. JSON Schema validates wire shape;
   it does not replace transition or authority rules.
 - `execution-binding.schema.json` freezes `cymule.execution-binding/1`. Rust

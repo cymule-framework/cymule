@@ -453,6 +453,7 @@ fn candidate() -> PlanCandidate {
                                 correlation: "approval".to_owned(),
                                 schema: json!({"type": "boolean"}),
                             },
+                            bind: Some("approval".to_owned()),
                         },
                     },
                 ],
@@ -503,11 +504,12 @@ fn nested_wait_candidate() -> PlanCandidate {
                                             correlation: "nested-approval".to_owned(),
                                             schema: json!({}),
                                         },
+                                        bind: Some("nested_approval".to_owned()),
                                     },
                                 },
                             ],
                             result: Expression::Binding {
-                                name: "greeting".to_owned(),
+                                name: "nested_approval".to_owned(),
                             },
                         }),
                         bind: Some("nested_result".to_owned()),
@@ -574,11 +576,12 @@ fn invoked_wait_candidate() -> PlanCandidate {
                                     correlation: "review-approval".to_owned(),
                                     schema: json!({}),
                                 },
+                                bind: Some("review_approval".to_owned()),
                             },
                         },
                     ],
                     result: Expression::Binding {
-                        name: "greeting".to_owned(),
+                        name: "review_approval".to_owned(),
                     },
                 },
             },
@@ -698,9 +701,14 @@ fn external_wait_candidate(name: &str, wait: WaitSpec) -> PlanCandidate {
             body: Region {
                 steps: vec![Step {
                     id: "wait.external".to_owned(),
-                    operation: Operation::Wait { wait },
+                    operation: Operation::Wait {
+                        wait,
+                        bind: Some("external_result".to_owned()),
+                    },
                 }],
-                result: Expression::Input,
+                result: Expression::Binding {
+                    name: "external_result".to_owned(),
+                },
             },
         }],
         metadata: BTreeMap::new(),
@@ -941,7 +949,7 @@ fn nested_scope_wait_reopens_from_region_path_without_reinvoking_component() {
     else {
         panic!("nested Run should complete");
     };
-    assert_eq!(result.value, json!({"greeting": "Hello, Ada!"}));
+    assert_eq!(result.value, json!({"approved": true}));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let restored = reopened.coordinator().state().expect("state");
     assert_eq!(restored.continuations["run:nested-resume"].frames.len(), 1);
@@ -990,7 +998,7 @@ fn invoked_definition_wait_reopens_without_reinvoking_completed_component() {
     else {
         panic!("invoked Run should complete");
     };
-    assert_eq!(result.value, json!({"greeting": "Hello, Ada!"}));
+    assert_eq!(result.value, json!({"approved": true}));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         reopened.coordinator().state().expect("state").continuations[run_id]
@@ -1076,7 +1084,7 @@ fn durable_control_drives_and_queries_one_domain_across_reopen() {
     else {
         panic!("resumed Run must complete");
     };
-    assert_eq!(result.value, input);
+    assert_eq!(result.value, json!({"approved": true}));
     let replay = reopened
         .submit(DurableCommand::StartRun {
             control_version: DURABLE_CONTROL_VERSION.to_owned(),
@@ -1523,7 +1531,7 @@ fn identified_signal_and_timer_activations_resume_after_process_reopen() {
         else {
             panic!("activated run should complete");
         };
-        assert_eq!(result.value, json!({"case": run_id}));
+        assert_eq!(result.value, json!({"delivered": true}));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(
             reopened

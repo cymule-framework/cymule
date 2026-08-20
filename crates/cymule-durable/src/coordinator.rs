@@ -616,29 +616,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
     ) -> DurableResult<String> {
         self.mutate_checked(|state| {
             state.machine = machine.snapshot();
-            let wait = state
-                .waits
-                .get_mut(wait_id)
-                .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
-            ensure_direct_wait_completion(wait)?;
-            if wait.state == WaitState::Completed && wait.result.as_ref() == Some(&result) {
-                return Ok(());
-            }
-            if wait.state != WaitState::Pending {
-                return Err(DurableError::IllegalTransition(format!(
-                    "wait {wait_id} is not pending"
-                )));
-            }
-            wait.state = WaitState::Completed;
-            wait.result = Some(result);
-            let continuation = state.continuations.get_mut(&wait.run_id).ok_or_else(|| {
-                DurableError::NotFound(format!("continuation {} does not exist", wait.run_id))
-            })?;
-            continuation.wait_set.remove(wait_id);
-            if continuation.wait_set.is_empty() {
-                continuation.status = ContinuationStatus::Ready;
-            }
-            Ok(())
+            complete_wait_state(state, wait_id, &result, true)
         })
     }
 
@@ -668,31 +646,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         wait_id: &str,
         result: cymule_core::ArtifactRef,
     ) -> DurableResult<String> {
-        self.mutate_checked(|state| {
-            let wait = state
-                .waits
-                .get_mut(wait_id)
-                .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
-            ensure_direct_wait_completion(wait)?;
-            if wait.state == WaitState::Completed && wait.result.as_ref() == Some(&result) {
-                return Ok(());
-            }
-            if wait.state != WaitState::Pending {
-                return Err(DurableError::IllegalTransition(format!(
-                    "wait {wait_id} is not pending"
-                )));
-            }
-            wait.state = WaitState::Completed;
-            wait.result = Some(result);
-            let continuation = state.continuations.get_mut(&wait.run_id).ok_or_else(|| {
-                DurableError::NotFound(format!("continuation {} does not exist", wait.run_id))
-            })?;
-            continuation.wait_set.remove(wait_id);
-            if continuation.wait_set.is_empty() {
-                continuation.status = ContinuationStatus::Ready;
-            }
-            Ok(())
-        })
+        self.mutate_checked(|state| complete_wait_state(state, wait_id, &result, true))
     }
 
     /// Atomically admit one identified signal or timer delivery, complete all
@@ -790,7 +744,6 @@ impl<S: DurableStore> DurableCoordinator<S> {
             )?;
 
             let mut consume_once_targets = 0usize;
-            let mut run_ids = std::collections::BTreeSet::new();
             for wait_id in &activation.wait_ids {
                 let wait = state.waits.get(wait_id).ok_or_else(|| {
                     DurableError::NotFound(format!("wait {wait_id} does not exist"))
@@ -804,7 +757,6 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 if wait.consume_once {
                     consume_once_targets += 1;
                 }
-                run_ids.insert(wait.run_id.clone());
             }
             activation
                 .source
@@ -812,22 +764,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
 
             state.machine = machine_snapshot;
             for wait_id in &activation.wait_ids {
-                let wait = state.waits.get_mut(wait_id).ok_or_else(|| {
-                    DurableError::NotFound(format!("wait {wait_id} does not exist"))
-                })?;
-                wait.state = WaitState::Completed;
-                wait.result = Some(activation.result.clone());
-            }
-            for run_id in run_ids {
-                let continuation = state.continuations.get_mut(&run_id).ok_or_else(|| {
-                    DurableError::NotFound(format!("continuation {run_id} does not exist"))
-                })?;
-                for wait_id in &activation.wait_ids {
-                    continuation.wait_set.remove(wait_id);
-                }
-                if continuation.wait_set.is_empty() {
-                    continuation.status = ContinuationStatus::Ready;
-                }
+                complete_wait_state(state, wait_id, &activation.result, false)?;
             }
             state
                 .wait_activations
@@ -1183,34 +1120,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 &std::collections::BTreeSet::from([result.clone()]),
                 "input wait checkpoint",
             )?;
-            let wait = state
-                .waits
-                .get_mut(wait_id)
-                .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
-            ensure_direct_wait_completion(wait)?;
-            match wait.state {
-                WaitState::Completed if wait.result.as_ref() == Some(result) => {}
-                WaitState::Pending => {
-                    wait.state = WaitState::Completed;
-                    wait.result = Some(result.clone());
-                    let continuation =
-                        state.continuations.get_mut(&wait.run_id).ok_or_else(|| {
-                            DurableError::NotFound(format!(
-                                "continuation {} does not exist",
-                                wait.run_id
-                            ))
-                        })?;
-                    continuation.wait_set.remove(wait_id);
-                    if continuation.wait_set.is_empty() {
-                        continuation.status = ContinuationStatus::Ready;
-                    }
-                }
-                _ => {
-                    return Err(DurableError::IllegalTransition(format!(
-                        "wait {wait_id} cannot accept this input result"
-                    )));
-                }
-            }
+            complete_wait_state(state, wait_id, result, true)?;
             for batch in batches {
                 for record in &batch.records {
                     append_journal_record(state, &batch.journal_id, record.clone())?;
@@ -1274,29 +1184,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             for record in records {
                 append_journal_record(state, journal_id, record.clone())?;
             }
-            let wait = state
-                .waits
-                .get_mut(wait_id)
-                .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
-            ensure_direct_wait_completion(wait)?;
-            if wait.state == WaitState::Completed && wait.result.as_ref() == Some(&result) {
-                return Ok(());
-            }
-            if wait.state != WaitState::Pending {
-                return Err(DurableError::IllegalTransition(format!(
-                    "wait {wait_id} is not pending"
-                )));
-            }
-            wait.state = WaitState::Completed;
-            wait.result = Some(result);
-            let continuation = state.continuations.get_mut(&wait.run_id).ok_or_else(|| {
-                DurableError::NotFound(format!("continuation {} does not exist", wait.run_id))
-            })?;
-            continuation.wait_set.remove(wait_id);
-            if continuation.wait_set.is_empty() {
-                continuation.status = ContinuationStatus::Ready;
-            }
-            Ok(())
+            complete_wait_state(state, wait_id, &result, true)
         })
     }
 
@@ -1339,6 +1227,77 @@ fn ensure_direct_wait_completion(wait: &WaitCondition) -> DurableResult<()> {
             "wait {} requires an identified signal or timer activation",
             wait.wait_id
         )));
+    }
+    Ok(())
+}
+
+fn complete_wait_state(
+    state: &mut DurableState,
+    wait_id: &str,
+    result: &cymule_core::ArtifactRef,
+    require_input: bool,
+) -> DurableResult<()> {
+    let (run_id, result_binding) = {
+        let wait = state
+            .waits
+            .get_mut(wait_id)
+            .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
+        if require_input {
+            ensure_direct_wait_completion(wait)?;
+        }
+        if wait.state == WaitState::Completed && wait.result.as_ref() == Some(result) {
+            return Ok(());
+        }
+        if wait.state != WaitState::Pending {
+            return Err(DurableError::IllegalTransition(format!(
+                "wait {wait_id} is not pending"
+            )));
+        }
+        wait.state = WaitState::Completed;
+        wait.result = Some(result.clone());
+        (wait.run_id.clone(), wait.result_binding.clone())
+    };
+    let continuation = state
+        .continuations
+        .get_mut(&run_id)
+        .ok_or_else(|| DurableError::NotFound(format!("continuation {run_id} does not exist")))?;
+    if let Some(binding) = result_binding {
+        let frame = continuation
+            .frames
+            .iter_mut()
+            .find(|frame| {
+                frame.invocation_id == binding.invocation_id
+                    && frame.definition_id == binding.definition_id
+                    && frame.region_path == binding.region_path
+            })
+            .ok_or_else(|| {
+                DurableError::Validation(format!(
+                    "wait {wait_id} owning frame {} is missing",
+                    binding.invocation_id
+                ))
+            })?;
+        if frame.definition_id != binding.definition_id || frame.region_path != binding.region_path
+        {
+            return Err(DurableError::Validation(format!(
+                "wait {wait_id} result binding does not match its owning frame"
+            )));
+        }
+        match frame.locals.get(&binding.local) {
+            Some(existing) if existing == result => {}
+            Some(_) => {
+                return Err(DurableError::IllegalTransition(format!(
+                    "wait {wait_id} result binding {} already has a different Artifact",
+                    binding.local
+                )));
+            }
+            None => {
+                frame.locals.insert(binding.local, result.clone());
+            }
+        }
+    }
+    continuation.wait_set.remove(wait_id);
+    if continuation.wait_set.is_empty() {
+        continuation.status = ContinuationStatus::Ready;
     }
     Ok(())
 }

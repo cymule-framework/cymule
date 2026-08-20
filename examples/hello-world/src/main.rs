@@ -32,7 +32,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let plan = runtime.seal(flow::build())?;
     eprintln!("sealed {}", plan.plan_id);
 
-    let result = runtime.execute(plan, &json!({"name": name}), "run:hello-world")?;
+    let result = runtime
+        .execute(plan, &json!({"name": name}), "run:hello-world")?
+        .into_completed()?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }

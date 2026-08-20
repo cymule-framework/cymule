@@ -61,6 +61,7 @@ fn index() -> ParkedWaitIndex {
                 timer_id: "timer:one".to_owned(),
             },
             consume_once: false,
+            result_binding: None,
             state: WaitState::Pending,
             result: None,
         },

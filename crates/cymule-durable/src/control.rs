@@ -106,7 +106,7 @@ impl DurableCommand {
                 run_id, candidate, ..
             } => {
                 validate_identity("Run", run_id)?;
-                cymule_runtime::seal_plan(candidate.clone())?;
+                cymule_core::seal_plan(candidate.clone())?;
             }
             Self::ResumeRun { run_id, .. } => validate_identity("Run", run_id)?,
             Self::ActivateWait {

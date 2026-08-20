@@ -433,6 +433,7 @@ dependencies = [
 name = "cymule-core"
 version = "0.1.4"
 dependencies = [
+ "jsonschema",
  "proptest",
  "serde",
  "serde_json",

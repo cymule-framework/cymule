@@ -105,6 +105,14 @@ Use this precedence order when guidance conflicts:
 - `cymule.ir/2` reusable definition calls resolve inside one immutable Plan.
   Logical latest-compatible references are linked by M4 into a new parent Plan;
   a sealed Plan never dereferences a mutable `latest` alias at runtime.
+- `cymule_core::seal_plan` is the only Plan sealing authority. It rejects every
+  recursive definition SCC, including invokes nested under scopes, and compiles
+  schemas as Draft 2020-12 with external retrieval disabled. Machine insertion
+  and restore reverify the same admission.
+- A `wait` may bind its result or intentionally ignore it. Durable activation
+  pins the exact frame and site, then atomically commits the result Artifact,
+  completed wait, optional frame local, and Continuation readiness. Embedded
+  execution returns a typed boundary and never claims a Continuation.
 - Reusable modules resolve their complete acyclic dependency closure before
   sealing. Store every exact revision in the linked record, derive reverse
   indexes from registry state, and make transitive compatible updates create a

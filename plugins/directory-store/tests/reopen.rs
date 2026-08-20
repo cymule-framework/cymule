@@ -6,6 +6,7 @@ use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use cymule_core::seal_plan;
 use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, Definition, Expression, Machine, PlanCandidate,
     Region,
@@ -47,25 +48,25 @@ fn writer_contention_returns_immediately_as_conflict() {
 
 fn machine_with_run() -> (Machine, String, cymule_core::ArtifactRef) {
     let mut machine = Machine::new();
-    let plan = machine
-        .seal_plan(PlanCandidate {
-            ir_version: cymule_core::IR_VERSION.to_owned(),
-            name: "directory_store_test".to_owned(),
-            entry: "main".to_owned(),
-            components: Vec::new(),
-            effects: Vec::new(),
-            definitions: vec![Definition {
-                id: "main".to_owned(),
-                input_schema: json!({}),
-                output_schema: json!({}),
-                body: Region {
-                    steps: Vec::new(),
-                    result: Expression::Literal { value: json!(null) },
-                },
-            }],
-            metadata: BTreeMap::new(),
-        })
-        .expect("plan seals");
+    let plan = seal_plan(PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "directory_store_test".to_owned(),
+        entry: "main".to_owned(),
+        components: Vec::new(),
+        effects: Vec::new(),
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: Vec::new(),
+                result: Expression::Literal { value: json!(null) },
+            },
+        }],
+        metadata: BTreeMap::new(),
+    })
+    .expect("plan seals");
+    machine.insert_plan(plan.clone()).expect("Plan inserts");
     machine
         .submit(CommandEnvelope {
             command_version: COMMAND_VERSION.to_owned(),

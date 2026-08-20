@@ -59,7 +59,10 @@ test("TypeScript candidate seals and executes through the Rust engine", () => {
   const plan = engine.seal(candidate);
   assert.equal(plan.plan_id, expectedPlanId);
   const input = { message: "hello from TypeScript" };
-  const result = engine.run(plan, input, pluginPath, "run:typescript-e2e");
+  const execution = engine.run(plan, input, pluginPath, "run:typescript-e2e");
+  assert.equal(execution.status, "completed");
+  if (execution.status !== "completed") throw new Error("expected terminal execution");
+  const result = execution.result;
   assert.deepEqual(result.value, input);
   assert.equal(result.effects.length, 1);
 });

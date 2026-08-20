@@ -332,37 +332,37 @@ fn install_agent_input(machine: &mut Machine) {
 fn workspace_machine(run_id: &str) -> (Machine, String, ArtifactRef) {
     let mut machine = Machine::new();
     install_agent_input(&mut machine);
-    let plan = machine
-        .seal_plan(PlanCandidate {
-            ir_version: cymule_core::IR_VERSION.to_owned(),
-            name: "agent_workspace_scope".to_owned(),
-            entry: "main".to_owned(),
-            components: Vec::new(),
-            effects: vec![EffectContract {
-                id: "workspace.commit".to_owned(),
-                input_schema: json!({}),
-                output_schema: json!({}),
-                profile: EffectProfile {
-                    mutation: MutationKind::Mutating,
-                    dispatch: DispatchPolicy::OnScopeCommit,
-                    reconciliation: ReconciliationMode::Queryable,
-                    keyed_idempotency: true,
-                    irreversible: false,
-                },
-                requirements: BTreeMap::new(),
-            }],
-            definitions: vec![Definition {
-                id: "main".to_owned(),
-                input_schema: json!({}),
-                output_schema: json!({}),
-                body: Region {
-                    steps: Vec::new(),
-                    result: Expression::Literal { value: json!(null) },
-                },
-            }],
-            metadata: BTreeMap::new(),
-        })
-        .expect("workspace Plan seals");
+    let plan = cymule_core::seal_plan(PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "agent_workspace_scope".to_owned(),
+        entry: "main".to_owned(),
+        components: Vec::new(),
+        effects: vec![EffectContract {
+            id: "workspace.commit".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            profile: EffectProfile {
+                mutation: MutationKind::Mutating,
+                dispatch: DispatchPolicy::OnScopeCommit,
+                reconciliation: ReconciliationMode::Queryable,
+                keyed_idempotency: true,
+                irreversible: false,
+            },
+            requirements: BTreeMap::new(),
+        }],
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: Vec::new(),
+                result: Expression::Literal { value: json!(null) },
+            },
+        }],
+        metadata: BTreeMap::new(),
+    })
+    .expect("workspace Plan seals");
+    machine.insert_plan(plan.clone()).expect("Plan inserts");
     machine
         .submit(CommandEnvelope {
             command_version: COMMAND_VERSION.to_owned(),

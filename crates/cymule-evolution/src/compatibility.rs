@@ -217,7 +217,7 @@ fn visit_region(
             Operation::Invoke { definition, .. } => {
                 visit_definition(definition, definitions, visited, surface)?;
             }
-            Operation::Wait { wait } => {
+            Operation::Wait { wait, .. } => {
                 surface.waits.insert(canonical_digest(wait)?);
             }
             Operation::Effect { effect, .. } => {
