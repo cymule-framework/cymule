@@ -462,19 +462,16 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 transition: EffectTransition::StartDispatch,
             },
         )?;
-        let response = match self.plugin.invoke(PluginRequest::DispatchEffect {
+        let Ok(response) = self.plugin.invoke(PluginRequest::DispatchEffect {
             operation: operation.to_owned(),
             intent_id: intent_id.clone(),
             input: input.clone(),
-        }) {
-            Ok(response) => response,
-            Err(_) => {
-                self.observe_unknown(run_id, &intent_id)?;
-                return Err(RuntimeError::unknown_world(
-                    "effect_dispatch_response_lost",
-                    "effect dispatch started but no authoritative outcome was received",
-                ));
-            }
+        }) else {
+            self.observe_unknown(run_id, &intent_id)?;
+            return Err(RuntimeError::unknown_world(
+                "effect_dispatch_response_lost",
+                "effect dispatch started but no authoritative outcome was received",
+            ));
         };
         let PluginResponse::EffectResult { outcome, mut value } = response else {
             self.observe_unknown(run_id, &intent_id)?;
