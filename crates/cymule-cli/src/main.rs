@@ -231,7 +231,15 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
 fn local_process_runtime(
     executable: impl AsRef<Path>,
 ) -> cymule_runtime::RuntimeResult<EmbeddedRuntime<ProcessPlugin>> {
-    let bytes = fs::read(executable.as_ref()).map_err(cymule_runtime::RuntimeError::from)?;
+    let bytes = fs::read(executable.as_ref()).map_err(|error| {
+        cymule_runtime::RuntimeError::substrate(
+            "plugin_start_failed",
+            format!(
+                "failed to read plugin {}: {error}",
+                executable.as_ref().display()
+            ),
+        )
+    })?;
     let implementation_revision = format!("sha256:{}", sha256_bytes(&bytes));
     let mut plugin = ProcessPlugin::new(executable);
     let manifest = plugin.describe()?;

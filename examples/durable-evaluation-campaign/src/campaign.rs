@@ -17,7 +17,11 @@ use cymule_resource::{
     ResourceShape, ResourceWriteIntent,
 };
 use cymule_resource_fs::FsResourceStore;
-use cymule_runtime::EmbeddedRuntime;
+use cymule_runtime::{
+    EmbeddedRuntime, ExecutionBinding, ExecutionOperationKind, PluginHost,
+    RUNTIME_COMPOSITION_VERSION, RuntimeCompositionGraph, RuntimeImplementation,
+    RuntimeProviderDescriptor,
+};
 use cymule_store_sqlite::SqliteStore;
 use cymule_virtual::{
     ClaimedWork, DurableVirtualController, FrontierLimits, VIRTUAL_RECOVERY_CONTROL_VERSION,
@@ -33,6 +37,7 @@ use crate::model::{
     CASE_ARTIFACT_KIND, CaseOutput, ERROR_ARTIFACT_KIND, EvaluationCase, MAX_SUITE_BYTES,
     RESULT_ARTIFACT_KIND, SUITE_ARTIFACT_KIND, SUITE_MEDIA_TYPE,
 };
+use crate::plugin::{SCORER_COMPONENT, SUBJECT_COMPONENT};
 use crate::source::{CURSOR_VERSION, CaseSource, case_reference, parse_suite};
 
 const VIRTUAL_JOURNAL: &str = "example:virtual-work";
@@ -677,8 +682,41 @@ fn execute_claim(
     config.arguments = vec!["__plugin".to_owned()];
     config.timeout = Duration::from_secs(5);
     config.message_limit = 1024 * 1024;
-    let executor = ProcessExecutor::new(config)?;
-    let mut runtime = EmbeddedRuntime::new(executor);
+    let mut executor = ProcessExecutor::new(config)?;
+    let manifest = executor.describe()?;
+    let implementation_revision = format!(
+        "sha256:{}",
+        sha256_bytes(&fs::read(&options.plugin_executable)?)
+    );
+    let empty_digest = format!("sha256:{}", sha256_bytes(b"{}"));
+    let providers = [
+        (
+            "evaluation-subject",
+            SUBJECT_COMPONENT,
+            "evaluation-subject",
+        ),
+        ("evaluation-scorer", SCORER_COMPONENT, "evaluation-scorer"),
+    ]
+    .into_iter()
+    .map(
+        |(provider_id, operation, capability)| RuntimeProviderDescriptor {
+            version: RUNTIME_COMPOSITION_VERSION.to_owned(),
+            provider_id: provider_id.to_owned(),
+            implementation: RuntimeImplementation {
+                implementation_id: manifest.implementation_id.clone(),
+                revision: implementation_revision.clone(),
+            },
+            provides: vec![ExecutionOperationKind::Component.service_key(operation)],
+            requires: Vec::new(),
+            properties: BTreeMap::from([("capability".to_owned(), capability.to_owned())]),
+            configuration_schema_digest: empty_digest.clone(),
+            configuration_fingerprint: empty_digest.clone(),
+        },
+    )
+    .collect();
+    let graph = RuntimeCompositionGraph::build(providers)?;
+    let binding = ExecutionBinding::admit(&graph, &manifest)?;
+    let mut runtime = EmbeddedRuntime::new(executor, binding)?;
     let execution = runtime.execute(
         linked.plan.clone(),
         &serde_json::to_value(case)?,

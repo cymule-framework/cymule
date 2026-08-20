@@ -1427,6 +1427,7 @@ fn ensure_run_start_machine(
         .as_ref()
         .ok_or_else(|| DurableError::Validation("new Run input is missing".to_owned()))?;
     let binding = cymule_core::ArtifactRef {
+        identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
         artifact_id: continuation.binding_context.clone(),
         kind: cymule_runtime::EXECUTION_BINDING_VERSION.to_owned(),
     };

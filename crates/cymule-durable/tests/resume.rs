@@ -1886,6 +1886,7 @@ fn reopen_preserves_the_historical_execution_binding_artifact() {
         .continuations["run:binding-pin"]
         .clone();
     let reference = cymule_core::ArtifactRef {
+        identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
         artifact_id: continuation.binding_context.clone(),
         kind: cymule_runtime::EXECUTION_BINDING_VERSION.to_owned(),
     };

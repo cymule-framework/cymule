@@ -135,7 +135,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
         let plan = proposed_plan;
         self.binding.admit_plan(&plan)?;
         let binding_bytes = self.binding.canonical_bytes()?;
-        let binding_ref = machine.put_artifact(EXECUTION_BINDING_VERSION, binding_bytes);
+        let binding_ref = machine.put_artifact(EXECUTION_BINDING_VERSION, binding_bytes)?;
         if binding_ref != self.binding.artifact_ref()? {
             return Err(DurableError::Validation(
                 "execution binding Artifact identity is inconsistent".to_owned(),

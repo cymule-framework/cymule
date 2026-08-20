@@ -118,7 +118,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
         let binding_bytes = self.binding.canonical_bytes()?;
         let binding_ref = self
             .machine
-            .put_artifact(crate::EXECUTION_BINDING_VERSION, binding_bytes);
+            .put_artifact(crate::EXECUTION_BINDING_VERSION, binding_bytes)?;
         if binding_ref != self.binding.artifact_ref()? {
             return Err(RuntimeError::plugin_defect(
                 "execution binding Artifact identity is inconsistent",

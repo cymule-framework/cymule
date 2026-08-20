@@ -12,6 +12,10 @@ test fixture disguised as a product example.
   this example.
 - Every claimed case must retain its exact linked Plan ID as the occurrence
   binding. Evolution changes only future claims.
+- Bind the subject and scorer as distinct runtime services with their exact
+  capability properties, even when one executable implements both operations.
+  The shared binary digest identifies implementation bytes; it does not replace
+  per-operation requirement admission.
 - Treat the subject as observational and safe to retry. A mutating subject must
   use an Effect plugin with idempotency and reconciliation instead.
 - Keep suite reads bounded and content-verified. Reject symlinks, duplicate case

@@ -397,7 +397,8 @@ pub enum ExecutionOperationKind {
 }
 
 impl ExecutionOperationKind {
-    fn service(self, operation: &str) -> ServiceKey {
+    /// Return the stable runtime service contract for an abstract operation.
+    pub fn service_key(self, operation: &str) -> ServiceKey {
         ServiceKey::new(
             match self {
                 Self::Component => COMPONENT_SERVICE_NAMESPACE,
@@ -509,12 +510,12 @@ impl ExecutionBinding {
         let provides = manifest
             .components
             .keys()
-            .map(|operation| ExecutionOperationKind::Component.service(operation))
+            .map(|operation| ExecutionOperationKind::Component.service_key(operation))
             .chain(
                 manifest
                     .effects
                     .keys()
-                    .map(|operation| ExecutionOperationKind::Effect.service(operation)),
+                    .map(|operation| ExecutionOperationKind::Effect.service_key(operation)),
             )
             .collect();
         let graph = RuntimeCompositionGraph::build(vec![RuntimeProviderDescriptor {
@@ -643,7 +644,8 @@ impl ExecutionBinding {
     /// Content-addressed reference pinned by Run, Continuation, and Attempt.
     pub fn artifact_ref(&self) -> Result<ArtifactRef, CompositionError> {
         let bytes = self.canonical_bytes()?;
-        Ok(artifact_ref(EXECUTION_BINDING_VERSION, &bytes))
+        artifact_ref(EXECUTION_BINDING_VERSION, &bytes)
+            .map_err(|error| CompositionError::Encoding(error.to_string()))
     }
 
     /// Deterministically derive one exact operation occurrence binding.
@@ -680,7 +682,7 @@ fn select_operation(
         .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
     validate_token("operation revision", operation_revision)
         .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
-    let service = kind.service(operation);
+    let service = kind.service_key(operation);
     let selected = graph
         .bindings()
         .iter()
