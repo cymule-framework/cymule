@@ -53,7 +53,7 @@ The following domains evolve independently:
 | Virtual region migration | `cymule.virtual-region-migration/1` | opaque cursor coverage and retirement lineage |
 | Virtual migration control | `cymule.virtual-region-migration-control/1` | stable command ID plus verified plan |
 | Virtual archive manifest | `cymule.virtual-archive-manifest/1` | exact content-addressed occurrence history |
-| Virtual compaction certificate | `cymule.virtual-compaction-certificate/1` | causal cut, summary, retention, and rehydration evidence |
+| Virtual compaction certificate | `cymule.virtual-compaction-certificate/2` | cold Resource descriptor replaces hot Artifact bytes |
 | Virtual compaction control | `cymule.virtual-compaction-control/1` | stable command ID plus pinned archive binding |
 | Virtual rehydration control | `cymule.virtual-rehydration-control/1` | stable command ID plus exact occurrence selection |
 | Virtual claim control | `cymule.virtual-claim-control/1` | stable command ID plus capacity-slot lease proposal |
@@ -477,19 +477,19 @@ compactor binding. It MUST NOT choose certificate fields, interpret occurrence
 meaning, or place a provider locator or credential in semantic state.
 
 The Rust controller MUST canonically encode `cymule.virtual-archive-manifest/1`
-and compute its ordinary Artifact ID before calling the archive. The manifest
-contains the exact occurrence records, final work/epoch index, region/Run, and a
-non-empty causal checkpoint cut. A returned success followed by a failed M1 CAS
-MAY leave that immutable object unreferenced; scheduler state, Machine state,
-certificate, and checkpoint MUST remain unchanged.
+and compute its semantic content Resource descriptor before calling the archive.
+The manifest contains the exact occurrence records, final work/epoch index,
+region/Run, and a non-empty causal checkpoint cut. A returned success followed
+by a failed M1 CAS MAY leave that immutable object unreferenced; scheduler state,
+Machine state, certificate, and checkpoint MUST remain unchanged.
 For the M1 linear virtual journal, a new durable compaction cut MUST include the
 current checkpoint head; an old command replays from its retained receipt before
 this future-head check.
 
-`cymule.virtual-compaction-certificate/1` MUST authenticate the causal cut,
-bounded completion summary, complete manifest digest and Artifact, terminal
-work/debug index digest, retained occurrence bindings, unresolved obligations,
-replay availability, and pinned compactor revision. The current M3 compactor
+`cymule.virtual-compaction-certificate/2` MUST authenticate the causal cut,
+bounded completion summary, complete manifest digest and Resource descriptor,
+terminal work/debug index digest, retained occurrence bindings, unresolved
+obligations, replay availability, and pinned compactor revision. The current M3 compactor
 admits only a completed subtree with no unresolved obligations and `exact`
 replay through the retained manifest. It removes occurrence payloads from the
 hot snapshot but retains logical work identity, greatest epoch, terminal state,
@@ -499,7 +499,7 @@ canonical truth.
 
 `cymule.virtual-rehydration-control/1` selects a non-empty exact set of
 occurrence IDs from one certificate. Before inserting any record, the framework
-MUST reload and verify immutable bytes, Artifact identity, manifest/schema
+MUST reload and verify immutable bytes, Resource identity, manifest/schema
 version, manifest digest, causal cut, summary, final work index, region/Run,
 retained bindings, and certificate binding. Missing, extra, corrupted, or
 conflicting occurrence data restores nothing. Compaction and rehydration

@@ -16,11 +16,14 @@
   collisions, or stale CAS retire nothing.
 - A completed region may move exact occurrence records to a `VirtualArchive`
   only when exhausted or retired and free of ready, active, and parked work.
-  The framework computes the manifest Artifact, summary digests, certificate
-  identity, terminal fence index, retained bindings, and replay classification;
-  an archive plugin only stores/loads exact immutable bytes.
+  The framework computes the manifest Resource descriptor, summary digests,
+  certificate identity, terminal fence index, retained bindings, and replay
+  classification; an archive plugin only stores/loads exact immutable bytes.
+- Cold archive manifest bytes never return to the hot Machine Artifact map.
+  The compaction certificate retains only the verified semantic Resource
+  descriptor; the pinned archive binding resolves those bytes for rehydration.
 - Compaction failure may leave an unreferenced immutable archive object but MUST
-  roll back scheduler and M1 state. Rehydration verifies bytes, Artifact ID,
+  roll back scheduler and M1 state. Rehydration verifies bytes, Resource ID,
   manifest digest, certificate, work index, causal cut, and binding before
   restoring only the requested occurrence IDs.
 - Cursors are immutable logical progress tokens returned by a source and stored

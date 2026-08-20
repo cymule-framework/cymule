@@ -127,6 +127,9 @@
   and revision, certificate identity, and exact rehydration occurrence set.
   Stateful tests sweep archive put/get failures, tamper bytes, stale CAS, reopen,
   and receipt replay; an archive adapter never validates its own certificate.
+  Hot-state assertions prove the certificate retains a semantic Resource
+  descriptor while the archived manifest bytes remain absent from Machine
+  Artifacts before and after reopen.
 - Multi-worker tests inject stale CAS and lost receipts at claim, renewal, and
   recovery; prove distinct slots can progress, one slot cannot overclaim,
   expiry rejects normal output, explicit takeover increments work epoch, and

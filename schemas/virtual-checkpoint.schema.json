@@ -483,7 +483,7 @@
         "replay_availability", "rehydration_manifest", "compactor_binding", "compactor_revision"
       ],
       "properties": {
-        "certificate_version": { "const": "cymule.virtual-compaction-certificate/1" },
+        "certificate_version": { "const": "cymule.virtual-compaction-certificate/2" },
         "certificate_id": { "$ref": "#/$defs/nonEmpty" },
         "source_causal_cut": {
           "type": "array", "minItems": 1, "uniqueItems": true,
@@ -500,7 +500,7 @@
           "items": { "$ref": "#/$defs/nonEmpty" }
         },
         "replay_availability": { "$ref": "#/$defs/replayAvailability" },
-        "rehydration_manifest": { "$ref": "#/$defs/artifact" },
+        "rehydration_manifest": { "$ref": "https://cymule.dev/schemas/resource.schema.json#/$defs/resourceHandle" },
         "compactor_binding": { "$ref": "#/$defs/nonEmpty" },
         "compactor_revision": { "$ref": "#/$defs/nonEmpty" }
       }

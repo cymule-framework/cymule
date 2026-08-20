@@ -1187,8 +1187,8 @@ impl VirtualScheduler {
             work_index,
         };
         let record = virtual_archive_record(&manifest)?;
-        archive.put(&record.reference, &record.bytes)?;
-        if archive.get(&record.reference)? != record.bytes {
+        archive.put(&record.descriptor, &record.bytes)?;
+        if archive.get(&record.descriptor)? != record.bytes {
             return Err(VirtualError::Source(
                 "archive readback does not match the stored manifest".to_owned(),
             ));
@@ -1209,7 +1209,7 @@ impl VirtualScheduler {
             unresolved_obligations: BTreeSet::new(),
             retained_occurrence_bindings,
             replay_availability: ReplayAvailability::Exact,
-            rehydration_manifest: record.reference,
+            rehydration_manifest: record.descriptor,
             compactor_binding: command.compactor_binding.clone(),
             compactor_revision: command.compactor_revision.clone(),
         };
@@ -1301,7 +1301,7 @@ impl VirtualScheduler {
         let manifest: VirtualArchiveManifest = cymule_core::decode_json(&bytes)
             .map_err(|error| VirtualError::Source(error.to_string()))?;
         let record = virtual_archive_record(&manifest)?;
-        if record.reference != certificate.rehydration_manifest || record.bytes != bytes {
+        if record.descriptor != certificate.rehydration_manifest || record.bytes != bytes {
             return Err(VirtualError::Source(
                 "archive manifest bytes do not match their content reference".to_owned(),
             ));
@@ -2245,7 +2245,10 @@ fn virtual_certificate_id(certificate: &VirtualCompactionCertificate) -> Virtual
 }
 
 fn validate_virtual_certificate(certificate: &VirtualCompactionCertificate) -> VirtualResult<()> {
-    validate_artifact(&certificate.rehydration_manifest)?;
+    certificate
+        .rehydration_manifest
+        .verify()
+        .map_err(|error| VirtualError::Validation(error.to_string()))?;
     if certificate.certificate_version != VIRTUAL_COMPACTION_CERTIFICATE_VERSION
         || certificate.certificate_id != virtual_certificate_id(certificate)?
         || certificate.source_causal_cut.is_empty()
@@ -2255,7 +2258,12 @@ fn validate_virtual_certificate(certificate: &VirtualCompactionCertificate) -> V
         || certificate.summary_state_digest.is_empty()
         || certificate.compactor_binding.is_empty()
         || certificate.compactor_revision.is_empty()
-        || certificate.rehydration_manifest.kind != crate::VIRTUAL_ARCHIVE_MANIFEST_KIND
+        || certificate.rehydration_manifest.media_type != crate::VIRTUAL_ARCHIVE_MANIFEST_KIND
+        || certificate.rehydration_manifest.shape != cymule_resource::ResourceShape::Object
+        || !matches!(
+            certificate.rehydration_manifest.integrity,
+            cymule_resource::ResourceIntegrity::Content { .. }
+        )
         || !certificate.unresolved_obligations.is_empty()
         || certificate
             .retained_occurrence_bindings
@@ -2290,7 +2298,7 @@ fn validate_manifest_certificate(
         || canonical_digest(manifest)
             .map_err(|error| VirtualError::Validation(error.to_string()))?
             != certificate.summary_state_digest
-        || virtual_archive_record(manifest)?.reference != certificate.rehydration_manifest
+        || virtual_archive_record(manifest)?.descriptor != certificate.rehydration_manifest
         || archived_work_index(&manifest.occurrences)? != manifest.work_index
         || manifest.occurrences.values().any(|occurrence| {
             occurrence.region_id != manifest.region_id || occurrence.run_id != manifest.run_id

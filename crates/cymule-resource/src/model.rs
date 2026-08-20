@@ -221,6 +221,8 @@ pub struct ResourceHandle {
     pub annotations: BTreeMap<String, String>,
 }
 
+impl Eq for ResourceHandle {}
+
 #[derive(Serialize)]
 struct ResourceIdentity<'a> {
     resource_version: &'a str,

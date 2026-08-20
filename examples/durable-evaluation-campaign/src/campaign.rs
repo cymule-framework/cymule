@@ -523,13 +523,13 @@ fn store_suite_bytes(
     let expected_digest = format!("sha256:{}", sha256_bytes(bytes));
     let expected_size = u64::try_from(bytes.len())?;
     if !matches!(
-        resource.integrity,
+        resource.resource.integrity,
         ResourceIntegrity::Content { ref digest, size }
             if digest == &expected_digest && size == expected_size
     ) {
         return Err("filesystem store published different suite bytes".into());
     }
-    Ok(resource)
+    Ok(resource.resource)
 }
 
 fn initialize_evolution(
@@ -861,7 +861,8 @@ fn verify_suite_resource(
     store: &mut FsResourceStore,
 ) -> CampaignResult<Vec<u8>> {
     let mut bytes = Vec::new();
-    ResourceClient::new(store.clone()).copy_to(resource, 64 * 1024, &mut bytes)?;
+    let publication = store.publication(resource)?;
+    ResourceClient::new(store.clone()).copy_to(&publication, 64 * 1024, &mut bytes)?;
     if u64::try_from(bytes.len())? > MAX_SUITE_BYTES {
         return Err("retained suite exceeds the example byte limit".into());
     }

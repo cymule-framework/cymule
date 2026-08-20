@@ -337,21 +337,235 @@ pub fn framework_artifact_contracts() -> ResourceResult<Vec<ArtifactTypeContract
 }
 
 fn framework_schema(definition: &str) -> ResourceResult<Value> {
-    let schema: Value = serde_json::from_str(include_str!("../../../schemas/resource.schema.json"))
-        .map_err(|error| ResourceError::Validation(error.to_string()))?;
-    let definitions = schema.get("$defs").cloned().ok_or_else(|| {
-        ResourceError::Validation("Resource schema has no local definitions".to_owned())
-    })?;
-    if definitions.get(definition).is_none() {
-        return Err(ResourceError::Validation(format!(
-            "Resource schema has no framework definition {definition}"
-        )));
-    }
-    Ok(serde_json::json!({
+    let schema = match definition {
+        "resourceHandle" => resource_handle_schema(),
+        "manifestDescriptor" => manifest_descriptor_schema(),
+        "listProof" => list_proof_schema(),
+        "resourceHandoff" => resource_handoff_schema(),
+        "lifecycleReceipt" => lifecycle_receipt_schema(),
+        _ => {
+            return Err(ResourceError::Validation(format!(
+                "unknown framework Artifact definition {definition}"
+            )));
+        }
+    };
+    Ok(schema)
+}
+
+fn resource_handle_schema() -> Value {
+    serde_json::json!({
         "$schema": JSON_SCHEMA_DIALECT,
-        "$ref": format!("#/$defs/{definition}"),
-        "$defs": definitions,
-    }))
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resource_id", "resource_version", "shape", "media_type", "integrity"],
+        "properties": {
+            "resource_id": digest_schema(),
+            "resource_version": {"const": crate::RESOURCE_VERSION},
+            "shape": {"enum": ["inline", "object", "collection", "directory", "snapshot"]},
+            "media_type": {"type": "string", "minLength": 3, "maxLength": 255},
+            "inline": inline_schema(),
+            "integrity": integrity_schema(),
+            "manifest": manifest_descriptor_schema_without_dialect(),
+            "annotations": {
+                "type": "object",
+                "additionalProperties": {"type": "string", "maxLength": 4096}
+            }
+        },
+        "allOf": [{
+            "if": {"properties": {"shape": {"const": "inline"}}, "required": ["shape"]},
+            "then": {
+                "required": ["inline"],
+                "not": {"required": ["manifest"]},
+                "properties": {"integrity": {"type": "object", "properties": {"kind": {"const": "inline"}}, "required": ["kind"]}}
+            },
+            "else": {
+                "not": {"required": ["inline"]},
+                "properties": {"integrity": {"not": {"type": "object", "properties": {"kind": {"const": "inline"}}, "required": ["kind"]}}}
+            }
+        }]
+    })
+}
+
+fn manifest_descriptor_schema() -> Value {
+    let mut schema = manifest_descriptor_schema_without_dialect();
+    schema
+        .as_object_mut()
+        .expect("manifest schema is an object")
+        .insert(
+            "$schema".to_owned(),
+            Value::String(JSON_SCHEMA_DIALECT.to_owned()),
+        );
+    schema
+}
+
+fn manifest_descriptor_schema_without_dialect() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["manifest_version", "media_type", "digest", "size", "entry_count", "root_digest"],
+        "properties": {
+            "manifest_version": {"const": crate::RESOURCE_MANIFEST_VERSION},
+            "media_type": {"const": crate::RESOURCE_MANIFEST_MEDIA_TYPE},
+            "digest": digest_schema(),
+            "size": {"type": "integer", "minimum": 0},
+            "entry_count": {"type": "integer", "minimum": 0},
+            "root_digest": digest_schema()
+        }
+    })
+}
+
+fn list_proof_schema() -> Value {
+    serde_json::json!({
+        "$schema": JSON_SCHEMA_DIALECT,
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["proof_version", "manifest_digest", "entry_count", "start_index", "inclusions"],
+        "properties": {
+            "proof_version": {"const": crate::RESOURCE_LIST_PROOF_VERSION},
+            "manifest_digest": digest_schema(),
+            "entry_count": {"type": "integer", "minimum": 0},
+            "start_index": {"type": "integer", "minimum": 0},
+            "inclusions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["index", "path"],
+                    "properties": {
+                        "index": {"type": "integer", "minimum": 0},
+                        "path": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": ["side", "digest"],
+                                "properties": {"side": {"enum": ["left", "right"]}, "digest": digest_schema()}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn resource_handoff_schema() -> Value {
+    serde_json::json!({
+        "$schema": JSON_SCHEMA_DIALECT,
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["handoff_version", "transfer_id", "producer", "to_run", "slot", "resource"],
+        "properties": {
+            "handoff_version": {"const": crate::RESOURCE_HANDOFF_VERSION},
+            "transfer_id": non_empty_schema(),
+            "producer": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["run_id", "occurrence_id", "result"],
+                "properties": {
+                    "run_id": non_empty_schema(),
+                    "occurrence_id": non_empty_schema(),
+                    "result": artifact_ref_schema()
+                }
+            },
+            "to_run": non_empty_schema(),
+            "slot": non_empty_schema(),
+            "resource": resource_handle_schema()
+        }
+    })
+}
+
+fn lifecycle_receipt_schema() -> Value {
+    serde_json::json!({
+        "$schema": JSON_SCHEMA_DIALECT,
+        "oneOf": [
+            receipt_schema(
+                crate::RESOURCE_PIN_RECEIPT_VERSION,
+                &["pin_id", "resource_id", "owner"],
+                &serde_json::json!({"pin_id": non_empty_schema(), "resource_id": digest_schema(), "owner": non_empty_schema()}),
+            ),
+            receipt_schema(
+                crate::RESOURCE_RELEASE_RECEIPT_VERSION,
+                &["release_id", "pin_id", "resource_id"],
+                &serde_json::json!({"release_id": non_empty_schema(), "pin_id": non_empty_schema(), "resource_id": digest_schema()}),
+            ),
+            receipt_schema(
+                crate::RESOURCE_GC_RECEIPT_VERSION,
+                &["gc_id", "resource_id", "active_pin_count", "disposition"],
+                &serde_json::json!({"gc_id": non_empty_schema(), "resource_id": digest_schema(), "active_pin_count": {"type": "integer", "minimum": 0}, "disposition": {"enum": ["retained", "eligible"]}}),
+            ),
+            receipt_schema(
+                crate::RESOURCE_DELETE_RECEIPT_VERSION,
+                &["delete_id", "gc_id", "resource_id", "store_binding", "removed_bytes", "verified_absent"],
+                &serde_json::json!({"delete_id": non_empty_schema(), "gc_id": non_empty_schema(), "resource_id": digest_schema(), "store_binding": non_empty_schema(), "removed_bytes": {"type": "integer", "minimum": 0}, "verified_absent": {"const": true}}),
+            ),
+            receipt_schema(
+                crate::RESOURCE_CLEANUP_RECEIPT_VERSION,
+                &["write_id", "upload_id", "store_binding", "removed_staging_objects", "removed_chunks", "verified_absent"],
+                &serde_json::json!({"write_id": non_empty_schema(), "upload_id": non_empty_schema(), "store_binding": non_empty_schema(), "removed_staging_objects": {"type": "integer", "minimum": 0}, "removed_chunks": {"type": "integer", "minimum": 0}, "verified_absent": {"const": true}}),
+            )
+        ]
+    })
+}
+
+fn receipt_schema(version: &str, required: &[&str], properties: &Value) -> Value {
+    let mut required = required
+        .iter()
+        .map(|value| Value::String((*value).to_owned()))
+        .collect::<Vec<_>>();
+    required.insert(0, Value::String("receipt_version".to_owned()));
+    let mut properties = properties
+        .as_object()
+        .cloned()
+        .expect("receipt properties are an object");
+    properties.insert(
+        "receipt_version".to_owned(),
+        serde_json::json!({"const": version}),
+    );
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": required,
+        "properties": properties
+    })
+}
+
+fn inline_schema() -> Value {
+    serde_json::json!({"oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["encoding", "text"], "properties": {"encoding": {"const": "utf8"}, "text": {"type": "string"}}},
+        {"type": "object", "additionalProperties": false, "required": ["encoding", "value"], "properties": {"encoding": {"const": "json"}, "value": true}},
+        {"type": "object", "additionalProperties": false, "required": ["encoding", "data"], "properties": {"encoding": {"const": "base64"}, "data": {"type": "string"}}}
+    ]})
+}
+
+fn integrity_schema() -> Value {
+    serde_json::json!({"oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["kind"], "properties": {"kind": {"const": "inline"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "digest", "size"], "properties": {"kind": {"const": "content"}, "digest": digest_schema(), "size": {"type": "integer", "minimum": 0}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "authority", "version"], "properties": {"kind": {"const": "version"}, "authority": non_empty_schema(), "version": non_empty_schema()}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "identity"], "properties": {"kind": {"const": "live"}, "identity": non_empty_schema()}}
+    ]})
+}
+
+fn artifact_ref_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["identity_version", "artifact_id", "kind"],
+        "properties": {
+            "identity_version": {"const": cymule_core::ARTIFACT_IDENTITY_VERSION},
+            "artifact_id": digest_schema(),
+            "kind": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._+-]*/[a-z0-9][a-z0-9._+/-]*$"}
+        }
+    })
+}
+
+fn digest_schema() -> Value {
+    serde_json::json!({"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"})
+}
+
+fn non_empty_schema() -> Value {
+    serde_json::json!({"type": "string", "minLength": 1, "maxLength": 512})
 }
 
 impl ArtifactTypeContract {

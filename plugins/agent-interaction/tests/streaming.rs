@@ -98,7 +98,7 @@ fn message_chunks_are_invisible_until_atomic_finalization_and_reopen() {
                     text: "world".to_owned(),
                 },
                 ContentBlock::ResourceHandle {
-                    resource: resource.clone(),
+                    resource: Box::new(resource.clone()),
                 },
             ],
         },
@@ -121,7 +121,9 @@ fn message_chunks_are_invisible_until_atomic_finalization_and_reopen() {
     assert_eq!(message.content.len(), 3);
     assert_eq!(
         message.content[2],
-        ContentBlock::ResourceHandle { resource }
+        ContentBlock::ResourceHandle {
+            resource: Box::new(resource),
+        }
     );
     let revision = finalized.revision;
     drop(coordinator);

@@ -15,7 +15,7 @@ pub const VIRTUAL_REGION_MIGRATION_CONTROL_VERSION: &str =
 /// Immutable cold-archive manifest version.
 pub const VIRTUAL_ARCHIVE_MANIFEST_VERSION: &str = "cymule.virtual-archive-manifest/1";
 /// Verified virtual subtree compaction certificate version.
-pub const VIRTUAL_COMPACTION_CERTIFICATE_VERSION: &str = "cymule.virtual-compaction-certificate/1";
+pub const VIRTUAL_COMPACTION_CERTIFICATE_VERSION: &str = "cymule.virtual-compaction-certificate/2";
 /// Idempotent virtual compaction command version.
 pub const VIRTUAL_COMPACTION_CONTROL_VERSION: &str = "cymule.virtual-compaction-control/1";
 /// Idempotent partial rehydration command version.
@@ -554,8 +554,8 @@ pub struct VirtualCompactionCertificate {
     pub retained_occurrence_bindings: BTreeSet<String>,
     /// Replay capability after this retention decision.
     pub replay_availability: ReplayAvailability,
-    /// Content-addressed exact history used for partial rehydration.
-    pub rehydration_manifest: ArtifactRef,
+    /// Semantic descriptor for cold exact history used by partial rehydration.
+    pub rehydration_manifest: cymule_resource::ResourceHandle,
     /// Pinned archive/compactor implementation binding.
     pub compactor_binding: String,
     /// Immutable implementation or policy revision.

@@ -28,6 +28,8 @@
   projection, and finalized message identity is immutable.
 - Large streamed content should finalize to a verified `ResourceHandle` block;
   do not accumulate unbounded provider bytes in Session messages.
+- Keep the `ResourceHandle` enum payload boxed in memory so richer semantic
+  descriptors do not inflate every `ContentBlock`; Serde wire shape stays flat.
 - Journal adapters persist accepted updates before the in-process projection is
   advanced. Reopen by replaying the journal; never treat an in-memory Session as
   durable authority. Adapter-local exclusion must be non-blocking and must

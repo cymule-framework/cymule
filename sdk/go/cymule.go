@@ -842,7 +842,7 @@ type VirtualCompactionCertificate struct {
 	UnresolvedObligations      []string                 `json:"unresolved_obligations"`
 	RetainedOccurrenceBindings []string                 `json:"retained_occurrence_bindings"`
 	ReplayAvailability         ReplayAvailability       `json:"replay_availability"`
-	RehydrationManifest        ArtifactRef              `json:"rehydration_manifest"`
+	RehydrationManifest        ResourceHandle           `json:"rehydration_manifest"`
 	CompactorBinding           string                   `json:"compactor_binding"`
 	CompactorRevision          string                   `json:"compactor_revision"`
 }

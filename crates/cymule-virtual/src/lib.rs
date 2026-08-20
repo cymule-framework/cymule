@@ -6,7 +6,9 @@ mod error;
 mod model;
 mod scheduler;
 
-pub use archive::{VIRTUAL_ARCHIVE_MANIFEST_KIND, VirtualArchive, virtual_archive_record};
+pub use archive::{
+    VIRTUAL_ARCHIVE_MANIFEST_KIND, VirtualArchive, VirtualArchiveObject, virtual_archive_record,
+};
 pub use durable::{DurableVirtualController, VIRTUAL_CHECKPOINT_SCHEMA, VirtualCheckpoint};
 pub use error::{VirtualError, VirtualResult};
 pub use model::{

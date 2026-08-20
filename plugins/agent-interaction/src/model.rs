@@ -38,7 +38,7 @@ pub enum ContentBlock {
     /// Provider-neutral cross-Run Resource Handle.
     ResourceHandle {
         /// Verified provider-neutral Resource Handle.
-        resource: ResourceHandle,
+        resource: Box<ResourceHandle>,
     },
 }
 

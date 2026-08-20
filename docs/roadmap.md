@@ -110,7 +110,7 @@ Status: implemented.
   work identity, and exposes four-language control contracts;
 - completed regions compact through a pinned immutable byte archive into
   authenticated summaries/certificates, retain terminal fence and binding
-  evidence, checkpoint the manifest Artifact atomically, and partially
+  evidence, checkpoint only the cold manifest Resource descriptor, and partially
   rehydrate exact selected occurrences after full content verification;
 - archive write/read failure, tamper, stale CAS, reopen, and old receipt replay
   are fault-tested; four SDKs expose the same compact/rehydrate controls without

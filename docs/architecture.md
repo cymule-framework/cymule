@@ -315,13 +315,15 @@ on its historical region identity. No database partition, Kafka offset, object
 prefix, or range syntax enters framework state.
 
 Completed regions use a separate `VirtualArchive` byte seam. Cymule serializes
-the exact occurrence manifest, derives its Artifact reference, and asks the
-adapter to idempotently store those bytes. The adapter may realize any immutable
-storage substrate, but it cannot author the `VirtualCompactionCertificate`.
-After manifest readback, one M1 Artifact-plus-journal CAS replaces hot
-occurrence payloads with a bounded summary, certificate, and small per-work
-terminal fence index. A failed CAS leaves at most an unreferenced immutable
-manifest in the adapter.
+the exact occurrence manifest, derives its semantic Resource descriptor, and
+asks the adapter to idempotently store those bytes. The adapter may realize any
+immutable storage substrate, but it cannot author the
+`VirtualCompactionCertificate`.
+After manifest readback, one M1 journal CAS replaces hot occurrence payloads
+with a bounded summary, certificate, semantic cold descriptor, and small
+per-work terminal fence index. A failed CAS leaves at most an unreferenced
+immutable manifest in the adapter. Cold bytes never enter the hot Machine
+Artifact map.
 
 Partial rehydration is explicit rather than an implicit cache miss. A typed
 command fixes the certificate and exact occurrence IDs. The controller reads

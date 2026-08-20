@@ -340,7 +340,7 @@ class VirtualCompactionCertificate(TypedDict):
     unresolved_obligations: list[str]
     retained_occurrence_bindings: list[str]
     replay_availability: dict[str, Any]
-    rehydration_manifest: ArtifactRef
+    rehydration_manifest: dict[str, Any]
     compactor_binding: str
     compactor_revision: str
 

@@ -631,6 +631,7 @@ version = "0.1.4"
 dependencies = [
  "cymule-core",
  "cymule-durable",
+ "cymule-resource",
  "serde",
  "serde_json",
 ]

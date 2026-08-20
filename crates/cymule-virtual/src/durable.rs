@@ -17,7 +17,6 @@ use crate::{
     VirtualRecoveryCommand, VirtualRecoveryReceipt, VirtualRehydrationCommand,
     VirtualRehydrationReceipt, VirtualResult, VirtualRunWeightCommand, VirtualRunWeightReceipt,
     VirtualScheduler, VirtualSnapshot, WorkOccurrence, WorkResolution, WorkResolutionCommand,
-    virtual_archive_record,
 };
 
 /// Versioned M3 scheduler checkpoint stored in an M1 application journal.
@@ -525,12 +524,11 @@ impl DurableVirtualController {
     }
 
     /// Archive one completed region and atomically checkpoint its verified
-    /// certificate plus manifest Artifact through the M1 journal CAS.
+    /// cold Resource descriptor through the M1 journal CAS.
     pub fn compact_command_and_checkpoint<S: DurableStore>(
         coordinator: &mut DurableCoordinator<S>,
         scheduler: &mut VirtualScheduler,
         archive: &mut impl VirtualArchive,
-        machine: &mut Machine,
         command: &VirtualCompactionCommand,
         journal_id: &str,
     ) -> VirtualResult<VirtualCompactionReceipt> {
@@ -555,7 +553,6 @@ impl DurableVirtualController {
             )));
         }
         let scheduler_before = scheduler.clone();
-        let machine_before = machine.clone();
         let receipt = scheduler.compact(archive, command)?;
         let bytes = match archive.get(&receipt.certificate.rehydration_manifest) {
             Ok(bytes) => bytes,
@@ -571,27 +568,17 @@ impl DurableVirtualController {
                 return Err(VirtualError::Source(error.to_string()));
             }
         };
-        let record = match virtual_archive_record(&manifest) {
-            Ok(record) => record,
+        let object = match crate::virtual_archive_record(&manifest) {
+            Ok(object) => object,
             Err(error) => {
                 *scheduler = scheduler_before;
                 return Err(error);
             }
         };
-        if record.reference != receipt.certificate.rehydration_manifest || record.bytes != bytes {
+        if object.descriptor != receipt.certificate.rehydration_manifest || object.bytes != bytes {
             *scheduler = scheduler_before;
             return Err(VirtualError::Source(
                 "archive manifest changed before its durable checkpoint".to_owned(),
-            ));
-        }
-        let stored = machine
-            .put_artifact(record.reference.kind.clone(), record.bytes)
-            .map_err(|error| VirtualError::Validation(error.to_string()))?;
-        if stored != record.reference {
-            *scheduler = scheduler_before;
-            *machine = machine_before;
-            return Err(VirtualError::Validation(
-                "archive manifest Artifact identity is inconsistent".to_owned(),
             ));
         }
         let checkpoint = match compaction_checkpoint_record(
@@ -604,7 +591,6 @@ impl DurableVirtualController {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
                 *scheduler = scheduler_before;
-                *machine = machine_before;
                 return Err(error);
             }
         };
@@ -612,13 +598,8 @@ impl DurableVirtualController {
             journal_id: journal_id.to_owned(),
             records: vec![checkpoint],
         };
-        if let Err(error) = coordinator.checkpoint_artifact_journals(
-            machine,
-            &BTreeSet::from([receipt.certificate.rehydration_manifest.clone()]),
-            &[batch],
-        ) {
+        if let Err(error) = coordinator.checkpoint_journals(&[batch]) {
             *scheduler = scheduler_before;
-            *machine = machine_before;
             return Err(durable_error(error));
         }
         Ok(receipt)

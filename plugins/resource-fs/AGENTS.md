@@ -2,6 +2,8 @@
 
 - Store bytes by verified SHA-256, never by caller path. A resolver reference is
   a non-secret digest interpreted only under the configured immutable binding.
+  Rebuild replaceable locator sets from the semantic Handle's content digest
+  and this configured binding; do not copy locators back into the Handle.
 - Upload IDs derive from caller write IDs. Chunk retry at an already persisted
   offset succeeds only when the retained bytes match exactly; gaps and changed
   bytes fail closed. A whole-file import must also replay after publication by

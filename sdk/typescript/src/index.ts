@@ -402,7 +402,7 @@ export interface VirtualCompletionSummary {
 }
 
 export interface VirtualCompactionCertificate {
-  certificate_version: "cymule.virtual-compaction-certificate/1";
+  certificate_version: "cymule.virtual-compaction-certificate/2";
   certificate_id: string;
   source_causal_cut: string[];
   summary: VirtualCompletionSummary;
@@ -410,7 +410,7 @@ export interface VirtualCompactionCertificate {
   unresolved_obligations: string[];
   retained_occurrence_bindings: string[];
   replay_availability: ReplayAvailability;
-  rehydration_manifest: ArtifactRef;
+  rehydration_manifest: ResourceHandle;
   compactor_binding: string;
   compactor_revision: string;
 }

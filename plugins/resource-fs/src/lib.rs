@@ -68,6 +68,29 @@ impl FsResourceStore {
         &self.binding
     }
 
+    /// Rebuild this adapter's replaceable locator set for one semantic Handle.
+    pub fn publication(&self, resource: &ResourceHandle) -> ResourceResult<ResourcePublication> {
+        resource.verify()?;
+        let digest = resource.integrity.content_digest().ok_or_else(|| {
+            ResourceError::Validation(
+                "filesystem publication requires content-addressed integrity".to_owned(),
+            )
+        })?;
+        let publication = ResourcePublication {
+            resource: resource.clone(),
+            locators: ResourceLocatorSet {
+                locator_version: RESOURCE_LOCATOR_VERSION.to_owned(),
+                resource_id: resource.resource_id.clone(),
+                resolver_binding: self.binding.clone(),
+                locations: vec![ResourceLocation::Opaque {
+                    reference: digest.to_owned(),
+                }],
+            },
+        };
+        publication.verify()?;
+        Ok(publication)
+    }
+
     /// Encode a sorted, validated directory manifest for a chunked write.
     pub fn encode_manifest(entries: &[ResourceManifestEntry]) -> ResourceResult<Vec<u8>> {
         Ok(SealedResourceManifest::seal(entries.to_vec())?.bytes)

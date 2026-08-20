@@ -53,8 +53,8 @@ Status: implemented.
   stale CAS, reopen, and historical command-replay tests;
 - shared Rust, TypeScript, Python, and Go migration plan/control contracts that
   never interpret cursor positions;
-- provider-neutral immutable `VirtualArchive` bytes with framework-computed
-  manifest Artifact identity and pinned compactor binding;
+- provider-neutral immutable `VirtualArchive` bytes with a framework-computed
+  semantic Resource descriptor and pinned compactor binding;
 - completed-region eligibility that rejects non-exhausted/non-retired regions,
   any hot work, or a non-terminal greatest occurrence;
 - authenticated completion summaries and compaction certificates retaining the
@@ -62,9 +62,9 @@ Status: implemented.
   bindings, replay availability, and compactor revision;
 - exact occurrence-selection partial rehydration with full manifest/certificate
   readback validation and no implicit widening;
-- M1 Artifact-plus-journal checkpoints for compaction and journal checkpoints
-  for rehydration, including reopen, idempotent receipt replay, stale CAS
-  rollback, injected archive read/write failure, and tamper rejection;
+- M1 journal checkpoints retaining only the cold Resource descriptor for
+  compaction and rehydration, including reopen, idempotent receipt replay,
+  stale CAS rollback, injected archive read/write failure, and tamper rejection;
 - shared Rust, TypeScript, Python, and Go compaction/rehydration commands and
   transport-neutral archive/control interfaces;
 - provider-neutral worker capacity-slot claim commands whose M1 lease and M3
@@ -109,12 +109,16 @@ independent `cymule.virtual-region-migration/1` and
 `cymule.virtual-region-migration-control/1` domains; receipts and retired lineage
 remain in the same M3 checkpoint.
 Cold history adds independent `cymule.virtual-archive-manifest/1`,
-`cymule.virtual-compaction-certificate/1`,
+`cymule.virtual-compaction-certificate/2`,
 `cymule.virtual-compaction-control/1`, and
 `cymule.virtual-rehydration-control/1` domains. Their receipts, bounded summary,
 and terminal fence index remain in the additive
-`cymule.virtual-checkpoint/1` payload; exact occurrence bytes remain an ordinary
-content-addressed Artifact behind `VirtualArchive`.
+`cymule.virtual-checkpoint/1` payload; exact occurrence bytes remain a cold
+content-addressed Resource behind `VirtualArchive` and never re-enter hot
+Machine Artifacts.
+Certificate `/2` is the terminal pre-release replacement for `/1`; no dual
+reader or Artifact-reference fallback remains. Existing `/1` checkpoints must
+be rebuilt from their retained cold manifest before upgrading this profile.
 Multi-worker control adds independent `cymule.virtual-claim-control/1`,
 `cymule.virtual-lease-renewal-control/1`,
 `cymule.virtual-recovery-control/1`, and
