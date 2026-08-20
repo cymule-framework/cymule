@@ -34,7 +34,7 @@ The following domains evolve independently:
 | Canonical encoding | `cymule.jcs/1` | RFC 8785 JSON, SHA-256 IDs |
 | Artifact identity | `cymule.artifact/2` | closed kind and explicit length-prefixed bytes |
 | Artifact type contract | `cymule.artifact-type-contract/1` | exact contract is pinned in typed references |
-| Machine snapshot | `cymule.machine-snapshot/4` | full effect preimages and profiles are required |
+| Machine snapshot | `cymule.machine-snapshot/5` | authenticated compacted command/Event evidence is required |
 | Event schema | `cymule.event/3` | readers reject incomplete or unknown semantic events |
 | Command protocol | `cymule.command/2` | typed envelope and stable error codes |
 | Engine protocol | `cymule.engine/1` | one versioned request and success-or-failure response envelope |
@@ -68,6 +68,12 @@ failure MUST be a successful transport response containing exactly one closed
 failure object with category, phase, stable code, and display-only message.
 Contract identity, side, JSON Pointer, bounded issues, and retry disposition are
 present only when the Engine has authoritative evidence for them.
+
+An Engine envelope contains exactly one of a success response or failure
+object. Success response tags and their fields are closed. Nested discriminated
+responses, including completed-or-suspended execution and returned evolution
+commands, reject unknown variants, overlapping variant fields, and fields owned
+by another operation before the SDK returns them to a caller.
 
 Failure categories distinguish transport, validation, contract violation,
 admission denial, conflict, absence, declared plugin failure, plugin defect,
@@ -744,17 +750,20 @@ binding, or required authority MUST downgrade the claim. The runtime MUST NOT
 silently regenerate missing data. M0 verifies exact canonical state replay; its
 one-shot component calls are not an exact execution-replay implementation.
 
-`cymule.machine-snapshot/4` MAY replace a causally closed Event prefix with an
-authenticated base projection, cumulative prefix digest, and exact compacted
-Event identities. Every remaining Event stays in full and MUST have all parents
-in either the base or retained suffix. Restore verifies the base projection,
-every v2 Artifact reference, and an exact bidirectional Event/command-receipt
-closure before replaying the suffix. Every retained or compacted Event identity
-has exactly one applied receipt; every applied receipt names one such Event;
-and each retained Event's command ID and command hash match its command record.
-A conflict receipt names no Event. These are stricter restore invariants within
-snapshot v3, not a new wire shape. Older snapshot versions are rejected rather
-than upgraded implicitly. M1 compaction is a CAS transition with explicit
+`cymule.machine-snapshot/5` MAY replace a causally closed Event prefix with an
+authenticated base projection and cumulative ordered compacted evidence. Each
+compacted entry retains the Event ID, admitting command ID, Event command hash,
+and digest of the complete command record and receipt. The prefix digest is
+recomputed over that complete evidence plus the verified projection digest; a
+shape-valid caller digest is not authentication. Every remaining Event stays in
+full and MUST have all parents in either the base or retained suffix. Restore
+verifies the base projection, every v2 Artifact reference, and an exact
+bidirectional Event/command-receipt closure before replaying the suffix. Every
+retained or compacted Event identity has exactly one applied receipt; every
+applied receipt names one such Event; retained Events match command IDs and
+hashes directly; and compacted Events match their authenticated command and
+receipt evidence. A conflict receipt names no Event. Older snapshot versions
+are rejected rather than upgraded implicitly. M1 compaction is a CAS transition with explicit
 lineage; stale writers lose and acknowledgement loss reopens to the committed
 base. Compaction preserves current state replay but does not claim the removed
 Event bodies remain available for historical inspection unless a higher-profile

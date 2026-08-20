@@ -1663,6 +1663,74 @@ function validateSuccessResponse(value: unknown): void {
   if (payload === undefined || Object.keys(value).sort().join(",") !== payload) {
     throw transportError("invalid_engine_response", "success response fields are not closed");
   }
+  if (value.type === "execution_boundary") validateExecutionOutcome(value.execution);
+  if (value.type === "verified_evolution_command") validateEvolutionCommand(value.command);
+  if (value.type === "verified_live_evolution_command") validateLiveEvolutionCommand(value.command);
+}
+
+function validateExecutionOutcome(value: unknown): void {
+  if (!isRecord(value)) {
+    throw transportError("invalid_engine_response", "execution outcome is not an object");
+  }
+  const expected = value.status === "completed"
+    ? "result,status"
+    : value.status === "suspended" ? "status,suspension" : undefined;
+  if (expected === undefined || Object.keys(value).sort().join(",") !== expected) {
+    throw transportError("invalid_engine_response", "execution outcome is not closed");
+  }
+  const nested = value.status === "completed" ? value.result : value.suspension;
+  const nestedFields = value.status === "completed"
+    ? "effects,plan_id,precondition_token,projection_digest,run_id,value"
+    : "definition_id,invocation_id,plan_id,result_bind,run_id,site_id,wait";
+  if (!isRecord(nested) || Object.keys(nested).sort().join(",") !== nestedFields) {
+    throw transportError("invalid_engine_response", "execution payload fields are not closed");
+  }
+}
+
+function validateEvolutionCommand(value: unknown): void {
+  if (!isRecord(value)) {
+    throw transportError("invalid_engine_response", "evolution command is not an object");
+  }
+  const fields = new Map<string, string>([
+    ["apply_patch", "command_id,control_version,operation,patch"],
+    ["set_rollout", "command_id,control_version,decision,operation"],
+    ["select_occurrence", "command_id,control_version,occurrence_id,operation"],
+    ["migrate", "command_id,control_version,operation,request"],
+    ["restart_under_new_plan", "command_id,control_version,operation,request"],
+    ["shadow", "command_id,control_version,operation,request"],
+    ["observe", "command_id,control_version,observation,operation"],
+    ["apply_gate", "command_id,control_version,gate,next_decision_id,operation"],
+  ]).get(String(value.operation));
+  if (
+    value.control_version !== "cymule.evolution-control/2"
+    || fields === undefined
+    || Object.keys(value).sort().join(",") !== fields
+  ) {
+    throw transportError("invalid_engine_response", "evolution command is not closed");
+  }
+}
+
+function validateLiveEvolutionCommand(value: unknown): void {
+  if (!isRecord(value)) {
+    throw transportError("invalid_engine_response", "live evolution command is not an object");
+  }
+  const fields = new Map<string, string[]>([
+    ["publish_definition", ["command_id,control_version,definition,logical_ref,operation"]],
+    ["register_template", ["command_id,control_version,operation,template"]],
+    ["publish_and_relink", ["command_id,control_version,operation,publication"]],
+    ["apply", [
+      "command,command_id,control_version,operation,template_id",
+      "command,command_id,control_version,operation,safe_point,template_id",
+    ]],
+  ]).get(String(value.operation));
+  if (
+    value.control_version !== "cymule.live-evolution-control/1"
+    || fields === undefined
+    || !fields.includes(Object.keys(value).sort().join(","))
+  ) {
+    throw transportError("invalid_engine_response", "live evolution command is not closed");
+  }
+  if (value.operation === "apply") validateEvolutionCommand(value.command);
 }
 
 function validateEngineFailure(value: unknown): asserts value is EngineFailure {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"sort"
 )
 
@@ -389,6 +390,49 @@ type LiveEvolutionCommand struct {
 	SafePoint      *MigrationSafePoint     `json:"safe_point,omitempty"`
 }
 
+// UnmarshalJSON rejects unknown or overlapping live-evolution operations.
+func (command *LiveEvolutionCommand) UnmarshalJSON(input []byte) error {
+	value, err := decodeUniqueJSON(input)
+	if err != nil {
+		return err
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("live evolution command is not an object")
+	}
+	operation, ok := object["operation"].(string)
+	if !ok {
+		return fmt.Errorf("live evolution command operation is missing")
+	}
+	if object["control_version"] != "cymule.live-evolution-control/1" {
+		return fmt.Errorf("unsupported live evolution control version")
+	}
+	expected := map[string][][]string{
+		"publish_definition": {{"control_version", "command_id", "operation", "logical_ref", "definition"}},
+		"register_template":  {{"control_version", "command_id", "operation", "template"}},
+		"publish_and_relink": {{"control_version", "command_id", "operation", "publication"}},
+		"apply": {
+			{"control_version", "command_id", "operation", "template_id", "command"},
+			{"control_version", "command_id", "operation", "template_id", "command", "safe_point"},
+		},
+	}[operation]
+	if expected == nil {
+		return fmt.Errorf("unsupported live evolution operation %q", operation)
+	}
+	if !slices.ContainsFunc(expected, func(fields []string) bool {
+		return requireExactJSONFields(object, fields) == nil
+	}) {
+		return fmt.Errorf("live evolution command fields are not closed")
+	}
+	type wire LiveEvolutionCommand
+	var decoded wire
+	if err := decodeClosedValue(value, &decoded); err != nil {
+		return err
+	}
+	*command = LiveEvolutionCommand(decoded)
+	return nil
+}
+
 // MarshalJSON emits the exact operation-specific request shape.
 func (command EvolutionCommand) MarshalJSON() ([]byte, error) {
 	var request any
@@ -420,6 +464,37 @@ func (command EvolutionCommand) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON reads the closed operation-specific request into typed fields.
 func (command *EvolutionCommand) UnmarshalJSON(input []byte) error {
+	value, err := decodeUniqueJSON(input)
+	if err != nil {
+		return err
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("evolution command is not an object")
+	}
+	operation, ok := object["operation"].(string)
+	if !ok {
+		return fmt.Errorf("evolution command operation is missing")
+	}
+	if object["control_version"] != "cymule.evolution-control/2" {
+		return fmt.Errorf("unsupported evolution control version")
+	}
+	expectedFields, ok := map[string][]string{
+		"apply_patch":            {"control_version", "command_id", "operation", "patch"},
+		"set_rollout":            {"control_version", "command_id", "operation", "decision"},
+		"select_occurrence":      {"control_version", "command_id", "operation", "occurrence_id"},
+		"migrate":                {"control_version", "command_id", "operation", "request"},
+		"restart_under_new_plan": {"control_version", "command_id", "operation", "request"},
+		"shadow":                 {"control_version", "command_id", "operation", "request"},
+		"observe":                {"control_version", "command_id", "operation", "observation"},
+		"apply_gate":             {"control_version", "command_id", "operation", "gate", "next_decision_id"},
+	}[operation]
+	if !ok {
+		return fmt.Errorf("unsupported evolution operation %q", operation)
+	}
+	if err := requireExactJSONFields(object, expectedFields); err != nil {
+		return err
+	}
 	var wire struct {
 		ControlVersion string              `json:"control_version"`
 		CommandID      string              `json:"command_id"`
@@ -432,7 +507,7 @@ func (command *EvolutionCommand) UnmarshalJSON(input []byte) error {
 		Gate           *RolloutGate        `json:"gate"`
 		NextDecisionID string              `json:"next_decision_id"`
 	}
-	if err := json.Unmarshal(input, &wire); err != nil {
+	if err := decodeClosedValue(value, &wire); err != nil {
 		return err
 	}
 	*command = EvolutionCommand{
@@ -449,19 +524,19 @@ func (command *EvolutionCommand) UnmarshalJSON(input []byte) error {
 	switch wire.Operation {
 	case "migrate":
 		var request MigrationRequest
-		if err := json.Unmarshal(wire.Request, &request); err != nil {
+		if err := decodeClosedJSON(wire.Request, &request); err != nil {
 			return err
 		}
 		command.Migration = &request
 	case "restart_under_new_plan":
 		var request RestartRequest
-		if err := json.Unmarshal(wire.Request, &request); err != nil {
+		if err := decodeClosedJSON(wire.Request, &request); err != nil {
 			return err
 		}
 		command.Restart = &request
 	case "shadow":
 		var request ShadowRequest
-		if err := json.Unmarshal(wire.Request, &request); err != nil {
+		if err := decodeClosedJSON(wire.Request, &request); err != nil {
 			return err
 		}
 		command.Shadow = &request
@@ -1410,6 +1485,39 @@ type ExecutionOutcome struct {
 	Suspension *SuspensionBoundary `json:"suspension,omitempty"`
 }
 
+// UnmarshalJSON rejects unknown or overlapping Embedded execution variants.
+func (outcome *ExecutionOutcome) UnmarshalJSON(input []byte) error {
+	value, err := decodeUniqueJSON(input)
+	if err != nil {
+		return err
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("execution outcome is not an object")
+	}
+	status, ok := object["status"].(string)
+	if !ok {
+		return fmt.Errorf("execution outcome status is missing")
+	}
+	expected, ok := map[string][]string{
+		"completed": {"status", "result"},
+		"suspended": {"status", "suspension"},
+	}[status]
+	if !ok {
+		return fmt.Errorf("unsupported execution outcome %q", status)
+	}
+	if err := requireExactJSONFields(object, expected); err != nil {
+		return err
+	}
+	type wire ExecutionOutcome
+	var decoded wire
+	if err := decodeClosedValue(value, &decoded); err != nil {
+		return err
+	}
+	*outcome = ExecutionOutcome(decoded)
+	return nil
+}
+
 // FlowBuilder builds one-definition Plan Candidates.
 type FlowBuilder struct {
 	candidate PlanCandidate
@@ -1633,13 +1741,17 @@ func (engine CliEngine) request(request any, response any) error {
 	if err := command.Run(); err != nil {
 		return transportFailure("engine_process_failed", "engine exited without a protocol response")
 	}
+	return decodeEngineResponse(stdout.Bytes(), response)
+}
+
+func decodeEngineResponse(input []byte, response any) error {
 	var envelope struct {
-		Outcome        string          `json:"outcome"`
-		EngineProtocol string          `json:"engine_protocol"`
-		Response       json.RawMessage `json:"response"`
-		Error          *EngineFailure  `json:"error"`
+		Outcome        string           `json:"outcome"`
+		EngineProtocol string           `json:"engine_protocol"`
+		Response       *json.RawMessage `json:"response"`
+		Error          *EngineFailure   `json:"error"`
 	}
-	if err := decodeClosedJSON(stdout.Bytes(), &envelope); err != nil {
+	if err := decodeClosedJSON(input, &envelope); err != nil {
 		return transportFailure("invalid_engine_response", err.Error())
 	}
 	if envelope.EngineProtocol != EngineProtocolVersion {
@@ -1652,15 +1764,18 @@ func (engine CliEngine) request(request any, response any) error {
 	}
 	switch envelope.Outcome {
 	case "failure":
-		if envelope.Error == nil {
-			return transportFailure("invalid_engine_response", "failure response omitted error")
+		if envelope.Error == nil || envelope.Response != nil {
+			return transportFailure("invalid_engine_response", "failure response must contain only error")
 		}
 		if err := envelope.Error.validate(); err != nil {
 			return transportFailure("invalid_engine_response", err.Error())
 		}
 		return *envelope.Error
 	case "success":
-		if err := decodeClosedJSON(envelope.Response, response); err != nil {
+		if envelope.Response == nil || envelope.Error != nil {
+			return transportFailure("invalid_engine_response", "success response must contain only response")
+		}
+		if err := decodeClosedJSON(*envelope.Response, response); err != nil {
 			return transportFailure("invalid_engine_response", err.Error())
 		}
 		return nil
@@ -1674,6 +1789,10 @@ func decodeClosedJSON(input []byte, target any) error {
 	if err != nil {
 		return err
 	}
+	return decodeClosedValue(value, target)
+}
+
+func decodeClosedValue(value any, target any) error {
 	normalized, err := json.Marshal(value)
 	if err != nil {
 		return err
@@ -1689,6 +1808,18 @@ func decodeClosedJSON(input []byte, target any) error {
 			return fmt.Errorf("unexpected trailing JSON value")
 		}
 		return err
+	}
+	return nil
+}
+
+func requireExactJSONFields(object map[string]any, expected []string) error {
+	if len(object) != len(expected) {
+		return fmt.Errorf("JSON object fields are not closed")
+	}
+	for _, field := range expected {
+		if _, ok := object[field]; !ok {
+			return fmt.Errorf("JSON object omitted required field %q", field)
+		}
 	}
 	return nil
 }

@@ -242,7 +242,7 @@ impl DurableState {
                 )
             })?;
             let base_id = content_id("cymule.machine-base/1", base)?;
-            let compacted_events = u64::try_from(base.compacted_event_ids.len())
+            let compacted_events = u64::try_from(base.compacted_events.len())
                 .map_err(|error| DurableError::Validation(error.to_string()))?;
             let retained_events = u64::try_from(self.machine.events.len())
                 .map_err(|error| DurableError::Validation(error.to_string()))?;

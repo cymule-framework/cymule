@@ -1499,6 +1499,95 @@ def _validate_engine_envelope(envelope: object) -> None:
         raise _transport_error("invalid_engine_response", "response envelope is not closed")
     if outcome == "failure":
         _validate_engine_failure(envelope["error"])
+    else:
+        _validate_success_response(envelope["response"])
+
+
+def _validate_success_response(value: object) -> None:
+    if not isinstance(value, dict) or not isinstance(value.get("type"), str):
+        raise _transport_error("invalid_engine_response", "success response is not tagged")
+    expected = {
+        "sealed": {"type", "plan"},
+        "sealed_resource": {"type", "resource"},
+        "verified_wait_activation": {"type", "activation"},
+        "verified_durable_command": {"type", "command"},
+        "verified_evolution_command": {"type", "command"},
+        "verified_live_evolution_command": {"type", "command"},
+        "execution_boundary": {"type", "execution"},
+        "verified": {"type"},
+    }.get(value["type"])
+    if expected is None or set(value) != expected:
+        raise _transport_error("invalid_engine_response", "success response fields are not closed")
+    if value["type"] == "execution_boundary":
+        _validate_execution_outcome(value["execution"])
+    elif value["type"] == "verified_evolution_command":
+        _validate_evolution_command(value["command"])
+    elif value["type"] == "verified_live_evolution_command":
+        _validate_live_evolution_command(value["command"])
+
+
+def _validate_execution_outcome(value: object) -> None:
+    if not isinstance(value, dict):
+        raise _transport_error("invalid_engine_response", "execution outcome is not an object")
+    expected = {
+        "completed": {"status", "result"},
+        "suspended": {"status", "suspension"},
+    }.get(value.get("status"))
+    if expected is None or set(value) != expected:
+        raise _transport_error("invalid_engine_response", "execution outcome is not closed")
+    nested = value["result"] if value["status"] == "completed" else value["suspension"]
+    nested_fields = (
+        {"run_id", "plan_id", "value", "projection_digest", "precondition_token", "effects"}
+        if value["status"] == "completed"
+        else {"run_id", "plan_id", "definition_id", "invocation_id", "site_id", "wait", "result_bind"}
+    )
+    if not isinstance(nested, dict) or set(nested) != nested_fields:
+        raise _transport_error("invalid_engine_response", "execution payload fields are not closed")
+
+
+def _validate_evolution_command(value: object) -> None:
+    if not isinstance(value, dict):
+        raise _transport_error("invalid_engine_response", "evolution command is not an object")
+    common = {"control_version", "command_id", "operation"}
+    variant = {
+        "apply_patch": {"patch"},
+        "set_rollout": {"decision"},
+        "select_occurrence": {"occurrence_id"},
+        "migrate": {"request"},
+        "restart_under_new_plan": {"request"},
+        "shadow": {"request"},
+        "observe": {"observation"},
+        "apply_gate": {"gate", "next_decision_id"},
+    }.get(value.get("operation"))
+    if (
+        value.get("control_version") != "cymule.evolution-control/2"
+        or variant is None
+        or set(value) != common | variant
+    ):
+        raise _transport_error("invalid_engine_response", "evolution command is not closed")
+
+
+def _validate_live_evolution_command(value: object) -> None:
+    if not isinstance(value, dict):
+        raise _transport_error("invalid_engine_response", "live evolution command is not an object")
+    common = {"control_version", "command_id", "operation"}
+    variants = {
+        "publish_definition": [common | {"logical_ref", "definition"}],
+        "register_template": [common | {"template"}],
+        "publish_and_relink": [common | {"publication"}],
+        "apply": [
+            common | {"template_id", "command"},
+            common | {"template_id", "command", "safe_point"},
+        ],
+    }.get(value.get("operation"))
+    if (
+        value.get("control_version") != "cymule.live-evolution-control/1"
+        or variants is None
+        or set(value) not in variants
+    ):
+        raise _transport_error("invalid_engine_response", "live evolution command is not closed")
+    if value["operation"] == "apply":
+        _validate_evolution_command(value["command"])
 
 
 def _validate_engine_failure(value: object) -> None:

@@ -182,12 +182,14 @@ transactions, WAL, synchronous-full persistence, and zero-timeout contention.
 Adapter exclusion is never semantic authority. No database, queue, or object
 store name is part of the contract.
 
-Machine snapshot v2 can compact a causally closed canonical Event prefix into
-an authenticated base projection while retaining exact prefix identities,
-command receipts, and every full suffix Event. Restore validates the base and
-replays the suffix. The M1 coordinator records cumulative compaction lineage in
-the same whole-state CAS, so a stale writer loses and a lost response can be
-recovered by reopen without recomputing history.
+Machine snapshot v5 can compact a causally closed canonical Event prefix into
+an authenticated base projection while retaining ordered Event identities,
+command identities and semantic hashes, complete command-record digests, and
+every full suffix Event. Restore recomputes the prefix digest from that evidence
+and the projection digest before replaying the suffix. The M1 coordinator
+records cumulative compaction lineage in the same whole-state CAS, so a stale
+writer loses and a lost response can be recovered by reopen without recomputing
+history.
 
 ## Cross-Run resources
 

@@ -50,6 +50,50 @@ printf '%s' '{"engine_protocol":"cymule.engine/1","outcome":"success","response"
   }
 });
 
+test("TypeScript Engine success and nested unions are closed", () => {
+  const cases = [
+    {
+      response: { type: "verified_evolution_command", command: {
+        control_version: "cymule.evolution-control/2",
+        command_id: "command:test",
+        operation: "future_operation",
+      } },
+      invoke: (engine: CliEngine) => engine.verifyEvolutionCommand({} as never),
+    },
+    {
+      response: { type: "execution_boundary", execution: {
+        status: "completed", result: {}, suspension: {},
+      } },
+      invoke: (engine: CliEngine) => engine.run({} as never, null, "plugin", "run:test"),
+    },
+  ];
+  for (const [index, entry] of cases.entries()) {
+    const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-"));
+    const executable = join(directory, `closed-engine-${index}`);
+    writeFileSync(
+      executable,
+      `#!/bin/sh
+cat >/dev/null
+printf '%s' '${JSON.stringify({
+        engine_protocol: "cymule.engine/1",
+        outcome: "success",
+        response: entry.response,
+      })}'
+`,
+    );
+    chmodSync(executable, 0o700);
+    try {
+      assert.throws(
+        () => entry.invoke(new CliEngine(executable)),
+        (error: unknown) => error instanceof EngineError
+          && error.failure.code === "invalid_engine_response",
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
 test("TypeScript candidate seals and executes through the Rust engine", () => {
   const enginePath = process.env.CYMULE_BIN;
   const pluginPath = process.env.CYMULE_TEST_PLUGIN;
