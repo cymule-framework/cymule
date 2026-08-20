@@ -236,12 +236,12 @@ fn map_resource_error(error: &cymule_resource::ResourceError) -> EngineFailure {
             "resource_schema_violation",
             "typed Artifact value violates its declared schema",
         );
-        failure.contract = Some(issue.codec_id.clone().into());
+        failure.contract = Some(issue.contract_id.clone().into());
         failure.contract_side = Some(EngineContractSide::Input);
         failure.path = Some(issue.instance_path.clone().into());
         failure.issues = vec![EngineIssue {
             code: "schema_violation".into(),
-            message: issue.message.clone().into(),
+            message: "value does not satisfy the Artifact type contract".into(),
             path: Some(issue.instance_path.clone().into()),
             schema_path: Some(issue.schema_path.clone().into()),
         }];
