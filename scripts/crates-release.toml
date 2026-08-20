@@ -92,6 +92,7 @@ dependencies = [
   "cymule-core",
   "cymule-durable",
   "cymule-evolution",
+  "cymule-executor-process",
   "cymule-resource",
   "cymule-runtime",
   "cymule-virtual",
