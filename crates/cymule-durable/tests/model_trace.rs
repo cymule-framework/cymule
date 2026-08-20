@@ -33,7 +33,7 @@ impl PluginHost for EmptyPlugin {
                     effects: BTreeMap::new(),
                 },
             }),
-            other => Err(RuntimeError::Plugin(format!(
+            other => Err(RuntimeError::plugin_defect(format!(
                 "model trace received unexpected plugin request: {other:?}"
             ))),
         }

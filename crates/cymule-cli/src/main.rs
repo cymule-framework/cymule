@@ -11,9 +11,8 @@ use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{
     ENGINE_PROTOCOL_VERSION, EmbeddedRuntime, EngineContractSide, EngineFailure,
-    EngineFailureCategory, EngineIssue, EnginePhase, EngineRequestEnvelope,
-    EngineResponseEnvelope, EngineRetryDisposition, ExecutionResult, ProcessPlugin, seal_plan,
-    verify_plan,
+    EngineFailureCategory, EngineIssue, EnginePhase, EngineRequestEnvelope, EngineResponseEnvelope,
+    EngineRetryDisposition, ExecutionResult, ProcessPlugin, seal_plan, verify_plan,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -244,6 +243,7 @@ fn map_resource_error(error: &cymule_resource::ResourceError) -> EngineFailure {
             code: "schema_violation".into(),
             message: issue.message.clone().into(),
             path: Some(issue.instance_path.clone().into()),
+            schema_path: Some(issue.schema_path.clone().into()),
         }];
         failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
         return failure;

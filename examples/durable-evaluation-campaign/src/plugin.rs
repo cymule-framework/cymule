@@ -46,8 +46,8 @@ impl PluginHost for EvaluationPlugin {
             }),
             PluginRequest::Call { component, input } if component == SUBJECT_COMPONENT => {
                 let case: EvaluationCase = serde_json::from_value(input)
-                    .map_err(|error| RuntimeError::Plugin(error.to_string()))?;
-                case.validate().map_err(RuntimeError::Plugin)?;
+                    .map_err(|error| RuntimeError::plugin_defect(error.to_string()))?;
+                case.validate().map_err(RuntimeError::plugin_defect)?;
                 Ok(PluginResponse::CallResult {
                     value: serde_json::to_value(predict(&case))?,
                 })
@@ -57,7 +57,7 @@ impl PluginHost for EvaluationPlugin {
                     value: score(&input)?,
                 })
             }
-            request => Err(RuntimeError::Plugin(format!(
+            request => Err(RuntimeError::plugin_defect(format!(
                 "unsupported evaluation request: {request:?}"
             ))),
         }
@@ -91,22 +91,24 @@ fn predict(case: &EvaluationCase) -> Prediction {
 fn score(input: &Value) -> RuntimeResult<Value> {
     let evaluation = input
         .get("evaluation")
-        .ok_or_else(|| RuntimeError::Plugin("scorer input is missing evaluation".to_owned()))?;
+        .ok_or_else(|| RuntimeError::plugin_defect("scorer input is missing evaluation"))?;
     let policy = input
         .get("policy")
         .and_then(Value::as_str)
-        .ok_or_else(|| RuntimeError::Plugin("scorer input is missing policy".to_owned()))?;
+        .ok_or_else(|| RuntimeError::plugin_defect("scorer input is missing policy"))?;
     let expected: TicketLabel = serde_json::from_value(
         evaluation
             .get("case")
             .and_then(|case| case.get("expected"))
             .cloned()
-            .ok_or_else(|| RuntimeError::Plugin("scorer input is missing expected".to_owned()))?,
+            .ok_or_else(|| RuntimeError::plugin_defect("scorer input is missing expected"))?,
     )?;
-    let prediction: Prediction =
-        serde_json::from_value(evaluation.get("prediction").cloned().ok_or_else(|| {
-            RuntimeError::Plugin("scorer input is missing prediction".to_owned())
-        })?)?;
+    let prediction: Prediction = serde_json::from_value(
+        evaluation
+            .get("prediction")
+            .cloned()
+            .ok_or_else(|| RuntimeError::plugin_defect("scorer input is missing prediction"))?,
+    )?;
     let category = u8::from(expected.category == prediction.category);
     let urgency = u8::from(expected.urgency == prediction.urgency);
     let result = match policy {
@@ -123,7 +125,7 @@ fn score(input: &Value) -> RuntimeResult<Value> {
             passed: category == 1,
         },
         _ => {
-            return Err(RuntimeError::Plugin(format!(
+            return Err(RuntimeError::plugin_defect(format!(
                 "unsupported scoring policy {policy:?}"
             )));
         }

@@ -39,7 +39,7 @@ fn process_timeout_is_reported_as_ambiguous() {
     let mut executor = ProcessExecutor::new(config).expect("executor configures");
     assert!(matches!(
         executor.describe(),
-        Err(RuntimeError::Plugin(message)) if message.contains("process_timeout_unknown")
+        Err(RuntimeError::Substrate { code, .. }) if code == "process_timeout_unknown"
     ));
 }
 
@@ -53,7 +53,10 @@ fn process_output_limit_fails_closed() {
     ];
     config.message_limit = 32;
     let mut executor = ProcessExecutor::new(config).expect("executor configures");
-    assert!(matches!(executor.describe(), Err(RuntimeError::Io(_))));
+    assert!(matches!(
+        executor.describe(),
+        Err(RuntimeError::Substrate { .. })
+    ));
 }
 
 #[cfg(unix)]
@@ -80,6 +83,6 @@ fn process_output_exactly_at_limit_is_accepted() {
 fn relative_executable_is_rejected() {
     assert!(matches!(
         ProcessExecutor::new(ProcessExecutorConfig::new("plugin")),
-        Err(RuntimeError::Plugin(_))
+        Err(RuntimeError::PluginDefect { .. })
     ));
 }

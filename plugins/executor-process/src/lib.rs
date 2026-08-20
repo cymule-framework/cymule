@@ -56,8 +56,8 @@ impl ProcessExecutorConfig {
                 .keys()
                 .any(|key| key.is_empty() || key.contains('=') || key.chars().any(char::is_control))
         {
-            return Err(RuntimeError::Plugin(
-                "process executor configuration is invalid".to_owned(),
+            return Err(RuntimeError::plugin_defect(
+                "process executor configuration is invalid",
             ));
         }
         Ok(())
@@ -88,8 +88,8 @@ impl PluginHost for ProcessExecutor {
         self.config.validate()?;
         let input = serde_json::to_vec(&request)?;
         if input.len() > self.config.message_limit {
-            return Err(RuntimeError::Plugin(
-                "process plugin request exceeds the configured byte limit".to_owned(),
+            return Err(RuntimeError::plugin_defect(
+                "process plugin request exceeds the configured byte limit",
             ));
         }
         let mut command = Command::new(&self.config.executable);
@@ -104,24 +104,36 @@ impl PluginHost for ProcessExecutor {
             command.current_dir(directory);
         }
         let mut child = command.spawn().map_err(|error| {
-            RuntimeError::Io(format!(
-                "failed to start process plugin {}: {error}",
-                self.config.executable.display()
-            ))
+            RuntimeError::substrate(
+                "process_start_failed",
+                format!(
+                    "failed to start process plugin {}: {error}",
+                    self.config.executable.display()
+                ),
+            )
         })?;
         child
             .stdin
             .take()
-            .ok_or_else(|| RuntimeError::Io("process stdin was not captured".to_owned()))?
+            .ok_or_else(|| {
+                RuntimeError::substrate(
+                    "process_stdin_unavailable",
+                    "process stdin was not captured",
+                )
+            })?
             .write_all(&input)?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| RuntimeError::Io("process stdout was not captured".to_owned()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| RuntimeError::Io("process stderr was not captured".to_owned()))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            RuntimeError::substrate(
+                "process_stdout_unavailable",
+                "process stdout was not captured",
+            )
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            RuntimeError::substrate(
+                "process_stderr_unavailable",
+                "process stderr was not captured",
+            )
+        })?;
         let limit = self.config.message_limit;
         let stdout_reader = thread::spawn(move || read_limited(stdout, limit));
         let stderr_reader = thread::spawn(move || read_limited(stderr, limit));
@@ -136,14 +148,17 @@ impl PluginHost for ProcessExecutor {
         let stdout = join_reader(stdout_reader)?;
         let stderr = join_reader(stderr_reader)?;
         if timed_out {
-            return Err(RuntimeError::Plugin(format!(
-                "process_timeout_unknown: plugin {} exceeded {:?}",
-                self.config.executable.display(),
-                self.config.timeout
-            )));
+            return Err(RuntimeError::substrate(
+                "process_timeout_unknown",
+                format!(
+                    "process_timeout_unknown: plugin {} exceeded {:?}",
+                    self.config.executable.display(),
+                    self.config.timeout
+                ),
+            ));
         }
         if !status.success() {
-            return Err(RuntimeError::Plugin(format!(
+            return Err(RuntimeError::plugin_defect(format!(
                 "process plugin {} exited with {status}: {}",
                 self.config.executable.display(),
                 String::from_utf8_lossy(&stderr).trim()
@@ -151,7 +166,7 @@ impl PluginHost for ProcessExecutor {
         }
         let response: PluginResponse = serde_json::from_slice(&stdout)?;
         if let PluginResponse::Error { code, message } = &response {
-            return Err(RuntimeError::Plugin(format!("{code}: {message}")));
+            return Err(RuntimeError::plugin_defect(format!("{code}: {message}")));
         }
         Ok(response)
     }
@@ -160,14 +175,14 @@ impl PluginHost for ProcessExecutor {
         let manifest = match self.invoke(PluginRequest::Describe)? {
             PluginResponse::Manifest { manifest } => manifest,
             response => {
-                return Err(RuntimeError::Plugin(format!(
+                return Err(RuntimeError::plugin_defect(format!(
                     "describe returned unexpected response {response:?}"
                 )));
             }
         };
         if manifest.plugin_version != PLUGIN_VERSION || manifest.implementation_id.is_empty() {
-            return Err(RuntimeError::Plugin(
-                "process plugin returned an invalid manifest".to_owned(),
+            return Err(RuntimeError::plugin_defect(
+                "process plugin returned an invalid manifest",
             ));
         }
         Ok(manifest)
@@ -189,6 +204,11 @@ fn read_limited(reader: impl Read, limit: usize) -> std::io::Result<Vec<u8>> {
 fn join_reader(reader: thread::JoinHandle<std::io::Result<Vec<u8>>>) -> RuntimeResult<Vec<u8>> {
     reader
         .join()
-        .map_err(|_| RuntimeError::Io("process output reader panicked".to_owned()))?
+        .map_err(|_| {
+            RuntimeError::substrate(
+                "process_output_reader_panicked",
+                "process output reader panicked",
+            )
+        })?
         .map_err(RuntimeError::from)
 }

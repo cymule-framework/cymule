@@ -32,7 +32,7 @@ pub enum RuntimeError {
 
 impl RuntimeError {
     /// Construct a host-classified plugin protocol defect.
-    pub(crate) fn plugin_defect(message: impl Into<String>) -> Self {
+    pub fn plugin_defect(message: impl Into<String>) -> Self {
         Self::PluginDefect {
             code: "plugin_protocol_violation".to_owned(),
             message: message.into(),
@@ -40,7 +40,7 @@ impl RuntimeError {
     }
 
     /// Construct a process substrate failure.
-    pub(crate) fn substrate(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn substrate(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Substrate {
             code: code.into(),
             message: message.into(),

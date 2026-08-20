@@ -122,7 +122,7 @@ impl LedgerPlugin {
 
     fn dispatch(&self, intent_id: &str, input: &Value) -> RuntimeResult<()> {
         let connection = Connection::open(&self.database)
-            .map_err(|error| RuntimeError::Plugin(error.to_string()))?;
+            .map_err(|error| RuntimeError::plugin_defect(error.to_string()))?;
         let bytes = cymule_core::canonical_bytes(input)?;
         let existing: Option<(Vec<u8>, i64)> = connection
             .query_row(
@@ -131,10 +131,10 @@ impl LedgerPlugin {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
-            .map_err(|error| RuntimeError::Plugin(error.to_string()))?;
+            .map_err(|error| RuntimeError::plugin_defect(error.to_string()))?;
         match existing {
-            Some((retained, _)) if retained != bytes => Err(RuntimeError::Plugin(
-                "effect intent was reused with different input".to_owned(),
+            Some((retained, _)) if retained != bytes => Err(RuntimeError::plugin_defect(
+                "effect intent was reused with different input",
             )),
             Some(_) => {
                 connection
@@ -143,7 +143,7 @@ impl LedgerPlugin {
                          WHERE intent_id = ?1",
                         [intent_id],
                     )
-                    .map_err(|error| RuntimeError::Plugin(error.to_string()))?;
+                    .map_err(|error| RuntimeError::plugin_defect(error.to_string()))?;
                 Ok(())
             }
             None => {
@@ -154,7 +154,7 @@ impl LedgerPlugin {
                          ) VALUES (?1, ?2, 1, 0)",
                         params![intent_id, bytes],
                     )
-                    .map_err(|error| RuntimeError::Plugin(error.to_string()))?;
+                    .map_err(|error| RuntimeError::plugin_defect(error.to_string()))?;
                 Ok(())
             }
         }
@@ -162,7 +162,7 @@ impl LedgerPlugin {
 
     fn reconcile(&self, intent_id: &str) -> RuntimeResult<bool> {
         let connection = Connection::open(&self.database)
-            .map_err(|error| RuntimeError::Plugin(error.to_string()))?;
+            .map_err(|error| RuntimeError::plugin_defect(error.to_string()))?;
         connection
             .execute(
                 "INSERT INTO reconciliation_ledger(intent_id, reconciliation_count)
@@ -171,7 +171,7 @@ impl LedgerPlugin {
                     reconciliation_count = reconciliation_count + 1",
                 [intent_id],
             )
-            .map_err(|error| RuntimeError::Plugin(error.to_string()))?;
+            .map_err(|error| RuntimeError::plugin_defect(error.to_string()))?;
         let updated = connection
             .execute(
                 "UPDATE effect_ledger
@@ -179,7 +179,7 @@ impl LedgerPlugin {
                  WHERE intent_id = ?1",
                 [intent_id],
             )
-            .map_err(|error| RuntimeError::Plugin(error.to_string()))?;
+            .map_err(|error| RuntimeError::plugin_defect(error.to_string()))?;
         Ok(updated == 1)
     }
 
@@ -244,7 +244,7 @@ impl PluginHost for LedgerPlugin {
                 },
                 value: Some(input),
             }),
-            request @ PluginRequest::Call { .. } => Err(RuntimeError::Plugin(format!(
+            request @ PluginRequest::Call { .. } => Err(RuntimeError::plugin_defect(format!(
                 "unexpected process-kill plugin request {request:?}"
             ))),
         }

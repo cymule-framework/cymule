@@ -44,7 +44,7 @@ impl PluginHost for HelloPlugin {
                     .get("name")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| {
-                        RuntimeError::Plugin("example.greet requires a string name".to_owned())
+                        RuntimeError::plugin_defect("example.greet requires a string name")
                     })?;
                 Ok(PluginResponse::CallResult {
                     value: json!({"message": format!("Hello, {name}!")}),
@@ -80,7 +80,7 @@ impl PluginHost for HelloPlugin {
                     value: Some(input),
                 })
             }
-            request => Err(RuntimeError::Plugin(format!(
+            request => Err(RuntimeError::plugin_defect(format!(
                 "unsupported Hello World request: {request:?}"
             ))),
         }
