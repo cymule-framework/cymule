@@ -9,8 +9,10 @@ mod protocol;
 
 pub use composition::{
     BINDING_CONTEXT_ID_DOMAIN, BindingContextDescriptor, CompositionError,
-    RUNTIME_COMPOSITION_VERSION, RequirementAdmission, RuntimeCompositionGraph,
-    RuntimeImplementation, RuntimeProviderDescriptor, ServiceBindingDescriptor, ServiceKey,
+    EXECUTION_BINDING_VERSION, ExecutionBinding, ExecutionOperationBinding, ExecutionOperationKind,
+    OCCURRENCE_BINDING_ID_DOMAIN, RUNTIME_COMPOSITION_VERSION, RequirementAdmission,
+    RuntimeCompositionGraph, RuntimeImplementation, RuntimeProviderDescriptor,
+    ServiceBindingDescriptor, ServiceKey,
 };
 pub use contract::{
     CONTRACT_SCHEMA_DIALECT, ContractBoundary, ContractIssue, ContractPhase, ContractResult,

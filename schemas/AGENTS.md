@@ -18,6 +18,9 @@
   require a new IR version rather than widening this frozen schema in place.
 - Keep semantic validation in the Rust kernel. JSON Schema validates wire shape;
   it does not replace transition or authority rules.
+- `execution-binding.schema.json` freezes `cymule.execution-binding/1`. Rust
+  additionally enforces normalized provider order, exact service ownership,
+  Plan requirements, manifest equality, and content identities.
 - `resource.schema.json` owns `cymule.resource/1` candidates/handles and
   `cymule.resource-handoff/1`. Shape or integrity changes require Rust semantic
   validation, all SDKs, fixtures, and cross-language Resource ID tests.

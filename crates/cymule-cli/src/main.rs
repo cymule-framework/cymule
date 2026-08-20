@@ -5,14 +5,15 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
-use cymule_core::{PlanCandidate, SealedPlan};
+use cymule_core::{PlanCandidate, SealedPlan, sha256_bytes};
 use cymule_durable::{DurableCommand, WaitActivation};
 use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{
     ENGINE_PROTOCOL_VERSION, EmbeddedRuntime, EngineContractSide, EngineFailure,
     EngineFailureCategory, EngineIssue, EnginePhase, EngineRequestEnvelope, EngineResponseEnvelope,
-    EngineRetryDisposition, ExecutionResult, ProcessPlugin, seal_plan, verify_plan,
+    EngineRetryDisposition, ExecutionBinding, ExecutionResult, PluginHost, ProcessPlugin,
+    seal_plan, verify_plan,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -116,7 +117,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let input: Value = read_path(argument_value(&arguments, "--input")?)?;
             let plugin = argument_value(&arguments, "--plugin")?;
             let run_id = argument_value(&arguments, "--run-id")?;
-            let mut runtime = EmbeddedRuntime::new(ProcessPlugin::new(plugin));
+            let mut runtime = local_process_runtime(plugin)?;
             let result = runtime.execute(plan, &input, run_id)?;
             print_json(&result)
         }
@@ -215,7 +216,8 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
             plugin,
             run_id,
         } => {
-            let mut runtime = EmbeddedRuntime::new(ProcessPlugin::new(plugin));
+            let mut runtime = local_process_runtime(&plugin)
+                .map_err(|error| EngineFailure::from_runtime(error, EnginePhase::ExecutePlan))?;
             EngineResponse::Executed {
                 result: runtime.execute(plan, &input, run_id).map_err(|error| {
                     EngineFailure::from_runtime(error, EnginePhase::ExecutePlan)
@@ -224,6 +226,17 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
         }
     };
     Ok(response)
+}
+
+fn local_process_runtime(
+    executable: impl AsRef<Path>,
+) -> cymule_runtime::RuntimeResult<EmbeddedRuntime<ProcessPlugin>> {
+    let bytes = fs::read(executable.as_ref()).map_err(cymule_runtime::RuntimeError::from)?;
+    let implementation_revision = format!("sha256:{}", sha256_bytes(&bytes));
+    let mut plugin = ProcessPlugin::new(executable);
+    let manifest = plugin.describe()?;
+    let binding = ExecutionBinding::for_local_process(&manifest, implementation_revision)?;
+    EmbeddedRuntime::new(plugin, binding)
 }
 
 fn map_resource_error(error: &cymule_resource::ResourceError) -> EngineFailure {

@@ -12,8 +12,8 @@ use cymule_core::{
 use cymule_runtime::{
     ContractBoundary, ContractPhase, ContractSide, ContractTarget, ContractValidator,
     EmbeddedRuntime, EngineContractSide, EngineFailure, EngineFailureCategory, EnginePhase,
-    PLUGIN_VERSION, PlanContracts, PluginEffect, PluginHost, PluginManifest, PluginOperation,
-    PluginRequest, PluginResponse, RuntimeError, RuntimeResult, seal_plan,
+    ExecutionBinding, PLUGIN_VERSION, PlanContracts, PluginEffect, PluginHost, PluginManifest,
+    PluginOperation, PluginRequest, PluginResponse, RuntimeError, RuntimeResult, seal_plan,
 };
 use serde_json::{Value, json};
 
@@ -154,29 +154,33 @@ struct ContractPlugin {
     effect_output: Value,
 }
 
+fn plugin_manifest() -> PluginManifest {
+    PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: "contract-plugin@1".to_owned(),
+        components: BTreeMap::from([(
+            "example.component".to_owned(),
+            PluginOperation {
+                implementation_revision: "1".to_owned(),
+            },
+        )]),
+        effects: BTreeMap::from([(
+            "example.effect".to_owned(),
+            PluginEffect {
+                implementation_revision: "1".to_owned(),
+                can_reconcile: true,
+            },
+        )]),
+    }
+}
+
 impl PluginHost for ContractPlugin {
     fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
         match request {
             PluginRequest::Describe => {
                 self.counts.describe.fetch_add(1, Ordering::SeqCst);
                 Ok(PluginResponse::Manifest {
-                    manifest: PluginManifest {
-                        plugin_version: PLUGIN_VERSION.to_owned(),
-                        implementation_id: "contract-plugin@1".to_owned(),
-                        components: BTreeMap::from([(
-                            "example.component".to_owned(),
-                            PluginOperation {
-                                implementation_revision: "1".to_owned(),
-                            },
-                        )]),
-                        effects: BTreeMap::from([(
-                            "example.effect".to_owned(),
-                            PluginEffect {
-                                implementation_revision: "1".to_owned(),
-                                can_reconcile: true,
-                            },
-                        )]),
-                    },
+                    manifest: plugin_manifest(),
                 })
             }
             PluginRequest::Call { .. } => {
@@ -208,11 +212,20 @@ fn runtime(
     component_output: Value,
     effect_output: Value,
 ) -> EmbeddedRuntime<ContractPlugin> {
-    EmbeddedRuntime::new(ContractPlugin {
-        counts,
-        component_output,
-        effect_output,
-    })
+    let binding = ExecutionBinding::for_local_process(
+        &plugin_manifest(),
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    )
+    .expect("test binding is admitted");
+    EmbeddedRuntime::new(
+        ContractPlugin {
+            counts,
+            component_output,
+            effect_output,
+        },
+        binding,
+    )
+    .expect("runtime opens with exact binding")
 }
 
 fn effect_only_candidate(input: Value, output: Value) -> PlanCandidate {
@@ -464,7 +477,33 @@ fn invalid_run_input_has_zero_plugin_calls_and_zero_machine_mutation() {
         .expect_err("Run input must fail its entry contract");
 
     assert!(matches!(error, RuntimeError::Contract(_)));
-    assert_eq!(counts.describe.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.describe.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.call.load(Ordering::SeqCst), 0);
+    let snapshot = runtime.machine().snapshot();
+    assert!(snapshot.plans.is_empty());
+    assert!(snapshot.artifacts.is_empty());
+    assert!(snapshot.events.is_empty());
+}
+
+#[test]
+fn unmet_plan_requirements_are_rejected_before_run_creation_or_dispatch() {
+    let mut candidate = candidate();
+    candidate.components[0].requirements =
+        BTreeMap::from([("isolation.level".to_owned(), "sandbox".to_owned())]);
+    candidate.definitions[0].body.steps.truncate(1);
+    candidate.definitions[0].body.result = Expression::Literal { value: json!(true) };
+    let plan = seal_plan(candidate).expect("Plan admits structurally");
+    let counts = Arc::new(PluginCounts::default());
+    let mut runtime = runtime(counts.clone(), json!(42), json!("unused"));
+
+    let error = runtime
+        .execute(plan, &json!({"request": "run"}), "run:requirements")
+        .expect_err("unmatched provider requirements fail admission");
+
+    assert!(matches!(
+        error,
+        RuntimeError::PluginDefect { ref code, .. } if code == "execution_binding_rejected"
+    ));
     assert_eq!(counts.call.load(Ordering::SeqCst), 0);
     let snapshot = runtime.machine().snapshot();
     assert!(snapshot.plans.is_empty());

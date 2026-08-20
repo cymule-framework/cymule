@@ -15,8 +15,8 @@ use cymule_durable::{
     OutboxState, ResumableRuntime, StoreCommit, StoredState, WaitActivationSource,
 };
 use cymule_runtime::{
-    PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginOperation, PluginRequest,
-    PluginResponse, RuntimeError, RuntimeResult,
+    ExecutionBinding, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginOperation,
+    PluginRequest, PluginResponse, RuntimeError, RuntimeResult,
 };
 use serde_json::json;
 
@@ -29,6 +29,21 @@ struct CrashAfterApplyPlugin {
     reconciliations: Arc<AtomicUsize>,
     crash_after_apply: bool,
     unknown_reconciliations: usize,
+}
+
+fn open_runtime<S: DurableStore, P: PluginHost>(
+    store: S,
+    mut plugin: P,
+) -> DurableResult<ResumableRuntime<S, P>> {
+    let manifest = plugin
+        .describe()
+        .map_err(|error| DurableError::Substrate(error.to_string()))?;
+    let binding = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    )
+    .map_err(|error| DurableError::Validation(error.to_string()))?;
+    ResumableRuntime::open(store, plugin, binding)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -695,7 +710,7 @@ fn external_wait_candidate(name: &str, wait: WaitSpec) -> PlanCandidate {
 #[test]
 fn process_reopen_resumes_after_wait_without_reinvoking_component() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut runtime = ResumableRuntime::open(
+    let mut runtime = open_runtime(
         MemoryStore::new(),
         CountingPlugin {
             calls: calls.clone(),
@@ -711,7 +726,7 @@ fn process_reopen_resumes_after_wait_without_reinvoking_component() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let (store, _) = runtime.into_parts();
-    let mut reopened = ResumableRuntime::open(
+    let mut reopened = open_runtime(
         store,
         CountingPlugin {
             calls: calls.clone(),
@@ -740,7 +755,7 @@ fn process_reopen_resumes_after_wait_without_reinvoking_component() {
 #[test]
 fn one_durable_domain_runs_multiple_runs_and_replays_start_exactly() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut runtime = ResumableRuntime::open(
+    let mut runtime = open_runtime(
         MemoryStore::new(),
         CountingPlugin {
             calls: calls.clone(),
@@ -836,7 +851,7 @@ fn one_durable_domain_runs_multiple_runs_and_replays_start_exactly() {
 fn second_run_creation_reopens_after_lost_cas_receipt() {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = ArmableLostReceiptStore::new();
-    let mut runtime = ResumableRuntime::open(
+    let mut runtime = open_runtime(
         store.clone(),
         CountingPlugin {
             calls: calls.clone(),
@@ -853,7 +868,7 @@ fn second_run_creation_reopens_after_lost_cas_receipt() {
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    let mut reopened = ResumableRuntime::open(
+    let mut reopened = open_runtime(
         store,
         CountingPlugin {
             calls: calls.clone(),
@@ -888,7 +903,7 @@ fn second_run_creation_reopens_after_lost_cas_receipt() {
 #[test]
 fn nested_scope_wait_reopens_from_region_path_without_reinvoking_component() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut runtime = ResumableRuntime::open(
+    let mut runtime = open_runtime(
         MemoryStore::new(),
         CountingPlugin {
             calls: calls.clone(),
@@ -913,7 +928,7 @@ fn nested_scope_wait_reopens_from_region_path_without_reinvoking_component() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let (store, _) = runtime.into_parts();
 
-    let mut reopened = ResumableRuntime::open(
+    let mut reopened = open_runtime(
         store,
         CountingPlugin {
             calls: calls.clone(),
@@ -939,7 +954,7 @@ fn nested_scope_wait_reopens_from_region_path_without_reinvoking_component() {
 #[test]
 fn invoked_definition_wait_reopens_without_reinvoking_completed_component() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut runtime = ResumableRuntime::open(
+    let mut runtime = open_runtime(
         MemoryStore::new(),
         CountingPlugin {
             calls: calls.clone(),
@@ -962,7 +977,7 @@ fn invoked_definition_wait_reopens_without_reinvoking_completed_component() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let (store, _) = runtime.into_parts();
-    let mut reopened = ResumableRuntime::open(
+    let mut reopened = open_runtime(
         store,
         CountingPlugin {
             calls: calls.clone(),
@@ -992,7 +1007,7 @@ fn durable_control_drives_and_queries_one_domain_across_reopen() {
         dispatches: Arc::new(AtomicUsize::new(0)),
         reconciliations: Arc::new(AtomicUsize::new(0)),
     };
-    let runtime = ResumableRuntime::open(store.clone(), plugin()).expect("runtime opens");
+    let runtime = open_runtime(store.clone(), plugin()).expect("runtime opens");
     let mut control = DurableRuntimeControl::new(runtime);
     let candidate = external_wait_candidate(
         "durable_control_signal",
@@ -1032,7 +1047,7 @@ fn durable_control_drives_and_queries_one_domain_across_reopen() {
     );
     drop(control);
 
-    let runtime = ResumableRuntime::open(store, plugin()).expect("runtime reopens");
+    let runtime = open_runtime(store, plugin()).expect("runtime reopens");
     let mut reopened = DurableRuntimeControl::new(runtime);
     assert_eq!(
         reopened
@@ -1100,7 +1115,7 @@ fn durable_control_drives_and_queries_one_domain_across_reopen() {
 fn every_run_cas_boundary_recovers_from_io_failure_or_lost_acknowledgement() {
     let baseline_store = CasFaultStore::new(CasFaultTiming::BeforeCommit, 0);
     let baseline_probe = baseline_store.clone();
-    let mut baseline = ResumableRuntime::open(
+    let mut baseline = open_runtime(
         baseline_store,
         SweepPlugin {
             dispatches: Arc::new(AtomicUsize::new(0)),
@@ -1134,7 +1149,7 @@ fn every_run_cas_boundary_recovers_from_io_failure_or_lost_acknowledgement() {
             };
             let run_id = format!("run:cas-sweep:{timing:?}:{fail_at}");
             let input = json!({"failure": fail_at, "timing": format!("{timing:?}")});
-            let mut runtime = ResumableRuntime::open(store, plugin()).expect("fault runtime opens");
+            let mut runtime = open_runtime(store, plugin()).expect("fault runtime opens");
             runtime
                 .start(effect_candidate(), &input, &run_id)
                 .expect_err("selected CAS boundary must fail once");
@@ -1150,8 +1165,7 @@ fn every_run_cas_boundary_recovers_from_io_failure_or_lost_acknowledgement() {
                 );
             }
 
-            let mut reopened =
-                ResumableRuntime::open(store_probe, plugin()).expect("faulted store reopens");
+            let mut reopened = open_runtime(store_probe, plugin()).expect("faulted store reopens");
             let outcome = if persisted.is_some() {
                 reopened.resume(&run_id)
             } else {
@@ -1212,7 +1226,7 @@ fn nested_effect_stays_staged_until_its_scope_commit_survives_reopen() {
             lose_first_prepare_response: false,
         };
         let run_id = format!("run:nested-effect-receipt-loss:{index}");
-        let mut runtime = ResumableRuntime::open(store, plugin()).expect("runtime opens");
+        let mut runtime = open_runtime(store, plugin()).expect("runtime opens");
         assert!(
             runtime
                 .start(nested_effect_candidate(), &json!({"value": index}), &run_id,)
@@ -1225,7 +1239,7 @@ fn nested_effect_stays_staged_until_its_scope_commit_survives_reopen() {
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
 
         let (store, _) = runtime.into_parts();
-        let mut reopened = ResumableRuntime::open(store, plugin()).expect("runtime reopens");
+        let mut reopened = open_runtime(store, plugin()).expect("runtime reopens");
         let durable = reopened.coordinator().state().expect("state");
         let dispatch = durable.outbox.values().next().expect("staged effect");
         assert_eq!(dispatch.state, OutboxState::Pending);
@@ -1313,7 +1327,7 @@ fn eager_observation_binds_result_before_scope_commit_across_receipt_loss() {
         };
         let run_id = format!("run:eager-receipt-loss:{index}");
         let input = json!({"value": index});
-        let mut runtime = ResumableRuntime::open(store, plugin()).expect("runtime opens");
+        let mut runtime = open_runtime(store, plugin()).expect("runtime opens");
         let error = runtime
             .start(eager_effect_candidate(), &input, &run_id)
             .expect_err("injected eager receipt loss stops the Run");
@@ -1323,7 +1337,7 @@ fn eager_observation_binds_result_before_scope_commit_across_receipt_loss() {
         );
 
         let (store, _) = runtime.into_parts();
-        let mut reopened = ResumableRuntime::open(store, plugin()).expect("runtime reopens");
+        let mut reopened = open_runtime(store, plugin()).expect("runtime reopens");
         let machine = reopened
             .coordinator()
             .restore_machine()
@@ -1397,7 +1411,7 @@ fn explicit_effect_waits_for_release_and_replays_release_after_receipt_loss() {
         };
         let run_id = format!("run:explicit-receipt-loss:{index}");
         let input = json!({"value": index});
-        let mut runtime = ResumableRuntime::open(store, plugin()).expect("runtime opens");
+        let mut runtime = open_runtime(store, plugin()).expect("runtime opens");
         let DriveOutcome::ReleaseRequired { intent_ids } = runtime
             .start(explicit_effect_candidate(), &input, &run_id)
             .expect("explicit effect stages")
@@ -1416,7 +1430,7 @@ fn explicit_effect_waits_for_release_and_replays_release_after_receipt_loss() {
         assert!(lost.load(Ordering::SeqCst));
 
         let (store, _) = runtime.into_parts();
-        let mut reopened = ResumableRuntime::open(store, plugin()).expect("runtime reopens");
+        let mut reopened = open_runtime(store, plugin()).expect("runtime reopens");
         let DriveOutcome::Completed(result) = reopened
             .release_effect(&intent_id)
             .expect("explicit release recovery completes")
@@ -1473,7 +1487,7 @@ fn identified_signal_and_timer_activations_resume_after_process_reopen() {
 
     for (run_id, candidate, source) in cases {
         let calls = Arc::new(AtomicUsize::new(0));
-        let mut runtime = ResumableRuntime::open(
+        let mut runtime = open_runtime(
             MemoryStore::new(),
             CountingPlugin {
                 calls: calls.clone(),
@@ -1497,7 +1511,7 @@ fn identified_signal_and_timer_activations_resume_after_process_reopen() {
         assert_eq!(ready_runs, BTreeSet::from([run_id.to_owned()]));
 
         let (store, _) = runtime.into_parts();
-        let mut reopened = ResumableRuntime::open(
+        let mut reopened = open_runtime(
             store,
             CountingPlugin {
                 calls: calls.clone(),
@@ -1529,7 +1543,7 @@ fn identified_signal_and_timer_activations_resume_after_process_reopen() {
 fn crash_after_provider_application_reconciles_without_redispatch() {
     let dispatches = Arc::new(AtomicUsize::new(0));
     let reconciliations = Arc::new(AtomicUsize::new(0));
-    let mut runtime = ResumableRuntime::open(
+    let mut runtime = open_runtime(
         MemoryStore::new(),
         CrashAfterApplyPlugin {
             dispatches: dispatches.clone(),
@@ -1551,7 +1565,7 @@ fn crash_after_provider_application_reconciles_without_redispatch() {
     assert_eq!(dispatches.load(Ordering::SeqCst), 1);
 
     let (store, _) = runtime.into_parts();
-    let mut reopened = ResumableRuntime::open(
+    let mut reopened = open_runtime(
         store,
         CrashAfterApplyPlugin {
             dispatches: dispatches.clone(),
@@ -1582,7 +1596,7 @@ fn recovery_survives_lost_unknown_receipt_after_provider_crash() {
     };
     let dispatches = Arc::new(AtomicUsize::new(0));
     let reconciliations = Arc::new(AtomicUsize::new(0));
-    let mut runtime = ResumableRuntime::open(
+    let mut runtime = open_runtime(
         store,
         CrashAfterApplyPlugin {
             dispatches: dispatches.clone(),
@@ -1605,7 +1619,7 @@ fn recovery_survives_lost_unknown_receipt_after_provider_crash() {
     assert_eq!(dispatches.load(Ordering::SeqCst), 1);
 
     let (store, _) = runtime.into_parts();
-    let mut first_recovery = ResumableRuntime::open(
+    let mut first_recovery = open_runtime(
         store,
         CrashAfterApplyPlugin {
             dispatches: dispatches.clone(),
@@ -1625,7 +1639,7 @@ fn recovery_survives_lost_unknown_receipt_after_provider_crash() {
     assert_eq!(reconciliations.load(Ordering::SeqCst), 0);
 
     let (store, _) = first_recovery.into_parts();
-    let mut second_recovery = ResumableRuntime::open(
+    let mut second_recovery = open_runtime(
         store,
         CrashAfterApplyPlugin {
             dispatches: dispatches.clone(),
@@ -1650,7 +1664,7 @@ fn recovery_survives_lost_unknown_receipt_after_provider_crash() {
 fn unknown_outbox_reconciles_after_another_process_reopen_without_redispatch() {
     let dispatches = Arc::new(AtomicUsize::new(0));
     let reconciliations = Arc::new(AtomicUsize::new(0));
-    let mut runtime = ResumableRuntime::open(
+    let mut runtime = open_runtime(
         MemoryStore::new(),
         CrashAfterApplyPlugin {
             dispatches: dispatches.clone(),
@@ -1670,7 +1684,7 @@ fn unknown_outbox_reconciles_after_another_process_reopen_without_redispatch() {
             .is_err()
     );
     let (store, _) = runtime.into_parts();
-    let mut first_recovery = ResumableRuntime::open(
+    let mut first_recovery = open_runtime(
         store,
         CrashAfterApplyPlugin {
             dispatches: dispatches.clone(),
@@ -1697,7 +1711,7 @@ fn unknown_outbox_reconciles_after_another_process_reopen_without_redispatch() {
     );
 
     let (store, _) = first_recovery.into_parts();
-    let mut second_recovery = ResumableRuntime::open(
+    let mut second_recovery = open_runtime(
         store,
         CrashAfterApplyPlugin {
             dispatches: dispatches.clone(),
@@ -1780,7 +1794,7 @@ fn effect_stage_receipt_loss_reopens_without_duplicate_world_effects() {
             lose_first_prepare_response: false,
         };
         let run_id = format!("run:effect-stage-receipt-loss:{index}");
-        let mut runtime = ResumableRuntime::open(store.clone(), plugin()).expect("runtime opens");
+        let mut runtime = open_runtime(store.clone(), plugin()).expect("runtime opens");
         assert!(
             runtime
                 .start(effect_candidate(), &json!({"value": index}), &run_id)
@@ -1788,7 +1802,7 @@ fn effect_stage_receipt_loss_reopens_without_duplicate_world_effects() {
         );
         assert!(lost.load(Ordering::SeqCst));
         let (store, _) = runtime.into_parts();
-        let mut reopened = ResumableRuntime::open(store, plugin()).expect("runtime reopens");
+        let mut reopened = open_runtime(store, plugin()).expect("runtime reopens");
         let DriveOutcome::Completed(result) = reopened
             .resume(&run_id)
             .expect("receipt-loss recovery completes")
@@ -1818,7 +1832,7 @@ fn lost_prepare_response_reuses_the_same_intent_before_dispatch() {
         reconciliation: ReconciliationResolution::ResolvedApplied,
         lose_first_prepare_response: true,
     };
-    let mut runtime = ResumableRuntime::open(MemoryStore::new(), plugin()).expect("runtime opens");
+    let mut runtime = open_runtime(MemoryStore::new(), plugin()).expect("runtime opens");
     assert!(
         runtime
             .start(
@@ -1832,7 +1846,7 @@ fn lost_prepare_response_reuses_the_same_intent_before_dispatch() {
     assert_eq!(dispatches.load(Ordering::SeqCst), 0);
     let (store, _) = runtime.into_parts();
 
-    let mut reopened = ResumableRuntime::open(store, plugin()).expect("runtime reopens");
+    let mut reopened = open_runtime(store, plugin()).expect("runtime reopens");
     let DriveOutcome::Completed(result) = reopened
         .resume("run:lost-prepare-response")
         .expect("idempotent prepare retry completes")
@@ -1843,4 +1857,62 @@ fn lost_prepare_response_reuses_the_same_intent_before_dispatch() {
     assert_eq!(prepares.load(Ordering::SeqCst), 2);
     assert_eq!(dispatches.load(Ordering::SeqCst), 1);
     assert_eq!(reconciliations.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn reopen_preserves_the_historical_execution_binding_artifact() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut runtime = open_runtime(
+        MemoryStore::new(),
+        CountingPlugin {
+            calls: calls.clone(),
+        },
+    )
+    .expect("runtime opens");
+    let DriveOutcome::Suspended { .. } = runtime
+        .start(candidate(), &json!({"name": "Cymule"}), "run:binding-pin")
+        .expect("Run suspends")
+    else {
+        panic!("Run must suspend at its input wait")
+    };
+    let machine = runtime
+        .coordinator()
+        .restore_machine()
+        .expect("Machine restores");
+    let continuation = runtime
+        .coordinator()
+        .state()
+        .expect("state exists")
+        .continuations["run:binding-pin"]
+        .clone();
+    let reference = cymule_core::ArtifactRef {
+        artifact_id: continuation.binding_context.clone(),
+        kind: cymule_runtime::EXECUTION_BINDING_VERSION.to_owned(),
+    };
+    assert!(machine.artifact(&reference).is_some());
+    let run = &machine.projection().runs["run:binding-pin"];
+    assert_eq!(run.initial_binding_context, reference.artifact_id);
+    assert_eq!(run.current_binding_context, reference.artifact_id);
+    assert_eq!(
+        run.attempts.values().next().unwrap().occurrence_binding,
+        reference.artifact_id
+    );
+
+    let (store, _) = runtime.into_parts();
+    let mut changed_plugin = CountingPlugin {
+        calls: calls.clone(),
+    };
+    let manifest = changed_plugin.describe().expect("plugin describes");
+    let changed_binding = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    )
+    .expect("changed binding is independently valid");
+    let mut changed_runtime =
+        ResumableRuntime::open(store, changed_plugin, changed_binding).expect("domain reopens");
+    assert!(matches!(
+        changed_runtime.resume("run:binding-pin"),
+        Err(DurableError::IllegalTransition(message)) if message.contains("is pinned")
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

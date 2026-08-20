@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/execution-binding.schema.json",
+  "title": "Cymule Execution Binding cymule.execution-binding/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "context", "plugin_implementation_id", "components", "effects"],
+  "properties": {
+    "version": {"const": "cymule.execution-binding/1"},
+    "context": {"$ref": "#/$defs/context"},
+    "plugin_implementation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "components": {"type": "object", "additionalProperties": {"$ref": "#/$defs/componentBinding"}},
+    "effects": {"type": "object", "additionalProperties": {"$ref": "#/$defs/effectBinding"}}
+  },
+  "$defs": {
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "name", "api_revision"],
+      "properties": {
+        "namespace": {"type": "string", "minLength": 1, "maxLength": 256},
+        "name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "api_revision": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["implementation_id", "revision"],
+      "properties": {
+        "implementation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "revision": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "provider_id", "implementation", "provides", "requires", "properties", "configuration_schema_digest", "configuration_fingerprint"],
+      "properties": {
+        "version": {"const": "cymule.runtime-composition/1"},
+        "provider_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "implementation": {"$ref": "#/$defs/implementation"},
+        "provides": {"type": "array", "items": {"$ref": "#/$defs/service"}},
+        "requires": {"type": "array", "items": {"$ref": "#/$defs/service"}},
+        "properties": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+        "configuration_schema_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "configuration_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "providers"],
+      "properties": {
+        "version": {"const": "cymule.runtime-composition/1"},
+        "providers": {"type": "array", "items": {"$ref": "#/$defs/provider"}}
+      }
+    },
+    "componentBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "provider_id", "implementation", "operation_revision"],
+      "properties": {
+        "service": {"$ref": "#/$defs/service"},
+        "provider_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "implementation": {"$ref": "#/$defs/implementation"},
+        "operation_revision": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "effectBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "provider_id", "implementation", "operation_revision", "can_reconcile"],
+      "properties": {
+        "service": {"$ref": "#/$defs/service"},
+        "provider_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "implementation": {"$ref": "#/$defs/implementation"},
+        "operation_revision": {"type": "string", "minLength": 1, "maxLength": 256},
+        "can_reconcile": {"type": "boolean"}
+      }
+    }
+  }
+}

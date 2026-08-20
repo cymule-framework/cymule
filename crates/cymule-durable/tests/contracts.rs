@@ -13,8 +13,8 @@ use cymule_durable::{
     DriveOutcome, DurableError, DurableStore, MemoryStore, OutboxState, ResumableRuntime, WaitState,
 };
 use cymule_runtime::{
-    PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginOperation, PluginRequest,
-    PluginResponse, RuntimeResult,
+    ExecutionBinding, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginOperation,
+    PluginRequest, PluginResponse, RuntimeResult,
 };
 use serde_json::{Value, json};
 
@@ -83,15 +83,18 @@ fn runtime(
     component_output: Value,
     effect_output: Value,
 ) -> ResumableRuntime<MemoryStore, Plugin> {
-    ResumableRuntime::open(
-        store,
-        Plugin {
-            counts,
-            component_output,
-            effect_output,
-        },
+    let mut plugin = Plugin {
+        counts,
+        component_output,
+        effect_output,
+    };
+    let manifest = plugin.describe().expect("test plugin describes");
+    let binding = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
     )
-    .expect("runtime opens")
+    .expect("test binding is admitted");
+    ResumableRuntime::open(store, plugin, binding).expect("runtime opens")
 }
 
 fn base_candidate() -> PlanCandidate {

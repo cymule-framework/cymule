@@ -39,6 +39,11 @@
   provider object. Ordinary Rust ownership and provider adapters manage
   process-local resources; durable cleanup remains an explicit effect
   obligation and reconciliation concern.
+- `cymule.execution-binding/1` is the executable binding authority. Persist its
+  canonical bytes as an immutable Artifact; Run, Continuation, and Attempt pin
+  that Artifact ID, while component and Effect occurrence bindings derive from
+  it plus the exact selected operation. A live manifest may verify the pin but
+  never replace it.
 - `EngineFailure` is the cross-language failure projection. Keep its categories,
   phases, bounded issue tree, contract detail, and retry dispositions closed and
   versioned. Validate every deserialized failure; do not infer retry safety from

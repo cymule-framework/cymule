@@ -11,14 +11,25 @@ use std::{
     fmt::{Display, Formatter},
 };
 
-use cymule_core::content_id;
+use cymule_core::{ArtifactRef, artifact_ref, canonical_bytes, content_id, sha256_bytes};
 use serde::{Deserialize, Serialize};
+
+use crate::{PLUGIN_VERSION, PluginManifest};
 
 /// Frozen runtime-binding descriptor version.
 pub const RUNTIME_COMPOSITION_VERSION: &str = "cymule.runtime-composition/1";
 
 /// Domain separator for immutable binding-context identities.
 pub const BINDING_CONTEXT_ID_DOMAIN: &str = "cymule.binding-context/1";
+
+/// Frozen executable binding descriptor version and Artifact kind.
+pub const EXECUTION_BINDING_VERSION: &str = "cymule.execution-binding/1";
+
+/// Domain separator for exact component and effect occurrence bindings.
+pub const OCCURRENCE_BINDING_ID_DOMAIN: &str = "cymule.occurrence-binding/1";
+
+const COMPONENT_SERVICE_NAMESPACE: &str = "cymule.plugin.component";
+const EFFECT_SERVICE_NAMESPACE: &str = "cymule.plugin.effect";
 
 /// A versioned, provider-neutral runtime service contract.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -375,6 +386,325 @@ impl RuntimeCompositionGraph {
     }
 }
 
+/// Closed operation class used in immutable execution bindings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionOperationKind {
+    /// Pure or nondeterministic component call.
+    Component,
+    /// External effect operation.
+    Effect,
+}
+
+impl ExecutionOperationKind {
+    fn service(self, operation: &str) -> ServiceKey {
+        ServiceKey::new(
+            match self {
+                Self::Component => COMPONENT_SERVICE_NAMESPACE,
+                Self::Effect => EFFECT_SERVICE_NAMESPACE,
+            },
+            operation,
+            PLUGIN_VERSION,
+        )
+    }
+}
+
+/// Exact provider and implementation selected for one plugin operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionOperationBinding {
+    /// Exact runtime service contract.
+    pub service: ServiceKey,
+    /// Provider selected by the admitted composition graph.
+    pub provider_id: String,
+    /// Immutable provider implementation identity.
+    pub implementation: RuntimeImplementation,
+    /// Plugin-advertised operation implementation revision.
+    pub operation_revision: String,
+    /// Effect reconciliation capability; absent for components.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_reconcile: Option<bool>,
+}
+
+/// Complete immutable authority for one executable plugin binding.
+///
+/// A manifest remains a capability advertisement. This descriptor becomes
+/// execution authority only after a caller explicitly selects an immutable
+/// provider graph and seals the exact advertised operation revisions into this
+/// content-addressed value. Policy and authority grants remain separate gates.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionBinding {
+    /// Frozen descriptor version and Artifact kind.
+    pub version: String,
+    /// Normalized provider graph input.
+    pub context: BindingContextDescriptor,
+    /// Selected plugin implementation identity.
+    pub plugin_implementation_id: String,
+    /// Exact selected component implementations.
+    pub components: BTreeMap<String, ExecutionOperationBinding>,
+    /// Exact selected effect implementations.
+    pub effects: BTreeMap<String, ExecutionOperationBinding>,
+}
+
+impl ExecutionBinding {
+    /// Select one advertised plugin against an already admitted provider graph.
+    pub fn admit(
+        graph: &RuntimeCompositionGraph,
+        manifest: &PluginManifest,
+    ) -> Result<Self, CompositionError> {
+        validate_token("plugin implementation ID", &manifest.implementation_id)
+            .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
+        let components = manifest
+            .components
+            .iter()
+            .map(|(operation, advertised)| {
+                select_operation(
+                    graph,
+                    &manifest.implementation_id,
+                    ExecutionOperationKind::Component,
+                    operation,
+                    &advertised.implementation_revision,
+                    None,
+                )
+                .map(|binding| (operation.clone(), binding))
+            })
+            .collect::<Result<_, _>>()?;
+        let effects = manifest
+            .effects
+            .iter()
+            .map(|(operation, advertised)| {
+                select_operation(
+                    graph,
+                    &manifest.implementation_id,
+                    ExecutionOperationKind::Effect,
+                    operation,
+                    &advertised.implementation_revision,
+                    Some(advertised.can_reconcile),
+                )
+                .map(|binding| (operation.clone(), binding))
+            })
+            .collect::<Result<_, _>>()?;
+        let binding = Self {
+            version: EXECUTION_BINDING_VERSION.to_owned(),
+            context: graph.descriptor().clone(),
+            plugin_implementation_id: manifest.implementation_id.clone(),
+            components,
+            effects,
+        };
+        binding.verify()?;
+        Ok(binding)
+    }
+
+    /// Build the explicit single-process provider graph used by the CLI.
+    ///
+    /// `implementation_revision` must be the digest of the selected executable
+    /// bytes. The resulting provider has no Plan properties; callers requiring
+    /// properties must supply an explicitly reviewed graph to [`Self::admit`].
+    pub fn for_local_process(
+        manifest: &PluginManifest,
+        implementation_revision: impl Into<String>,
+    ) -> Result<Self, CompositionError> {
+        let empty_digest = format!("sha256:{}", sha256_bytes(b"{}"));
+        let provides = manifest
+            .components
+            .keys()
+            .map(|operation| ExecutionOperationKind::Component.service(operation))
+            .chain(
+                manifest
+                    .effects
+                    .keys()
+                    .map(|operation| ExecutionOperationKind::Effect.service(operation)),
+            )
+            .collect();
+        let graph = RuntimeCompositionGraph::build(vec![RuntimeProviderDescriptor {
+            version: RUNTIME_COMPOSITION_VERSION.to_owned(),
+            provider_id: "local-process-plugin".to_owned(),
+            implementation: RuntimeImplementation {
+                implementation_id: manifest.implementation_id.clone(),
+                revision: implementation_revision.into(),
+            },
+            provides,
+            requires: Vec::new(),
+            properties: BTreeMap::new(),
+            configuration_schema_digest: empty_digest.clone(),
+            configuration_fingerprint: empty_digest,
+        }])?;
+        Self::admit(&graph, manifest)
+    }
+
+    /// Verify canonical graph input and every selected operation.
+    pub fn verify(&self) -> Result<(), CompositionError> {
+        if self.version != EXECUTION_BINDING_VERSION {
+            return Err(CompositionError::InvalidExecutionBinding {
+                reason: format!(
+                    "unsupported version {}; expected {EXECUTION_BINDING_VERSION}",
+                    self.version
+                ),
+            });
+        }
+        self.context.verify()?;
+        let graph = RuntimeCompositionGraph::build(self.context.providers.clone())?;
+        for (kind, operations) in [
+            (ExecutionOperationKind::Component, &self.components),
+            (ExecutionOperationKind::Effect, &self.effects),
+        ] {
+            for (operation, selected) in operations {
+                if matches!(kind, ExecutionOperationKind::Component)
+                    != selected.can_reconcile.is_none()
+                {
+                    return Err(CompositionError::InvalidExecutionBinding {
+                        reason: format!(
+                            "reconciliation capability shape is invalid for {kind:?} {operation}"
+                        ),
+                    });
+                }
+                let expected = select_operation(
+                    &graph,
+                    &self.plugin_implementation_id,
+                    kind,
+                    operation,
+                    &selected.operation_revision,
+                    selected.can_reconcile,
+                )?;
+                if expected != *selected {
+                    return Err(CompositionError::InvalidExecutionBinding {
+                        reason: format!("non-canonical selection for {kind:?} {operation}"),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify that the live capability advertisement exactly matches the
+    /// immutable selection. A live manifest never updates the selection.
+    pub fn verify_manifest(&self, manifest: &PluginManifest) -> Result<(), CompositionError> {
+        if manifest.implementation_id != self.plugin_implementation_id
+            || manifest.components.len() != self.components.len()
+            || manifest.effects.len() != self.effects.len()
+        {
+            return Err(CompositionError::ManifestMismatch);
+        }
+        for (operation, binding) in &self.components {
+            if manifest
+                .components
+                .get(operation)
+                .map(|advertised| advertised.implementation_revision.as_str())
+                != Some(binding.operation_revision.as_str())
+                || binding.can_reconcile.is_some()
+            {
+                return Err(CompositionError::ManifestMismatch);
+            }
+        }
+        for (operation, binding) in &self.effects {
+            let advertised = manifest.effects.get(operation);
+            if advertised.map(|value| value.implementation_revision.as_str())
+                != Some(binding.operation_revision.as_str())
+                || advertised.map(|value| value.can_reconcile) != binding.can_reconcile
+            {
+                return Err(CompositionError::ManifestMismatch);
+            }
+        }
+        Ok(())
+    }
+
+    /// Admit every component and effect requirement before Run creation.
+    pub fn admit_plan(&self, plan: &cymule_core::SealedPlan) -> Result<(), CompositionError> {
+        self.verify()?;
+        let graph = RuntimeCompositionGraph::build(self.context.providers.clone())?;
+        for contract in &plan.candidate.components {
+            let selected = self.components.get(&contract.id).ok_or_else(|| {
+                CompositionError::MissingOperationBinding {
+                    kind: ExecutionOperationKind::Component,
+                    operation: contract.id.clone(),
+                }
+            })?;
+            graph.admit_plan_requirements(&selected.service, &contract.requirements)?;
+        }
+        for contract in &plan.candidate.effects {
+            let selected = self.effects.get(&contract.id).ok_or_else(|| {
+                CompositionError::MissingOperationBinding {
+                    kind: ExecutionOperationKind::Effect,
+                    operation: contract.id.clone(),
+                }
+            })?;
+            graph.admit_plan_requirements(&selected.service, &contract.requirements)?;
+        }
+        Ok(())
+    }
+
+    /// Canonical bytes stored as the immutable Machine Artifact.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, CompositionError> {
+        self.verify()?;
+        canonical_bytes(self).map_err(|error| CompositionError::Encoding(error.to_string()))
+    }
+
+    /// Content-addressed reference pinned by Run, Continuation, and Attempt.
+    pub fn artifact_ref(&self) -> Result<ArtifactRef, CompositionError> {
+        let bytes = self.canonical_bytes()?;
+        Ok(artifact_ref(EXECUTION_BINDING_VERSION, &bytes))
+    }
+
+    /// Deterministically derive one exact operation occurrence binding.
+    pub fn occurrence_binding(
+        &self,
+        kind: ExecutionOperationKind,
+        operation: &str,
+    ) -> Result<String, CompositionError> {
+        let selected = match kind {
+            ExecutionOperationKind::Component => self.components.get(operation),
+            ExecutionOperationKind::Effect => self.effects.get(operation),
+        }
+        .ok_or_else(|| CompositionError::MissingOperationBinding {
+            kind,
+            operation: operation.to_owned(),
+        })?;
+        content_id(
+            OCCURRENCE_BINDING_ID_DOMAIN,
+            &(self.artifact_ref()?.artifact_id, kind, operation, selected),
+        )
+        .map_err(|error| CompositionError::Encoding(error.to_string()))
+    }
+}
+
+fn select_operation(
+    graph: &RuntimeCompositionGraph,
+    plugin_implementation_id: &str,
+    kind: ExecutionOperationKind,
+    operation: &str,
+    operation_revision: &str,
+    can_reconcile: Option<bool>,
+) -> Result<ExecutionOperationBinding, CompositionError> {
+    validate_token("operation ID", operation)
+        .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
+    validate_token("operation revision", operation_revision)
+        .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
+    let service = kind.service(operation);
+    let selected = graph
+        .bindings()
+        .iter()
+        .find(|binding| binding.service == service)
+        .ok_or_else(|| CompositionError::UnboundService {
+            service: service.clone(),
+        })?;
+    if selected.implementation.implementation_id != plugin_implementation_id {
+        return Err(CompositionError::InvalidExecutionBinding {
+            reason: format!(
+                "provider {} implements {service} with {}, not selected plugin {plugin_implementation_id}",
+                selected.provider_id, selected.implementation.implementation_id
+            ),
+        });
+    }
+    Ok(ExecutionOperationBinding {
+        service,
+        provider_id: selected.provider_id.clone(),
+        implementation: selected.implementation.clone(),
+        operation_revision: operation_revision.to_owned(),
+        can_reconcile,
+    })
+}
+
 /// Runtime provider binding admission error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CompositionError {
@@ -452,6 +782,20 @@ pub enum CompositionError {
     },
     /// Canonical descriptor encoding failed.
     Encoding(String),
+    /// The selected executable binding is malformed or inconsistent.
+    InvalidExecutionBinding {
+        /// Deterministic rejection reason.
+        reason: String,
+    },
+    /// A Plan operation has no immutable selected binding.
+    MissingOperationBinding {
+        /// Operation class.
+        kind: ExecutionOperationKind,
+        /// Abstract operation ID.
+        operation: String,
+    },
+    /// The live capability advertisement differs from the immutable selection.
+    ManifestMismatch,
 }
 
 impl Display for CompositionError {
@@ -518,6 +862,14 @@ impl Display for CompositionError {
                 "provider {provider_id} property {key} is {actual:?}; required {required:?}"
             ),
             Self::Encoding(message) => write!(formatter, "composition encoding failed: {message}"),
+            Self::InvalidExecutionBinding { reason } => {
+                write!(formatter, "invalid execution binding: {reason}")
+            }
+            Self::MissingOperationBinding { kind, operation } => {
+                write!(formatter, "missing {kind:?} binding for {operation}")
+            }
+            Self::ManifestMismatch => formatter
+                .write_str("live plugin manifest does not match the immutable execution binding"),
         }
     }
 }

@@ -540,9 +540,17 @@ dispatch a child commit-gated effect while its child scope remains open.
 ## 12. Binding evolution
 
 A Plan changes semantic meaning. A Binding Context changes realization defaults
-for future occurrences. Every persisted occurrence must pin an immutable
-binding at admission. Embedded M0 persists this for Attempts and Effect Intents,
-including reconciliation. M1 defines canonical component occurrence records.
+for future occurrences. `cymule.execution-binding/1` is the closed executable
+binding authority: normalized provider descriptors, the selected plugin
+implementation, and every advertised operation revision are serialized to
+canonical bytes and stored as an immutable Machine Artifact. Plan requirements
+MUST match the selected provider before Run creation. Run, Continuation, and
+Attempt MUST pin that Artifact ID. Component and Effect occurrence bindings
+MUST be content-derived from the descriptor Artifact ID, operation class,
+abstract operation ID, and exact selected operation record; implementation-ID
+string concatenation is not a binding. Embedded M0 persists this for Attempts
+and Effect Intents, including reconciliation. M1 defines canonical component
+occurrence records and commits the binding Artifact atomically with Run input.
 Optional plugins MAY define additional domain occurrences, but they MUST
 preserve the same immutable binding rule whenever replay or reconciliation
 depends on a selected implementation. Session, stream, and domain-controller

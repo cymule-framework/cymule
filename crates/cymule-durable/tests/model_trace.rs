@@ -9,8 +9,8 @@ use cymule_durable::{
     ResumableRuntime, StoreCommit, StoredState,
 };
 use cymule_runtime::{
-    PLUGIN_VERSION, PluginHost, PluginManifest, PluginRequest, PluginResponse, RuntimeError,
-    RuntimeResult,
+    ExecutionBinding, PLUGIN_VERSION, PluginHost, PluginManifest, PluginRequest, PluginResponse,
+    RuntimeError, RuntimeResult,
 };
 use cymule_test_world::{
     FaultAction, FaultPlan, FaultSchedule, FaultStep, ReplaySpec, SeededRandom, TestWorld,
@@ -21,6 +21,21 @@ use serde_json::{Value, json};
 const CAS_OPERATION: &str = "durable.compare_and_swap";
 
 struct EmptyPlugin;
+
+fn open_runtime<S: DurableStore, P: PluginHost>(
+    store: S,
+    mut plugin: P,
+) -> DurableResult<ResumableRuntime<S, P>> {
+    let manifest = plugin
+        .describe()
+        .map_err(|error| DurableError::Substrate(error.to_string()))?;
+    let binding = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    )
+    .map_err(|error| DurableError::Validation(error.to_string()))?;
+    ResumableRuntime::open(store, plugin, binding)
+}
 
 impl PluginHost for EmptyPlugin {
     fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
@@ -216,7 +231,7 @@ fn run_case(case: &TraceCase<DurableCommand>) -> Result<(), String> {
         inner: MemoryStore::new(),
         faults: world.faults_mut().clone(),
     };
-    let runtime = ResumableRuntime::open(store, EmptyPlugin).map_err(|error| error.to_string())?;
+    let runtime = open_runtime(store, EmptyPlugin).map_err(|error| error.to_string())?;
     let mut control = DurableRuntimeControl::new(runtime);
     let mut model = DomainModel::default();
 
@@ -227,7 +242,7 @@ fn run_case(case: &TraceCase<DurableCommand>) -> Result<(), String> {
                 Err(DurableError::Substrate(_)) => {
                     let (store, plugin) = control.into_runtime().into_parts();
                     control = DurableRuntimeControl::new(
-                        ResumableRuntime::open(store, plugin)
+                        open_runtime(store, plugin)
                             .map_err(|error| format!("reopen failed: {error}"))?,
                     );
                 }

@@ -18,6 +18,10 @@
 - Each durable frame separates `definition_id`, structural `invocation_id`, and
   immutable input Artifact. Invoked definitions push frames without pushing a
   scope; nested scopes retain the current definition, invocation, and input.
+- Run creation stores the canonical `cymule.execution-binding/1` Artifact in
+  the same Machine delta as the input, Plan, start Event, Attempt, and initial
+  Continuation. Reopen must resolve and verify that exact Artifact; a newly
+  selected provider revision cannot reinterpret historical work.
 - Compile the admitted Plan through `cymule-runtime` and validate Run,
   invocation, component, effect, typed-wait, definition-result, and terminal
   Result values at their exact boundary. Invalid input may not create its

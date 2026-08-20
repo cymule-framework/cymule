@@ -1426,11 +1426,35 @@ fn ensure_run_start_machine(
         .state
         .as_ref()
         .ok_or_else(|| DurableError::Validation("new Run input is missing".to_owned()))?;
+    let binding = cymule_core::ArtifactRef {
+        artifact_id: continuation.binding_context.clone(),
+        kind: cymule_runtime::EXECUTION_BINDING_VERSION.to_owned(),
+    };
+    let binding_record = next
+        .artifacts
+        .iter()
+        .find(|record| record.reference.artifact_id == binding.artifact_id)
+        .ok_or_else(|| {
+            DurableError::Validation("new Run execution binding Artifact is missing".to_owned())
+        })?;
+    if binding_record.reference != binding {
+        return Err(DurableError::Validation(
+            "new Run execution binding Artifact reference is malformed".to_owned(),
+        ));
+    }
+    let binding_descriptor: cymule_runtime::ExecutionBinding =
+        serde_json::from_slice(&binding_record.bytes)?;
+    binding_descriptor.verify()?;
+    if binding_descriptor.artifact_ref()? != binding {
+        return Err(DurableError::Validation(
+            "new Run execution binding Artifact identity is invalid".to_owned(),
+        ));
+    }
     let events = ensure_canonical_machine_delta_with_plan(
         current,
         next,
         Some(plan),
-        &std::collections::BTreeSet::from([input.clone()]),
+        &std::collections::BTreeSet::from([input.clone(), binding.clone()]),
         "Run creation",
     )?;
     let [started, attempt] = events.as_slice() else {
@@ -1445,12 +1469,6 @@ fn ensure_run_start_machine(
                 if plan_id == &continuation.plan_id
                     && binding_context == &continuation.binding_context
         );
-    let implementation = continuation
-        .binding_context
-        .strip_prefix("binding:plugin/")
-        .ok_or_else(|| {
-            DurableError::Validation("new Run binding context is malformed".to_owned())
-        })?;
     let attempt_matches = attempt.run_id == continuation.run_id
         && matches!(
             &attempt.payload,
@@ -1461,7 +1479,7 @@ fn ensure_run_start_machine(
                 epoch,
             } if attempt_id == &format!("attempt:{}:0", continuation.run_id)
                 && continuation_id == &format!("continuation:{}", continuation.run_id)
-                && occurrence_binding == &format!("binding:{implementation}/runtime")
+                && occurrence_binding == &continuation.binding_context
                 && *epoch == 0
         );
     if !run_matches || !attempt_matches {

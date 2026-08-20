@@ -98,6 +98,14 @@ stable implementation ID. Plan contracts own schemas and effect properties.
 Registration never grants authority. Admission independently checks the plan,
 binding, policy, and authority before dispatch.
 
+The reference runtime accepts one explicit `ExecutionBinding`. It first checks
+the live manifest against that immutable selection, then admits every Plan
+requirement against the normalized provider graph. Canonical descriptor bytes
+are stored as `cymule.execution-binding/1`; all execution records point to its
+Artifact identity or to a deterministic operation binding derived from it.
+Process-local construction and finalization remain ordinary adapter ownership,
+not durable semantics.
+
 `cymule-runtime` compiles those schemas with the maintained `jsonschema`
 implementation under fixed Draft 2020-12 semantics and a resolver that cannot
 load ambient files or network resources. `cymule-core` continues to own the

@@ -88,6 +88,15 @@ impl From<crate::PlanAdmissionError> for RuntimeError {
     }
 }
 
+impl From<crate::CompositionError> for RuntimeError {
+    fn from(error: crate::CompositionError) -> Self {
+        Self::PluginDefect {
+            code: "execution_binding_rejected".to_owned(),
+            message: error.to_string(),
+        }
+    }
+}
+
 impl From<std::io::Error> for RuntimeError {
     fn from(error: std::io::Error) -> Self {
         Self::Substrate {

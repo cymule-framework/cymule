@@ -9,12 +9,27 @@ use cymule_durable::{
     WaitCondition, WaitDelivery, WaitKind, WaitSourceDriver, WaitState,
 };
 use cymule_runtime::{
-    PLUGIN_VERSION, PluginHost, PluginManifest, PluginRequest, PluginResponse, RuntimeError,
-    RuntimeResult,
+    ExecutionBinding, PLUGIN_VERSION, PluginHost, PluginManifest, PluginRequest, PluginResponse,
+    RuntimeError, RuntimeResult,
 };
 use serde_json::json;
 
 struct EmptyPlugin;
+
+fn open_runtime<S: cymule_durable::DurableStore, P: PluginHost>(
+    store: S,
+    mut plugin: P,
+) -> cymule_durable::DurableResult<ResumableRuntime<S, P>> {
+    let manifest = plugin
+        .describe()
+        .map_err(|error| DurableError::Substrate(error.to_string()))?;
+    let binding = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    )
+    .map_err(|error| DurableError::Validation(error.to_string()))?;
+    ResumableRuntime::open(store, plugin, binding)
+}
 
 impl PluginHost for EmptyPlugin {
     fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
@@ -243,8 +258,7 @@ fn parked_index_selects_bounded_signal_and_exact_timer_candidates() {
 #[test]
 fn wait_source_ack_loss_redelivers_one_committed_activation_after_reopen() {
     let run_id = "run:wait-source";
-    let mut runtime =
-        ResumableRuntime::open(MemoryStore::new(), EmptyPlugin).expect("runtime opens");
+    let mut runtime = open_runtime(MemoryStore::new(), EmptyPlugin).expect("runtime opens");
     let DriveOutcome::Suspended { wait_id } = runtime
         .start(signal_candidate(), &json!({"value": 7}), run_id)
         .expect("Run parks")
@@ -275,7 +289,7 @@ fn wait_source_ack_loss_redelivers_one_committed_activation_after_reopen() {
     );
 
     let (store, _) = runtime.into_parts();
-    let mut reopened = ResumableRuntime::open(store, EmptyPlugin).expect("runtime reopens");
+    let mut reopened = open_runtime(store, EmptyPlugin).expect("runtime reopens");
     assert_eq!(
         reopened
             .drive_wait_source(&mut driver, 16)

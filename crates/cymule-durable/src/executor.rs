@@ -3,12 +3,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus, DispatchPolicy,
     EffectTransition, Expression, Machine, MutationKind, Operation, PlanCandidate, ROOT_SCOPE_ID,
-    ReconciliationResolution, Region, SealedPlan, WaitSpec, WorldOutcome, canonical_bytes,
-    content_id, effect_intent_id,
+    ReconciliationResolution, Region, WaitSpec, WorldOutcome, canonical_bytes, content_id,
+    effect_intent_id,
 };
 use cymule_runtime::{
-    ContractTarget, ContractValidator, ExecutionResult, PlanContracts, PluginHost, PluginManifest,
-    PluginRequest, PluginResponse, seal_plan,
+    ContractTarget, ContractValidator, EXECUTION_BINDING_VERSION, ExecutionBinding,
+    ExecutionOperationKind, ExecutionResult, PlanContracts, PluginHost, PluginRequest,
+    PluginResponse, seal_plan,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -48,19 +49,21 @@ pub enum DriveOutcome {
 pub struct ResumableRuntime<S, P> {
     coordinator: DurableCoordinator<S>,
     plugin: P,
-    manifest: PluginManifest,
+    binding: ExecutionBinding,
 }
 
 impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
     /// Open a durable runtime over an existing or empty store.
-    pub fn open(store: S, mut plugin: P) -> DurableResult<Self> {
+    pub fn open(store: S, mut plugin: P, binding: ExecutionBinding) -> DurableResult<Self> {
+        binding.verify()?;
         let manifest = plugin
             .describe()
             .map_err(|error| DurableError::Substrate(error.to_string()))?;
+        binding.verify_manifest(&manifest)?;
         Ok(Self {
             coordinator: DurableCoordinator::open(store)?,
             plugin,
-            manifest,
+            binding,
         })
     }
 
@@ -97,7 +100,8 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 .ok_or_else(|| DurableError::NotFound("existing Run Plan is missing".to_owned()))?;
             let contracts = PlanContracts::compile(&plan.candidate)?;
             contracts.validate_definition_input(&plan.candidate.entry, input)?;
-            validate_manifest(plan, &self.manifest)?;
+            self.binding.admit_plan(plan)?;
+            self.verify_pinned_binding(&machine, &existing)?;
             let expected_input = Machine::new().put_artifact("cymule.input/1", input_bytes)?;
             if existing.frames.first().map(|frame| &frame.input) != Some(&expected_input) {
                 return Err(DurableError::IllegalTransition(format!(
@@ -129,22 +133,29 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
         };
         machine.insert_plan(proposed_plan.clone())?;
         let plan = proposed_plan;
-        validate_manifest(&plan, &self.manifest)?;
+        self.binding.admit_plan(&plan)?;
+        let binding_bytes = self.binding.canonical_bytes()?;
+        let binding_ref = machine.put_artifact(EXECUTION_BINDING_VERSION, binding_bytes);
+        if binding_ref != self.binding.artifact_ref()? {
+            return Err(DurableError::Validation(
+                "execution binding Artifact identity is inconsistent".to_owned(),
+            ));
+        }
         submit(
             &mut machine,
             &run_id,
             format!("{run_id}:start"),
             Command::StartRun {
                 plan_id: plan.plan_id.clone(),
-                binding_context: format!("binding:plugin/{}", self.manifest.implementation_id),
+                binding_context: binding_ref.artifact_id.clone(),
             },
         )?;
-        begin_attempt(&mut machine, &run_id, &self.manifest, 0)?;
+        begin_attempt(&mut machine, &run_id, &binding_ref.artifact_id, 0)?;
         let input_ref = machine.put_artifact("cymule.input/1", input_bytes)?;
         let continuation = Continuation {
             run_id: run_id.clone(),
             plan_id: plan.plan_id,
-            binding_context: format!("binding:plugin/{}", self.manifest.implementation_id),
+            binding_context: binding_ref.artifact_id,
             frames: vec![FrameState {
                 definition_id: plan.candidate.entry.clone(),
                 invocation_id: plan.candidate.entry,
@@ -271,13 +282,16 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
     /// Resume an existing ready/running Run after process reopen or a recoverable
     /// adapter failure.
     pub fn resume(&mut self, run_id: &str) -> DurableResult<DriveOutcome> {
-        let status = self
+        let continuation = self
             .coordinator
             .state()?
             .continuations
             .get(run_id)
             .ok_or_else(|| DurableError::NotFound(format!("continuation {run_id} is missing")))?
-            .status;
+            .clone();
+        let machine = self.coordinator.restore_machine()?;
+        self.verify_pinned_binding(&machine, &continuation)?;
+        let status = continuation.status;
         match status {
             ContinuationStatus::Ready => {
                 let mut machine = self.coordinator.restore_machine()?;
@@ -289,7 +303,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     format!("{run_id}:advance:{epoch}"),
                     Command::AdvanceEpoch,
                 )?;
-                begin_attempt(&mut machine, run_id, &self.manifest, epoch)?;
+                begin_attempt(&mut machine, run_id, &continuation.binding_context, epoch)?;
                 continuation.epoch = epoch;
                 continuation.status = ContinuationStatus::Running;
                 self.coordinator.checkpoint(&machine, continuation, None)?;
@@ -374,14 +388,15 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
 
     fn drive(&mut self, run_id: &str) -> DurableResult<DriveOutcome> {
         let admitted_machine = self.coordinator.restore_machine()?;
-        let admitted_plan_id = self
+        let admitted_continuation = self
             .coordinator
             .state()?
             .continuations
             .get(run_id)
             .ok_or_else(|| DurableError::NotFound(format!("continuation {run_id} is missing")))?
-            .plan_id
             .clone();
+        self.verify_pinned_binding(&admitted_machine, &admitted_continuation)?;
+        let admitted_plan_id = admitted_continuation.plan_id;
         let admitted_plan = admitted_machine
             .plan(&admitted_plan_id)
             .ok_or_else(|| DurableError::NotFound(format!("Plan {admitted_plan_id} is missing")))?;
@@ -549,17 +564,12 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     contracts.validate_component_input(component, &value)?;
                     let input_ref = machine
                         .put_artifact("cymule.component-input/1", canonical_bytes(&value)?)?;
-                    let operation = self.manifest.components.get(component).ok_or_else(|| {
-                        DurableError::Validation(format!(
-                            "plugin does not implement component {component}"
-                        ))
+                    let operation = self.binding.components.get(component).ok_or_else(|| {
+                        DurableError::Validation(format!("component {component} is not bound"))
                     })?;
-                    let occurrence_binding = format!(
-                        "binding:{}/component/{}/{}",
-                        self.manifest.implementation_id,
-                        component,
-                        operation.implementation_revision
-                    );
+                    let occurrence_binding = self
+                        .binding
+                        .occurrence_binding(ExecutionOperationKind::Component, component)?;
                     let occurrence_id = component_occurrence_id(
                         run_id,
                         &frame.invocation_id,
@@ -598,7 +608,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                             input: input_ref,
                             output: output_ref.clone(),
                             occurrence_binding,
-                            implementation_revision: operation.implementation_revision.clone(),
+                            implementation_revision: operation.operation_revision.clone(),
                         };
                         (output_ref, Some(occurrence))
                     };
@@ -707,17 +717,9 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     contracts.validate_effect_input(effect, &value)?;
                     let args =
                         machine.put_artifact("cymule.effect-args/1", canonical_bytes(&value)?)?;
-                    let implementation = self.manifest.effects.get(effect).ok_or_else(|| {
-                        DurableError::Validation(format!(
-                            "plugin does not implement effect {effect}"
-                        ))
-                    })?;
-                    let occurrence_binding = format!(
-                        "binding:{}/effect/{}/{}",
-                        self.manifest.implementation_id,
-                        effect,
-                        implementation.implementation_revision
-                    );
+                    let occurrence_binding = self
+                        .binding
+                        .occurrence_binding(ExecutionOperationKind::Effect, effect)?;
                     let intent_id = effect_intent_id(
                         run_id,
                         &frame.invocation_id,
@@ -856,6 +858,34 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 }
             }
         }
+    }
+
+    fn verify_pinned_binding(
+        &self,
+        machine: &Machine,
+        continuation: &Continuation,
+    ) -> DurableResult<()> {
+        let expected = self.binding.artifact_ref()?;
+        if continuation.binding_context != expected.artifact_id {
+            return Err(DurableError::IllegalTransition(format!(
+                "Run {} is pinned to execution binding {}, not {}",
+                continuation.run_id, continuation.binding_context, expected.artifact_id
+            )));
+        }
+        let record = machine.artifact(&expected).ok_or_else(|| {
+            DurableError::NotFound(format!(
+                "execution binding Artifact {} is missing",
+                expected.artifact_id
+            ))
+        })?;
+        let stored: ExecutionBinding = serde_json::from_slice(&record.bytes)?;
+        stored.verify()?;
+        if stored != self.binding {
+            return Err(DurableError::Validation(
+                "execution binding Artifact bytes do not match the admitted binding".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     fn dispatch_outbox(
@@ -1244,26 +1274,6 @@ fn completed_result(machine: &Machine, run_id: &str) -> DurableResult<ExecutionR
     })
 }
 
-fn validate_manifest(plan: &SealedPlan, manifest: &PluginManifest) -> DurableResult<()> {
-    for component in &plan.candidate.components {
-        if !manifest.components.contains_key(&component.id) {
-            return Err(DurableError::Validation(format!(
-                "plugin does not implement component {}",
-                component.id
-            )));
-        }
-    }
-    for effect in &plan.candidate.effects {
-        if !manifest.effects.contains_key(&effect.id) {
-            return Err(DurableError::Validation(format!(
-                "plugin does not implement effect {}",
-                effect.id
-            )));
-        }
-    }
-    Ok(())
-}
-
 fn submit(
     machine: &mut Machine,
     run_id: &str,
@@ -1302,7 +1312,7 @@ fn submit(
 fn begin_attempt(
     machine: &mut Machine,
     run_id: &str,
-    manifest: &PluginManifest,
+    binding_context: &str,
     epoch: u64,
 ) -> DurableResult<()> {
     submit(
@@ -1312,7 +1322,7 @@ fn begin_attempt(
         Command::BeginAttempt {
             attempt_id: format!("attempt:{run_id}:{epoch}"),
             continuation_id: format!("continuation:{run_id}"),
-            occurrence_binding: format!("binding:{}/runtime", manifest.implementation_id),
+            occurrence_binding: binding_context.to_owned(),
             epoch,
         },
     )

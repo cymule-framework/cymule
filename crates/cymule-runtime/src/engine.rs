@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    PlanAdmissionResult, PlanContracts, PluginHost, PluginManifest, PluginRequest, PluginResponse,
-    RuntimeError, RuntimeResult,
+    ExecutionBinding, ExecutionOperationKind, PlanAdmissionResult, PlanContracts, PluginHost,
+    PluginRequest, PluginResponse, RuntimeError, RuntimeResult,
 };
 
 /// Validate every semantic and executable contract, then seal the unchanged
@@ -63,21 +63,26 @@ struct RegionOutcome {
 pub struct EmbeddedRuntime<P: PluginHost> {
     machine: Machine,
     plugin: P,
+    binding: ExecutionBinding,
     command_sequence: u64,
     scope_sequence: u64,
     invocation_sequence: u64,
 }
 
 impl<P: PluginHost> EmbeddedRuntime<P> {
-    /// Construct an embedded runtime with one plugin host.
-    pub fn new(plugin: P) -> Self {
-        Self {
+    /// Construct an embedded runtime with one explicitly admitted binding.
+    pub fn new(mut plugin: P, binding: ExecutionBinding) -> RuntimeResult<Self> {
+        binding.verify()?;
+        let manifest = plugin.describe()?;
+        binding.verify_manifest(&manifest)?;
+        Ok(Self {
             machine: Machine::new(),
             plugin,
+            binding,
             command_sequence: 0,
             scope_sequence: 0,
             invocation_sequence: 0,
-        }
+        })
     }
 
     /// Access the underlying machine for queries and conformance assertions.
@@ -108,11 +113,19 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             .ok_or_else(|| RuntimeError::plugin_defect("entry definition disappeared"))?
             .clone();
         contracts.validate_definition_input(&definition.id, input)?;
+        self.binding.admit_plan(&plan)?;
         self.machine.insert_plan(plan.clone())?;
-        let manifest = self.plugin.describe()?;
-        validate_manifest(&plan, &manifest)?;
+        let binding_bytes = self.binding.canonical_bytes()?;
+        let binding_ref = self
+            .machine
+            .put_artifact(crate::EXECUTION_BINDING_VERSION, binding_bytes);
+        if binding_ref != self.binding.artifact_ref()? {
+            return Err(RuntimeError::plugin_defect(
+                "execution binding Artifact identity is inconsistent",
+            ));
+        }
         let run_id = run_id.into();
-        let binding_context = format!("binding:plugin/{}", manifest.implementation_id);
+        let binding_context = binding_ref.artifact_id.clone();
 
         self.submit(
             &run_id,
@@ -126,7 +139,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             Command::BeginAttempt {
                 attempt_id: "attempt:root/1".to_owned(),
                 continuation_id: "continuation:root".to_owned(),
-                occurrence_binding: format!("binding:{}/runtime", manifest.implementation_id),
+                occurrence_binding: binding_ref.artifact_id,
                 epoch: 0,
             },
         )?;
@@ -136,7 +149,6 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             &run_id,
             &plan,
             &contracts,
-            &manifest,
             &definition.body,
             input,
             ROOT_SCOPE_ID,
@@ -191,7 +203,6 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
         run_id: &str,
         plan: &SealedPlan,
         contracts: &PlanContracts,
-        manifest: &PluginManifest,
         region: &Region,
         input: &Value,
         scope_id: &str,
@@ -244,7 +255,6 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         run_id,
                         plan,
                         contracts,
-                        manifest,
                         &target.body,
                         &value,
                         scope_id,
@@ -271,16 +281,9 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                     let args = self
                         .machine
                         .put_artifact("cymule.effect-args/1", canonical_bytes(&value)?)?;
-                    let occurrence_binding = format!(
-                        "binding:{}/effect/{}/{}",
-                        manifest.implementation_id,
-                        effect,
-                        manifest
-                            .effects
-                            .get(effect)
-                            .expect("manifest was validated")
-                            .implementation_revision
-                    );
+                    let occurrence_binding = self
+                        .binding
+                        .occurrence_binding(ExecutionOperationKind::Effect, effect)?;
                     let epoch = self.current_epoch(run_id)?;
                     let intent_id = effect_intent_id(
                         run_id,
@@ -367,7 +370,6 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         run_id,
                         plan,
                         contracts,
-                        manifest,
                         body,
                         input,
                         &child_scope,
@@ -572,26 +574,6 @@ fn validate_optional_reconciliation_output(
     }
     if resolution == ReconciliationResolution::ResolvedApplied {
         contracts.validate_effect_output(operation, &Value::Null)?;
-    }
-    Ok(())
-}
-
-fn validate_manifest(plan: &SealedPlan, manifest: &PluginManifest) -> RuntimeResult<()> {
-    for contract in &plan.candidate.components {
-        if !manifest.components.contains_key(&contract.id) {
-            return Err(RuntimeError::plugin_defect(format!(
-                "plugin does not implement component {}",
-                contract.id
-            )));
-        }
-    }
-    for contract in &plan.candidate.effects {
-        if !manifest.effects.contains_key(&contract.id) {
-            return Err(RuntimeError::plugin_defect(format!(
-                "plugin does not implement effect {}",
-                contract.id
-            )));
-        }
     }
     Ok(())
 }

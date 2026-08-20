@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 
 use cymule_runtime::{
-    CompositionError, RUNTIME_COMPOSITION_VERSION, RuntimeCompositionGraph, RuntimeImplementation,
-    RuntimeProviderDescriptor, ServiceKey,
+    CompositionError, EXECUTION_BINDING_VERSION, ExecutionBinding, ExecutionOperationKind,
+    PLUGIN_VERSION, PluginEffect, PluginManifest, PluginOperation, RUNTIME_COMPOSITION_VERSION,
+    RuntimeCompositionGraph, RuntimeImplementation, RuntimeProviderDescriptor, ServiceKey,
 };
 
 const SCHEMA_DIGEST: &str =
@@ -33,6 +34,48 @@ fn provider(
         properties: BTreeMap::new(),
         configuration_schema_digest: SCHEMA_DIGEST.to_owned(),
         configuration_fingerprint: CONFIGURATION_FINGERPRINT.to_owned(),
+    }
+}
+
+fn execution_manifest() -> PluginManifest {
+    PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: "cymule.test.executor".to_owned(),
+        components: BTreeMap::from([(
+            "evaluate".to_owned(),
+            PluginOperation {
+                implementation_revision: "component-v1".to_owned(),
+            },
+        )]),
+        effects: BTreeMap::from([(
+            "publish".to_owned(),
+            PluginEffect {
+                implementation_revision: "effect-v1".to_owned(),
+                can_reconcile: true,
+            },
+        )]),
+    }
+}
+
+fn execution_provider(
+    configuration_fingerprint: &str,
+    revision: &str,
+) -> RuntimeProviderDescriptor {
+    RuntimeProviderDescriptor {
+        version: RUNTIME_COMPOSITION_VERSION.to_owned(),
+        provider_id: "executor".to_owned(),
+        implementation: RuntimeImplementation {
+            implementation_id: "cymule.test.executor".to_owned(),
+            revision: revision.to_owned(),
+        },
+        provides: vec![
+            ServiceKey::new("cymule.plugin.component", "evaluate", PLUGIN_VERSION),
+            ServiceKey::new("cymule.plugin.effect", "publish", PLUGIN_VERSION),
+        ],
+        requires: Vec::new(),
+        properties: BTreeMap::from([("isolation.level".to_owned(), "process".to_owned())]),
+        configuration_schema_digest: SCHEMA_DIGEST.to_owned(),
+        configuration_fingerprint: configuration_fingerprint.to_owned(),
     }
 }
 
@@ -246,4 +289,63 @@ fn ambiguous_plan_requirement_keys_fail_closed() {
             Err(CompositionError::InvalidPlanRequirement { .. })
         ));
     }
+}
+
+#[test]
+fn execution_binding_pins_provider_manifest_and_exact_operations() {
+    let manifest = execution_manifest();
+    let graph = RuntimeCompositionGraph::build(vec![execution_provider(
+        CONFIGURATION_FINGERPRINT,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )])
+    .expect("provider graph admits");
+    let binding = ExecutionBinding::admit(&graph, &manifest).expect("manifest is selected");
+    let reference = binding
+        .artifact_ref()
+        .expect("binding has an Artifact identity");
+
+    assert_eq!(reference.kind, EXECUTION_BINDING_VERSION);
+    assert_ne!(reference.artifact_id, graph.binding_context_id().unwrap());
+    let component = binding
+        .occurrence_binding(ExecutionOperationKind::Component, "evaluate")
+        .expect("component binding derives");
+    let effect = binding
+        .occurrence_binding(ExecutionOperationKind::Effect, "publish")
+        .expect("effect binding derives");
+    assert!(component.starts_with("sha256:"));
+    assert!(effect.starts_with("sha256:"));
+    assert_ne!(component, effect);
+    assert!(!component.contains("evaluate"));
+
+    let changed_configuration = ExecutionBinding::admit(
+        &RuntimeCompositionGraph::build(vec![execution_provider(
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )])
+        .unwrap(),
+        &manifest,
+    )
+    .unwrap();
+    let changed_implementation = ExecutionBinding::admit(
+        &RuntimeCompositionGraph::build(vec![execution_provider(
+            CONFIGURATION_FINGERPRINT,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )])
+        .unwrap(),
+        &manifest,
+    )
+    .unwrap();
+    assert_ne!(reference, changed_configuration.artifact_ref().unwrap());
+    assert_ne!(reference, changed_implementation.artifact_ref().unwrap());
+
+    let mut changed_manifest = manifest;
+    changed_manifest
+        .effects
+        .get_mut("publish")
+        .unwrap()
+        .can_reconcile = false;
+    assert_eq!(
+        binding.verify_manifest(&changed_manifest),
+        Err(CompositionError::ManifestMismatch)
+    );
 }

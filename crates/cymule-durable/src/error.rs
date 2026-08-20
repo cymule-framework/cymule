@@ -76,3 +76,9 @@ impl From<cymule_runtime::PlanAdmissionError> for DurableError {
         }
     }
 }
+
+impl From<cymule_runtime::CompositionError> for DurableError {
+    fn from(error: cymule_runtime::CompositionError) -> Self {
+        Self::Validation(error.to_string())
+    }
+}
