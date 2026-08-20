@@ -120,11 +120,25 @@ fn plan(version: &str) -> cymule_core::SealedPlan {
 }
 
 fn artifact(id: &str) -> ArtifactRef {
-    ArtifactRef {
-        identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
-        artifact_id: id.to_owned(),
-        kind: "evolution/evidence".to_owned(),
-    }
+    cymule_core::artifact_ref("evolution/evidence", id.as_bytes())
+        .expect("evolution Artifact reference derives")
+}
+
+fn retain_artifact<S: DurableStore>(
+    coordinator: &mut DurableCoordinator<S>,
+    value: &str,
+) -> ArtifactRef {
+    let mut machine = coordinator.restore_machine().expect("Machine restores");
+    machine
+        .put_artifact("test/input", b"evolution test input".to_vec())
+        .expect("test input stores");
+    let reference = machine
+        .put_artifact("evolution/evidence", value.as_bytes().to_vec())
+        .expect("evolution Artifact stores");
+    coordinator
+        .persist_machine(&machine)
+        .expect("evolution Artifact persists");
+    reference
 }
 
 fn artifact_record(kind: &str, value: &str) -> ArtifactRecord {
@@ -146,11 +160,8 @@ fn continuation(plan_id: &str) -> Continuation {
         frames: vec![FrameState {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
-            input: cymule_core::ArtifactRef {
-                identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
-                artifact_id: format!("sha256:{}", "0".repeat(64)),
-                kind: "test/input".to_owned(),
-            },
+            input: cymule_core::artifact_ref("test/input", b"evolution test input")
+                .expect("test input reference derives"),
             region_path: Vec::new(),
             next_step: 0,
             locals: BTreeMap::new(),
@@ -2521,7 +2532,7 @@ fn durable_mixed_version_pin_reopens_after_lost_checkpoint_receipt() {
         first.plan_id
     );
 
-    let migration_input = artifact("state:durable:1");
+    let migration_input = retain_artifact(&mut reopened, "state:durable:1");
     let (migration_continuation, migration_safe_point) =
         migration_safe_point("run:active", &first.plan_id, migration_input.clone());
     reopened
@@ -2719,11 +2730,9 @@ fn durable_restart_reopens_after_lost_receipt_and_rejects_stale_proof() {
         .expect("coordinator opens")
         .initialize(&cymule_core::Machine::new())
         .expect("coordinator initializes");
-    let (continuation, safe_point) = migration_safe_point(
-        "run:restart-durable",
-        &first.plan_id,
-        artifact("state:restart-durable"),
-    );
+    let restart_state = retain_artifact(&mut coordinator, "state:restart-durable");
+    let (continuation, safe_point) =
+        migration_safe_point("run:restart-durable", &first.plan_id, restart_state);
     coordinator
         .put_continuation(continuation.clone())
         .expect("safe point persists");
@@ -2831,7 +2840,7 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
             mode: RolloutMode::Shadow,
         })
         .expect("shadow rollout sets");
-    let migration_input = artifact("state:durable-plugin");
+    let migration_input = retain_artifact(&mut coordinator, "state:durable-plugin");
     let (migration_continuation, migration_safe_point) = migration_safe_point(
         "run:durable-plugin",
         &first.plan_id,

@@ -56,6 +56,9 @@
   migration, rollback without history rewrite, and DAG cycle rejection.
 - Executable evolution tests must construct an explicit binding whose provider
   properties satisfy the selected Plan; a manifest alone is never admission.
+- Durable safe-point fixtures retain their frame and state Artifacts in the
+  same Machine before publishing a Continuation; synthetic dangling hashes are
+  not valid migration evidence.
 - Durable evolution records use the generic M1 journal with explicit checkpoint
   lineage. Receipt loss must reopen to the committed occurrence pin or control
   decision without creating a second edge or selection.
