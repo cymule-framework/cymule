@@ -82,6 +82,10 @@
 - Keep CI lanes as statically declared jobs selected by planner outputs. GitHub
   resolves `uses:` actions before step-level conditions, so a conditional
   matrix would download unrelated toolchain actions and defeat lane isolation.
+- Rust CI remains split into static consumer compilation, semantic profiles,
+  durable/live-process profiles, provider plugins, and release-package bytes.
+  Do not collapse these witnesses into one long Rust job or rerun workspace
+  behavioral tests before every owner leaf.
 - `verify-soak.sh` owns only repeatable high-risk Rust properties and anomaly
   sweeps. Keep it out of `full`; scheduled soak complements, rather than
   duplicates, change-routed verification.

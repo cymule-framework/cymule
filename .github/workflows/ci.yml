@@ -21,7 +21,11 @@ jobs:
       meta: ${{ steps.plan.outputs.meta }}
       package_typescript: ${{ steps.plan.outputs.package_typescript }}
       protocol: ${{ steps.plan.outputs.protocol }}
-      rust: ${{ steps.plan.outputs.rust }}
+      rust_static: ${{ steps.plan.outputs.rust_static }}
+      rust_semantic: ${{ steps.plan.outputs.rust_semantic }}
+      rust_durable: ${{ steps.plan.outputs.rust_durable }}
+      rust_plugins: ${{ steps.plan.outputs.rust_plugins }}
+      rust_package: ${{ steps.plan.outputs.rust_package }}
       sdk_go: ${{ steps.plan.outputs.sdk_go }}
       sdk_python: ${{ steps.plan.outputs.sdk_python }}
       sdk_rust: ${{ steps.plan.outputs.sdk_rust }}
@@ -66,7 +70,8 @@ jobs:
               for entry in json.loads(os.environ["MATRIX"])["include"]
           }
           for lane in (
-              "meta", "package-typescript", "protocol", "rust", "sdk-go",
+              "meta", "package-typescript", "protocol", "rust-static",
+              "rust-semantic", "rust-durable", "rust-plugins", "rust-package", "sdk-go",
               "sdk-python", "sdk-rust", "sdk-typescript", "workbench",
           ):
               print(f"{lane.replace('-', '_')}={lanes.get(lane, '')}")
@@ -105,10 +110,10 @@ jobs:
           path: .cache/test-harness/meta.json
           if-no-files-found: warn
 
-  rust:
-    name: Verify / rust
+  rust-static:
+    name: Verify / rust-static
     needs: plan
-    if: needs.plan.outputs.rust != ''
+    if: needs.plan.outputs.rust_static != ''
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
@@ -121,14 +126,118 @@ jobs:
       - name: Run selected verification suites
         run: >-
           python3 scripts/test_harness.py run
-          ${{ needs.plan.outputs.rust }}
+          ${{ needs.plan.outputs.rust_static }}
           --keep-going
-          --report .cache/test-harness/rust.json
+          --report .cache/test-harness/rust-static.json
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: test-harness-rust
-          path: .cache/test-harness/rust.json
+          name: test-harness-rust-static
+          path: .cache/test-harness/rust-static.json
+          if-no-files-found: warn
+
+  rust-semantic:
+    name: Verify / rust-semantic
+    needs: plan
+    if: needs.plan.outputs.rust_semantic != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.1
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.rust_semantic }}
+          --keep-going
+          --report .cache/test-harness/rust-semantic.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-rust-semantic
+          path: .cache/test-harness/rust-semantic.json
+          if-no-files-found: warn
+
+  rust-durable:
+    name: Verify / rust-durable
+    needs: plan
+    if: needs.plan.outputs.rust_durable != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.1
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.rust_durable }}
+          --keep-going
+          --report .cache/test-harness/rust-durable.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-rust-durable
+          path: .cache/test-harness/rust-durable.json
+          if-no-files-found: warn
+
+  rust-plugins:
+    name: Verify / rust-plugins
+    needs: plan
+    if: needs.plan.outputs.rust_plugins != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.1
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.rust_plugins }}
+          --keep-going
+          --report .cache/test-harness/rust-plugins.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-rust-plugins
+          path: .cache/test-harness/rust-plugins.json
+          if-no-files-found: warn
+
+  rust-package:
+    name: Verify / rust-package
+    needs: plan
+    if: needs.plan.outputs.rust_package != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.1
+      - name: Run selected verification suites
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.rust_package }}
+          --keep-going
+          --report .cache/test-harness/rust-package.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-harness-rust-package
+          path: .cache/test-harness/rust-package.json
           if-no-files-found: warn
 
   protocol:

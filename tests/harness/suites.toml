@@ -8,9 +8,9 @@ suites = [
   "test-world-deterministic",
   "rust-core",
   "rust-consumers",
+  "rust-workspace",
   "rust-durable",
   "rust-virtual",
-  "rust-evolution",
   "rust-resource",
   "package-typescript",
   "package-rust",
@@ -27,7 +27,7 @@ suites = [
 description = "Credential-free evidence that executes a built child or crosses a real process-death boundary."
 suites = [
   "test-world-live-process",
-  "rust-workspace",
+  "rust-evolution",
   "rust-agent-plugin",
   "protocol",
   "sdk-rust",
@@ -64,67 +64,67 @@ commands = [["python3", "-m", "unittest", "discover", "-s", "tests/harness", "-p
 
 [suites.test-world-deterministic]
 description = "Validate owned clocks, seeded traces, fault schedules, observations, and temporary domains."
-lane = "rust"
+lane = "rust-durable"
 tools = ["rust"]
 commands = [["cargo", "test", "--package", "cymule-test-world", "--test", "deterministic"]]
 
 [suites.test-world-live-process]
 description = "Prove managed child teardown reaches a barrier and reaps a forgotten child."
-lane = "rust"
+lane = "rust-durable"
 tools = ["rust"]
 commands = [["cargo", "test", "--package", "cymule-test-world", "--test", "live_process"]]
 
 [suites.rust-workspace]
-description = "Run formatting, static analysis, tests, and documentation for the Rust workspace."
-lane = "rust"
+description = "Run formatting, static analysis, and documentation for the Rust workspace."
+lane = "rust-static"
 tools = ["rust"]
-commands = [["./scripts/verify-rust.sh"]]
+commands = [["./scripts/verify-rust-static.sh"]]
 
 [suites.rust-consumers]
 description = "Compile every workspace package and test target as the Cargo reverse-dependency witness."
-lane = "rust"
+lane = "rust-static"
 tools = ["rust"]
 commands = [["cargo", "check", "--workspace", "--all-targets"]]
 
 [suites.rust-core]
 description = "Run the small Rust semantic kernel and its property tests."
-lane = "rust"
+lane = "rust-semantic"
 tools = ["rust"]
 commands = [["./scripts/verify-rust.sh", "cymule-core"]]
 
 [suites.rust-durable]
 description = "Run M1 persistence, recovery, and deterministic fault tests."
-lane = "rust"
+lane = "rust-durable"
 tools = ["rust"]
 commands = [["./scripts/verify-rust.sh", "cymule-durable"]]
 
 [suites.rust-virtual]
 description = "Run M3 bounded scheduling, migration, compaction, and fault tests."
-lane = "rust"
+lane = "rust-durable"
 tools = ["rust"]
 commands = [["./scripts/verify-rust.sh", "cymule-virtual"]]
 
 [suites.rust-evolution]
 description = "Run M4 evolution semantics and fault tests."
-lane = "rust"
+lane = "rust-durable"
 tools = ["rust"]
 commands = [["./scripts/verify-rust.sh", "cymule-evolution"]]
 
 [suites.rust-resource]
 description = "Run provider-neutral Resource semantics."
-lane = "rust"
+lane = "rust-semantic"
 tools = ["rust"]
 commands = [["./scripts/verify-rust.sh", "cymule-resource"]]
 
 [suites.rust-agent-plugin]
 description = "Run the optional Agent interaction plugin fault suite."
-lane = "rust"
+lane = "rust-plugins"
 tools = ["rust"]
 commands = [["./scripts/verify-rust.sh", "cymule-agent"]]
 
 [suites.rust-directory-plugin]
 description = "Run the atomic directory-store adapter suite."
-lane = "rust"
+lane = "rust-plugins"
 tools = ["rust"]
 commands = [["./scripts/verify-rust.sh", "cymule-directory-store"]]
 
@@ -172,7 +172,7 @@ commands = [["./scripts/verify-typescript-package.sh"]]
 
 [suites.package-rust]
 description = "Build deterministic public Rust archives and compile their normalized registry manifests."
-lane = "rust"
+lane = "rust-package"
 tools = ["rust"]
 commands = [["./scripts/verify-crates-package.sh"]]
 
@@ -185,43 +185,43 @@ commands = [["./compiler/mlir/verify.sh"]]
 
 [suites.rust-soak]
 description = "Repeat high-risk Rust properties and deterministic fault sweeps at soak depth."
-lane = "rust"
+lane = "rust-durable"
 tools = ["rust"]
 commands = [["./scripts/verify-soak.sh"]]
 
 [suites.rust-coverage]
 description = "Measure semantic Rust coverage against the recorded non-regression floor."
-lane = "rust"
+lane = "rust-semantic"
 tools = ["rust"]
 commands = [["./scripts/verify-analysis.sh", "coverage"]]
 
 [suites.rust-coverage-plugins]
 description = "Measure day-one plugin coverage against its independent non-regression floor."
-lane = "rust"
+lane = "rust-semantic"
 tools = ["rust"]
 commands = [["./scripts/verify-analysis.sh", "coverage-plugins"]]
 
 [suites.rust-mutation]
 description = "Prove cymule-core tests kill generated semantic mutations."
-lane = "rust"
+lane = "rust-semantic"
 tools = ["rust"]
 commands = [["./scripts/verify-analysis.sh", "mutation"]]
 
 [suites.rust-mutation-evolution-m4]
 description = "Prove M4 compatibility, safe-point, relink, and restart tests kill semantic mutations."
-lane = "rust"
+lane = "rust-semantic"
 tools = ["rust"]
 commands = [["./scripts/verify-analysis.sh", "mutation-evolution-m4"]]
 
 [suites.rust-mutation-plugins]
 description = "Prove day-one plugin tests kill critical admission and ambiguity mutations."
-lane = "rust"
+lane = "rust-semantic"
 tools = ["rust"]
 commands = [["./scripts/verify-analysis.sh", "mutation-plugins"]]
 
 [suites.rust-portability]
 description = "Run portable core, durable, and directory-store witnesses."
-lane = "rust"
+lane = "rust-durable"
 tools = ["rust"]
 commands = [
   ["bash", "./scripts/verify-rust.sh", "cymule-core"],
@@ -231,13 +231,13 @@ commands = [
 
 [suites.rust-store-plugins]
 description = "Run SQLite and directory durable-store adapters."
-lane = "rust"
+lane = "rust-plugins"
 tools = ["rust"]
 commands = [["bash", "./scripts/verify-rust.sh", "cymule-store-sqlite", "cymule-directory-store"]]
 
 [suites.rust-resource-plugins]
 description = "Run filesystem and Apache object-store Resource adapters."
-lane = "rust"
+lane = "rust-plugins"
 tools = ["rust"]
 commands = [
   ["bash", "./scripts/verify-rust.sh", "cymule-resource-fs", "cymule-resource-object-store"],
@@ -246,25 +246,25 @@ commands = [
 
 [suites.rust-activation-plugins]
 description = "Run HTTP signal and durable timer activation adapters."
-lane = "rust"
+lane = "rust-plugins"
 tools = ["rust"]
 commands = [["bash", "./scripts/verify-rust.sh", "cymule-activation-http", "cymule-activation-timer", "cymule-clock-system"]]
 
 [suites.rust-executor-plugin]
 description = "Run the hardened process executor adapter."
-lane = "rust"
+lane = "rust-plugins"
 tools = ["rust"]
 commands = [["bash", "./scripts/verify-rust.sh", "cymule-executor-process"]]
 
 [suites.rust-observability-plugin]
 description = "Run bounded OpenTelemetry observation and pipeline tests."
-lane = "rust"
+lane = "rust-plugins"
 tools = ["rust"]
 commands = [["bash", "./scripts/verify-rust.sh", "cymule-observability-otel"]]
 
 [suites.rust-agent-mcp-plugin]
 description = "Run official RMCP tool mapping and boundary tests."
-lane = "rust"
+lane = "rust-plugins"
 tools = ["rust"]
 commands = [["bash", "./scripts/verify-rust.sh", "cymule-agent-mcp"]]
 
@@ -277,6 +277,13 @@ requires = [
   "test-world-deterministic",
   "test-world-live-process",
   "rust-workspace",
+  "rust-consumers",
+  "rust-core",
+  "rust-durable",
+  "rust-virtual",
+  "rust-evolution",
+  "rust-resource",
+  "rust-agent-plugin",
   "protocol",
   "sdk-rust",
   "sdk-typescript",

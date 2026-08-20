@@ -93,15 +93,21 @@ class ChangeRoutingTests(unittest.TestCase):
         manifest = HARNESS.load_manifest()
         matrix = HARNESS.ci_matrix(["full"], manifest)
         lanes = {entry["lane"] for entry in matrix["include"]}
-        self.assertIn("rust", lanes)
+        self.assertIn("rust-static", lanes)
+        self.assertIn("rust-semantic", lanes)
+        self.assertIn("rust-durable", lanes)
+        self.assertIn("rust-plugins", lanes)
+        self.assertIn("rust-package", lanes)
         self.assertIn("sdk-typescript", lanes)
         self.assertIn("sdk-python", lanes)
         self.assertIn("sdk-go", lanes)
         self.assertIn("meta", lanes)
-        rust_lane = next(entry for entry in matrix["include"] if entry["lane"] == "rust")
+        rust_lane = next(
+            entry for entry in matrix["include"] if entry["lane"] == "rust-durable"
+        )
         self.assertEqual(
             set(rust_lane["execution_classes"]),
-            {"deterministic", "live_process", "live_provider"},
+            {"deterministic", "live_process"},
         )
 
     def test_every_leaf_has_one_execution_class(self) -> None:

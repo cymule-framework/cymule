@@ -217,6 +217,12 @@ conditional setup steps. Each job therefore downloads only the toolchain actions
 its suite actually needs; skipped Go, Node, pnpm, or uv setup is not part of an
 unrelated lane's failure surface.
 
+Rust uses five independently reported lanes: workspace static/consumer compile,
+semantic profiles, durable and live-process profiles, provider plugins, and
+release-package bytes. `full` composes those leaves without first running one
+duplicate workspace-wide behavioral suite. A failure therefore preserves the
+other evidence instead of hiding it behind one long Rust job.
+
 ## Routing rules
 
 Routing is a conservative union over every changed path:
