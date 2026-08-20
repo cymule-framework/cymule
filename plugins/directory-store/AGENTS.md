@@ -14,3 +14,5 @@
 - Tests must cover reopen, stale writers, interrupted staging residue, and
   malformed bytes. Production adapters for databases or object stores belong in
   separate plugin crates and must satisfy the same conformance behavior.
+- Reopen fixtures use real Machine-retained Artifact inputs; never bypass
+  durable reference closure with a syntactically valid missing digest.

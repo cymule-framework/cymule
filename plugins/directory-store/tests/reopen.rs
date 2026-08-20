@@ -45,7 +45,7 @@ fn writer_contention_returns_immediately_as_conflict() {
     fs::remove_dir_all(directory).expect("test directory removes");
 }
 
-fn machine_with_run() -> (Machine, String) {
+fn machine_with_run() -> (Machine, String, cymule_core::ArtifactRef) {
     let mut machine = Machine::new();
     let plan = machine
         .seal_plan(PlanCandidate {
@@ -79,10 +79,13 @@ fn machine_with_run() -> (Machine, String) {
             },
         })
         .expect("run starts");
-    (machine, plan.plan_id)
+    let input = machine
+        .put_artifact("test/input", b"directory test input".to_vec())
+        .expect("input stores");
+    (machine, plan.plan_id, input)
 }
 
-fn continuation(plan_id: String) -> Continuation {
+fn continuation(plan_id: String, input: cymule_core::ArtifactRef) -> Continuation {
     Continuation {
         run_id: "run:directory".to_owned(),
         plan_id,
@@ -90,11 +93,7 @@ fn continuation(plan_id: String) -> Continuation {
         frames: vec![FrameState {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
-            input: cymule_core::ArtifactRef {
-                identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
-                artifact_id: format!("sha256:{}", "0".repeat(64)),
-                kind: "test/input".to_owned(),
-            },
+            input,
             region_path: Vec::new(),
             next_step: 0,
             locals: BTreeMap::new(),
@@ -114,7 +113,7 @@ fn continuation(plan_id: String) -> Continuation {
 #[test]
 fn committed_state_reopens_and_stale_writer_is_rejected() {
     let directory = test_directory();
-    let (machine, plan_id) = machine_with_run();
+    let (machine, plan_id, input) = machine_with_run();
     let mut current = DurableCoordinator::open(DirectoryStore::open(&directory).expect("opens"))
         .expect("coordinator opens")
         .initialize(&machine)
@@ -122,7 +121,7 @@ fn committed_state_reopens_and_stale_writer_is_rejected() {
     let mut stale = DurableCoordinator::open(DirectoryStore::open(&directory).expect("opens"))
         .expect("second coordinator opens");
     current
-        .put_continuation(continuation(plan_id))
+        .put_continuation(continuation(plan_id, input))
         .expect("continuation commits");
     assert!(matches!(
         stale.persist_machine(&machine),
@@ -146,7 +145,7 @@ fn committed_state_reopens_and_stale_writer_is_rejected() {
 #[test]
 fn malformed_or_revision_tampered_state_fails_closed() {
     let directory = test_directory();
-    let (machine, _) = machine_with_run();
+    let (machine, _, _) = machine_with_run();
     DurableCoordinator::open(DirectoryStore::open(&directory).expect("opens"))
         .expect("coordinator opens")
         .initialize(&machine)
