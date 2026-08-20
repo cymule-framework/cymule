@@ -15,7 +15,7 @@ pub struct AgentInputCheckpoint {
     pub session: AgentSession,
     /// M1 wait identity correlated with the input request.
     pub wait_id: String,
-    /// Newly committed whole-state CAS revision.
+    /// Newly committed semantic revision behind the segmented head CAS.
     pub revision: String,
 }
 
@@ -174,7 +174,7 @@ impl AgentInputController {
             .map(agent_update_record)
             .collect::<AgentResult<Vec<_>>>()?;
         let revision = coordinator
-            .checkpoint_journal_wait_completion(session_id, &records, wait_id, result)
+            .checkpoint_journal_wait_completion(session_id, &records, wait_id, &result)
             .map_err(|error| AgentError::Persistence(error.to_string()))?;
         Ok(AgentInputCheckpoint {
             session,

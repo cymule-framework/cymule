@@ -20,8 +20,8 @@ use cymule_core::{
     sha256_bytes,
 };
 use cymule_durable::{
-    DriveOutcome, DurableResult, DurableState, DurableStore, OutboxState, ResumableRuntime,
-    StoreCommit, StoredState,
+    DriveOutcome, DurableResult, DurableStore, OutboxState, ResumableRuntime, StoreCommit,
+    StoredState,
 };
 use cymule_runtime::{
     ExecutionBinding, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginRequest,
@@ -60,19 +60,19 @@ impl DurableStore for KillStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
         self.calls += 1;
         if self.calls != self.fail_at {
-            return self.inner.compare_and_swap(expected_revision, next);
+            return self.inner.compare_and_commit(expected, batch);
         }
         match self.phase {
             KillPhase::BeforeCommit => self.stop(),
             KillPhase::AfterCommit => {
-                self.inner.compare_and_swap(expected_revision, next)?;
+                self.inner.compare_and_commit(expected, batch)?;
                 self.stop();
             }
         }
@@ -89,13 +89,13 @@ impl DurableStore for CountingStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.compare_and_swap(expected_revision, next)
+        self.inner.compare_and_commit(expected, batch)
     }
 }
 

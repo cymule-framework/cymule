@@ -456,6 +456,7 @@ dependencies = [
  "cymule-core",
  "cymule-durable",
  "fs4",
+ "serde",
  "serde_json",
 ]
 
@@ -466,6 +467,7 @@ dependencies = [
  "cymule-core",
  "cymule-runtime",
  "cymule-test-world",
+ "proptest",
  "serde",
  "serde_json",
 ]
@@ -598,6 +600,7 @@ dependencies = [
  "cymule-runtime",
  "cymule-test-world",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
 ]

@@ -6,7 +6,7 @@ use cymule_core::{
 use crate::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableError,
     DurableResult, DurableState, DurableStore, EffectDispatch, HISTORY_COMPACTION_VERSION,
-    HistoryCompactionReceipt, JournalBatch, JournalRecord, OutboxState, SnapshotRecord,
+    HistoryCompactionReceipt, JournalBatch, JournalRecord, OutboxState, SnapshotRecord, StoreBatch,
     StoredState, WaitActivation, WaitCondition, WaitKind, WaitState,
 };
 
@@ -40,10 +40,14 @@ impl<S: DurableStore> DurableCoordinator<S> {
             ));
         }
         let state = DurableState::new(machine.snapshot());
-        let commit = self.store.compare_and_swap(None, &state)?;
+        let batch = StoreBatch::initialize(state)?;
+        let commit = self.store.compare_and_commit(None, &batch)?;
+        let checkpoint = batch.checkpoint.expect("initial batch has checkpoint");
         self.stored = Some(StoredState {
             revision: commit.revision.clone(),
-            state,
+            state: checkpoint.state,
+            head: commit.head,
+            checkpoint_covered_segment: checkpoint.covered_segment,
         });
         Ok(commit.revision)
     }
@@ -74,10 +78,14 @@ impl<S: DurableStore> DurableCoordinator<S> {
             .continuations
             .insert(continuation.run_id.clone(), continuation);
         state.validate()?;
-        let commit = self.store.compare_and_swap(None, &state)?;
+        let batch = StoreBatch::initialize(state)?;
+        let commit = self.store.compare_and_commit(None, &batch)?;
+        let checkpoint = batch.checkpoint.expect("initial batch has checkpoint");
         self.stored = Some(StoredState {
             revision: commit.revision.clone(),
-            state,
+            state: checkpoint.state,
+            head: commit.head,
+            checkpoint_covered_segment: checkpoint.covered_segment,
         });
         Ok(commit.revision)
     }
@@ -631,11 +639,11 @@ impl<S: DurableStore> DurableCoordinator<S> {
         &mut self,
         machine: &Machine,
         wait_id: &str,
-        result: cymule_core::ArtifactRef,
+        result: &cymule_core::ArtifactRef,
     ) -> DurableResult<String> {
         self.mutate_checked(|state| {
             state.machine = machine.snapshot();
-            complete_wait_state(state, wait_id, &result, true)
+            complete_wait_state(state, wait_id, result, true)
         })
     }
 
@@ -663,9 +671,9 @@ impl<S: DurableStore> DurableCoordinator<S> {
     pub fn complete_wait(
         &mut self,
         wait_id: &str,
-        result: cymule_core::ArtifactRef,
+        result: &cymule_core::ArtifactRef,
     ) -> DurableResult<String> {
-        self.mutate_checked(|state| complete_wait_state(state, wait_id, &result, true))
+        self.mutate_checked(|state| complete_wait_state(state, wait_id, result, true))
     }
 
     /// Atomically admit one identified signal or timer delivery, complete all
@@ -1116,14 +1124,14 @@ impl<S: DurableStore> DurableCoordinator<S> {
         journal_id: &str,
         records: &[JournalRecord],
         wait_id: &str,
-        result: cymule_core::ArtifactRef,
+        result: &cymule_core::ArtifactRef,
     ) -> DurableResult<String> {
         validate_journal_batch(journal_id, records)?;
         self.mutate_checked(|state| {
             for record in records {
                 append_journal_record(state, journal_id, record.clone())?;
             }
-            complete_wait_state(state, wait_id, &result, true)
+            complete_wait_state(state, wait_id, result, true)
         })
     }
 
@@ -1147,14 +1155,34 @@ impl<S: DurableStore> DurableCoordinator<S> {
             .stored
             .as_ref()
             .ok_or_else(|| DurableError::NotFound("durable state is not initialized".to_owned()))?;
-        let expected = stored.revision.clone();
+        let expected = stored.head.clone();
         let mut next = stored.state.clone();
         update(&mut next)?;
-        let commit = self.store.compare_and_swap(Some(&expected), &next)?;
+        let next_state = next.clone();
+        let Some(batch) = StoreBatch::transition(stored, next)? else {
+            let observed = self.store.load()?.ok_or_else(|| DurableError::Conflict {
+                expected: Some(expected.revision.clone()),
+                current: None,
+            })?;
+            if observed.head != expected {
+                return Err(DurableError::Conflict {
+                    expected: Some(expected.revision.clone()),
+                    current: Some(observed.revision),
+                });
+            }
+            return Ok(stored.revision.clone());
+        };
+        let checkpoint_covered_segment = batch.checkpoint.as_ref().map_or_else(
+            || stored.checkpoint_covered_segment.clone(),
+            |checkpoint| checkpoint.covered_segment.clone(),
+        );
+        let commit = self.store.compare_and_commit(Some(&expected), &batch)?;
         let revision = commit.revision;
         self.stored = Some(StoredState {
             revision: revision.clone(),
-            state: next,
+            state: next_state,
+            head: commit.head,
+            checkpoint_covered_segment,
         });
         Ok(revision)
     }

@@ -11,8 +11,8 @@ use cymule_core::{
 };
 use cymule_durable::{
     DURABLE_CONTROL_VERSION, DriveOutcome, DurableBoundary, DurableCommand, DurableError,
-    DurableResponse, DurableResult, DurableRuntimeControl, DurableState, DurableStore, MemoryStore,
-    OutboxState, ResumableRuntime, StoreCommit, StoredState, WaitActivationSource,
+    DurableResponse, DurableResult, DurableRuntimeControl, DurableStore, MemoryStore, OutboxState,
+    ResumableRuntime, StoreCommit, StoredState, WaitActivationSource,
 };
 use cymule_runtime::{
     ExecutionBinding, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginOperation,
@@ -107,12 +107,12 @@ impl DurableStore for ArmableLostReceiptStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
-        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        let commit = self.inner.compare_and_commit(expected, batch)?;
         if self.lose_next.swap(false, Ordering::SeqCst) {
             return Err(DurableError::Substrate(
                 "simulated lost multi-Run creation receipt".to_owned(),
@@ -155,10 +155,10 @@ impl DurableStore for CasFaultStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
         let call = self.control.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if matches!(self.timing, CasFaultTiming::BeforeCommit) && self.should_fail(call) {
@@ -166,7 +166,7 @@ impl DurableStore for CasFaultStore {
                 "simulated I/O failure before CAS {call}"
             )));
         }
-        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        let commit = self.inner.compare_and_commit(expected, batch)?;
         if matches!(self.timing, CasFaultTiming::AfterCommit) && self.should_fail(call) {
             return Err(DurableError::Substrate(format!(
                 "simulated lost acknowledgement after CAS {call}"
@@ -181,12 +181,17 @@ impl DurableStore for StageReceiptLossStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
-        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        let commit = self.inner.compare_and_commit(expected, batch)?;
+        let retained = self
+            .inner
+            .load()?
+            .expect("committed durable state remains present");
+        let next = &retained.state;
         let reached = next.outbox.values().any(|dispatch| {
             matches!(
                 (self.stage, dispatch.state),

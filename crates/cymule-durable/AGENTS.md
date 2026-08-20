@@ -2,8 +2,10 @@
 
 - This crate owns provider-neutral persistence and recovery contracts. It must
   not name a database, queue, object store, cloud, or transport product.
-- A durable write is compare-and-swap over one complete `DurableState` revision.
-  Adapters must not acknowledge a partial state transition.
+- A durable write inserts one immutable content-addressed delta and
+  compare-and-swaps a small head. The head authenticates a complete checkpoint
+  plus a bounded suffix; adapters must not acknowledge a partial segment/head
+  transition or rewrite the complete `DurableState` on each mutation.
 - Every Run creation includes its Plan/input/start Events and initial
   Continuation in one state CAS. The first Run initializes the domain; later
   Runs append an exact Machine delta under the same authority. Both pre-commit
@@ -133,6 +135,9 @@
 - A higher-profile input delivery that also publishes its Artifact and records
   typed provenance uses `checkpoint_input_wait_journals`; Artifact, journal
   records, input wait, and Continuation readiness must never split across CAS.
+- Checkpoint rotation occurs at the provider-neutral suffix bound. Cold
+  checkpoints and segments are reclaimable only behind an authenticated GC
+  receipt; reopen cost must remain bounded after arbitrary mutation count.
 - Reference in-memory synchronization is adapter-local and non-blocking.
   Contention must surface as a CAS conflict rather than waiting on a mutex.
 - Concrete storage belongs under `plugins/` and must pass this crate's shared

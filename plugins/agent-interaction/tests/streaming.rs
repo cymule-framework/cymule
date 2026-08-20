@@ -12,8 +12,8 @@ use cymule_agent::{
 };
 use cymule_core::Machine;
 use cymule_durable::{
-    DurableCoordinator, DurableError, DurableResult, DurableState, DurableStore, MemoryStore,
-    StoreCommit, StoredState,
+    DurableCoordinator, DurableError, DurableResult, DurableStore, MemoryStore, StoreCommit,
+    StoredState,
 };
 use cymule_resource::ResourceCandidate;
 use serde_json::json;
@@ -340,12 +340,12 @@ impl DurableStore for LostReceiptStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
-        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        let commit = self.inner.compare_and_commit(expected, batch)?;
         if self.lose_next_commit_receipt.swap(false, Ordering::SeqCst) {
             return Err(DurableError::Substrate(
                 "simulated loss after durable stream finalization".to_owned(),

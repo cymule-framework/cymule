@@ -69,7 +69,7 @@ impl ExecutionOutcome {
     pub fn into_completed(self) -> RuntimeResult<ExecutionResult> {
         match self {
             Self::Completed { result } => Ok(result),
-            Self::Suspended { suspension } => Err(RuntimeError::Suspended(suspension)),
+            Self::Suspended { suspension } => Err(RuntimeError::Suspended(Box::new(suspension))),
             Self::ReleaseRequired { release } => Err(RuntimeError::ReleaseRequired {
                 intent_ids: release.intent_ids,
             }),
@@ -258,8 +258,8 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
         let (value, pending) = match outcome {
             RegionOutcome::Completed { value, pending } => (value, pending),
             RegionOutcome::Suspended(mut suspension) => {
-                suspension.run_id = run_id.clone();
-                suspension.plan_id = plan.plan_id.clone();
+                suspension.run_id.clone_from(&run_id);
+                suspension.plan_id.clone_from(&plan.plan_id);
                 self.submit(
                     &run_id,
                     Command::YieldAttempt {
@@ -730,15 +730,12 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             if reconciliation_mode != ReconciliationMode::Queryable {
                 return Ok(EffectDispatchOutcome::ReconciliationRequired { intent_id });
             }
-            let response = match self.plugin.invoke(PluginRequest::ReconcileEffect {
+            let Ok(response) = self.plugin.invoke(PluginRequest::ReconcileEffect {
                 operation: operation.to_owned(),
                 intent_id: intent_id.clone(),
                 input,
-            }) {
-                Ok(response) => response,
-                Err(_) => {
-                    return Ok(EffectDispatchOutcome::ReconciliationRequired { intent_id });
-                }
+            }) else {
+                return Ok(EffectDispatchOutcome::ReconciliationRequired { intent_id });
             };
             let PluginResponse::ReconciliationResult {
                 resolution,

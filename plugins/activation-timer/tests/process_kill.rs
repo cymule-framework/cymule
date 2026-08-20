@@ -13,8 +13,9 @@ use std::time::Duration;
 use cymule_activation_timer::{Clock, SqliteTimerDriver};
 use cymule_core::{Definition, Expression, Operation, PlanCandidate, Region, Step, WaitSpec};
 use cymule_durable::{
-    ContinuationStatus, DriveOutcome, DurableResult, DurableState, DurableStore, ParkedWaitIndex,
-    ResumableRuntime, StoreCommit, StoredState, WaitDelivery, WaitSourceDriver, WaitState,
+    ContinuationStatus, DriveOutcome, DurableResult, DurableStore, ParkedWaitIndex,
+    ResumableRuntime, StoreBatch, StoreCommit, StoreHead, StoredState, WaitDelivery,
+    WaitSourceDriver, WaitState,
 };
 use cymule_runtime::{
     ExecutionBinding, PLUGIN_VERSION, PluginHost, PluginManifest, PluginRequest, PluginResponse,
@@ -134,15 +135,15 @@ impl DurableStore for KillStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&StoreHead>,
+        batch: &StoreBatch,
     ) -> DurableResult<StoreCommit> {
         if !self.after_commit {
             self.stop();
         }
-        self.inner.compare_and_swap(expected_revision, next)?;
+        self.inner.compare_and_commit(expected, batch)?;
         self.stop()
     }
 }

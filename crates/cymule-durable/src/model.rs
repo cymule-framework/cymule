@@ -332,15 +332,15 @@ fn validate_continuation_artifacts(
                 ),
             )?;
         }
-        let scope_id = machine.validate_execution_frame(
-            &continuation.run_id,
-            &frame.invocation_id,
-            &frame.invocation_path,
-            &frame.definition_id,
-            &frame.region_path,
-            &frame.scope_id,
-            frame.next_step,
-        )?;
+        let scope_id = machine.validate_execution_frame(&cymule_core::ExecutionFrameLocation {
+            run_id: &continuation.run_id,
+            invocation_id: &frame.invocation_id,
+            invocation_path: &frame.invocation_path,
+            definition_id: &frame.definition_id,
+            region_path: &frame.region_path,
+            scope_id: &frame.scope_id,
+            next_step: frame.next_step,
+        })?;
         if index == 0 && !frame.invocation_path.is_empty() {
             return Err(DurableError::Validation(format!(
                 "Continuation {} first frame is not the entry invocation",
@@ -483,11 +483,10 @@ fn validate_wait_artifacts(
             if frame.next_step > owner.step_index && frame.locals.get(bind) == Some(result) => {}
         (WaitState::Completed, Some(_), Some(frame), None)
             if frame.next_step > owner.step_index => {}
-        (WaitState::Completed, Some(_), None, _) => {}
+        (WaitState::Completed, Some(_), None, _) | (WaitState::Cancelled, None, None, _) => {}
         (WaitState::Cancelled, None, Some(frame), bind)
             if frame.next_step > owner.step_index
                 && bind.is_none_or(|bind| !frame.locals.contains_key(bind)) => {}
-        (WaitState::Cancelled, None, None, _) => {}
         _ => {
             return Err(DurableError::Validation(format!(
                 "wait {} owner is not reflected by its frame",
@@ -657,26 +656,37 @@ impl JournalRecord {
 }
 
 /// State plus its store-owned revision.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoredState {
     /// Canonical revision of `state`.
     pub revision: String,
     /// Complete committed state.
     pub state: DurableState,
+    /// Small physical CAS head authenticating the checkpoint and suffix.
+    pub head: crate::StoreHead,
+    /// Latest segment incorporated by the current checkpoint.
+    pub(crate) checkpoint_covered_segment: Option<String>,
 }
 
 impl StoredState {
     /// Validate that the revision matches the complete state.
     pub fn verify(&self) -> DurableResult<()> {
+        self.head.verify()?;
         let expected = self.state.revision()?;
-        if self.revision != expected {
+        if self.revision != expected || self.head.revision != expected {
             return Err(DurableError::Validation(format!(
                 "stored revision {} does not match {expected}",
                 self.revision
             )));
         }
         Ok(())
+    }
+
+    pub(crate) fn suffix_head_or_checkpoint_segment(&self) -> Option<String> {
+        self.head
+            .suffix_head
+            .clone()
+            .or_else(|| self.checkpoint_covered_segment.clone())
     }
 }
 

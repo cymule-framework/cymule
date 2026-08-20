@@ -11,7 +11,9 @@ Status: implemented for one production single-domain authority.
   projection plus exact full suffix, with M1 receipts, stale-CAS rejection,
   repeated compaction lineage, old-command replay, tamper rejection, and
   lost-acknowledgement reopen;
-- provider-neutral whole-state compare-and-swap `DurableStore`;
+- provider-neutral segmented `DurableStore`: small CAS head, immutable
+  content-addressed deltas, checkpoint rotation at a fixed suffix bound,
+  authenticated reopen, and receipt-backed cold reclamation;
 - multi-Run domain creation: the first Run initializes the durable state and
   every later Run atomically appends its exact Plan, input, start/attempt
   Events, command receipts, and initial Continuation without resetting existing
@@ -107,9 +109,13 @@ Status: implemented for one production single-domain authority.
   and restart-monotonic logical clock observations.
 
 No concrete storage product is part of this profile. An adapter conforms only
-when it provides atomic whole-state CAS and passes the profile fault suite.
+when immutable-object insertion and head movement are atomic, reopen is bounded,
+and it passes the stale-head, acknowledgement-loss, crash, tamper, and GC suite.
 
-Version decision: Resources introduce independent `cymule.resource/1` and
+Version decision: segmented storage introduces independent
+`cymule.durable-head/1`, `cymule.durable-segment/1`,
+`cymule.durable-checkpoint/1`, and `cymule.durable-gc-receipt/1` physical
+contracts without changing `cymule.durable-state/2`. Resources introduce independent `cymule.resource/1` and
 `cymule.resource-handoff/1` domains. Identified signal/timer admission introduces
 the independent `cymule.wait-activation/1` record inside M1 durable state. The
 additive activation map defaults empty when older M1 state is read. The

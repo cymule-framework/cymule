@@ -24,7 +24,8 @@ use cymule_agent::{
 };
 use cymule_core::Machine;
 use cymule_durable::{
-    DurableCoordinator, DurableResult, DurableState, DurableStore, StoreCommit, StoredState,
+    DurableCoordinator, DurableResult, DurableStore, StoreBatch, StoreCommit, StoreHead,
+    StoredState,
 };
 use cymule_store_sqlite::SqliteStore;
 use cymule_test_world::{ManagedChild, TestWorld};
@@ -55,13 +56,13 @@ impl DurableStore for CountingStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&StoreHead>,
+        batch: &StoreBatch,
     ) -> DurableResult<StoreCommit> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.compare_and_swap(expected_revision, next)
+        self.inner.compare_and_commit(expected, batch)
     }
 }
 
@@ -79,19 +80,19 @@ impl DurableStore for KillStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
         self.calls += 1;
         if self.calls != self.fail_at {
-            return self.inner.compare_and_swap(expected_revision, next);
+            return self.inner.compare_and_commit(expected, batch);
         }
         match self.phase {
             KillPhase::BeforeCommit => self.stop(),
             KillPhase::AfterCommit => {
-                self.inner.compare_and_swap(expected_revision, next)?;
+                self.inner.compare_and_commit(expected, batch)?;
                 self.stop();
             }
         }

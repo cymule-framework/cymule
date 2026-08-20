@@ -21,7 +21,7 @@ The plugin owns:
 
 The plugin does not own the Cymule execution model. It lowers its state through
 M1 application journals, waits, bindings, effects, scopes, resources, outbox
-records, and whole-state CAS checkpoints. It cannot widen authority, treat a
+records, and segmented head CAS checkpoints. It cannot widen authority, treat a
 catalog entry as permission, or bypass a Plan-declared world effect.
 
 The framework does not interpret Agent Loop phases, model/tool ordering,

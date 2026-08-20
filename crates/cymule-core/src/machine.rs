@@ -17,6 +17,25 @@ struct CommandRecord {
     receipt: CommandReceipt,
 }
 
+/// Borrowed durable-frame location re-resolved against one immutable Plan.
+#[derive(Clone, Copy)]
+pub struct ExecutionFrameLocation<'a> {
+    /// Owning Run.
+    pub run_id: &'a str,
+    /// Structural invocation identity.
+    pub invocation_id: &'a str,
+    /// Entry-rooted invocation path.
+    pub invocation_path: &'a [InvocationPathSegment],
+    /// Resolved definition.
+    pub definition_id: &'a str,
+    /// Nested Region path.
+    pub region_path: &'a [usize],
+    /// Exact lexical scope.
+    pub scope_id: &'a str,
+    /// Next operation index.
+    pub next_step: usize,
+}
+
 const MACHINE_PREFIX_VERSION: &str = "cymule.machine-prefix/2";
 
 /// Authenticated command/Event evidence retained after an Event body compacts.
@@ -556,14 +575,17 @@ impl Machine {
     /// callers cannot make a self-consistent but unreachable frame authoritative.
     pub fn validate_execution_frame(
         &self,
-        run_id: &str,
-        invocation_id: &str,
-        invocation_path: &[InvocationPathSegment],
-        definition_id: &str,
-        region_path: &[usize],
-        scope_id: &str,
-        next_step: usize,
+        location: &ExecutionFrameLocation<'_>,
     ) -> Result<String> {
+        let ExecutionFrameLocation {
+            run_id,
+            invocation_id,
+            invocation_path,
+            definition_id,
+            region_path,
+            scope_id,
+            next_step,
+        } = *location;
         let run = self.run(run_id)?;
         let plan = self.plans.get(&run.current_plan).ok_or_else(|| {
             CoreError::NotFound(format!("plan {} does not exist", run.current_plan))

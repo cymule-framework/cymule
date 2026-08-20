@@ -28,7 +28,11 @@ pub use retry::{
     RETRY_POLICY_VERSION, RETRY_STREAM_VERSION, RetryCommand, RetryDecision, RetryDelay,
     RetryDisposition, RetryFailure, RetryPolicy, RetryStopReason, RetryStream,
 };
-pub use store::{DurableStore, MemoryStore, StoreCommit};
+pub use store::{
+    DurableStore, GC_RECEIPT_VERSION, GcReceipt, JsonDelta, MAX_HOT_SEGMENTS, MemoryStore,
+    STATE_CHECKPOINT_VERSION, STATE_SEGMENT_VERSION, STORE_HEAD_VERSION, StateCheckpoint,
+    StateSegment, StoreBatch, StoreCommit, StoreHead, StoreStats, restore,
+};
 pub use wait_source::{
     MAX_WAIT_DELIVERY_TARGETS, ParkedWaitIndex, WaitDelivery, WaitSelection, WaitSourceDriver,
 };

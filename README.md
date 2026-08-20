@@ -474,8 +474,9 @@ Today Cymule provides:
 - **Exact semantic execution:** sealed Plans, canonical identities, typed
   idempotent Commands, causal replay, fenced attempts and effects, and explicit
   reconciliation of ambiguous outcomes.
-- **Durable single-domain execution:** multi-Run CAS state, complete
-  Continuations, waits, outbox records, component occurrences, compaction,
+- **Durable single-domain execution:** immutable delta segments behind a small
+  CAS head, bounded authenticated checkpoint-plus-suffix reopen, receipt-backed
+  cold reclamation, multi-Run state, complete Continuations, waits, outbox records, component occurrences, compaction,
   four-language controls, and process-death recovery across every Run CAS.
 - **Large virtual work:** bounded materialization, deterministic fairness,
   portable snapshots, verified region changes, cold-history archival, and

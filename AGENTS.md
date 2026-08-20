@@ -58,6 +58,11 @@ Use this precedence order when guidance conflicts:
 - Durable Run creation publishes the initial Machine and first Continuation in
   one CAS. Never create canonical work that cannot be resumed after a lost
   acknowledgement.
+- M1 storage moves one small CAS head over immutable content-addressed deltas.
+  Reopen authenticates one checkpoint plus a suffix shorter than
+  `MAX_HOT_SEGMENTS`; checkpoint rotation and cold-object reclamation retain
+  exact lineage and receipts. Never restore per-mutation whole-state rewrite
+  authority or add an implicit/mixed legacy-format fallback.
 - Machine history compaction replaces only a causally closed Event prefix with
   an authenticated base projection and exact identities. Retain the complete
   suffix and command receipts; CAS lineage and replay must survive stale writes

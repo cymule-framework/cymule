@@ -12,9 +12,9 @@ use cymule_core::{
 };
 use cymule_durable::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
-    DurableResult, DurableState, DurableStore, EffectDispatch, FrameState, JournalBatch,
-    JournalRecord, MemoryStore, OutboxState, StoreCommit, StoredState, WaitActivation,
-    WaitActivationSource, WaitCondition, WaitKind, WaitOwner, WaitState,
+    DurableResult, DurableStore, EffectDispatch, FrameState, JournalBatch, JournalRecord,
+    MemoryStore, OutboxState, StoreCommit, StoredState, WaitActivation, WaitActivationSource,
+    WaitCondition, WaitKind, WaitOwner, WaitState,
 };
 use cymule_runtime::{
     EXECUTION_BINDING_VERSION, ExecutionBinding, PLUGIN_VERSION, PluginManifest, PluginOperation,
@@ -32,12 +32,12 @@ impl DurableStore for LostCompactionReceiptStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
-        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        let commit = self.inner.compare_and_commit(expected, batch)?;
         if self.armed.swap(false, Ordering::SeqCst) {
             return Err(DurableError::Substrate(
                 "simulated lost compaction receipt".to_owned(),
@@ -220,8 +220,8 @@ fn prepared_effect_transition() -> (Machine, Machine, Continuation, EffectDispat
         },
     );
     let mut effect_continuation = continuation(plan.plan_id);
-    effect_continuation.run_id = "run:effect-delta".to_owned();
-    effect_continuation.binding_context = "binding:test".to_owned();
+    "run:effect-delta".clone_into(&mut effect_continuation.run_id);
+    "binding:test".clone_into(&mut effect_continuation.binding_context);
     (
         base,
         machine,
@@ -473,7 +473,7 @@ fn public_coordinator_rejects_every_dangling_or_legacy_artifact_reference() {
         .expect("wait registers");
     let wait_revision = coordinator.revision().expect("revision").to_owned();
     assert!(matches!(
-        coordinator.complete_wait("wait:dangling", missing.clone()),
+        coordinator.complete_wait("wait:dangling", &missing),
         Err(DurableError::Validation(_))
     ));
     assert_eq!(coordinator.revision(), Some(wait_revision.as_str()));
@@ -572,10 +572,10 @@ fn wait_completion_survives_reopen_and_readies_the_continuation() {
         })
         .expect("wait registers");
     coordinator
-        .complete_wait("wait:approval", result.clone())
+        .complete_wait("wait:approval", &result)
         .expect("wait completes");
     coordinator
-        .complete_wait("wait:approval", result)
+        .complete_wait("wait:approval", &result)
         .expect("completion retry is idempotent");
 
     let reopened = DurableCoordinator::open(store).expect("store reopens");
@@ -783,7 +783,7 @@ fn signal_activation_rejects_wrong_or_multiple_consume_once_targets_atomically()
         Err(DurableError::Validation(_))
     ));
     assert!(matches!(
-        coordinator.complete_wait("wait:signal:one", result),
+        coordinator.complete_wait("wait:signal:one", &result),
         Err(DurableError::Validation(_))
     ));
     assert_eq!(coordinator.revision(), Some(before.as_str()));

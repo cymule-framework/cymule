@@ -1,118 +1,321 @@
-//! `SQLite` reopen, fencing, contention, and integrity tests.
-
-use std::time::Duration;
-
+//! `SQLite` segmented-store reopen, migration, fencing, and complexity tests.
 use cymule_core::Machine;
-use cymule_durable::{DurableError, DurableState, DurableStore};
+use cymule_durable::{
+    DurableError, DurableState, DurableStore, JournalRecord, MAX_HOT_SEGMENTS, StoreBatch,
+    StoreHead, StoredState,
+};
 use cymule_store_sqlite::SqliteStore;
 use rusqlite::Connection;
+use serde_json::json;
+use std::time::Duration;
 use tempfile::tempdir;
 
 fn state() -> DurableState {
     DurableState::new(Machine::new().snapshot())
 }
-
-#[test]
-fn sqlite_store_reopens_replays_and_rejects_stale_writers() {
-    let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("cymule.sqlite");
-    let mut first = SqliteStore::open(&path, "domain:one").expect("store opens");
-    let mut stale = SqliteStore::open(&path, "domain:one").expect("second store opens");
-    assert!(first.load().expect("empty store loads").is_none());
-    let candidate_state = state();
-    let receipt = first
-        .compare_and_swap(None, &candidate_state)
-        .expect("initial state commits");
-    let reopened = stale
-        .load()
-        .expect("committed state reopens")
-        .expect("state");
-    assert_eq!(reopened.revision, receipt.revision);
-    assert_eq!(reopened.state, candidate_state);
-    assert!(matches!(
-        stale.compare_and_swap(None, &candidate_state),
-        Err(DurableError::Conflict { current: Some(current), .. }) if current == receipt.revision
-    ));
+fn initialize(store: &mut impl DurableStore) -> StoredState {
+    let batch = StoreBatch::initialize(state()).expect("initial batch");
+    store
+        .compare_and_commit(None, &batch)
+        .expect("initial commit");
+    store.load().expect("loads").expect("state exists")
+}
+fn append(store: &mut impl DurableStore, current: &StoredState, index: usize) -> StoredState {
+    let mut next = current.state.clone();
+    next.application_journals
+        .entry("journal:test".to_owned())
+        .or_default()
+        .push(
+            JournalRecord::new(
+                format!("record:{index}"),
+                "test.record/1",
+                json!({"index": index}),
+            )
+            .expect("record"),
+        );
+    let batch = StoreBatch::transition(current, next)
+        .expect("transition")
+        .expect("changed batch");
+    store
+        .compare_and_commit(Some(&current.head), &batch)
+        .expect("delta commits");
+    store.load().expect("loads").expect("state exists")
 }
 
 #[test]
-fn separate_domains_do_not_share_authority() {
+fn sqlite_reopens_authenticated_suffix_and_rejects_stale_head() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("cymule.sqlite");
+    let mut writer = SqliteStore::open(&path, "domain:one").expect("store opens");
+    let mut stale = SqliteStore::open(&path, "domain:one").expect("second store opens");
+    let initial = initialize(&mut writer);
+    let stale_view = stale.load().expect("stale view loads").expect("state");
+    let next = append(&mut writer, &initial, 1);
+    let mut stale_state = stale_view.state.clone();
+    stale_state.application_journals.insert(
+        "journal:stale".to_owned(),
+        vec![JournalRecord::new("stale", "test.record/1", json!(null)).expect("record")],
+    );
+    let stale_batch = StoreBatch::transition(&stale_view, stale_state)
+        .expect("transition")
+        .expect("batch");
+    assert!(matches!(
+        stale.compare_and_commit(Some(&stale_view.head), &stale_batch),
+        Err(DurableError::Conflict { .. })
+    ));
+    let reopened = SqliteStore::open(&path, "domain:one")
+        .expect("reopens")
+        .load()
+        .expect("loads")
+        .expect("state");
+    assert_eq!(reopened.revision, next.revision);
+    assert_eq!(reopened.state, next.state);
+}
+
+#[test]
+fn suffix_reopen_is_bounded_and_cold_objects_are_reclaimable() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("bounded.sqlite");
+    let mut store = SqliteStore::open(&path, "domain:bounded").expect("opens");
+    let mut current = initialize(&mut store);
+    for index in 0..(MAX_HOT_SEGMENTS as usize + 3) {
+        current = append(&mut store, &current, index);
+    }
+    let reopened = SqliteStore::open(&path, "domain:bounded")
+        .expect("reopens")
+        .load()
+        .expect("loads")
+        .expect("state");
+    let before = store.stats().expect("stats");
+    assert!(before.reopened_segments < MAX_HOT_SEGMENTS);
+    assert!(before.checkpoints >= 2);
+    let database = Connection::open(&path).expect("complexity observer opens");
+    let largest_segment: i64 = database
+        .query_row(
+            "SELECT MAX(length(object_json)) FROM cymule_segments WHERE domain = ?1",
+            ["domain:bounded"],
+            |row| row.get(0),
+        )
+        .expect("segment sizes read");
+    let projection_bytes = cymule_core::canonical_bytes(&reopened.state).expect("projection bytes");
+    assert!(largest_segment < i64::try_from(projection_bytes.len()).expect("size fits"));
+    let receipt = store
+        .reclaim_cold(&reopened.head)
+        .expect("cold archive reclaims");
+    assert!(receipt.reclaimed_objects > 0);
+    let after = store.stats().expect("stats");
+    assert_eq!(after.checkpoints, 1);
+    assert!(after.segments < u64::from(MAX_HOT_SEGMENTS));
+    assert_eq!(after.gc_receipts, 1);
+    assert_eq!(
+        store.load().expect("loads after GC").expect("state").state,
+        reopened.state
+    );
+    database
+        .execute(
+            "UPDATE cymule_gc_receipts SET object_json = ?1
+             WHERE domain = ?2 AND object_id = ?3",
+            (
+                b"{}".as_slice(),
+                "domain:bounded",
+                receipt.receipt_id.as_str(),
+            ),
+        )
+        .expect("test corrupts GC receipt");
+    assert!(matches!(store.load(), Err(DurableError::Encoding(_))));
+    database
+        .execute(
+            "UPDATE cymule_gc_receipts SET object_json = ?1
+             WHERE domain = ?2 AND object_id = ?3",
+            (
+                cymule_core::canonical_bytes(&receipt).expect("receipt bytes"),
+                "domain:bounded",
+                receipt.receipt_id.as_str(),
+            ),
+        )
+        .expect("test restores GC receipt");
+    let after_gc = store
+        .load()
+        .expect("loads restored receipt")
+        .expect("state");
+    let advanced = append(&mut store, &after_gc, 10_000);
+    assert!(advanced.head.gc_receipt.is_none());
+    assert_eq!(
+        store
+            .load()
+            .expect("loads after new delta")
+            .expect("state")
+            .state,
+        advanced.state
+    );
+}
+
+#[test]
+fn separate_domains_and_nonblocking_writer_contention_hold() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("domains.sqlite");
     let mut first = SqliteStore::open(&path, "domain:first").expect("first opens");
     let mut second = SqliteStore::open(&path, "domain:second").expect("second opens");
-    first
-        .compare_and_swap(None, &state())
-        .expect("first commits");
+    initialize(&mut first);
     assert!(second.load().expect("second loads").is_none());
-}
-
-#[test]
-fn active_sqlite_writer_returns_immediately_as_conflict() {
-    let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("contention.sqlite");
-    let mut store = SqliteStore::open(&path, "domain:one").expect("store opens");
     let blocker = Connection::open(&path).expect("blocking connection opens");
-    blocker
-        .busy_timeout(Duration::ZERO)
-        .expect("zero timeout configures");
+    blocker.busy_timeout(Duration::ZERO).expect("zero timeout");
     blocker
         .execute_batch("BEGIN IMMEDIATE")
-        .expect("writer transaction starts");
-    assert!(matches!(
-        store.compare_and_swap(None, &state()),
-        Err(DurableError::Conflict { current: Some(current), .. })
-            if current == "sqlite-writer-active"
-    ));
+        .expect("writer begins");
+    let batch = StoreBatch::initialize(state()).expect("batch");
+    assert!(
+        matches!(second.compare_and_commit(None, &batch), Err(DurableError::Conflict { current: Some(current), .. }) if current == "sqlite-writer-active")
+    );
     blocker.execute_batch("ROLLBACK").expect("writer releases");
 }
 
 #[test]
-fn read_only_observer_neither_configures_nor_contends_as_a_writer() {
+fn read_only_observer_reads_but_cannot_commit() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("observer.sqlite");
-    let candidate = state();
     let mut writer = SqliteStore::open(&path, "domain:one").expect("writer opens");
-    let commit = writer
-        .compare_and_swap(None, &candidate)
-        .expect("initial state commits");
-    let blocker = Connection::open(&path).expect("blocking connection opens");
-    blocker
-        .busy_timeout(Duration::ZERO)
-        .expect("zero timeout configures");
-    blocker
-        .execute_batch("BEGIN IMMEDIATE")
-        .expect("writer transaction starts");
-
-    let mut observer =
-        SqliteStore::open_read_only(&path, "domain:one").expect("observer opens read-only");
-    let retained = observer
-        .load()
-        .expect("observer reads through active writer")
-        .expect("committed state exists");
-    assert_eq!(retained.revision, commit.revision);
-    assert_eq!(retained.state, candidate);
-    assert!(matches!(
-        observer.compare_and_swap(Some(&commit.revision), &state()),
-        Err(DurableError::Validation(message)) if message.contains("read-only")
-    ));
-    blocker.execute_batch("ROLLBACK").expect("writer releases");
+    let retained = initialize(&mut writer);
+    let mut observer = SqliteStore::open_read_only(&path, "domain:one").expect("observer opens");
+    assert_eq!(
+        observer.load().expect("reads").expect("state").revision,
+        retained.revision
+    );
+    let mut next = retained.state.clone();
+    next.application_journals.insert(
+        "journal:x".to_owned(),
+        vec![JournalRecord::new("x", "x/1", json!(null)).expect("record")],
+    );
+    let batch = StoreBatch::transition(&retained, next)
+        .expect("transition")
+        .expect("batch");
+    assert!(
+        matches!(observer.compare_and_commit(Some(&retained.head), &batch), Err(DurableError::Validation(message)) if message.contains("read-only"))
+    );
 }
 
 #[test]
-fn corrupted_state_fails_closed() {
+fn corrupted_head_fails_closed() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("corrupt.sqlite");
-    let mut store = SqliteStore::open(&path, "domain:one").expect("store opens");
-    store
-        .compare_and_swap(None, &state())
-        .expect("initial state commits");
-    let connection = Connection::open(&path).expect("raw connection opens");
-    connection
+    let mut store = SqliteStore::open(&path, "domain:one").expect("opens");
+    initialize(&mut store);
+    Connection::open(&path)
+        .expect("raw connection")
         .execute(
-            "UPDATE cymule_state SET state_json = ?1 WHERE domain = ?2",
+            "UPDATE cymule_heads SET head_json = ?1 WHERE domain = ?2",
             (b"{}".as_slice(), "domain:one"),
         )
-        .expect("test corrupts state");
+        .expect("corrupts head");
     assert!(matches!(store.load(), Err(DurableError::Encoding(_))));
+}
+
+#[test]
+fn content_addressed_row_locator_must_match_embedded_segment_id() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("aliased-segment.sqlite");
+    let mut store = SqliteStore::open(&path, "domain:alias").expect("opens");
+    let initial = initialize(&mut store);
+    let current = append(&mut store, &initial, 1);
+    let actual = current
+        .head
+        .suffix_head
+        .as_ref()
+        .expect("suffix exists")
+        .clone();
+    let alias = format!("sha256:{}", "f".repeat(64));
+    let connection = Connection::open(&path).expect("raw observer opens");
+    let bytes: Vec<u8> = connection
+        .query_row(
+            "SELECT object_json FROM cymule_segments WHERE domain=?1 AND object_id=?2",
+            ("domain:alias", &actual),
+            |row| row.get(0),
+        )
+        .expect("segment bytes read");
+    connection
+        .execute(
+            "INSERT INTO cymule_segments(domain, object_id, object_json) VALUES (?1, ?2, ?3)",
+            ("domain:alias", &alias, bytes),
+        )
+        .expect("aliased segment writes");
+    let mut aliased: StoreHead = current.head.clone();
+    aliased.suffix_head = Some(alias);
+    connection
+        .execute(
+            "UPDATE cymule_heads SET head_json=?1 WHERE domain=?2",
+            (
+                cymule_core::canonical_bytes(&aliased).expect("aliased head bytes"),
+                "domain:alias",
+            ),
+        )
+        .expect("aliased head writes");
+    assert!(
+        matches!(store.load(), Err(DurableError::Validation(message)) if message.contains("locator"))
+    );
+}
+
+#[test]
+fn legacy_format_requires_explicit_offline_migration() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("legacy.sqlite");
+    let legacy = state();
+    let revision = legacy.revision().expect("revision");
+    let connection = Connection::open(&path).expect("opens raw SQLite");
+    connection.execute_batch("CREATE TABLE cymule_state (domain TEXT PRIMARY KEY NOT NULL, schema_version TEXT NOT NULL, revision TEXT NOT NULL, state_json BLOB NOT NULL) STRICT;").expect("legacy schema");
+    connection
+        .execute(
+            "INSERT INTO cymule_state VALUES (?1, ?2, ?3, ?4)",
+            (
+                "domain:legacy",
+                "cymule.sqlite-store/1",
+                &revision,
+                cymule_core::canonical_bytes(&legacy).expect("bytes"),
+            ),
+        )
+        .expect("legacy row");
+    drop(connection);
+    assert!(
+        matches!(SqliteStore::open(&path, "domain:legacy"), Err(DurableError::Validation(message)) if message.contains("explicit offline"))
+    );
+    let receipts = SqliteStore::migrate_v1(&path).expect("offline migration");
+    assert_eq!(receipts.len(), 1);
+    let mut migrated = SqliteStore::open(&path, "domain:legacy").expect("segmented opens");
+    assert_eq!(
+        migrated.load().expect("loads").expect("state").revision,
+        revision
+    );
+    assert!(SqliteStore::migrate_v1(&path).is_err());
+
+    let mixed_path = directory.path().join("mixed.sqlite");
+    let mixed = Connection::open(&mixed_path).expect("mixed database opens");
+    mixed.execute_batch(
+        "CREATE TABLE cymule_state (domain TEXT PRIMARY KEY NOT NULL, schema_version TEXT NOT NULL, revision TEXT NOT NULL, state_json BLOB NOT NULL) STRICT;
+         CREATE TABLE cymule_store_meta (singleton INTEGER PRIMARY KEY, schema_version TEXT NOT NULL) STRICT;
+         INSERT INTO cymule_store_meta VALUES (1, 'future-segmented-format');",
+    ).expect("mixed schema creates");
+    mixed
+        .execute(
+            "INSERT INTO cymule_state VALUES (?1, ?2, ?3, ?4)",
+            (
+                "domain:mixed",
+                "cymule.sqlite-store/1",
+                &revision,
+                cymule_core::canonical_bytes(&legacy).expect("mixed legacy bytes"),
+            ),
+        )
+        .expect("mixed legacy row writes");
+    drop(mixed);
+    assert!(matches!(
+        SqliteStore::migrate_v1(&mixed_path),
+        Err(DurableError::Validation(message)) if message.contains("mixed legacy")
+    ));
+    let mixed = Connection::open(&mixed_path).expect("mixed database reopens");
+    let legacy_retained: bool = mixed
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='cymule_state')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("legacy table retention reads");
+    assert!(legacy_retained);
 }

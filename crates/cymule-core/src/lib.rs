@@ -17,7 +17,8 @@ pub use ir::{
     SealedPlan, Step, WaitSpec, seal_plan,
 };
 pub use machine::{
-    CompactedEventEvidence, Machine, MachineBaseSnapshot, MachineCompaction, MachineSnapshot,
+    CompactedEventEvidence, ExecutionFrameLocation, Machine, MachineBaseSnapshot,
+    MachineCompaction, MachineSnapshot,
 };
 pub use model::{
     ARTIFACT_IDENTITY_VERSION, ArtifactRecord, ArtifactRef, AttemptProjection, COMMAND_VERSION,

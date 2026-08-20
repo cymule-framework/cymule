@@ -194,7 +194,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
         let result = machine.put_artifact("cymule.wait-result/1", canonical_bytes(value)?)?;
         let run_id = wait.run_id;
         self.coordinator
-            .complete_wait_with_machine(&machine, wait_id, result)?;
+            .complete_wait_with_machine(&machine, wait_id, &result)?;
         self.resume(&run_id)
     }
 

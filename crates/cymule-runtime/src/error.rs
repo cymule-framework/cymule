@@ -22,7 +22,7 @@ pub enum RuntimeError {
         message: String,
     },
     /// IR execution reached a durable wait unsupported by one-shot execution.
-    Suspended(SuspensionBoundary),
+    Suspended(Box<SuspensionBoundary>),
     /// Prepared explicit effects require a caller-owned durable release control.
     ReleaseRequired {
         /// Exact prepared intent identities that remain unreleased.

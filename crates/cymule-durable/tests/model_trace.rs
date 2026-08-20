@@ -12,8 +12,8 @@ use cymule_core::{
 };
 use cymule_durable::{
     ContinuationStatus, DURABLE_CONTROL_VERSION, DurableBoundary, DurableCommand, DurableError,
-    DurableResponse, DurableResult, DurableRuntimeControl, DurableState, DurableStore, MemoryStore,
-    OutboxState, ResumableRuntime, StoreCommit, StoredState, WaitActivationSource, WaitState,
+    DurableResponse, DurableResult, DurableRuntimeControl, DurableStore, MemoryStore, OutboxState,
+    ResumableRuntime, StoreCommit, StoredState, WaitActivationSource, WaitState,
 };
 use cymule_runtime::{
     ExecutionBinding, ExecutionResult, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest,
@@ -25,7 +25,7 @@ use cymule_test_world::{
 };
 use serde_json::{Value, json};
 
-const CAS_OPERATION: &str = "durable.compare_and_swap";
+const CAS_OPERATION: &str = "durable.compare_and_commit";
 const EFFECT_OPERATION: &str = "test.capture";
 const SIGNAL_KEY: &str = "trace.signal";
 const WAIT_SITE: &str = "wait.signal";
@@ -119,10 +119,10 @@ impl DurableStore for FaultingStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
         let path = [self.active_path.get()];
         let action = self.faults.observe_path(CAS_OPERATION, &path);
@@ -131,7 +131,7 @@ impl DurableStore for FaultingStore {
                 "generated failure before durable CAS at path {path:?}"
             )));
         }
-        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        let commit = self.inner.compare_and_commit(expected, batch)?;
         if action == Some(FaultAction::AcknowledgementLostAfter) {
             return Err(DurableError::Substrate(format!(
                 "generated acknowledgement loss after durable CAS at path {path:?}"
