@@ -7,6 +7,9 @@
   waits, effects, resources, and durable journals without becoming core truth.
 - A manifest advertises implemented operations, stable revisions, and
   reconciliation capability; it never grants authority or selects itself.
+- Process and persisted JSON ingress uses the core duplicate-rejecting decoder;
+  a plugin must not collapse duplicate object members before protocol or state
+  validation.
 - Effect adapters must preserve structural intent identity across prepare,
   dispatch, retry, receipt verification, and reconciliation.
 - An ambiguous dispatch returns `unknown`. Never hide it as a generic error or

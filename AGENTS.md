@@ -19,6 +19,10 @@ Use this precedence order when guidance conflicts:
 - Canonical truth consists of sealed plans, causal events, and immutable
   artifacts. Views, indexes, graphs, attention items, and schedulers are
   rebuildable projections.
+- Every raw JSON ingress uses the shared duplicate-rejecting decode contract
+  before typed deserialization. CLI, SDK, plugin, canonical Artifact, and
+  persisted-state readers must never pass wire bytes through a permissive
+  object parser or a fallback decoder.
 - Every Artifact reference pins `cymule.artifact/2`; its sole identity authority
   is the core length-prefixed helper. Typed JSON references additionally pin the
   exact content-addressed Artifact type contract in their kind. Opaque Artifact
@@ -58,6 +62,10 @@ Use this precedence order when guidance conflicts:
   an authenticated base projection and exact identities. Retain the complete
   suffix and command receipts; CAS lineage and replay must survive stale writes
   and lost acknowledgements.
+- Machine restore requires bidirectional closure between every retained or
+  compacted Event identity and exactly one applied command receipt. A retained
+  Event's command ID and command hash must match that receipt's command record;
+  conflicts never claim an Event.
 - Signal and timer transport belongs behind `WaitSourceDriver`. Drivers select
   only from the rebuildable parked-wait index, obey the hard target bound, and
   acknowledge only after the activation CAS; lost acknowledgement redelivers

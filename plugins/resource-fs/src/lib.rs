@@ -238,7 +238,7 @@ impl FsResourceStore {
 
     fn load_record(&self, upload_id: &str) -> ResourceResult<UploadRecord> {
         let record: UploadRecord =
-            serde_json::from_slice(&fs::read(self.record_path(upload_id)?).map_err(substrate)?)
+            cymule_core::decode_json(&fs::read(self.record_path(upload_id)?).map_err(substrate)?)
                 .map_err(substrate)?;
         if record.upload_id != upload_id {
             return Err(ResourceError::Integrity(
@@ -671,7 +671,7 @@ impl ArtifactResolver for FsResourceStore {
                 .checked_add(count as u64)
                 .ok_or_else(|| ResourceError::Integrity("manifest cursor overflow".to_owned()))?;
             let manifest: FsManifestEntry =
-                serde_json::from_str(line.trim_end()).map_err(substrate)?;
+                cymule_core::decode_json(line.trim_end().as_bytes()).map_err(substrate)?;
             validate_name(&manifest.name)?;
             manifest.resource.verify()?;
             entries.push(ResourceEntry {
@@ -716,7 +716,8 @@ fn validate_manifest(path: &Path) -> ResourceResult<()> {
         if reader.read_line(&mut line).map_err(substrate)? == 0 {
             return Ok(());
         }
-        let entry: FsManifestEntry = serde_json::from_str(line.trim_end()).map_err(substrate)?;
+        let entry: FsManifestEntry =
+            cymule_core::decode_json(line.trim_end().as_bytes()).map_err(substrate)?;
         validate_name(&entry.name)?;
         entry.resource.verify()?;
         if previous

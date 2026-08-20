@@ -165,7 +165,7 @@ pub struct Step {
 /// Frozen structured operations. Complex frontend syntax lowers to these five
 /// semantic boundaries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     /// Call an abstract component.
     Call {
@@ -228,7 +228,7 @@ pub enum ScopeMode {
 
 /// Durable wait descriptions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WaitSpec {
     /// Wait for an external signal key.
     Signal {
@@ -254,7 +254,7 @@ pub enum WaitSpec {
 
 /// Pure expressions over input, prior bindings, and literals.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Expression {
     /// Definition input.
     Input,

@@ -1449,7 +1449,7 @@ fn ensure_run_start_machine(
         ));
     }
     let binding_descriptor: cymule_runtime::ExecutionBinding =
-        serde_json::from_slice(&binding_record.bytes)?;
+        cymule_core::decode_json(&binding_record.bytes)?;
     binding_descriptor.verify()?;
     if binding_descriptor.artifact_ref()? != binding {
         return Err(DurableError::Validation(

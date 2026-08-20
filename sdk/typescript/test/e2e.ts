@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -24,6 +26,29 @@ const profile: EffectProfile = {
   keyed_idempotency: true,
   irreversible: false,
 };
+
+test("TypeScript Engine ingress rejects duplicate JSON object members", () => {
+  const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-"));
+  const executable = join(directory, "duplicate-engine");
+  writeFileSync(
+    executable,
+    `#!/bin/sh
+cat >/dev/null
+printf '%s' '{"engine_protocol":"cymule.engine/1","outcome":"success","response":{"type":"sealed","type":"verified"}}'
+`,
+  );
+  chmodSync(executable, 0o700);
+  try {
+    assert.throws(
+      () => new CliEngine(executable).seal({} as PlanCandidate),
+      (error: unknown) => error instanceof EngineError
+        && error.failure.code === "invalid_engine_response"
+        && error.failure.message.includes("duplicate JSON object member"),
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("TypeScript candidate seals and executes through the Rust engine", () => {
   const enginePath = process.env.CYMULE_BIN;

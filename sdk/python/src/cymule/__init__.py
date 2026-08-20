@@ -1385,8 +1385,10 @@ class CliEngine:
                 f"engine exited without a protocol response (status {completed.returncode})",
             )
         try:
-            envelope = json.loads(completed.stdout)
-        except json.JSONDecodeError as error:
+            envelope = json.loads(
+                completed.stdout, object_pairs_hook=_unique_json_object
+            )
+        except (json.JSONDecodeError, ValueError) as error:
             raise _transport_error("invalid_engine_response", str(error)) from error
         _validate_engine_envelope(envelope)
         if envelope.get("engine_protocol") != ENGINE_PROTOCOL_VERSION:
@@ -1411,6 +1413,15 @@ class CliEngine:
                 "invalid_engine_response", "response outcome is not closed"
             )
         return envelope["response"]
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, member in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON object member {key!r}")
+        value[key] = member
+    return value
 
 
 def _transport_error(code: str, message: str) -> EngineError:

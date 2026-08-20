@@ -9,7 +9,7 @@ mod ir;
 mod machine;
 mod model;
 
-pub use canonical::{canonical_bytes, canonical_digest, content_id, sha256_bytes};
+pub use canonical::{canonical_bytes, canonical_digest, content_id, decode_json, sha256_bytes};
 pub use error::{CoreError, Result};
 pub use ir::{
     ComponentContract, Definition, DispatchPolicy, EffectContract, EffectProfile, Expression,

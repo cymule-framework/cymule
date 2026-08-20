@@ -1435,7 +1435,7 @@ export class CliEngine {
     }
     let envelope: EngineResponseEnvelope;
     try {
-      envelope = parseEngineEnvelope(JSON.parse(child.stdout) as unknown);
+      envelope = parseEngineEnvelope(parseUniqueJson(child.stdout));
     } catch (error) {
       throw transportError(
         "invalid_engine_response",
@@ -1459,6 +1459,92 @@ export class CliEngine {
     }
     return envelope.response;
   }
+}
+
+function parseUniqueJson(input: string): unknown {
+  let offset = 0;
+  const whitespace = () => {
+    while ([" ", "\t", "\r", "\n"].includes(input[offset] ?? "")) offset += 1;
+  };
+  const string = (): string => {
+    const start = offset;
+    if (input[offset] !== '"') throw new SyntaxError("expected a JSON object member name");
+    offset += 1;
+    while (offset < input.length) {
+      if (input[offset] === "\\") {
+        offset += 2;
+      } else if (input[offset] === '"') {
+        offset += 1;
+        return JSON.parse(input.slice(start, offset)) as string;
+      } else {
+        offset += 1;
+      }
+    }
+    throw new SyntaxError("unterminated JSON string");
+  };
+  const value = (): unknown => {
+    whitespace();
+    if (input[offset] === "{") {
+      offset += 1;
+      whitespace();
+      const members = new Map<string, unknown>();
+      if (input[offset] === "}") {
+        offset += 1;
+        return {};
+      }
+      while (offset < input.length) {
+        const key = string();
+        if (members.has(key)) throw new SyntaxError(`duplicate JSON object member ${JSON.stringify(key)}`);
+        whitespace();
+        if (input[offset] !== ":") throw new SyntaxError("expected ':' after JSON object member");
+        offset += 1;
+        members.set(key, value());
+        whitespace();
+        if (input[offset] === "}") {
+          offset += 1;
+          return Object.fromEntries(members);
+        }
+        if (input[offset] !== ",") throw new SyntaxError("expected ',' between JSON object members");
+        offset += 1;
+        whitespace();
+      }
+      throw new SyntaxError("unterminated JSON object");
+    }
+    if (input[offset] === "[") {
+      offset += 1;
+      whitespace();
+      const values: unknown[] = [];
+      if (input[offset] === "]") {
+        offset += 1;
+        return values;
+      }
+      while (offset < input.length) {
+        values.push(value());
+        whitespace();
+        if (input[offset] === "]") {
+          offset += 1;
+          return values;
+        }
+        if (input[offset] !== ",") throw new SyntaxError("expected ',' between JSON array values");
+        offset += 1;
+      }
+      throw new SyntaxError("unterminated JSON array");
+    }
+    if (input[offset] === '"') {
+      return string();
+    }
+    const start = offset;
+    while (
+      offset < input.length
+      && ![" ", "\t", "\r", "\n", ",", "]", "}"].includes(input[offset] ?? "")
+    ) offset += 1;
+    if (offset === start) throw new SyntaxError("expected a JSON value");
+    return JSON.parse(input.slice(start, offset)) as unknown;
+  };
+  const parsed = value();
+  whitespace();
+  if (offset !== input.length) throw new SyntaxError("unexpected trailing JSON value");
+  return parsed;
 }
 
 function transportError(code: string, message: string): EngineError {
