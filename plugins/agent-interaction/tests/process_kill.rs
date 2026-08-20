@@ -18,9 +18,7 @@ use cymule_agent::{
     WorkspaceChange, WorkspaceReceipt,
 };
 use cymule_core::Machine;
-use cymule_durable::{
-    DurableCoordinator, DurableResult, DurableState, DurableStore, StoreCommit, StoredState,
-};
+use cymule_durable::{DurableCoordinator, DurableResult, DurableStore, StoreCommit, StoredState};
 use cymule_store_sqlite::SqliteStore;
 use cymule_test_world::{ManagedChild, TestWorld};
 use rusqlite::{Connection, OptionalExtension};
@@ -54,19 +52,19 @@ impl DurableStore for KillStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
         self.calls += 1;
         if self.calls != self.fail_at {
-            return self.inner.compare_and_swap(expected_revision, next);
+            return self.inner.compare_and_commit(expected, batch);
         }
         match self.phase {
             KillPhase::BeforeCommit => self.stop(),
             KillPhase::AfterCommit => {
-                self.inner.compare_and_swap(expected_revision, next)?;
+                self.inner.compare_and_commit(expected, batch)?;
                 self.stop();
             }
         }

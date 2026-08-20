@@ -138,9 +138,10 @@ semantics.
 
 ## Storage contracts
 
-M1 defines a provider-neutral `DurableStore` as compare-and-swap over one
-complete `DurableState` revision. A successful write atomically covers the
-semantic Machine snapshot, Continuations, waits, leases, effect outbox,
+M1 defines a provider-neutral `DurableStore` as compare-and-swap over a small
+head that authenticates one content-addressed checkpoint and a bounded suffix
+of immutable content-addressed state deltas. A successful head transition
+atomically covers the semantic Machine snapshot, Continuations, waits, leases, effect outbox,
 identified signal/timer activation receipts, component occurrences, snapshot
 metadata, and typed higher-profile journals. This keeps M2-M4 records under the
 same revision authority without placing their domain types in `cymule-core`.
@@ -170,8 +171,11 @@ SDKs. It exposes start, resume, wait admission, explicit effect release, and
 read-only Run/domain queries. The Rust `DurableRuntimeControl` is the only
 reducer; clients do not reconstruct Continuations or outbox transitions.
 
-The repository provides a non-blocking shared-memory reference store, an
-atomic local directory adapter, and a SQLite adapter with immediate
+The suffix rotates into an authenticated complete projection at 32 segments,
+so reopen reads at most 31 deltas. Older checkpoints and segments form a cold
+archive until explicit reclamation records an immutable receipt. The repository
+provides a non-blocking shared-memory reference store, an atomic local directory
+adapter, and a SQLite adapter with immediate
 transactions, WAL, synchronous-full persistence, and zero-timeout contention.
 Adapter exclusion is never semantic authority. No database, queue, or object
 store name is part of the contract.
@@ -180,7 +184,7 @@ Machine snapshot v2 can compact a causally closed canonical Event prefix into
 an authenticated base projection while retaining exact prefix identities,
 command receipts, and every full suffix Event. Restore validates the base and
 replays the suffix. The M1 coordinator records cumulative compaction lineage in
-the same whole-state CAS, so a stale writer loses and a lost response can be
+the same head CAS, so a stale writer loses and a lost response can be
 recovered by reopen without recomputing history.
 
 ## Cross-Run resources

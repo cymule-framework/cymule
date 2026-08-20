@@ -39,6 +39,10 @@
   `cymule.durable-control/1` mutation/query union. SDKs may construct start,
   resume, wait-activation, effect-release, and read-only query commands, but
   only the Rust M1 runtime may reduce them against a durable domain.
+- `durable-storage.schema.json` freezes the provider-neutral M1 physical head,
+  recursive delta, checkpoint envelope, and GC receipt. Rust additionally
+  verifies every content identity, segment lineage, semantic revision, and the
+  checkpoint-plus-suffix replay bound.
 - `virtual-checkpoint.schema.json` owns `cymule.virtual-checkpoint/1` cursor and
   bounded-frontier journal payloads. The derived parked-reason index is omitted
   from wire state and rebuilt from the closed parked-work map on restore.

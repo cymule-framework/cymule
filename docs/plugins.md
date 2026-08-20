@@ -11,8 +11,8 @@ into Plans and Events.
 
 | Crate | Boundary | Maintained foundation | Implemented guarantees |
 | --- | --- | --- | --- |
-| `cymule-directory-store` | `DurableStore` | Rust filesystem APIs, `fs4` | complete-state atomic replacement, fsync, non-blocking writer claim |
-| `cymule-store-sqlite` | `DurableStore` | SQLite through `rusqlite` | WAL, full synchronous mode, immediate transaction CAS, zero busy timeout, reopen/integrity checks |
+| `cymule-directory-store` | `DurableStore` | Rust filesystem APIs, `fs4` | immutable segments/checkpoints, atomic head replacement, bounded reopen, receipt-backed GC, explicit offline v1 migration, fsync, non-blocking writer claim |
+| `cymule-store-sqlite` | `DurableStore` | SQLite through `rusqlite` | immutable segments/checkpoints plus small-head CAS, bounded reopen, receipt-backed GC, explicit offline v1 migration, WAL/full synchronous, zero busy timeout |
 | `cymule-resource-fs` | `ArtifactStore` / `ArtifactResolver` | Rust filesystem APIs, `fs4` | content addressing, exact chunk retry, atomic publication, recursive directory manifests, bounded cursor listing |
 | `cymule-resource-object-store` | object `ArtifactStore` / `ArtifactResolver` | Apache `object_store` | conditional records/chunks, bounded multipart promotion, digest verification; maintained S3, GCS, Azure and HTTP clients; backends without required CAS operations fail closed |
 | `cymule-activation-http` | signal `WaitSourceDriver` | Axum, Tokio, SQLite | durable ingress spool and target selection, injected authorization, response only after activation acknowledgement, exact reopen/redelivery, duplicate/conflict handling |
@@ -39,8 +39,8 @@ Status: proposed P1 adapter.
 RocksDB is valuable for embedded services with large state, high write rates,
 prefix/range access, column-family separation, snapshots, and compaction tuning.
 It is not the best day-one default for Cymule's current `DurableStore`, which
-commits one complete single-domain state behind one revision CAS. Under that
-contract, SQLite already supplies transactional compare-and-swap, simple
+commits immutable deltas and periodic checkpoints behind one small-head CAS.
+Under that contract, SQLite already supplies transactional compare-and-swap, simple
 inspection, migrations, and much lighter build/operations.
 
 A future `cymule-store-rocksdb` becomes worthwhile when the durable substrate

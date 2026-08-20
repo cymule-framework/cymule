@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/durable-storage.schema.json",
+  "title": "Cymule Durable Storage Records",
+  "$defs": {
+    "identity": { "type": "string", "minLength": 1 },
+    "json_delta": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": { "op": { "const": "replace" }, "value": true },
+          "required": ["op", "value"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": { "const": "object" },
+            "fields": { "type": "object", "additionalProperties": { "$ref": "#/$defs/json_delta" } },
+            "removed": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+          },
+          "required": ["op", "fields", "removed"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": { "const": "append" },
+            "base_len": { "type": "integer", "minimum": 0 },
+            "values": { "type": "array" }
+          },
+          "required": ["op", "base_len", "values"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "head": {
+      "type": "object",
+      "properties": {
+        "head_version": { "const": "cymule.durable-head/1" },
+        "revision": { "$ref": "#/$defs/identity" },
+        "checkpoint_id": { "$ref": "#/$defs/identity" },
+        "suffix_head": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
+        "suffix_len": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "gc_receipt": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] }
+      },
+      "required": ["head_version", "revision", "checkpoint_id", "suffix_head", "suffix_len", "sequence", "gc_receipt"],
+      "additionalProperties": false
+    },
+    "segment": {
+      "type": "object",
+      "properties": {
+        "segment_version": { "const": "cymule.durable-segment/1" },
+        "segment_id": { "$ref": "#/$defs/identity" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "parent_segment": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
+        "base_revision": { "$ref": "#/$defs/identity" },
+        "revision": { "$ref": "#/$defs/identity" },
+        "delta": { "$ref": "#/$defs/json_delta" }
+      },
+      "required": ["segment_version", "segment_id", "sequence", "parent_segment", "base_revision", "revision", "delta"],
+      "additionalProperties": false
+    },
+    "checkpoint": {
+      "type": "object",
+      "properties": {
+        "checkpoint_version": { "const": "cymule.durable-checkpoint/1" },
+        "checkpoint_id": { "$ref": "#/$defs/identity" },
+        "parent_checkpoint": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
+        "covered_segment": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "revision": { "$ref": "#/$defs/identity" },
+        "state": { "type": "object" }
+      },
+      "required": ["checkpoint_version", "checkpoint_id", "parent_checkpoint", "covered_segment", "sequence", "revision", "state"],
+      "additionalProperties": false
+    },
+    "gc_receipt": {
+      "type": "object",
+      "properties": {
+        "receipt_version": { "const": "cymule.durable-gc-receipt/1" },
+        "receipt_id": { "$ref": "#/$defs/identity" },
+        "revision": { "$ref": "#/$defs/identity" },
+        "retained_checkpoint": { "$ref": "#/$defs/identity" },
+        "reclaimed_digest": { "$ref": "#/$defs/identity" },
+        "reclaimed_objects": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["receipt_version", "receipt_id", "revision", "retained_checkpoint", "reclaimed_digest", "reclaimed_objects"],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/head" },
+    { "$ref": "#/$defs/segment" },
+    { "$ref": "#/$defs/checkpoint" },
+    { "$ref": "#/$defs/gc_receipt" }
+  ]
+}

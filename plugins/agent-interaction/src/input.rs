@@ -13,7 +13,7 @@ pub struct AgentInputCheckpoint {
     pub session: AgentSession,
     /// M1 wait identity correlated with the input request.
     pub wait_id: String,
-    /// Newly committed whole-state CAS revision.
+    /// Newly committed semantic revision behind the segmented head CAS.
     pub revision: String,
 }
 

@@ -19,6 +19,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 cymule-test-world = { path = "../../tests/test-world" }
+proptest = "1.11.0"
 
 [lints]
 workspace = true

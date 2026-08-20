@@ -10,8 +10,7 @@ use cymule_core::{
 };
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
-    DurableState, DurableStore, MemoryStore, StoreCommit, StoredState, WaitCondition, WaitKind,
-    WaitState,
+    DurableStore, MemoryStore, StoreCommit, StoredState, WaitCondition, WaitKind, WaitState,
 };
 use cymule_resource::{
     ArtifactResolver, ArtifactStore, InlineData, ResourceCandidate, ResourceChunk, ResourceClient,
@@ -32,12 +31,12 @@ impl DurableStore for LostHandoffReceiptStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
-        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        let commit = self.inner.compare_and_commit(expected, batch)?;
         if self.armed.swap(false, Ordering::SeqCst) {
             return Err(DurableError::Substrate(
                 "simulated lost handoff activation receipt".to_owned(),

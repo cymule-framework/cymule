@@ -470,26 +470,37 @@ impl JournalRecord {
 }
 
 /// State plus its store-owned revision.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoredState {
     /// Canonical revision of `state`.
     pub revision: String,
     /// Complete committed state.
     pub state: DurableState,
+    /// Small physical CAS head authenticating the checkpoint and suffix.
+    pub head: crate::StoreHead,
+    /// Latest segment incorporated by the current checkpoint.
+    pub(crate) checkpoint_covered_segment: Option<String>,
 }
 
 impl StoredState {
     /// Validate that the revision matches the complete state.
     pub fn verify(&self) -> DurableResult<()> {
+        self.head.verify()?;
         let expected = self.state.revision()?;
-        if self.revision != expected {
+        if self.revision != expected || self.head.revision != expected {
             return Err(DurableError::Validation(format!(
                 "stored revision {} does not match {expected}",
                 self.revision
             )));
         }
         Ok(())
+    }
+
+    pub(crate) fn suffix_head_or_checkpoint_segment(&self) -> Option<String> {
+        self.head
+            .suffix_head
+            .clone()
+            .or_else(|| self.checkpoint_covered_segment.clone())
     }
 }
 

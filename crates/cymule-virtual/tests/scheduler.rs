@@ -12,7 +12,7 @@ use cymule_core::{
 };
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
-    DurableState, DurableStore, FrameState, MemoryStore, StoreCommit, StoredState, WaitActivation,
+    DurableStore, FrameState, MemoryStore, StoreCommit, StoredState, WaitActivation,
     WaitActivationSource, WaitCondition, WaitKind, WaitState,
 };
 use cymule_virtual::{
@@ -62,12 +62,12 @@ impl DurableStore for LostReceiptStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
-        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        let commit = self.inner.compare_and_commit(expected, batch)?;
         if self.lose_next_commit_receipt.swap(false, Ordering::SeqCst) {
             return Err(DurableError::Substrate(
                 "simulated loss after durable virtual transition".to_owned(),

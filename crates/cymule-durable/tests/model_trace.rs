@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use cymule_core::{Definition, Expression, PlanCandidate, Region};
 use cymule_durable::{
     DURABLE_CONTROL_VERSION, DurableBoundary, DurableCommand, DurableError, DurableResponse,
-    DurableResult, DurableRuntimeControl, DurableState, DurableStore, MemoryStore,
-    ResumableRuntime, StoreCommit, StoredState,
+    DurableResult, DurableRuntimeControl, DurableStore, MemoryStore, ResumableRuntime, StoreCommit,
+    StoredState,
 };
 use cymule_runtime::{
     ExecutionBinding, PLUGIN_VERSION, PluginHost, PluginManifest, PluginRequest, PluginResponse,
@@ -18,7 +18,7 @@ use cymule_test_world::{
 };
 use serde_json::{Value, json};
 
-const CAS_OPERATION: &str = "durable.compare_and_swap";
+const CAS_OPERATION: &str = "durable.compare_and_commit";
 
 struct EmptyPlugin;
 
@@ -65,10 +65,10 @@ impl DurableStore for FaultingStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
         let action = self.faults.observe(CAS_OPERATION);
         if action == Some(FaultAction::ErrorBefore) {
@@ -76,7 +76,7 @@ impl DurableStore for FaultingStore {
                 "generated failure before durable CAS".to_owned(),
             ));
         }
-        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        let commit = self.inner.compare_and_commit(expected, batch)?;
         if action == Some(FaultAction::AcknowledgementLostAfter) {
             return Err(DurableError::Substrate(
                 "generated acknowledgement loss after durable CAS".to_owned(),

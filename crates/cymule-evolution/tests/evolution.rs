@@ -21,7 +21,7 @@ use cymule_core::{
 };
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
-    DurableState, DurableStore, FrameState, MemoryStore, StoreCommit, StoredState,
+    DurableStore, FrameState, MemoryStore, StoreCommit, StoredState,
 };
 use cymule_evolution::{
     DefinitionRegistry, DurableDefinitionRegistry, DurableEvolutionController,
@@ -456,12 +456,12 @@ impl DurableStore for LostReceiptStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
-        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        let commit = self.inner.compare_and_commit(expected, batch)?;
         if self.armed.swap(false, Ordering::SeqCst) {
             return Err(DurableError::Substrate(
                 "simulated lost evolution checkpoint receipt".to_owned(),
@@ -501,15 +501,15 @@ impl DurableStore for KillBarrierStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
         match self.phase {
             KillPhase::BeforeCommit => self.stop_here(),
             KillPhase::AfterCommit => {
-                self.inner.compare_and_swap(expected_revision, next)?;
+                self.inner.compare_and_commit(expected, batch)?;
                 self.stop_here();
             }
         }

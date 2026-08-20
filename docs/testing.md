@@ -281,7 +281,7 @@ integration tests additionally place an external barrier immediately before or
 after a selected real CAS, then the parent sends `SIGKILL`. This selects narrow
 OS-death windows without adding a test branch to the reducer.
 
-The M1 Run sweep treats every whole-state CAS as two distinct anomaly points:
+The M1 Run sweep treats every segmented head CAS as two distinct anomaly points:
 failure before the write and lost acknowledgement after a successful write. It
 first discovers the boundary count from a successful execution, injects one
 fault at each position, disables the fault, reopens through the public durable

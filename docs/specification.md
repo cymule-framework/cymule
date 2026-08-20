@@ -177,7 +177,7 @@ idempotent write IDs, exact offsets, explicit commit, and explicit abort.
 
 A Run-to-Run handoff carries one verified Resource Handle under a stable caller
 transfer ID and target slot. The handoff MUST be recorded in the target Run's
-M1 application journal by whole-state CAS. Repeating identical semantics is
+M1 application journal by segmented head CAS. Repeating identical semantics is
 idempotent; reusing a transfer ID with different semantics MUST fail. One target
 slot has at most one handoff; multiple values use one collection Resource.
 When a handoff activates an input wait, the canonical Resource Handle Artifact,
@@ -227,6 +227,18 @@ binding projections. M1 defines and persists the complete first-class
 Continuation field set through a provider-neutral CAS store and resumes every
 safe point expressible by the frozen sequential/nested IR. The Embedded profile
 does not claim this persistence because it deliberately uses one-shot memory.
+
+The M1 store MUST persist each non-empty transition as an immutable
+content-addressed `cymule.durable-segment/1` and atomically move one
+`cymule.durable-head/1`. The head MUST authenticate the semantic revision, one
+`cymule.durable-checkpoint/1`, the latest suffix segment, its exact length, and
+a monotonic physical sequence. A store MUST reconstruct and validate the
+checkpoint plus suffix before exposing state, MUST rotate before the suffix can
+reach `MAX_HOT_SEGMENTS`, and MUST NOT rewrite a complete projection for every
+mutation. Reclaiming cold checkpoint/segment objects MUST preserve the current
+checkpoint and suffix and emit a content-addressed
+`cymule.durable-gc-receipt/1`. Physical storage migrations are explicit and
+offline; runtime open MUST NOT mix or implicitly fall back to an older format.
 
 A durable domain MAY contain multiple independent Runs. Creating the first Run
 initializes the domain; creating any later Run MUST append only that Run's exact

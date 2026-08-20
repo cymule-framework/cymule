@@ -13,7 +13,7 @@ use cymule_core::{
 use cymule_directory_store::DirectoryStore;
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableStore, FrameState,
-    StoredState,
+    JournalRecord, MAX_HOT_SEGMENTS, StoreHead,
 };
 use fs4::FileExt;
 use serde_json::json;
@@ -37,7 +37,7 @@ fn writer_contention_returns_immediately_as_conflict() {
         .truncate(false)
         .read(true)
         .write(true)
-        .open(directory.join("state.lock"))
+        .open(directory.join("head.lock"))
         .expect("lock opens");
     FileExt::lock(&lock).expect("test holds writer claim");
     assert!(matches!(store.load(), Err(DurableError::Conflict { .. })));
@@ -128,7 +128,7 @@ fn committed_state_reopens_and_stale_writer_is_rejected() {
         Err(DurableError::Conflict { .. })
     ));
 
-    fs::write(directory.join("state.next"), b"interrupted staging bytes")
+    fs::write(directory.join("head.next"), b"interrupted staging bytes")
         .expect("staging residue writes");
     let reopened = DurableCoordinator::open(DirectoryStore::open(&directory).expect("opens"))
         .expect("committed state reopens");
@@ -150,14 +150,14 @@ fn malformed_or_revision_tampered_state_fails_closed() {
         .expect("coordinator opens")
         .initialize(&machine)
         .expect("state initializes");
-    let state_path = directory.join("state.json");
+    let state_path = directory.join("head.json");
     let committed = fs::read(&state_path).expect("committed bytes read");
 
     fs::write(&state_path, b"{\"revision\":").expect("truncated state writes");
     let mut truncated = DirectoryStore::open(&directory).expect("truncated store opens");
     assert!(matches!(truncated.load(), Err(DurableError::Encoding(_))));
 
-    let mut tampered: StoredState = serde_json::from_slice(&committed).expect("state decodes");
+    let mut tampered: StoreHead = serde_json::from_slice(&committed).expect("head decodes");
     tampered.revision = format!("sha256:{}", "0".repeat(64));
     fs::write(
         &state_path,
@@ -170,5 +170,78 @@ fn malformed_or_revision_tampered_state_fails_closed() {
         Err(DurableError::Validation(_))
     ));
 
+    fs::remove_dir_all(directory).expect("test directory removes");
+}
+
+#[test]
+fn legacy_directory_requires_explicit_offline_migration() {
+    let directory = test_directory();
+    fs::create_dir_all(&directory).expect("legacy directory creates");
+    let state = cymule_durable::DurableState::new(Machine::new().snapshot());
+    let revision = state.revision().expect("legacy revision");
+    let legacy_bytes = cymule_core::canonical_bytes(&json!({"revision": revision, "state": state}))
+        .expect("legacy bytes");
+    fs::write(directory.join("state.json"), &legacy_bytes).expect("legacy state writes");
+    assert!(matches!(
+        DirectoryStore::open(&directory),
+        Err(DurableError::Validation(message)) if message.contains("explicit offline")
+    ));
+    let receipt = DirectoryStore::migrate_v1(&directory).expect("legacy migrates");
+    assert_eq!(receipt.legacy_revision, revision);
+    fs::write(directory.join("state.json"), legacy_bytes)
+        .expect("simulated post-head migration crash restores legacy file");
+    assert!(DirectoryStore::open(&directory).is_err());
+    assert_eq!(
+        DirectoryStore::migrate_v1(&directory)
+            .expect("matching partial migration resumes")
+            .receipt_id,
+        receipt.receipt_id
+    );
+    let mut migrated = DirectoryStore::open(&directory).expect("segmented store opens");
+    assert_eq!(
+        migrated.load().expect("loads").expect("state").revision,
+        revision
+    );
+    fs::remove_dir_all(directory).expect("test directory removes");
+}
+
+#[test]
+fn checkpoint_rotation_bounds_reopen_and_cold_gc_preserves_state() {
+    let directory = test_directory();
+    let mut coordinator =
+        DurableCoordinator::open(DirectoryStore::open(&directory).expect("directory store opens"))
+            .expect("coordinator opens")
+            .initialize(&Machine::new())
+            .expect("state initializes");
+    for index in 0..(MAX_HOT_SEGMENTS + 2) {
+        coordinator
+            .append_journal_record(
+                "journal:directory-gc",
+                JournalRecord::new(
+                    format!("record:{index}"),
+                    "test.directory-gc/1",
+                    json!({"index": index}),
+                )
+                .expect("journal record"),
+            )
+            .expect("delta commits");
+    }
+    let expected = coordinator.state().expect("state").clone();
+    let mut store = coordinator.into_store();
+    let head = store.load().expect("loads").expect("state").head;
+    assert!(store.stats().expect("stats").checkpoints >= 2);
+    assert!(
+        store
+            .reclaim_cold(&head)
+            .expect("cold GC")
+            .reclaimed_objects
+            > 0
+    );
+    let reopened = store.load().expect("reopens").expect("state");
+    assert_eq!(reopened.state, expected);
+    let stats = store.stats().expect("stats");
+    assert_eq!(stats.checkpoints, 1);
+    assert!(stats.segments < u64::from(MAX_HOT_SEGMENTS));
+    assert_eq!(stats.gc_receipts, 1);
     fs::remove_dir_all(directory).expect("test directory removes");
 }

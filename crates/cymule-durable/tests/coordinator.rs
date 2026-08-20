@@ -11,9 +11,9 @@ use cymule_core::{
 };
 use cymule_durable::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
-    DurableResult, DurableState, DurableStore, EffectDispatch, FrameState, JournalBatch,
-    JournalRecord, MemoryStore, OutboxState, StoreCommit, StoredState, WaitActivation,
-    WaitActivationSource, WaitCondition, WaitKind, WaitState,
+    DurableResult, DurableStore, EffectDispatch, FrameState, JournalBatch, JournalRecord,
+    MemoryStore, OutboxState, StoreCommit, StoredState, WaitActivation, WaitActivationSource,
+    WaitCondition, WaitKind, WaitState,
 };
 use cymule_runtime::{
     EXECUTION_BINDING_VERSION, ExecutionBinding, PLUGIN_VERSION, PluginManifest, PluginOperation,
@@ -31,12 +31,12 @@ impl DurableStore for LostCompactionReceiptStore {
         self.inner.load()
     }
 
-    fn compare_and_swap(
+    fn compare_and_commit(
         &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
     ) -> DurableResult<StoreCommit> {
-        let commit = self.inner.compare_and_swap(expected_revision, next)?;
+        let commit = self.inner.compare_and_commit(expected, batch)?;
         if self.armed.swap(false, Ordering::SeqCst) {
             return Err(DurableError::Substrate(
                 "simulated lost compaction receipt".to_owned(),

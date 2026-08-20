@@ -1,15 +1,19 @@
 # SQLite Durable Store Guidance
 
-- This plugin implements the complete-state `DurableStore` CAS contract; it
-  does not reinterpret or partition canonical M1 state.
+- This plugin implements the segmented `DurableStore` contract: immutable
+  delta/checkpoint rows plus one small transactional head. It does not
+  reinterpret or partition canonical M1 state.
 - Keep `busy_timeout` at zero. SQLite writer contention must return a Cymule
   conflict immediately instead of waiting behind a database lock.
 - Observation-only callers use `open_read_only`, which performs no schema or
   journal-mode writes and rejects CAS. Never make a status path initialize or
   reconfigure the database.
-- Use an immediate transaction to compare the current revision and replace the
-  state atomically. Serialized bytes and the canonical next revision are
-  computed before acquiring the writer transaction.
+- Use an immediate transaction to compare the exact current head, insert
+  immutable segment/checkpoint bytes, and move the head atomically. Validate
+  all content identities and the resulting semantic revision before commit.
+- `cymule.sqlite-store/1` migration is offline and explicit. Normal open must
+  reject the legacy table and any mixed v1/v2 database; never add runtime
+  fallback or automatic conversion.
 - Reopen, stale writer, busy writer, committed-receipt loss, and corrupted-row
   tests are required. SQLite WAL and synchronous-full durability are adapter
   configuration, not framework semantics.

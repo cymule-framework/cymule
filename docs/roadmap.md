@@ -19,7 +19,8 @@ Status: implemented in 0.1.0.
 
 Status: implemented for one production single-domain authority.
 
-- provider-neutral durable state CAS, full Continuation data, waits, leases,
+- provider-neutral segmented durable head CAS, bounded checkpoint-plus-suffix
+  reopen, receipt-backed cold reclamation, full Continuation data, waits, leases,
   outbox, component occurrences, and snapshot records are implemented;
 - memory and atomic directory-store adapters pass reopen and stale-writer tests;
 - sequential component/wait execution resumes after process reopen and replays

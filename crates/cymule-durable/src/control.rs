@@ -185,7 +185,7 @@ impl From<DriveOutcome> for DurableBoundary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DurableRunView {
-    /// Store-owned complete-state revision.
+    /// Store-owned semantic revision authenticated by the segmented head.
     pub revision: String,
     /// Complete resumable Continuation.
     pub continuation: Continuation,
