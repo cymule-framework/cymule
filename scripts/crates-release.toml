@@ -68,7 +68,7 @@ dependencies = ["cymule-clock-system", "cymule-core", "cymule-durable"]
 [[crate]]
 name = "cymule-executor-process"
 path = "plugins/executor-process"
-dependencies = ["cymule-runtime"]
+dependencies = ["cymule-core", "cymule-runtime"]
 
 [[crate]]
 name = "cymule-observability-otel"
