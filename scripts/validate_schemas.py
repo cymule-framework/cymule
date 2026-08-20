@@ -158,7 +158,7 @@ def main() -> int:
         raise AssertionError("Rust Engine did not return a structured decode failure")
 
     plugin_validator = Draft202012Validator(
-        by_title["Cymule Process Plugin Message"], registry=registry
+        by_title["Cymule Process Plugin Protocol cymule.plugin/2"], registry=registry
     )
     plugin_validator.validate({"type": "describe"})
     plugin_validator.validate(
