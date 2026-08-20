@@ -9,6 +9,10 @@
   parse `Error()` text for control flow.
 - Engine-process stderr is diagnostic-only and never becomes an
   `EngineFailure.Message`; response-less exits use bounded SDK-owned status.
+- Decode exactly one Engine outcome: success has a response and no error;
+  failure has an error and no response. Custom Evolution and execution union
+  decoders reject unknown variants, operation-incompatible fields, and unknown
+  nested request fields.
 - Every `ArtifactRef` carries the exact `cymule.artifact/2` identity version;
   Go preserves it without deriving or upgrading identities.
 - `Definition` and `Invoke` author exact local reusable calls; logical subflow

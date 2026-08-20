@@ -1404,6 +1404,7 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
         "cymule.machine-snapshot/1",
         "cymule.machine-snapshot/2",
         "cymule.machine-snapshot/3",
+        "cymule.machine-snapshot/4",
     ] {
         let mut old_snapshot = machine.snapshot();
         old_snapshot.snapshot_version = old_version.to_owned();
@@ -1428,7 +1429,9 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
     );
     machine.verify_replay().expect("base plus suffix replays");
     let snapshot = machine.snapshot();
-    assert!(snapshot.base.is_some());
+    let base = snapshot.base.as_ref().expect("base exists");
+    assert_eq!(base.compacted_events.len(), 2);
+    assert_eq!(base.compacted_events[0].event_id, event_ids[0]);
     assert_eq!(snapshot.events.len(), 2);
 
     let mut restored = Machine::restore(snapshot.clone()).expect("suffix rehydrates");
@@ -1459,6 +1462,17 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
         Err(CoreError::IdentityMismatch(_))
     ));
 
+    let mut digest_tamper = snapshot.clone();
+    digest_tamper
+        .base
+        .as_mut()
+        .expect("base exists")
+        .prefix_digest = format!("sha256:{}", "0".repeat(64));
+    assert!(matches!(
+        Machine::restore(digest_tamper),
+        Err(CoreError::IdentityMismatch(_))
+    ));
+
     for malformed_base in [
         {
             let mut value = snapshot.clone();
@@ -1476,18 +1490,15 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
                 .base
                 .as_mut()
                 .expect("base exists")
-                .compacted_event_ids
+                .compacted_events
                 .clear();
             value
         },
         {
             let mut value = snapshot.clone();
-            value
-                .base
-                .as_mut()
-                .expect("base exists")
-                .compacted_event_ids
-                .insert(String::new());
+            value.base.as_mut().expect("base exists").compacted_events[0]
+                .event_id
+                .clear();
             value
         },
     ] {
@@ -1496,6 +1507,51 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
             Err(CoreError::Validation(_))
         ));
     }
+
+    for evidence_tamper in [
+        {
+            let mut value = snapshot.clone();
+            value.base.as_mut().expect("base exists").compacted_events[0].event_id =
+                format!("sha256:{}", "0".repeat(64));
+            value
+        },
+        {
+            let mut value = snapshot.clone();
+            value.base.as_mut().expect("base exists").compacted_events[0].command_hash =
+                "0".repeat(64);
+            value
+        },
+        {
+            let mut value = snapshot.clone();
+            value.base.as_mut().expect("base exists").compacted_events[0].command_record_digest =
+                "0".repeat(64);
+            value
+        },
+    ] {
+        assert!(matches!(
+            Machine::restore(evidence_tamper),
+            Err(CoreError::IdentityMismatch(_))
+        ));
+    }
+
+    let mut command_tamper = serde_json::to_value(&snapshot).expect("snapshot encodes");
+    command_tamper["commands"]["command:1"]["semantic_hash"] = json!("0".repeat(64));
+    let command_tamper = serde_json::from_value(command_tamper).expect("snapshot shape decodes");
+    assert!(matches!(
+        Machine::restore(command_tamper),
+        Err(CoreError::IdentityMismatch(message))
+            if message.contains("does not match compacted event")
+    ));
+
+    let mut receipt_tamper = serde_json::to_value(&snapshot).expect("snapshot encodes");
+    receipt_tamper["commands"]["command:1"]["receipt"]["current_precondition"] =
+        json!("pre:tampered");
+    let receipt_tamper = serde_json::from_value(receipt_tamper).expect("snapshot shape decodes");
+    assert!(matches!(
+        Machine::restore(receipt_tamper),
+        Err(CoreError::IdentityMismatch(message))
+            if message.contains("does not match compacted event")
+    ));
 
     let mut orphaned = snapshot;
     orphaned.events = vec![

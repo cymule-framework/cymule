@@ -15,7 +15,7 @@
   `defect`. Effects return exact world outcomes.
 - Every public `ArtifactRef` requires `identity_version = cymule.artifact/2`, a
   lowercase SHA-256 ID, and a closed lowercase path kind. The v2 identity and
-  machine snapshot v3 replace their predecessors without fallback. The
+  machine snapshot v5 replace their predecessors without fallback. The
   `artifact-type-contract.schema.json` file freezes recoverable canonical JSON
   contracts; opaque Artifacts do not use that schema.
 - Keep this exact Artifact reference shape identical in every owning public

@@ -19,7 +19,7 @@ from cymule import (
     VirtualWorkControlBuilder,
     WaitActivationBuilder,
 )
-from cymule import _unique_json_object
+from cymule import _unique_json_object, _validate_engine_envelope
 
 
 class EndToEndTest(unittest.TestCase):
@@ -29,6 +29,39 @@ class EndToEndTest(unittest.TestCase):
                 '{"response":{"type":"verified","type":"executed"}}',
                 object_pairs_hook=_unique_json_object,
             )
+
+    def test_engine_success_and_nested_unions_are_closed(self) -> None:
+        invalid_responses = [
+            {
+                "engine_protocol": "cymule.engine/1",
+                "outcome": "success",
+                "response": {"type": "unknown"},
+            },
+            {
+                "engine_protocol": "cymule.engine/1",
+                "outcome": "success",
+                "response": {
+                    "type": "execution_boundary",
+                    "execution": {"status": "completed", "result": {}, "suspension": {}},
+                },
+            },
+            {
+                "engine_protocol": "cymule.engine/1",
+                "outcome": "success",
+                "response": {
+                    "type": "verified_evolution_command",
+                    "command": {
+                        "control_version": "cymule.evolution-control/2",
+                        "command_id": "command:test",
+                        "operation": "future_operation",
+                    },
+                },
+            },
+        ]
+        for response in invalid_responses:
+            with self.subTest(response=response):
+                with self.assertRaises(EngineError):
+                    _validate_engine_envelope(response)
 
     def test_python_preserves_structured_engine_failures(self) -> None:
         engine_path = os.environ.get("CYMULE_BIN")

@@ -4,9 +4,9 @@ Status: implemented for one production single-domain authority.
 
 ## Implemented profile
 
-- portable `cymule.machine-snapshot/4` with deterministic projection rebuild,
-  restored command deduplication, full Effect preimages/profiles, and strict
-  rejection of earlier snapshot versions;
+- portable `cymule.machine-snapshot/5` with deterministic projection rebuild,
+  restored command deduplication, full Effect preimages/profiles, authenticated
+  compacted command/Event evidence, and strict rejection of earlier versions;
 - cumulative causally closed Event-prefix compaction into an authenticated base
   projection plus exact full suffix, with M1 receipts, stale-CAS rejection,
   repeated compaction lineage, old-command replay, tamper rejection, and

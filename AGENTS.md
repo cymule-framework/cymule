@@ -66,6 +66,10 @@ Use this precedence order when guidance conflicts:
   compacted Event identity and exactly one applied command receipt. A retained
   Event's command ID and command hash must match that receipt's command record;
   conflicts never claim an Event.
+- Compacted-prefix authentication cumulatively binds ordered Event identities,
+  command identities and semantic hashes, complete command-record digests, and
+  the base projection digest. Restore recomputes this evidence; a shape-valid
+  digest string is never authentication.
 - Signal and timer transport belongs behind `WaitSourceDriver`. Drivers select
   only from the rebuildable parked-wait index, obey the hard target bound, and
   acknowledge only after the activation CAS; lost acknowledgement redelivers
@@ -105,6 +109,10 @@ Use this precedence order when guidance conflicts:
   success or failure uses its versioned envelope; stderr and process status are
   transport diagnostics, never a second semantic error channel. A missing
   response never implies that retrying a potentially mutating request is safe.
+- Engine clients accept exactly one success response or one failure object.
+  Success tags, nested execution outcomes, and returned evolution commands are
+  closed unions; unknown or overlapping variants and fields fail transport
+  validation before reaching SDK callers.
 - `cymule.plugin/2` is the only process-plugin protocol. Expected component
   failures and defects are distinct closed response variants; an unclassified
   process error is never an expected application result. The official process

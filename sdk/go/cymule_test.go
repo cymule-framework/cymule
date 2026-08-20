@@ -89,6 +89,51 @@ func TestEngineJSONRejectsDuplicateObjectMembers(t *testing.T) {
 	}
 }
 
+func TestEngineEnvelopeRequiresExclusiveOutcomePayload(t *testing.T) {
+	invalid := []string{
+		`{"engine_protocol":"cymule.engine/1","outcome":"success","response":{"type":"verified"},"error":{"category":"validation","phase":"transport","code":"invalid","message":"invalid"}}`,
+		`{"engine_protocol":"cymule.engine/1","outcome":"failure","response":{"type":"verified"},"error":{"category":"validation","phase":"transport","code":"invalid","message":"invalid"}}`,
+		`{"engine_protocol":"cymule.engine/1","outcome":"success"}`,
+	}
+	for _, input := range invalid {
+		var response struct {
+			Type string `json:"type"`
+		}
+		err := decodeEngineResponse([]byte(input), &response)
+		if err == nil || !strings.Contains(err.Error(), "invalid_engine_response") {
+			t.Fatalf("expected exclusive envelope rejection for %s, got %v", input, err)
+		}
+	}
+}
+
+func TestEvolutionAndExecutionResponseUnionsAreClosed(t *testing.T) {
+	for _, input := range []string{
+		`{"control_version":"cymule.evolution-control/2","command_id":"command:test","operation":"future"}`,
+		`{"control_version":"cymule.evolution-control/2","command_id":"command:test","operation":"select_occurrence","occurrence_id":"occurrence:test","patch":{}}`,
+	} {
+		var command EvolutionCommand
+		if err := decodeClosedJSON([]byte(input), &command); err == nil {
+			t.Fatalf("expected closed Evolution rejection for %s", input)
+		}
+	}
+	var live LiveEvolutionCommand
+	if err := decodeClosedJSON([]byte(
+		`{"control_version":"cymule.live-evolution-control/1","command_id":"command:test","operation":"future"}`,
+	), &live); err == nil {
+		t.Fatal("expected closed live Evolution rejection")
+	}
+
+	for _, input := range []string{
+		`{"status":"future"}`,
+		`{"status":"completed","result":{},"suspension":{}}`,
+	} {
+		var outcome ExecutionOutcome
+		if err := decodeClosedJSON([]byte(input), &outcome); err == nil {
+			t.Fatalf("expected closed execution rejection for %s", input)
+		}
+	}
+}
+
 func TestEvolutionControlValidatesThroughRust(t *testing.T) {
 	enginePath := os.Getenv("CYMULE_BIN")
 	fixturePath := os.Getenv("CYMULE_EVOLUTION_CONTROL_FIXTURE")

@@ -11,7 +11,7 @@
 - `artifact_ref` is the sole authority for the collision-free,
   length-prefixed `cymule.artifact/2` identity preimage. Artifact references pin
   this identity version; higher layers must call the helper rather than copy its
-  framing. Snapshot v4 is the only accepted snapshot wire version.
+  framing. Snapshot v5 is the only accepted snapshot wire version.
 - Reducers are pure over prior projection plus event. Do not hide mutations in
   caches or global state.
 - Preserve closed effect, scope, attempt, and Run state machines. Illegal jumps
@@ -40,6 +40,10 @@
 - Snapshot restore also closes Event and command authority in both directions:
   every Event has exactly one applied receipt, every applied receipt names a
   retained or compacted Event, and retained command IDs and hashes match.
+- A compacted prefix retains ordered Event ID, command ID/hash, and complete
+  command-record digest evidence. Its prefix digest is recomputed from that
+  cumulative evidence plus the authenticated projection digest; shape-only
+  prefix digests are invalid.
 - Property failures persist under `proptest-regressions/`. Commit the minimized
   corpus file with its fix; never depend on an ephemeral CI seed alone.
 - Changes here require specification, schema, conformance, and SDK review.

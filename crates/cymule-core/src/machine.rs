@@ -16,14 +16,37 @@ struct CommandRecord {
     receipt: CommandReceipt,
 }
 
+const MACHINE_PREFIX_VERSION: &str = "cymule.machine-prefix/2";
+
+/// Authenticated command/Event evidence retained after an Event body compacts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactedEventEvidence {
+    /// Content-addressed Event identity.
+    pub event_id: String,
+    /// Command that admitted the Event.
+    pub command_id: String,
+    /// Canonical command semantic hash copied from the Event.
+    pub command_hash: String,
+    /// Canonical digest of the complete retained command record and receipt.
+    pub command_record_digest: String,
+}
+
+#[derive(serde::Serialize)]
+struct MachinePrefixPreimage<'a> {
+    prefix_version: &'static str,
+    compacted_events: &'a [CompactedEventEvidence],
+    projection_digest: &'a str,
+}
+
 /// One verified canonical base projection replacing a causally closed prefix.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineBaseSnapshot {
-    /// Content digest of all compacted prefix events and any prior base.
+    /// Recomputable digest of the complete compacted evidence and projection.
     pub prefix_digest: String,
-    /// Exact identities in the compacted causal prefix.
-    pub compacted_event_ids: BTreeSet<String>,
+    /// Exact cumulative compacted Event and command evidence in admission order.
+    pub compacted_events: Vec<CompactedEventEvidence>,
     /// Projection after applying the complete compacted prefix.
     pub projection: Projection,
     /// Digest that authenticates the retained projection bytes.
@@ -32,14 +55,27 @@ pub struct MachineBaseSnapshot {
 
 impl MachineBaseSnapshot {
     fn verify(&self) -> Result<()> {
-        if !self.prefix_digest.starts_with("sha256:")
-            || self.prefix_digest.len() != "sha256:".len() + 64
-            || self.compacted_event_ids.is_empty()
-            || self.compacted_event_ids.iter().any(String::is_empty)
-        {
+        if !is_sha256_id(&self.prefix_digest) || self.compacted_events.is_empty() {
             return Err(CoreError::Validation(
                 "machine base snapshot has malformed prefix evidence".to_owned(),
             ));
+        }
+        let mut event_ids = BTreeSet::new();
+        let mut command_ids = BTreeSet::new();
+        for evidence in &self.compacted_events {
+            if !is_sha256_id(&evidence.event_id)
+                || evidence.command_id.is_empty()
+                || evidence.command_hash.len() != 64
+                || evidence.command_record_digest.len() != 64
+                || !evidence.command_hash.bytes().all(is_lower_hex)
+                || !evidence.command_record_digest.bytes().all(is_lower_hex)
+                || !event_ids.insert(evidence.event_id.clone())
+                || !command_ids.insert(evidence.command_id.clone())
+            {
+                return Err(CoreError::Validation(
+                    "machine base snapshot has malformed compacted Event evidence".to_owned(),
+                ));
+            }
         }
         let expected = self.projection.digest()?;
         if self.projection_digest != expected {
@@ -48,8 +84,15 @@ impl MachineBaseSnapshot {
                 self.projection_digest
             )));
         }
+        let expected_prefix = machine_prefix_digest(&self.compacted_events, &expected)?;
+        if self.prefix_digest != expected_prefix {
+            return Err(CoreError::IdentityMismatch(format!(
+                "machine prefix digest {} does not match {expected_prefix}",
+                self.prefix_digest
+            )));
+        }
         for run in self.projection.runs.values() {
-            if !self.compacted_event_ids.contains(&run.last_event) {
+            if !event_ids.contains(&run.last_event) {
                 return Err(CoreError::Causal(format!(
                     "machine base Run {} ends at an unretained event {}",
                     run.run_id, run.last_event
@@ -57,6 +100,13 @@ impl MachineBaseSnapshot {
             }
         }
         Ok(())
+    }
+
+    fn event_ids(&self) -> BTreeSet<String> {
+        self.compacted_events
+            .iter()
+            .map(|evidence| evidence.event_id.clone())
+            .collect()
     }
 }
 
@@ -97,7 +147,7 @@ pub struct MachineSnapshot {
 
 impl MachineSnapshot {
     /// Current snapshot schema version.
-    pub const VERSION: &'static str = "cymule.machine-snapshot/4";
+    pub const VERSION: &'static str = "cymule.machine-snapshot/5";
 
     /// Content digest used by conditional durable-store writes.
     pub fn digest(&self) -> Result<String> {
@@ -184,9 +234,7 @@ impl Machine {
         }
         if let Some(base) = base {
             machine.projection = base.projection.clone();
-            machine
-                .compacted_event_ids
-                .clone_from(&base.compacted_event_ids);
+            machine.compacted_event_ids = base.event_ids();
             machine.base = Some(base);
         }
         for event in events.iter().cloned() {
@@ -224,19 +272,48 @@ impl Machine {
         for event in &prefix {
             projection.apply_event(event)?;
         }
-        let prior_digest = self.base.as_ref().map(|base| base.prefix_digest.as_str());
-        let prefix_digest = content_id("cymule.machine-event-prefix/1", &(prior_digest, &prefix))?;
-        let mut compacted_event_ids = self.compacted_event_ids.clone();
-        compacted_event_ids.extend(prefix_ids.iter().cloned());
+        let mut compacted_events = self
+            .base
+            .as_ref()
+            .map(|base| base.compacted_events.clone())
+            .unwrap_or_default();
+        for event in &prefix {
+            let record = self.commands.get(&event.command_id).ok_or_else(|| {
+                CoreError::NotFound(format!(
+                    "compacted event {} has no command record",
+                    event.event_id
+                ))
+            })?;
+            if record.semantic_hash != event.command_hash
+                || record.receipt.status != CommandReceiptStatus::Applied
+                || record.receipt.event_id.as_deref() != Some(event.event_id.as_str())
+            {
+                return Err(CoreError::IdentityMismatch(format!(
+                    "compacted event {} does not match command {}",
+                    event.event_id, event.command_id
+                )));
+            }
+            compacted_events.push(CompactedEventEvidence {
+                event_id: event.event_id.clone(),
+                command_id: event.command_id.clone(),
+                command_hash: event.command_hash.clone(),
+                command_record_digest: canonical_digest(record)?,
+            });
+        }
+        let compacted_event_ids = compacted_events
+            .iter()
+            .map(|evidence| evidence.event_id.clone())
+            .collect();
         let projection_digest = projection.digest()?;
+        let prefix_digest = machine_prefix_digest(&compacted_events, &projection_digest)?;
         let base = MachineBaseSnapshot {
             prefix_digest,
-            compacted_event_ids: compacted_event_ids.clone(),
+            compacted_events,
             projection,
             projection_digest: projection_digest.clone(),
         };
         base.verify()?;
-        let base_id = content_id("cymule.machine-base/1", &base)?;
+        let base_id = content_id("cymule.machine-base/2", &base)?;
         for event_id in &prefix_ids {
             self.events.remove(event_id);
         }
@@ -861,7 +938,14 @@ fn verify_command_event_closure(
         .iter()
         .map(|event| (event.event_id.as_str(), event))
         .collect();
-    let compacted_event_ids = base.map(|base| &base.compacted_event_ids);
+    let compacted_events: BTreeMap<&str, &CompactedEventEvidence> = base
+        .map(|base| {
+            base.compacted_events
+                .iter()
+                .map(|evidence| (evidence.event_id.as_str(), evidence))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut receipt_by_event = BTreeMap::new();
 
     for (command_id, record) in commands {
@@ -874,7 +958,7 @@ fn verify_command_event_closure(
             (CommandReceiptStatus::Applied, Some(event_id))
                 if record.receipt.error_code.is_none() && record.receipt.message.is_none() =>
             {
-                if let Some(prior_command) = receipt_by_event.insert(event_id, command_id) {
+                if let Some(prior_command) = receipt_by_event.insert(event_id.clone(), command_id) {
                     return Err(CoreError::IdentityMismatch(format!(
                         "event {event_id} is claimed by commands {prior_command} and {command_id}"
                     )));
@@ -886,7 +970,17 @@ fn verify_command_event_closure(
                             "command {command_id} does not match retained event {event_id}"
                         )));
                     }
-                } else if !compacted_event_ids.is_some_and(|ids| ids.contains(event_id)) {
+                } else if let Some(evidence) = compacted_events.get(event_id.as_str()) {
+                    let record_digest = canonical_digest(record)?;
+                    if evidence.command_id != *command_id
+                        || evidence.command_hash != record.semantic_hash
+                        || evidence.command_record_digest != record_digest
+                    {
+                        return Err(CoreError::IdentityMismatch(format!(
+                            "command {command_id} does not match compacted event {event_id}"
+                        )));
+                    }
+                } else {
                     return Err(CoreError::NotFound(format!(
                         "command {command_id} references missing event {event_id}"
                     )));
@@ -924,16 +1018,38 @@ fn verify_command_event_closure(
             )));
         }
     }
-    if let Some(compacted_event_ids) = compacted_event_ids {
-        for event_id in compacted_event_ids {
-            if !receipt_by_event.contains_key(event_id) {
-                return Err(CoreError::NotFound(format!(
-                    "compacted event {event_id} has no command receipt"
-                )));
-            }
+    for event_id in compacted_events.keys() {
+        if !receipt_by_event.contains_key(*event_id) {
+            return Err(CoreError::NotFound(format!(
+                "compacted event {event_id} has no command receipt"
+            )));
         }
     }
     Ok(())
+}
+
+fn machine_prefix_digest(
+    compacted_events: &[CompactedEventEvidence],
+    projection_digest: &str,
+) -> Result<String> {
+    content_id(
+        MACHINE_PREFIX_VERSION,
+        &MachinePrefixPreimage {
+            prefix_version: MACHINE_PREFIX_VERSION,
+            compacted_events,
+            projection_digest,
+        },
+    )
+}
+
+fn is_sha256_id(value: &str) -> bool {
+    value.len() == "sha256:".len() + 64
+        && value.starts_with("sha256:")
+        && value["sha256:".len()..].bytes().all(is_lower_hex)
+}
+
+fn is_lower_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
 }
 
 fn verify_event_footprint(event: &Event) -> Result<()> {

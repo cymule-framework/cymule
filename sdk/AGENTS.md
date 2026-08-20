@@ -8,6 +8,9 @@
 - Engine response JSON must reject duplicate object members recursively before
   shape validation. SDKs must not rely on the host parser's last-key-wins
   behavior or retry with a permissive decoder.
+- Engine envelopes require response/error exclusivity. Validate the exact
+  success tag and nested discriminated unions, including execution and returned
+  evolution commands, before returning any payload to application code.
 - Contract issue decoding preserves both the failing value `path` and the
   failing `schema_path`; neither SDK may flatten them into display text.
 - Every SDK exposes reusable definition declaration and `invoke` authoring with
