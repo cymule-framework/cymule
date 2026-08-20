@@ -305,11 +305,8 @@ fn agent_continuation(run_id: &str) -> Continuation {
         frames: vec![FrameState {
             definition_id: "agent-turn".to_owned(),
             invocation_id: "agent-turn".to_owned(),
-            input: cymule_core::ArtifactRef {
-                identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
-                artifact_id: format!("sha256:{}", "0".repeat(64)),
-                kind: "test/input".to_owned(),
-            },
+            input: cymule_core::artifact_ref("test/input", b"agent test input")
+                .expect("test input reference derives"),
             region_path: Vec::new(),
             next_step: 0,
             locals: BTreeMap::new(),
@@ -326,8 +323,15 @@ fn agent_continuation(run_id: &str) -> Continuation {
     }
 }
 
+fn install_agent_input(machine: &mut Machine) {
+    machine
+        .put_artifact("test/input", b"agent test input".to_vec())
+        .expect("test input stores");
+}
+
 fn workspace_machine(run_id: &str) -> (Machine, String, ArtifactRef) {
     let mut machine = Machine::new();
+    install_agent_input(&mut machine);
     let plan = machine
         .seal_plan(PlanCandidate {
             ir_version: cymule_core::IR_VERSION.to_owned(),
@@ -904,6 +908,7 @@ fn lost_workspace_completion_receipt_is_reconciled_from_the_started_claim() {
 #[test]
 fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
     let mut machine = Machine::new();
+    install_agent_input(&mut machine);
     let result = machine
         .put_artifact("agent/input", br#"{"answer":"yes"}"#.to_vec())
         .expect("Artifact stores");
@@ -1051,7 +1056,8 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
 
 #[test]
 fn input_schema_and_external_references_fail_before_suspension() {
-    let machine = Machine::new();
+    let mut machine = Machine::new();
+    install_agent_input(&mut machine);
     let store = MemoryStore::new();
     let mut coordinator = DurableCoordinator::open(store)
         .expect("store opens")
@@ -1095,6 +1101,7 @@ fn input_schema_and_external_references_fail_before_suspension() {
 #[test]
 fn invalid_completed_input_leaves_wait_and_session_pending() {
     let mut machine = Machine::new();
+    install_agent_input(&mut machine);
     let result = machine
         .put_artifact("agent/input", br#"{"answer":42}"#.to_vec())
         .expect("Artifact stores");
@@ -1178,6 +1185,7 @@ fn invalid_completed_input_leaves_wait_and_session_pending() {
 #[test]
 fn declined_input_completes_without_an_instance_value() {
     let mut machine = Machine::new();
+    install_agent_input(&mut machine);
     let result = machine
         .put_artifact("agent/input-declined", b"null".to_vec())
         .expect("Artifact stores");
@@ -1227,7 +1235,8 @@ fn declined_input_completes_without_an_instance_value() {
 
 #[test]
 fn stale_input_checkpoint_writes_neither_wait_nor_agent_update() {
-    let machine = Machine::new();
+    let mut machine = Machine::new();
+    install_agent_input(&mut machine);
     let store = MemoryStore::new();
     let mut current = DurableCoordinator::open(store.clone())
         .expect("store opens")

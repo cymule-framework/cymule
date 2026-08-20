@@ -976,25 +976,22 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     owner,
                     lease.epoch,
                 )?;
-                let response = match self.plugin.invoke(PluginRequest::DispatchEffect {
+                let Ok(response) = self.plugin.invoke(PluginRequest::DispatchEffect {
                     operation: entry.operation.clone(),
                     intent_id: entry.intent_id.clone(),
                     input: input.clone(),
-                }) {
-                    Ok(response) => response,
-                    Err(_) => {
-                        record_unknown_dispatch(
-                            &mut self.coordinator,
-                            &mut machine,
-                            run_id,
-                            &entry.intent_id,
-                            owner,
-                            lease.epoch,
-                        )?;
-                        return Ok(Some(DriveOutcome::ReconciliationRequired {
-                            intent_id: entry.intent_id,
-                        }));
-                    }
+                }) else {
+                    record_unknown_dispatch(
+                        &mut self.coordinator,
+                        &mut machine,
+                        run_id,
+                        &entry.intent_id,
+                        owner,
+                        lease.epoch,
+                    )?;
+                    return Ok(Some(DriveOutcome::ReconciliationRequired {
+                        intent_id: entry.intent_id,
+                    }));
                 };
                 let PluginResponse::EffectResult { outcome, value } = response else {
                     record_unknown_dispatch(
@@ -1090,17 +1087,14 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 (owner, entry.claim_epoch)
             };
 
-            let response = match self.plugin.invoke(PluginRequest::ReconcileEffect {
+            let Ok(response) = self.plugin.invoke(PluginRequest::ReconcileEffect {
                 operation: entry.operation.clone(),
                 intent_id: entry.intent_id.clone(),
                 input,
-            }) {
-                Ok(response) => response,
-                Err(_) => {
-                    return Ok(Some(DriveOutcome::ReconciliationRequired {
-                        intent_id: entry.intent_id,
-                    }));
-                }
+            }) else {
+                return Ok(Some(DriveOutcome::ReconciliationRequired {
+                    intent_id: entry.intent_id,
+                }));
             };
             let PluginResponse::ReconciliationResult { resolution, value } = response else {
                 return Ok(Some(DriveOutcome::ReconciliationRequired {
