@@ -3,7 +3,10 @@ use std::io::Write;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{ResourceError, ResourceHandle, ResourceIntegrity, ResourceResult, ResourceShape};
+use crate::{
+    ResourceError, ResourceHandle, ResourceIntegrity, ResourceListProof, ResourceLocatorSet,
+    ResourceManifestEntry, ResourcePublication, ResourceResult, ResourceShape,
+};
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
@@ -34,13 +37,7 @@ pub struct ResourceChunk {
 }
 
 /// One directory or collection entry.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResourceEntry {
-    /// Provider-neutral relative display name.
-    pub name: String,
-    /// Child resource descriptor.
-    pub resource: ResourceHandle,
-}
+pub type ResourceEntry = ResourceManifestEntry;
 
 /// One bounded directory or collection page.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,17 +46,24 @@ pub struct ResourcePage {
     pub entries: Vec<ResourceEntry>,
     /// Opaque cursor for the next page.
     pub next_cursor: Option<String>,
+    /// Inclusion evidence binding every entry to the exact content manifest.
+    pub proof: ResourceListProof,
 }
 
 /// Replaceable read/list boundary for external resources.
 pub trait ArtifactResolver {
     /// Observe current metadata without reading the full value.
-    fn stat(&mut self, resource: &ResourceHandle) -> ResourceResult<ResourceObservation>;
+    fn stat(
+        &mut self,
+        resource: &ResourceHandle,
+        locators: &ResourceLocatorSet,
+    ) -> ResourceResult<ResourceObservation>;
 
     /// Read one bounded byte range.
     fn read(
         &mut self,
         resource: &ResourceHandle,
+        locators: &ResourceLocatorSet,
         offset: u64,
         max_bytes: u32,
     ) -> ResourceResult<ResourceChunk>;
@@ -68,6 +72,7 @@ pub trait ArtifactResolver {
     fn list(
         &mut self,
         resource: &ResourceHandle,
+        locators: &ResourceLocatorSet,
         cursor: Option<&str>,
         limit: u32,
     ) -> ResourceResult<ResourcePage>;
@@ -91,11 +96,16 @@ impl<R: ArtifactResolver> ResourceClient<R> {
     ///
     /// Returns an error for an invalid Handle, resolver failure, or observation
     /// that would reinterpret the retained Resource.
-    pub fn observe(&mut self, resource: &ResourceHandle) -> ResourceResult<ResourceObservation> {
-        resource.verify()?;
-        let observation = self.resolver.stat(resource)?;
-        if observation.media_type != resource.media_type
-            || observation.integrity != resource.integrity
+    pub fn observe(
+        &mut self,
+        publication: &ResourcePublication,
+    ) -> ResourceResult<ResourceObservation> {
+        publication.verify()?;
+        let observation = self
+            .resolver
+            .stat(&publication.resource, &publication.locators)?;
+        if observation.media_type != publication.resource.media_type
+            || observation.integrity != publication.resource.integrity
         {
             return Err(ResourceError::Integrity(
                 "resolver observation does not match the retained Resource".to_owned(),
@@ -115,11 +125,11 @@ impl<R: ArtifactResolver> ResourceClient<R> {
     /// responses, sink failures, size mismatch, or digest mismatch.
     pub fn copy_to(
         &mut self,
-        resource: &ResourceHandle,
+        publication: &ResourcePublication,
         chunk_size: u32,
         sink: &mut impl Write,
     ) -> ResourceResult<u64> {
-        self.observe(resource)?;
+        self.observe(publication)?;
         if chunk_size == 0 || chunk_size > MAX_READ_CHUNK {
             return Err(ResourceError::Validation(format!(
                 "resource read chunk must be 1..={MAX_READ_CHUNK} bytes"
@@ -128,7 +138,7 @@ impl<R: ArtifactResolver> ResourceClient<R> {
         let ResourceIntegrity::Content {
             digest: expected_digest,
             size: expected_size,
-        } = &resource.integrity
+        } = &publication.resource.integrity
         else {
             return Err(ResourceError::Validation(
                 "copy_to requires content-addressed integrity evidence".to_owned(),
@@ -137,7 +147,12 @@ impl<R: ArtifactResolver> ResourceClient<R> {
         let mut offset = 0_u64;
         let mut hasher = Sha256::new();
         loop {
-            let chunk = self.resolver.read(resource, offset, chunk_size)?;
+            let chunk = self.resolver.read(
+                &publication.resource,
+                &publication.locators,
+                offset,
+                chunk_size,
+            )?;
             if chunk.offset != offset || chunk.bytes.len() > chunk_size as usize {
                 return Err(ResourceError::Substrate(
                     "resolver returned an invalid resource chunk".to_owned(),
@@ -191,13 +206,13 @@ impl<R: ArtifactResolver> ResourceClient<R> {
     /// entries, duplicate names, cursor violations, or resolver failure.
     pub fn list_page(
         &mut self,
-        resource: &ResourceHandle,
+        publication: &ResourcePublication,
         cursor: Option<&str>,
         limit: u32,
     ) -> ResourceResult<ResourcePage> {
-        self.observe(resource)?;
+        self.observe(publication)?;
         if !matches!(
-            resource.shape,
+            publication.resource.shape,
             ResourceShape::Collection | ResourceShape::Directory | ResourceShape::Snapshot
         ) {
             return Err(ResourceError::Validation(
@@ -209,7 +224,9 @@ impl<R: ArtifactResolver> ResourceClient<R> {
                 "resource page limit must be 1..={MAX_LIST_PAGE}"
             )));
         }
-        let page = self.resolver.list(resource, cursor, limit)?;
+        let page =
+            self.resolver
+                .list(&publication.resource, &publication.locators, cursor, limit)?;
         if page.entries.len() > limit as usize
             || page.next_cursor.as_deref().is_some_and(str::is_empty)
             || page.next_cursor.as_deref() == cursor
@@ -235,6 +252,27 @@ impl<R: ArtifactResolver> ResourceClient<R> {
                 ));
             }
             entry.resource.verify()?;
+        }
+        let manifest = publication.resource.manifest.as_ref().ok_or_else(|| {
+            ResourceError::Validation(
+                "exact Resource listing requires a content-addressed manifest".to_owned(),
+            )
+        })?;
+        page.proof.verify_page(manifest, &page.entries)?;
+        if cursor.is_none() && page.proof.start_index != 0 {
+            return Err(ResourceError::Substrate(
+                "first Resource list page does not start at manifest entry zero".to_owned(),
+            ));
+        }
+        let end = page
+            .proof
+            .start_index
+            .checked_add(page.entries.len() as u64)
+            .ok_or_else(|| ResourceError::Integrity("manifest page range overflow".to_owned()))?;
+        if page.next_cursor.is_none() && end != manifest.entry_count {
+            return Err(ResourceError::Substrate(
+                "terminal Resource list page does not close the exact manifest".to_owned(),
+            ));
         }
         Ok(page)
     }

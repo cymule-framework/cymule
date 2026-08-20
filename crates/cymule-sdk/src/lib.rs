@@ -32,8 +32,9 @@ pub use cymule_evolution::{
 pub use cymule_resource::{
     ARTIFACT_TYPE_CONTRACT_KIND, ARTIFACT_TYPE_CONTRACT_VERSION, ArtifactTypeCandidate,
     ArtifactTypeContract, ArtifactTypeRegistry, InlineData, ResourceCandidate, ResourceHandle,
-    ResourceHandoff, ResourceIntegrity, ResourceLocation, ResourceReplayClass, ResourceSchemaIssue,
-    ResourceShape,
+    ResourceHandoff, ResourceIntegrity, ResourceListProof, ResourceLocation, ResourceLocatorSet,
+    ResourceManifestDescriptor, ResourceManifestEntry, ResourceProducerProvenance,
+    ResourcePublication, ResourceReplayClass, ResourceSchemaIssue, ResourceShape,
 };
 pub use cymule_runtime::{
     ENGINE_PROTOCOL_VERSION, EffectReconciliationBoundary, EffectReleaseBoundary,

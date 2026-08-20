@@ -16,6 +16,21 @@ pub const CANONICAL_JSON_MEDIA_TYPE: &str = "application/json";
 /// Closed JSON Schema dialect used by typed Artifact contracts.
 pub const JSON_SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 
+/// Closed framework Artifact types with exact immutable contracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameworkArtifactType {
+    /// Semantic Resource Handle delivered across Runs.
+    ResourceHandle,
+    /// Content-addressed directory/collection manifest descriptor.
+    ResourceManifest,
+    /// Bounded inclusion proof for one manifest page.
+    ResourceListProof,
+    /// Exact producer-provenance Run handoff.
+    ResourceHandoff,
+    /// Pin/release/GC/delete/cleanup lifecycle receipt union.
+    ResourceLifecycleReceipt,
+}
+
 /// Candidate for one pure canonical JSON Artifact contract.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -157,6 +172,15 @@ impl ArtifactTypeRegistry {
         }
     }
 
+    /// Construct a registry containing every frozen framework Resource contract.
+    pub fn with_framework_contracts() -> ResourceResult<Self> {
+        let mut registry = Self::new();
+        for descriptor in framework_artifact_contracts()? {
+            registry.register(descriptor)?;
+        }
+        Ok(registry)
+    }
+
     /// Register one verified contract descriptor.
     ///
     /// Re-registering the exact descriptor is idempotent. Multiple immutable
@@ -271,6 +295,63 @@ impl ArtifactTypeRegistry {
             .get(contract_id)
             .ok_or_else(|| ResourceError::NotFound(format!("Artifact contract {contract_id}")))
     }
+}
+
+/// Seal one exact framework-owned Artifact type contract.
+pub fn framework_artifact_contract(
+    artifact_type: FrameworkArtifactType,
+) -> ResourceResult<ArtifactTypeContract> {
+    let (artifact_kind, definition) = match artifact_type {
+        FrameworkArtifactType::ResourceHandle => {
+            ("cymule.framework-resource-handle/2", "resourceHandle")
+        }
+        FrameworkArtifactType::ResourceManifest => {
+            ("cymule.framework-resource-manifest/1", "manifestDescriptor")
+        }
+        FrameworkArtifactType::ResourceListProof => {
+            ("cymule.framework-resource-list-proof/1", "listProof")
+        }
+        FrameworkArtifactType::ResourceHandoff => {
+            ("cymule.framework-resource-handoff/2", "resourceHandoff")
+        }
+        FrameworkArtifactType::ResourceLifecycleReceipt => (
+            "cymule.framework-resource-lifecycle-receipt/1",
+            "lifecycleReceipt",
+        ),
+    };
+    ArtifactTypeCandidate::canonical_json(artifact_kind, framework_schema(definition)?).seal()
+}
+
+/// Seal every framework-owned Resource Artifact contract in stable order.
+pub fn framework_artifact_contracts() -> ResourceResult<Vec<ArtifactTypeContract>> {
+    [
+        FrameworkArtifactType::ResourceHandle,
+        FrameworkArtifactType::ResourceManifest,
+        FrameworkArtifactType::ResourceListProof,
+        FrameworkArtifactType::ResourceHandoff,
+        FrameworkArtifactType::ResourceLifecycleReceipt,
+    ]
+    .into_iter()
+    .map(framework_artifact_contract)
+    .collect()
+}
+
+fn framework_schema(definition: &str) -> ResourceResult<Value> {
+    let schema: Value = serde_json::from_str(include_str!("../../../schemas/resource.schema.json"))
+        .map_err(|error| ResourceError::Validation(error.to_string()))?;
+    let definitions = schema.get("$defs").cloned().ok_or_else(|| {
+        ResourceError::Validation("Resource schema has no local definitions".to_owned())
+    })?;
+    if definitions.get(definition).is_none() {
+        return Err(ResourceError::Validation(format!(
+            "Resource schema has no framework definition {definition}"
+        )));
+    }
+    Ok(serde_json::json!({
+        "$schema": JSON_SCHEMA_DIALECT,
+        "$ref": format!("#/$defs/{definition}"),
+        "$defs": definitions,
+    }))
 }
 
 impl ArtifactTypeContract {

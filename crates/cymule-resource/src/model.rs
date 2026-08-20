@@ -5,10 +5,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
-use crate::{ResourceError, ResourceResult};
+use crate::{ResourceError, ResourceManifestDescriptor, ResourceResult};
 
 /// Frozen resource descriptor version.
-pub const RESOURCE_VERSION: &str = "cymule.resource/1";
+pub const RESOURCE_VERSION: &str = "cymule.resource/2";
+/// Frozen non-semantic locator-set version.
+pub const RESOURCE_LOCATOR_VERSION: &str = "cymule.resource-locators/1";
 /// Maximum decoded inline payload size.
 pub const INLINE_RESOURCE_LIMIT: usize = 1024 * 1024;
 
@@ -109,7 +111,25 @@ pub enum ResourceIntegrity {
     },
 }
 
-/// Non-authoritative realization hint for locating resource bytes.
+impl ResourceIntegrity {
+    /// Borrow the exact content digest when this is content evidence.
+    pub fn content_digest(&self) -> Option<&str> {
+        match self {
+            Self::Content { digest, .. } => Some(digest),
+            _ => None,
+        }
+    }
+
+    /// Read the exact content size when this is content evidence.
+    pub const fn content_size(&self) -> Option<u64> {
+        match self {
+            Self::Content { size, .. } => Some(*size),
+            _ => None,
+        }
+    }
+}
+
+/// Non-authoritative realization hint interpreted by one resolver binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResourceLocation {
@@ -119,12 +139,38 @@ pub enum ResourceLocation {
         url: String,
     },
     /// Opaque reference interpreted only by a pinned resolver binding.
-    Resolver {
-        /// Immutable resolver implementation binding.
-        binding: String,
+    Opaque {
         /// Opaque non-secret reference meaningful to that resolver.
         reference: String,
     },
+}
+
+/// Replaceable, non-semantic locations for one exact Resource.
+///
+/// This record is deliberately outside [`ResourceHandle`]. It may be replaced
+/// without changing Resource identity and may not contain signed URLs, grants,
+/// credentials, or credential revisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceLocatorSet {
+    /// Locator wire version.
+    pub locator_version: String,
+    /// Exact semantic Resource identity located by this set.
+    pub resource_id: String,
+    /// Immutable resolver implementation binding.
+    pub resolver_binding: String,
+    /// Credential-free public or opaque resolver references.
+    pub locations: Vec<ResourceLocation>,
+}
+
+/// One verified Resource publication plus its replaceable realization record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourcePublication {
+    /// Immutable semantic descriptor.
+    pub resource: ResourceHandle,
+    /// Replaceable resolver locations.
+    pub locators: ResourceLocatorSet,
 }
 
 /// Candidate resource descriptor before trusted Rust identity sealing.
@@ -142,9 +188,9 @@ pub struct ResourceCandidate {
     pub inline: Option<InlineData>,
     /// Replay/integrity evidence.
     pub integrity: ResourceIntegrity,
-    /// Replaceable, non-authoritative realization hints.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub locations: Vec<ResourceLocation>,
+    /// Exact content manifest for a listable collection shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<ResourceManifestDescriptor>,
     /// Semantic user/application metadata included in resource identity.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub annotations: BTreeMap<String, String>,
@@ -167,9 +213,9 @@ pub struct ResourceHandle {
     pub inline: Option<InlineData>,
     /// Replay/integrity evidence.
     pub integrity: ResourceIntegrity,
-    /// Replaceable, non-authoritative realization hints.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub locations: Vec<ResourceLocation>,
+    /// Exact content manifest for a listable collection shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<ResourceManifestDescriptor>,
     /// Semantic user/application metadata included in resource identity.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub annotations: BTreeMap<String, String>,
@@ -182,6 +228,7 @@ struct ResourceIdentity<'a> {
     media_type: &'a str,
     inline: Option<&'a InlineData>,
     integrity: &'a ResourceIntegrity,
+    manifest: Option<&'a ResourceManifestDescriptor>,
     annotations: &'a BTreeMap<String, String>,
 }
 
@@ -205,7 +252,7 @@ impl ResourceCandidate {
             media_type: "text/plain;charset=utf-8".to_owned(),
             inline: Some(InlineData::Utf8 { text: text.into() }),
             integrity: ResourceIntegrity::Inline,
-            locations: Vec::new(),
+            manifest: None,
             annotations: BTreeMap::new(),
         }
     }
@@ -218,7 +265,7 @@ impl ResourceCandidate {
             media_type: "application/json".to_owned(),
             inline: Some(InlineData::Json { value }),
             integrity: ResourceIntegrity::Inline,
-            locations: Vec::new(),
+            manifest: None,
             annotations: BTreeMap::new(),
         }
     }
@@ -227,8 +274,8 @@ impl ResourceCandidate {
     ///
     /// # Errors
     ///
-    /// Returns an error when shape, payload, evidence, locations, media type,
-    /// annotations, or credential-safety constraints are invalid.
+    /// Returns an error when shape, payload, evidence, manifest, media type, or
+    /// semantic annotations are invalid.
     pub fn seal(self) -> ResourceResult<ResourceHandle> {
         self.validate()?;
         let resource_id = resource_id(
@@ -237,6 +284,7 @@ impl ResourceCandidate {
             &self.media_type,
             self.inline.as_ref(),
             &self.integrity,
+            self.manifest.as_ref(),
             &self.annotations,
         )?;
         Ok(ResourceHandle {
@@ -246,7 +294,7 @@ impl ResourceCandidate {
             media_type: self.media_type,
             inline: self.inline,
             integrity: self.integrity,
-            locations: self.locations,
+            manifest: self.manifest,
             annotations: self.annotations,
         })
     }
@@ -263,7 +311,7 @@ impl ResourceCandidate {
             &self.media_type,
             self.inline.as_ref(),
             &self.integrity,
-            &self.locations,
+            self.manifest.as_ref(),
             &self.annotations,
         )
     }
@@ -282,7 +330,7 @@ impl ResourceHandle {
             &self.media_type,
             self.inline.as_ref(),
             &self.integrity,
-            &self.locations,
+            self.manifest.as_ref(),
             &self.annotations,
         )?;
         let expected = resource_id(
@@ -291,6 +339,7 @@ impl ResourceHandle {
             &self.media_type,
             self.inline.as_ref(),
             &self.integrity,
+            self.manifest.as_ref(),
             &self.annotations,
         )?;
         if expected != self.resource_id {
@@ -320,6 +369,7 @@ fn resource_id(
     media_type: &str,
     inline: Option<&InlineData>,
     integrity: &ResourceIntegrity,
+    manifest: Option<&ResourceManifestDescriptor>,
     annotations: &BTreeMap<String, String>,
 ) -> ResourceResult<String> {
     cymule_core::content_id(
@@ -330,6 +380,7 @@ fn resource_id(
             media_type,
             inline,
             integrity,
+            manifest,
             annotations,
         },
     )
@@ -342,7 +393,7 @@ fn validate_fields(
     media_type: &str,
     inline: Option<&InlineData>,
     integrity: &ResourceIntegrity,
-    locations: &[ResourceLocation],
+    manifest: Option<&ResourceManifestDescriptor>,
     annotations: &BTreeMap<String, String>,
 ) -> ResourceResult<()> {
     if resource_version != RESOURCE_VERSION {
@@ -354,9 +405,9 @@ fn validate_fields(
     match (shape, inline, integrity) {
         (ResourceShape::Inline, Some(data), ResourceIntegrity::Inline) => {
             data.bytes()?;
-            if !locations.is_empty() {
+            if manifest.is_some() {
                 return Err(ResourceError::Validation(
-                    "inline resource cannot have external locations".to_owned(),
+                    "inline resource cannot have a collection manifest".to_owned(),
                 ));
             }
         }
@@ -379,20 +430,24 @@ fn validate_fields(
             ));
         }
     }
-    if shape != ResourceShape::Inline && locations.is_empty() {
-        return Err(ResourceError::Validation(
-            "external resource requires at least one resolver location".to_owned(),
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    for location in locations {
-        validate_location(location)?;
-        let identity = cymule_core::canonical_digest(location)
-            .map_err(|error| ResourceError::Validation(error.to_string()))?;
-        if !seen.insert(identity) {
+    if let Some(manifest) = manifest {
+        if !matches!(
+            shape,
+            ResourceShape::Collection | ResourceShape::Directory | ResourceShape::Snapshot
+        ) {
             return Err(ResourceError::Validation(
-                "resource repeats an identical location".to_owned(),
+                "only collection, directory, or snapshot Resources have manifests".to_owned(),
             ));
+        }
+        manifest.verify()?;
+        match integrity {
+            ResourceIntegrity::Content { digest, size }
+                if digest == &manifest.digest && size == &manifest.size => {}
+            _ => {
+                return Err(ResourceError::Validation(
+                    "a Resource manifest must match content integrity digest and size".to_owned(),
+                ));
+            }
         }
     }
     for (key, value) in annotations {
@@ -458,12 +513,59 @@ fn validate_location(location: &ResourceLocation) -> ResourceResult<()> {
                 ));
             }
         }
-        ResourceLocation::Resolver { binding, reference } => {
-            validate_token("resolver binding", binding)?;
+        ResourceLocation::Opaque { reference } => {
             validate_token("resolver reference", reference)?;
         }
     }
     Ok(())
+}
+
+impl ResourceLocatorSet {
+    /// Validate this realization record against an exact semantic descriptor.
+    pub fn verify_for(&self, resource: &ResourceHandle) -> ResourceResult<()> {
+        resource.verify()?;
+        if self.locator_version != RESOURCE_LOCATOR_VERSION {
+            return Err(ResourceError::Validation(format!(
+                "unsupported Resource locator version {:?}",
+                self.locator_version
+            )));
+        }
+        if self.resource_id != resource.resource_id {
+            return Err(ResourceError::Integrity(
+                "Resource locator set targets a different semantic descriptor".to_owned(),
+            ));
+        }
+        validate_token("resolver binding", &self.resolver_binding)?;
+        if resource.shape != ResourceShape::Inline && self.locations.is_empty() {
+            return Err(ResourceError::Validation(
+                "external Resource publication requires at least one location".to_owned(),
+            ));
+        }
+        if resource.shape == ResourceShape::Inline && !self.locations.is_empty() {
+            return Err(ResourceError::Validation(
+                "inline Resource publication cannot have external locations".to_owned(),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for location in &self.locations {
+            validate_location(location)?;
+            let identity = cymule_core::canonical_digest(location)
+                .map_err(|error| ResourceError::Validation(error.to_string()))?;
+            if !seen.insert(identity) {
+                return Err(ResourceError::Validation(
+                    "Resource locator set repeats an identical location".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ResourcePublication {
+    /// Verify semantic identity and its independently replaceable locator set.
+    pub fn verify(&self) -> ResourceResult<()> {
+        self.locators.verify_for(&self.resource)
+    }
 }
 
 fn validate_token(kind: &str, value: &str) -> ResourceResult<()> {

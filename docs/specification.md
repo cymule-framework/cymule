@@ -39,8 +39,12 @@ The following domains evolve independently:
 | Command protocol | `cymule.command/3` | execution-location proof is required for scope/effect admission |
 | Engine protocol | `cymule.engine/1` | one versioned request and success-or-failure response envelope |
 | Plugin protocol | `cymule.plugin/2` | capability negotiation and expected failure are explicit |
-| Resource descriptor | `cymule.resource/1` | identity excludes realization locations |
-| Resource handoff | `cymule.resource-handoff/1` | transfer IDs are idempotent per target Run |
+| Resource descriptor | `cymule.resource/2` | semantic identity excludes locator/access state |
+| Resource locator set | `cymule.resource-locators/1` | replaceable resolver records target one exact descriptor |
+| Resource manifest | `cymule.resource-manifest/1` | byte digest, size, count, and Merkle root are exact |
+| Resource list proof | `cymule.resource-list-proof/1` | bounded entries prove contiguous manifest inclusion |
+| Resource handoff | `cymule.resource-handoff/2` | transfer pins producer Run, occurrence, and result |
+| Resource lifecycle receipts | `cymule.resource-*-receipt/1` | pin/release/GC/delete/cleanup operations replay exactly |
 | Wait activation | `cymule.wait-activation/1` | external delivery ID fixes source, targets, and result |
 | Durable control | `cymule.durable-control/1` | closed mutations and queries delegate all admission to Rust |
 | Virtual checkpoint | `cymule.virtual-checkpoint/1` | cursor and bounded frontier advance together |
@@ -167,29 +171,40 @@ plugin responsibilities.
 
 M1 Artifact exchange includes a versioned provider-neutral Resource descriptor.
 A Resource has a logical shape (`inline`, `object`, `collection`, `directory`,
-or `snapshot`), media type, replay evidence, semantic annotations, and optional
-realization locations. Inline text/JSON/bytes and external content with verified
+or `snapshot`), media type, replay evidence, semantic annotations, and an
+optional exact manifest descriptor. Inline text/JSON/bytes and external content with verified
 SHA-256/size provide location-independent exact evidence; availability still
 requires retained inline bytes or a usable location. An immutable provider version
 requires the original resolver binding for exact retrieval. A `live` Resource
 is useful state but is never exact replay evidence.
 
-Resolver locators and access grants are realization data, not Plan semantics.
+`cymule.resource-locators/1` is a separate replaceable realization record bound
+to one exact Resource ID and resolver implementation. Locator sets contain only
+credential-free public URLs or opaque non-secret references. Signed URLs,
+access grants, sessions, and credential revisions are resolver call state, not
+Resource, locator-set, Plan, or Artifact semantics.
 Credentials MUST NOT enter a descriptor, Artifact, Event, Continuation, or IR.
 A public URL MUST be credential-free HTTP(S) without userinfo, query, or
 fragment. Private object, drive, sandbox, and signed-URL access uses an opaque
 resolver binding/reference whose reference is non-secret. Locations do not
 participate in Resource ID; moving identical content MUST preserve identity.
 
-Read operations MUST be bounded chunks and directory/collection/snapshot lists
-MUST be bounded opaque-cursor pages. A resolver response that exceeds the
+Read operations MUST be bounded chunks. An exact directory, collection, or
+snapshot list MUST pin canonical JSON-lines bytes by digest and size, exact
+entry count, and Merkle root. Every bounded opaque-cursor page MUST carry a
+`cymule.resource-list-proof/1` inclusion path for every contiguous entry. A
+resolver response that exceeds the
 requested bound, repeats an unsafe entry, stalls with an empty non-terminal
-chunk, or fails content verification MUST be rejected. Chunked stores use
-idempotent write IDs, exact offsets, explicit commit, and explicit abort.
+chunk, fails page inclusion, or fails content verification MUST be rejected.
+Chunked stores use idempotent write IDs, exact offsets, explicit commit, and
+explicit abort. Commit convergence and abort MUST delete all owned staging and
+chunk objects, verify absence, and return an exact cleanup receipt.
 
-A Run-to-Run handoff carries one verified Resource Handle under a stable caller
-transfer ID and target slot. The handoff MUST be recorded in the target Run's
-M1 application journal by segmented head CAS. Repeating identical semantics is
+A Run-to-Run handoff carries one verified Resource Handle, producer Run,
+component occurrence, and exact output Artifact under a stable caller transfer
+ID and target slot. The Resource inline/content bytes MUST match the producer
+result. The handoff MUST be recorded in the target Run's
+M1 application journal by segmented small-head CAS. Repeating identical semantics is
 idempotent; reusing a transfer ID with different semantics MUST fail. One target
 slot has at most one handoff; multiple values use one collection Resource.
 When a handoff activates an input wait, the canonical Resource Handle Artifact,
@@ -197,6 +212,17 @@ transfer record, activation record, wait result, and Continuation readiness MUST
 share one M1 CAS. The target wait MUST be an input wait whose Run and correlation
 match the handoff target and slot. Receipt loss redelivers the same transfer and
 MUST NOT complete the wait twice.
+
+The Resource Handle input Artifact MUST use the closed framework
+`ArtifactTypeContract`; caller-selected schemas cannot reinterpret it. The same
+closed framework registry owns manifest descriptors, list proofs, handoffs, and
+lifecycle receipt types.
+
+Retention authority uses stable pin and release receipts. GC records the exact
+active-pin count and is deletion-eligible only at zero. Provider deletion MUST
+consume that retained eligible receipt and return verified-absent evidence.
+Historical receipt replay returns the original decision; later state does not
+rewrite it.
 
 ## 6. Frozen IR
 

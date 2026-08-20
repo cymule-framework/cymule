@@ -673,7 +673,7 @@ class ResourceBuilder:
     @staticmethod
     def text(text: str, annotations: dict[str, str] | None = None) -> dict[str, Any]:
         return {
-            "resource_version": "cymule.resource/1",
+            "resource_version": "cymule.resource/2",
             "shape": "inline",
             "media_type": "text/plain;charset=utf-8",
             "inline": {"encoding": "utf8", "text": text},
@@ -684,7 +684,7 @@ class ResourceBuilder:
     @staticmethod
     def json(value: Json, annotations: dict[str, str] | None = None) -> dict[str, Any]:
         return {
-            "resource_version": "cymule.resource/1",
+            "resource_version": "cymule.resource/2",
             "shape": "inline",
             "media_type": "application/json",
             "inline": {"encoding": "json", "value": value},
@@ -697,33 +697,33 @@ class ResourceBuilder:
         shape: str,
         media_type: str,
         integrity: dict[str, Json],
-        locations: list[dict[str, str]],
+        manifest: dict[str, Json] | None = None,
         annotations: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         if shape == "inline":
             raise ValueError("external resource shape cannot be inline")
         return {
-            "resource_version": "cymule.resource/1",
+            "resource_version": "cymule.resource/2",
             "shape": shape,
             "media_type": media_type,
             "integrity": copy.deepcopy(integrity),
-            "locations": copy.deepcopy(locations),
+            **({} if manifest is None else {"manifest": copy.deepcopy(manifest)}),
             "annotations": dict(annotations or {}),
         }
 
     @staticmethod
     def handoff(
         transfer_id: str,
-        from_run: str,
+        producer: dict[str, Any],
         to_run: str,
         slot: str,
         resource: dict[str, Any],
     ) -> dict[str, Any]:
         """Create one M1 Run-to-Run resource handoff record."""
         return {
-            "handoff_version": "cymule.resource-handoff/1",
+            "handoff_version": "cymule.resource-handoff/2",
             "transfer_id": transfer_id,
-            "from_run": from_run,
+            "producer": copy.deepcopy(producer),
             "to_run": to_run,
             "slot": slot,
             "resource": copy.deepcopy(resource),

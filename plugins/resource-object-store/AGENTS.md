@@ -7,7 +7,9 @@
   advances with e-tag/version update preconditions.
 - Commit streams retained chunks through a bounded multipart staging object,
   computes SHA-256, promotes with `copy_if_not_exists`, verifies downloaded
-  bytes, and only then records the Resource Handle.
+  bytes, and only then records the Resource publication. Commit and abort delete
+  every owned staging and chunk object, read back absence, and return an exact
+  cleanup receipt; ignored best-effort deletion is not conformance.
 - A backend that cannot provide conditional create/copy must fail closed; never
   weaken content-addressed publication to an unchecked overwrite.
 - The synchronous Cymule contract owns a private Tokio runtime. Call it from a

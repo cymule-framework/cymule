@@ -201,19 +201,28 @@ type ResourceIntegrity struct {
 type ResourceLocation struct {
 	Kind      string `json:"kind"`
 	URL       string `json:"url,omitempty"`
-	Binding   string `json:"binding,omitempty"`
 	Reference string `json:"reference,omitempty"`
+}
+
+// ResourceManifestDescriptor authenticates one exact bounded-list manifest.
+type ResourceManifestDescriptor struct {
+	ManifestVersion string `json:"manifest_version"`
+	MediaType       string `json:"media_type"`
+	Digest          string `json:"digest"`
+	Size            uint64 `json:"size"`
+	EntryCount      uint64 `json:"entry_count"`
+	RootDigest      string `json:"root_digest"`
 }
 
 // ResourceCandidate is sealed by the trusted Rust resource engine.
 type ResourceCandidate struct {
-	ResourceVersion string             `json:"resource_version"`
-	Shape           string             `json:"shape"`
-	MediaType       string             `json:"media_type"`
-	Inline          *InlineData        `json:"inline,omitempty"`
-	Integrity       ResourceIntegrity  `json:"integrity"`
-	Locations       []ResourceLocation `json:"locations,omitempty"`
-	Annotations     map[string]string  `json:"annotations,omitempty"`
+	ResourceVersion string                      `json:"resource_version"`
+	Shape           string                      `json:"shape"`
+	MediaType       string                      `json:"media_type"`
+	Inline          *InlineData                 `json:"inline,omitempty"`
+	Integrity       ResourceIntegrity           `json:"integrity"`
+	Manifest        *ResourceManifestDescriptor `json:"manifest,omitempty"`
+	Annotations     map[string]string           `json:"annotations,omitempty"`
 }
 
 // ResourceHandle is a location-independent trusted resource descriptor.
@@ -224,12 +233,19 @@ type ResourceHandle struct {
 
 // ResourceHandoff transfers one Resource Handle between durable Runs.
 type ResourceHandoff struct {
-	HandoffVersion string         `json:"handoff_version"`
-	TransferID     string         `json:"transfer_id"`
-	FromRun        string         `json:"from_run"`
-	ToRun          string         `json:"to_run"`
-	Slot           string         `json:"slot"`
-	Resource       ResourceHandle `json:"resource"`
+	HandoffVersion string                     `json:"handoff_version"`
+	TransferID     string                     `json:"transfer_id"`
+	Producer       ResourceProducerProvenance `json:"producer"`
+	ToRun          string                     `json:"to_run"`
+	Slot           string                     `json:"slot"`
+	Resource       ResourceHandle             `json:"resource"`
+}
+
+// ResourceProducerProvenance pins the exact producer occurrence and result.
+type ResourceProducerProvenance struct {
+	RunID        string      `json:"run_id"`
+	OccurrenceID string      `json:"occurrence_id"`
+	Result       ArtifactRef `json:"result"`
 }
 
 // ArtifactRef identifies immutable typed bytes in the semantic artifact store.
@@ -1350,11 +1366,11 @@ func uniqueSorted(values []string) []string {
 }
 
 // NewResourceHandoff creates one M1 Run-to-Run handoff record.
-func NewResourceHandoff(transferID, fromRun, toRun, slot string, resource ResourceHandle) ResourceHandoff {
+func NewResourceHandoff(transferID string, producer ResourceProducerProvenance, toRun, slot string, resource ResourceHandle) ResourceHandoff {
 	return ResourceHandoff{
-		HandoffVersion: "cymule.resource-handoff/1",
+		HandoffVersion: "cymule.resource-handoff/2",
 		TransferID:     transferID,
-		FromRun:        fromRun,
+		Producer:       producer,
 		ToRun:          toRun,
 		Slot:           slot,
 		Resource:       resource,
@@ -1364,7 +1380,7 @@ func NewResourceHandoff(transferID, fromRun, toRun, slot string, resource Resour
 // TextResource creates one inline UTF-8 Resource Candidate.
 func TextResource(text string, annotations map[string]string) ResourceCandidate {
 	return ResourceCandidate{
-		ResourceVersion: "cymule.resource/1",
+		ResourceVersion: "cymule.resource/2",
 		Shape:           "inline",
 		MediaType:       "text/plain;charset=utf-8",
 		Inline:          &InlineData{Encoding: "utf8", Text: text},
@@ -1376,7 +1392,7 @@ func TextResource(text string, annotations map[string]string) ResourceCandidate 
 // JSONResource creates one inline structured Resource Candidate.
 func JSONResource(value any, annotations map[string]string) ResourceCandidate {
 	return ResourceCandidate{
-		ResourceVersion: "cymule.resource/1",
+		ResourceVersion: "cymule.resource/2",
 		Shape:           "inline",
 		MediaType:       "application/json",
 		Inline:          &InlineData{Encoding: "json", Value: value},
@@ -1386,13 +1402,13 @@ func JSONResource(value any, annotations map[string]string) ResourceCandidate {
 }
 
 // ExternalResource creates a provider-neutral external Resource Candidate.
-func ExternalResource(shape, mediaType string, integrity ResourceIntegrity, locations []ResourceLocation, annotations map[string]string) ResourceCandidate {
+func ExternalResource(shape, mediaType string, integrity ResourceIntegrity, manifest *ResourceManifestDescriptor, annotations map[string]string) ResourceCandidate {
 	return ResourceCandidate{
-		ResourceVersion: "cymule.resource/1",
+		ResourceVersion: "cymule.resource/2",
 		Shape:           shape,
 		MediaType:       mediaType,
 		Integrity:       integrity,
-		Locations:       locations,
+		Manifest:        manifest,
 		Annotations:     annotations,
 	}
 }

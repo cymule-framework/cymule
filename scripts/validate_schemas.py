@@ -171,7 +171,7 @@ def main() -> int:
     )
 
     resource_validator = Draft202012Validator(
-        by_title["Cymule Resource Protocol cymule.resource/1"], registry=registry
+        by_title["Cymule Resource Protocol cymule.resource/2"], registry=registry
     )
     resource_candidate = load(root / "tests/fixtures/resource-candidate.json")
     resource_validator.validate(resource_candidate)
@@ -193,9 +193,17 @@ def main() -> int:
     validate_engine_request({"type": "seal_resource", "candidate": resource_candidate})
     resource_validator.validate(
         {
-            "handoff_version": "cymule.resource-handoff/1",
+            "handoff_version": "cymule.resource-handoff/2",
             "transfer_id": "transfer:fixture",
-            "from_run": "run:producer",
+            "producer": {
+                "run_id": "run:producer",
+                "occurrence_id": "occurrence:producer:result",
+                "result": {
+                    "identity_version": "cymule.artifact/2",
+                    "artifact_id": "sha256:" + "0" * 64,
+                    "kind": "cymule.result/1",
+                },
+            },
             "to_run": "run:consumer",
             "slot": "input.resource",
             "resource": sealed_resource,
@@ -706,7 +714,7 @@ def main() -> int:
         raise AssertionError("virtual rehydration accepted a provider field")
 
     credential_url = {
-        "resource_version": "cymule.resource/1",
+        "resource_version": "cymule.resource/2",
         "shape": "object",
         "media_type": "application/octet-stream",
         "integrity": {"kind": "live", "identity": "live:credential-check"},

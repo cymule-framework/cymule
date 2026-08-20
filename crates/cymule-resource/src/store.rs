@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ResourceError, ResourceHandle, ResourceIntegrity, ResourceResult, ResourceShape};
+use crate::{
+    ResourceCleanupReceipt, ResourceError, ResourceIntegrity, ResourcePublication, ResourceResult,
+    ResourceShape,
+};
 
 /// Maximum bytes submitted to a store in one call.
 pub const MAX_WRITE_CHUNK: usize = 8 * 1024 * 1024;
@@ -110,10 +113,16 @@ pub trait ArtifactStore {
     ) -> ResourceResult<()>;
 
     /// Finalize the upload and return its verified immutable handle.
-    fn commit_write(&mut self, session: &ResourceWriteSession) -> ResourceResult<ResourceHandle>;
+    fn commit_write(
+        &mut self,
+        session: &ResourceWriteSession,
+    ) -> ResourceResult<ResourcePublication>;
 
-    /// Abort one upload without claiming that already published bytes vanished.
-    fn abort_write(&mut self, session: &ResourceWriteSession) -> ResourceResult<()>;
+    /// Abort one upload and return verified staging/chunk cleanup evidence.
+    fn abort_write(
+        &mut self,
+        session: &ResourceWriteSession,
+    ) -> ResourceResult<ResourceCleanupReceipt>;
 }
 
 /// Validating facade over one chunked store adapter.
@@ -168,16 +177,16 @@ impl<S: ArtifactStore> ResourceWriter<S> {
         &mut self,
         intent: &ResourceWriteIntent,
         session: &ResourceWriteSession,
-    ) -> ResourceResult<ResourceHandle> {
+    ) -> ResourceResult<ResourcePublication> {
         intent.validate()?;
         session.validate_for(intent)?;
-        let resource = self.store.commit_write(session)?;
-        resource.verify()?;
-        if resource.shape != intent.shape
-            || resource.media_type != intent.media_type
-            || resource.annotations != intent.annotations
+        let publication = self.store.commit_write(session)?;
+        publication.verify()?;
+        if publication.resource.shape != intent.shape
+            || publication.resource.media_type != intent.media_type
+            || publication.resource.annotations != intent.annotations
             || !matches!(
-                resource.integrity,
+                publication.resource.integrity,
                 ResourceIntegrity::Content { .. } | ResourceIntegrity::Version { .. }
             )
         {
@@ -185,7 +194,7 @@ impl<S: ArtifactStore> ResourceWriter<S> {
                 "store committed a Resource that does not match its write intent".to_owned(),
             ));
         }
-        Ok(resource)
+        Ok(publication)
     }
 
     /// Abort one validated upload session.
@@ -198,10 +207,20 @@ impl<S: ArtifactStore> ResourceWriter<S> {
         &mut self,
         intent: &ResourceWriteIntent,
         session: &ResourceWriteSession,
-    ) -> ResourceResult<()> {
+    ) -> ResourceResult<ResourceCleanupReceipt> {
         intent.validate()?;
         session.validate_for(intent)?;
-        self.store.abort_write(session)
+        let receipt = self.store.abort_write(session)?;
+        receipt.verify()?;
+        if receipt.write_id != intent.write_id
+            || receipt.upload_id != session.upload_id
+            || receipt.store_binding != session.store_binding
+        {
+            return Err(ResourceError::Substrate(
+                "store returned cleanup evidence for another upload".to_owned(),
+            ));
+        }
+        Ok(receipt)
     }
 
     /// Consume the facade and return its adapter.

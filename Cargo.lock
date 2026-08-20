@@ -546,6 +546,7 @@ dependencies = [
  "cymule-core",
  "cymule-durable",
  "jsonschema",
+ "proptest",
  "serde",
  "serde_json",
  "sha2",

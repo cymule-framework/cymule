@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use cymule_core::{Machine, artifact_ref};
 use cymule_resource::{
-    ArtifactTypeCandidate, ArtifactTypeRegistry, ResourceCandidate, ResourceError,
-    ResourceIntegrity, ResourceLocation, ResourceShape,
+    ArtifactTypeCandidate, ArtifactTypeRegistry, FrameworkArtifactType, ResourceCandidate,
+    ResourceError, ResourceIntegrity, ResourceShape, framework_artifact_contracts,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -285,10 +285,7 @@ fn opaque_resource_and_artifact_bytes_do_not_require_a_contract() {
             digest: format!("sha256:{}", cymule_core::sha256_bytes(bytes)),
             size: bytes.len() as u64,
         },
-        locations: vec![ResourceLocation::Resolver {
-            binding: "binding:snapshot-store/1".to_owned(),
-            reference: "snapshot:opaque".to_owned(),
-        }],
+        manifest: None,
         annotations: BTreeMap::new(),
     }
     .seal()
@@ -308,5 +305,44 @@ fn opaque_resource_and_artifact_bytes_do_not_require_a_contract() {
     assert!(matches!(
         registry.decode_json(artifact),
         Err(ResourceError::Validation(_))
+    ));
+}
+
+#[test]
+fn framework_artifacts_use_closed_exact_contracts() {
+    let contracts = framework_artifact_contracts().expect("framework contracts seal");
+    assert_eq!(contracts.len(), 5);
+    let ids: std::collections::BTreeSet<_> = contracts
+        .iter()
+        .map(|contract| contract.contract_id.as_str())
+        .collect();
+    assert_eq!(ids.len(), contracts.len());
+
+    let registry =
+        ArtifactTypeRegistry::with_framework_contracts().expect("framework registry compiles");
+    let resource = ResourceCandidate::text("framework value")
+        .seal()
+        .expect("Resource seals");
+    let resource_contract =
+        cymule_resource::framework_artifact_contract(FrameworkArtifactType::ResourceHandle)
+            .expect("Resource Handle contract seals");
+    let artifact = registry
+        .put_canonical_json(&resource_contract.contract_id, &resource)
+        .expect("exact framework value seals");
+    assert_eq!(
+        registry
+            .decode_typed::<cymule_resource::ResourceHandle>(&artifact)
+            .expect("framework value decodes"),
+        resource
+    );
+
+    let mut widened = serde_json::to_value(&resource).expect("Resource serializes");
+    widened.as_object_mut().expect("Resource is object").insert(
+        "signed_url".to_owned(),
+        json!("https://example.test/?token=secret"),
+    );
+    assert!(matches!(
+        registry.put_canonical_json(&resource_contract.contract_id, &widened),
+        Err(ResourceError::Schema(_))
     ));
 }

@@ -3,12 +3,27 @@ use cymule_durable::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{ResourceError, ResourceHandle, ResourceResult};
+use crate::{
+    ArtifactTypeRegistry, FrameworkArtifactType, ResourceError, ResourceHandle, ResourceIntegrity,
+    ResourceResult, framework_artifact_contract,
+};
 
 /// Frozen Run-to-Run handoff record version.
-pub const RESOURCE_HANDOFF_VERSION: &str = "cymule.resource-handoff/1";
+pub const RESOURCE_HANDOFF_VERSION: &str = "cymule.resource-handoff/2";
 /// Frozen handoff-to-input activation record version.
 pub const RESOURCE_HANDOFF_ACTIVATION_VERSION: &str = "cymule.resource-handoff-activation/1";
+
+/// Exact producer occurrence and result provenance for one transferred Resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceProducerProvenance {
+    /// Producing Run.
+    pub run_id: String,
+    /// Exact immutable component occurrence in that Run.
+    pub occurrence_id: String,
+    /// Exact occurrence output Artifact represented by the Resource.
+    pub result: cymule_core::ArtifactRef,
+}
 
 /// One durable resource transfer between two Runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -18,8 +33,8 @@ pub struct ResourceHandoff {
     pub handoff_version: String,
     /// Caller-supplied idempotency identity.
     pub transfer_id: String,
-    /// Producing Run.
-    pub from_run: String,
+    /// Exact producing occurrence/result provenance.
+    pub producer: ResourceProducerProvenance,
     /// Consuming Run.
     pub to_run: String,
     /// Stable target state/output slot.
@@ -62,7 +77,8 @@ impl ResourceHandoff {
         }
         for (kind, value) in [
             ("transfer", self.transfer_id.as_str()),
-            ("source Run", self.from_run.as_str()),
+            ("source Run", self.producer.run_id.as_str()),
+            ("producer occurrence", self.producer.occurrence_id.as_str()),
             ("target Run", self.to_run.as_str()),
             ("slot", self.slot.as_str()),
         ] {
@@ -72,7 +88,11 @@ impl ResourceHandoff {
                 )));
             }
         }
-        if self.from_run == self.to_run {
+        self.producer
+            .result
+            .validate()
+            .map_err(|error| ResourceError::Validation(error.to_string()))?;
+        if self.producer.run_id == self.to_run {
             return Err(ResourceError::Validation(
                 "resource handoff requires distinct source and target Runs".to_owned(),
             ));
@@ -152,13 +172,19 @@ impl ResourceHandoffController {
                 "resource handoff input wait is cancelled".to_owned(),
             ));
         }
+        let contract = framework_artifact_contract(FrameworkArtifactType::ResourceHandle)?;
+        let contract_id = contract.contract_id.clone();
+        let mut registry = ArtifactTypeRegistry::new();
+        registry.register(contract)?;
+        let typed = registry.put_canonical_json(&contract_id, &handoff.resource)?;
         let result = machine
-            .put_artifact(
-                "cymule.resource-handoff-input/1",
-                cymule_core::canonical_bytes(&handoff.resource)
-                    .map_err(|error| ResourceError::Persistence(error.to_string()))?,
-            )
+            .put_artifact(typed.reference.kind.clone(), typed.bytes)
             .map_err(|error| ResourceError::Persistence(error.to_string()))?;
+        if result != typed.reference {
+            return Err(ResourceError::Persistence(
+                "Resource handoff typed Artifact identity changed".to_owned(),
+            ));
+        }
         let activation = ResourceHandoffActivation {
             activation_version: RESOURCE_HANDOFF_ACTIVATION_VERSION.to_owned(),
             activation_id: format!("activation:{}:{wait_id}", handoff.transfer_id),
@@ -247,11 +273,48 @@ fn ensure_admissible<S: DurableStore>(
     let machine = coordinator
         .restore_machine()
         .map_err(|error| persistence(&error))?;
-    for run_id in [&handoff.from_run, &handoff.to_run] {
+    for run_id in [&handoff.producer.run_id, &handoff.to_run] {
         if !machine.projection().runs.contains_key(run_id) {
             return Err(ResourceError::NotFound(format!(
                 "resource handoff Run {run_id} does not exist"
             )));
+        }
+    }
+    let state = coordinator.state().map_err(|error| persistence(&error))?;
+    let occurrence = state
+        .component_occurrences
+        .get(&handoff.producer.occurrence_id)
+        .ok_or_else(|| {
+            ResourceError::NotFound(format!(
+                "resource producer occurrence {}",
+                handoff.producer.occurrence_id
+            ))
+        })?;
+    if occurrence.run_id != handoff.producer.run_id || occurrence.output != handoff.producer.result
+    {
+        return Err(ResourceError::Validation(
+            "resource handoff producer Run, occurrence, and result do not match durable authority"
+                .to_owned(),
+        ));
+    }
+    let result = machine.artifact(&handoff.producer.result).ok_or_else(|| {
+        ResourceError::Persistence(
+            "resource handoff producer result Artifact is missing from the Machine".to_owned(),
+        )
+    })?;
+    match (
+        &handoff.resource.integrity,
+        handoff.resource.inline.as_ref(),
+    ) {
+        (ResourceIntegrity::Inline, Some(inline)) if inline.bytes()? == result.bytes => {}
+        (ResourceIntegrity::Content { digest, size }, None)
+            if digest == &format!("sha256:{}", cymule_core::sha256_bytes(&result.bytes))
+                && *size == result.bytes.len() as u64 => {}
+        _ => {
+            return Err(ResourceError::Integrity(
+                "resource handoff descriptor does not represent the exact producer result bytes"
+                    .to_owned(),
+            ));
         }
     }
     let target = &machine.projection().runs[&handoff.to_run];

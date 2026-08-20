@@ -27,12 +27,19 @@ Use this precedence order when guidance conflicts:
   is the core length-prefixed helper. Typed JSON references additionally pin the
   exact content-addressed Artifact type contract in their kind. Opaque Artifact
   bytes remain schema-free. Do not retain v1 identity or snapshot fallback paths.
-- Cross-Run resources use provider-neutral, versioned descriptors. Keep content
-  identity, media/kind, shape, and replay evidence separate from resolver
-  locators and access grants. Never persist credentials in an Artifact or claim
+- Cross-Run resources use provider-neutral `cymule.resource/2` semantic
+  descriptors. Locator sets are separate replaceable records; signed URLs,
+  access grants, and credential revisions never enter Resource identity. Exact
+  list operations require a content-addressed manifest descriptor and verified
+  per-page inclusion proof. Never persist credentials in an Artifact or claim
   exact replay for a mutable external locator without immutable version or
   content evidence. Concrete object stores, drives, sandboxes, and URL fetchers
   belong behind resolver/store plugins.
+- Framework-owned typed Artifacts use the closed exact
+  `ArtifactTypeContract` set. Resource handoffs pin the producer Run,
+  occurrence, and exact result Artifact. Retention uses idempotent pin, release,
+  GC, deletion, and staging/chunk cleanup receipts; deletion and cleanup require
+  provider absence readback.
 - Plans describe meaning and requirements. Runtime bindings describe concrete
   realization. Never place provider names, credentials, endpoints, or deployment
   topology in canonical plan semantics.

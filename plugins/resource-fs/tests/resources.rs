@@ -102,7 +102,9 @@ fn recursive_directory_import_lists_bounded_sorted_pages() {
     let resource = store
         .import_directory(&source, "import:source")
         .expect("directory imports");
-    let first = store.list(&resource, None, 2).expect("first page lists");
+    let first = store
+        .list(&resource.resource, &resource.locators, None, 2)
+        .expect("first page lists");
     assert_eq!(
         first
             .entries
@@ -112,7 +114,12 @@ fn recursive_directory_import_lists_bounded_sorted_pages() {
         ["a.txt", "b.txt"]
     );
     let second = store
-        .list(&resource, first.next_cursor.as_deref(), 2)
+        .list(
+            &resource.resource,
+            &resource.locators,
+            first.next_cursor.as_deref(),
+            2,
+        )
         .expect("second page lists");
     assert_eq!(second.entries[0].name, "nested");
     assert!(second.next_cursor.is_none());
@@ -196,7 +203,7 @@ fn same_size_object_and_manifest_tampering_fail_digest_verification() {
     let object_path = only_path_with_no_extension(&root.join("objects"));
     fs::write(&object_path, b"ABCDEFGH").expect("same-size object tamper writes");
     assert!(matches!(
-        store.stat(&object),
+        store.stat(&object.resource, &object.locators),
         Err(ResourceError::Integrity(message)) if message.contains("digest")
     ));
     assert!(matches!(
@@ -222,7 +229,7 @@ fn same_size_object_and_manifest_tampering_fail_digest_verification() {
     let manifest = directory_store
         .import_directory(&source_directory, "import:tamper-directory")
         .expect("directory imports");
-    let manifest_path = resource_object_path(&directory_root, &manifest);
+    let manifest_path = resource_object_path(&directory_root, &manifest.resource);
     let mut manifest_bytes = fs::read(&manifest_path).expect("manifest reads");
     let position = manifest_bytes
         .windows(5)
@@ -231,9 +238,90 @@ fn same_size_object_and_manifest_tampering_fail_digest_verification() {
     manifest_bytes[position] = b'b';
     fs::write(&manifest_path, manifest_bytes).expect("same-size manifest tamper writes");
     assert!(matches!(
-        directory_store.list(&manifest, None, 8),
+        directory_store.list(&manifest.resource, &manifest.locators, None, 8),
         Err(ResourceError::Integrity(message)) if message.contains("digest")
     ));
+}
+
+#[test]
+fn commit_replay_verifies_existing_object_and_removes_owned_staging() {
+    let directory = tempdir().expect("temporary directory creates");
+    let root = directory.path().join("store");
+    let mut store = FsResourceStore::open(&root, "fs:test").expect("store opens");
+    let first = ResourceWriteIntent {
+        write_id: "write:first-publication".to_owned(),
+        shape: ResourceShape::Object,
+        media_type: "application/octet-stream".to_owned(),
+        annotations: BTreeMap::new(),
+    };
+    let first_session = store.begin_write(&first).expect("first write begins");
+    store
+        .write_chunk(&first_session, 0, b"shared bytes")
+        .expect("first bytes write");
+    let first_publication = store.commit_write(&first_session).expect("first commits");
+
+    let second = ResourceWriteIntent {
+        write_id: "write:already-exists".to_owned(),
+        ..first
+    };
+    let second_session = store.begin_write(&second).expect("second write begins");
+    store
+        .write_chunk(&second_session, 0, b"shared bytes")
+        .expect("second bytes write");
+    let staging = root.join("staging").join(format!(
+        "object-{}",
+        second_session
+            .upload_id
+            .strip_prefix("upload:")
+            .expect("upload prefix")
+    ));
+    fs::write(&staging, b"stale staging bytes").expect("stale staging fixture writes");
+    let second_publication = store.commit_write(&second_session).expect("second commits");
+    assert_eq!(
+        second_publication.resource.resource_id,
+        first_publication.resource.resource_id
+    );
+    assert!(!staging.exists(), "owned staging object must be removed");
+    let upload_data = root.join("uploads").join(format!(
+        "{}.data",
+        second_session
+            .upload_id
+            .strip_prefix("upload:")
+            .expect("upload prefix")
+    ));
+    assert!(
+        !upload_data.exists(),
+        "committed upload bytes must be cleaned"
+    );
+
+    let replay = store.commit_write(&second_session).expect("commit replays");
+    assert_eq!(replay, second_publication);
+    assert!(!staging.exists());
+    assert!(!upload_data.exists());
+}
+
+#[test]
+fn abort_returns_verified_cleanup_receipt() {
+    let directory = tempdir().expect("temporary directory creates");
+    let root = directory.path().join("store");
+    let mut store = FsResourceStore::open(&root, "fs:test").expect("store opens");
+    let intent = ResourceWriteIntent {
+        write_id: "write:abort-cleanup".to_owned(),
+        shape: ResourceShape::Object,
+        media_type: "application/octet-stream".to_owned(),
+        annotations: BTreeMap::new(),
+    };
+    let session = store.begin_write(&intent).expect("write begins");
+    store
+        .write_chunk(&session, 0, b"staged chunk")
+        .expect("chunk stages");
+    let receipt = store.abort_write(&session).expect("abort cleans");
+    receipt.verify().expect("cleanup receipt verifies");
+    assert!(receipt.verified_absent);
+    assert_eq!(receipt.removed_staging_objects, 1);
+    let replay = store.abort_write(&session).expect("abort replays");
+    replay.verify().expect("replayed cleanup verifies");
+    assert_eq!(replay.removed_staging_objects, 0);
 }
 
 #[cfg(unix)]
@@ -322,7 +410,7 @@ fn filesystem_resource_recovers_from_real_process_death_before_and_after_publica
         let resource = store.commit_write(&session).expect("commit converges");
         resource.verify().expect("Resource handle verifies");
         assert!(matches!(
-            &resource.integrity,
+            &resource.resource.integrity,
             ResourceIntegrity::Content { digest, size }
                 if digest == &format!("sha256:{}", cymule_core::sha256_bytes(b"durable resource"))
                     && *size == 16

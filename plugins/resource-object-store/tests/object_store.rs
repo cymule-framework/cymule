@@ -66,6 +66,34 @@ fn object_store_rejects_non_object_shape() {
     ));
 }
 
+#[test]
+fn abort_deletes_every_owned_chunk_and_returns_verified_receipt() {
+    let backend = Arc::new(InMemory::new());
+    let mut store =
+        ObjectResourceStore::new(backend, "cymule", "object:test").expect("adapter builds");
+    let intent = ResourceWriteIntent {
+        write_id: "write:abort-cleanup".to_owned(),
+        shape: ResourceShape::Object,
+        media_type: "application/octet-stream".to_owned(),
+        annotations: BTreeMap::new(),
+    };
+    let session = store.begin_write(&intent).expect("write begins");
+    store
+        .write_chunk(&session, 0, b"first")
+        .expect("first chunk stages");
+    store
+        .write_chunk(&session, 5, b"second")
+        .expect("second chunk stages");
+    let receipt = store.abort_write(&session).expect("abort cleans");
+    receipt.verify().expect("cleanup receipt verifies");
+    assert!(receipt.verified_absent);
+    assert_eq!(receipt.removed_chunks, 2);
+    assert_eq!(receipt.removed_staging_objects, 0);
+    let replay = store.abort_write(&session).expect("abort replays");
+    assert_eq!(replay.removed_chunks, 0);
+    assert!(replay.verified_absent);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn synchronous_adapter_bridges_from_a_multithread_runtime() {
     let backend = Arc::new(InMemory::new());

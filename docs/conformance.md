@@ -150,9 +150,11 @@ The local suite verifies:
   query command and validate it through the Rust Engine; Rust restart-level
   conformance then drives start, signal admission, resume, terminal replay, Run
   query, and domain query through the stateful authority;
-- Resource identity ignores locations, public credential-bearing URLs fail,
-  bounded reads/lists reject malformed adapters, content bytes are verified,
-  and Run-to-Run handoffs survive M1 reopen and reject conflicting transfer IDs.
+- Resource identity excludes separate locator sets; credential-bearing public
+  URLs fail; bounded reads and manifest-proof lists reject malformed adapters;
+  content bytes are verified; pin/release/GC/delete/cleanup receipts replay
+  exactly; and Run-to-Run handoffs bind producer occurrence/result provenance,
+  survive M1 reopen, and reject conflicting transfer IDs.
 
 The optional Agent interaction plugin runs a separate Rust conformance suite for
 Session projection replay, binding-pinned occurrences, atomic input and stream

@@ -5,7 +5,7 @@
 - `rpc` JSON is the cross-language conformance boundary; changes require all SDK
   tests and a command-protocol version decision.
 - `seal_resource` is an additive request/response pair over
-  `cymule.resource/1`. The CLI delegates validation and identity to
+  `cymule.resource/2`. The CLI delegates validation and identity to
   `cymule-resource`; it must never compute Resource IDs independently.
 - `verify_wait_activation` validates only the versioned provider-neutral
   delivery record. Stateful source matching, consume-once admission, and

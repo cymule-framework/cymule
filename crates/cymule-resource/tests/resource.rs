@@ -10,15 +10,18 @@ use cymule_core::{
     PlanCandidate, Region, Step, WaitSpec, sha256_bytes,
 };
 use cymule_durable::{
-    Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
-    DurableStore, FrameState, MemoryStore, StoreCommit, StoredState, WaitCondition, WaitKind,
-    WaitState,
+    ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
+    DurableResult, DurableStore, FrameState, MemoryStore, StoreCommit, StoredState, WaitCondition,
+    WaitKind, WaitState,
 };
 use cymule_resource::{
-    ArtifactResolver, ArtifactStore, InlineData, ResourceCandidate, ResourceChunk, ResourceClient,
-    ResourceError, ResourceHandle, ResourceHandoff, ResourceHandoffController, ResourceIntegrity,
-    ResourceLocation, ResourceObservation, ResourcePage, ResourceReplayClass, ResourceShape,
-    ResourceWriteIntent, ResourceWriteSession, ResourceWriter,
+    ArtifactResolver, ArtifactStore, InlineData, RESOURCE_CLEANUP_RECEIPT_VERSION,
+    RESOURCE_LOCATOR_VERSION, ResourceCandidate, ResourceChunk, ResourceCleanupReceipt,
+    ResourceClient, ResourceError, ResourceHandle, ResourceHandoff, ResourceHandoffController,
+    ResourceIntegrity, ResourceLocation, ResourceLocatorSet, ResourceManifestEntry,
+    ResourceObservation, ResourcePage, ResourceProducerProvenance, ResourcePublication,
+    ResourceReplayClass, ResourceShape, ResourceWriteIntent, ResourceWriteSession, ResourceWriter,
+    SealedResourceManifest,
 };
 use serde_json::json;
 
@@ -48,36 +51,51 @@ impl DurableStore for LostHandoffReceiptStore {
     }
 }
 
-fn external_candidate(
-    shape: ResourceShape,
-    integrity: ResourceIntegrity,
-    locations: Vec<ResourceLocation>,
-) -> ResourceCandidate {
+fn external_candidate(shape: ResourceShape, integrity: ResourceIntegrity) -> ResourceCandidate {
     ResourceCandidate {
         resource_version: cymule_resource::RESOURCE_VERSION.to_owned(),
         shape,
         media_type: "application/octet-stream".to_owned(),
         inline: None,
         integrity,
-        locations,
+        manifest: None,
         annotations: BTreeMap::from([("purpose".to_owned(), "conformance".to_owned())]),
     }
 }
 
-fn object(bytes: &[u8]) -> ResourceHandle {
-    external_candidate(
+fn publication(
+    resource: ResourceHandle,
+    binding: &str,
+    locations: Vec<ResourceLocation>,
+) -> ResourcePublication {
+    ResourcePublication {
+        locators: ResourceLocatorSet {
+            locator_version: RESOURCE_LOCATOR_VERSION.to_owned(),
+            resource_id: resource.resource_id.clone(),
+            resolver_binding: binding.to_owned(),
+            locations,
+        },
+        resource,
+    }
+}
+
+fn object(bytes: &[u8]) -> ResourcePublication {
+    let resource = external_candidate(
         ResourceShape::Object,
         ResourceIntegrity::Content {
             digest: format!("sha256:{}", sha256_bytes(bytes)),
             size: bytes.len() as u64,
         },
-        vec![ResourceLocation::Resolver {
-            binding: "binding:memory-resolver/1".to_owned(),
+    )
+    .seal()
+    .expect("object seals");
+    publication(
+        resource,
+        "binding:memory-resolver/1",
+        vec![ResourceLocation::Opaque {
             reference: "object:fixture".to_owned(),
         }],
     )
-    .seal()
-    .expect("object seals")
 }
 
 #[test]
@@ -96,7 +114,7 @@ fn inline_text_json_and_bytes_are_location_independent_exact_resources() {
             data: "AAEC".to_owned(),
         }),
         integrity: ResourceIntegrity::Inline,
-        locations: Vec::new(),
+        manifest: None,
         annotations: BTreeMap::new(),
     }
     .seal()
@@ -129,7 +147,7 @@ fn frozen_resource_fixture_has_one_cross_language_identity() {
     let resource = candidate.seal().expect("fixture seals");
     assert_eq!(
         resource.resource_id,
-        "sha256:c5034cf635af3800a5b41ca18fd78665cc6ec595f6e87418b4220f8d0919261b"
+        "sha256:d0ed5dfc870375b45356667f9abc75edcfd81644a754293c7d1c4871163187d1"
     );
     let mut tampered = resource;
     tampered.media_type = "application/octet-stream".to_owned();
@@ -146,26 +164,28 @@ fn locations_do_not_change_identity_but_credentials_fail_closed() {
         digest: format!("sha256:{}", sha256_bytes(bytes)),
         size: bytes.len() as u64,
     };
-    let first = external_candidate(
-        ResourceShape::Object,
-        integrity.clone(),
+    let resource = external_candidate(ResourceShape::Object, integrity.clone())
+        .seal()
+        .expect("object seals");
+    let first = publication(
+        resource.clone(),
+        "binding:http/1",
         vec![ResourceLocation::PublicUrl {
             url: "https://example.com/artifacts/object.bin".to_owned(),
         }],
-    )
-    .seal()
-    .expect("public object seals");
-    let moved = external_candidate(
-        ResourceShape::Object,
-        integrity,
-        vec![ResourceLocation::Resolver {
-            binding: "binding:remote-drive/7".to_owned(),
+    );
+    let moved = publication(
+        external_candidate(ResourceShape::Object, integrity)
+            .seal()
+            .expect("moved object seals"),
+        "binding:remote-drive/7",
+        vec![ResourceLocation::Opaque {
             reference: "item:stable-reference".to_owned(),
         }],
-    )
-    .seal()
-    .expect("moved object seals");
-    assert_eq!(first.resource_id, moved.resource_id);
+    );
+    first.verify().expect("first publication verifies");
+    moved.verify().expect("moved publication verifies");
+    assert_eq!(first.resource.resource_id, moved.resource.resource_id);
 
     for url in [
         "https://user:secret@example.com/object",
@@ -173,16 +193,14 @@ fn locations_do_not_change_identity_but_credentials_fail_closed() {
         "https://example.com/object#access-token",
     ] {
         assert!(matches!(
-            external_candidate(
-                ResourceShape::Object,
-                ResourceIntegrity::Live {
-                    identity: "live:credential-test".to_owned(),
-                },
+            publication(
+                resource.clone(),
+                "binding:http/1",
                 vec![ResourceLocation::PublicUrl {
                     url: url.to_owned()
                 }],
             )
-            .seal(),
+            .verify(),
             Err(ResourceError::Validation(_))
         ));
     }
@@ -196,10 +214,6 @@ fn versioned_sandbox_and_live_remote_resource_have_honest_replay_classes() {
             authority: "sandbox-snapshot-format/1".to_owned(),
             version: "snapshot:2026-08-17:1".to_owned(),
         },
-        vec![ResourceLocation::Resolver {
-            binding: "binding:sandbox-resolver/4".to_owned(),
-            reference: "snapshot:opaque-17".to_owned(),
-        }],
     )
     .seal()
     .expect("snapshot seals");
@@ -208,10 +222,6 @@ fn versioned_sandbox_and_live_remote_resource_have_honest_replay_classes() {
         ResourceIntegrity::Live {
             identity: "drive-directory:team-docs".to_owned(),
         },
-        vec![ResourceLocation::Resolver {
-            binding: "binding:drive-resolver/2".to_owned(),
-            reference: "directory:team-docs".to_owned(),
-        }],
     )
     .seal()
     .expect("live directory seals");
@@ -232,6 +242,7 @@ impl ArtifactResolver for MemoryResolver {
     fn stat(
         &mut self,
         resource: &ResourceHandle,
+        _locators: &ResourceLocatorSet,
     ) -> cymule_resource::ResourceResult<ResourceObservation> {
         Ok(ResourceObservation {
             media_type: resource.media_type.clone(),
@@ -242,6 +253,7 @@ impl ArtifactResolver for MemoryResolver {
     fn read(
         &mut self,
         _resource: &ResourceHandle,
+        _locators: &ResourceLocatorSet,
         offset: u64,
         max_bytes: u32,
     ) -> cymule_resource::ResourceResult<ResourceChunk> {
@@ -265,6 +277,7 @@ impl ArtifactResolver for MemoryResolver {
     fn list(
         &mut self,
         _resource: &ResourceHandle,
+        _locators: &ResourceLocatorSet,
         cursor: Option<&str>,
         limit: u32,
     ) -> cymule_resource::ResourceResult<ResourcePage> {
@@ -272,8 +285,11 @@ impl ArtifactResolver for MemoryResolver {
             .map_or(Ok(0), str::parse::<usize>)
             .map_err(|error| ResourceError::Substrate(error.to_string()))?;
         let end = self.entries.len().min(start.saturating_add(limit as usize));
+        let sealed = SealedResourceManifest::seal(self.entries.clone())?;
+        let entries = self.entries[start..end].to_vec();
         Ok(ResourcePage {
-            entries: self.entries[start..end].to_vec(),
+            proof: sealed.proof(start as u64, entries.len())?,
+            entries,
             next_cursor: (end < self.entries.len()).then(|| end.to_string()),
         })
     }
@@ -307,31 +323,40 @@ fn bounded_resolver_streams_and_verifies_objects_and_directory_pages() {
         Err(ResourceError::Integrity(_))
     ));
 
-    let directory = external_candidate(
-        ResourceShape::Directory,
-        ResourceIntegrity::Version {
-            authority: "directory-manifest/1".to_owned(),
-            version: "manifest:1".to_owned(),
-        },
-        vec![ResourceLocation::Resolver {
-            binding: "binding:directory/1".to_owned(),
-            reference: "directory:fixture".to_owned(),
-        }],
-    )
-    .seal()
-    .expect("directory seals");
     let entries = vec![
-        cymule_resource::ResourceEntry {
+        ResourceManifestEntry {
             name: "first.txt".to_owned(),
             resource: ResourceCandidate::text("first").seal().unwrap(),
         },
-        cymule_resource::ResourceEntry {
+        ResourceManifestEntry {
             name: "nested/second.json".to_owned(),
             resource: ResourceCandidate::json(json!({"second": true}))
                 .seal()
                 .unwrap(),
         },
     ];
+    let sealed = SealedResourceManifest::seal(entries.clone()).expect("manifest seals");
+    let directory_resource = ResourceCandidate {
+        resource_version: cymule_resource::RESOURCE_VERSION.to_owned(),
+        shape: ResourceShape::Directory,
+        media_type: cymule_resource::RESOURCE_MANIFEST_MEDIA_TYPE.to_owned(),
+        inline: None,
+        integrity: ResourceIntegrity::Content {
+            digest: sealed.descriptor.digest.clone(),
+            size: sealed.descriptor.size,
+        },
+        manifest: Some(sealed.descriptor),
+        annotations: BTreeMap::new(),
+    }
+    .seal()
+    .expect("directory seals");
+    let directory = publication(
+        directory_resource,
+        "binding:directory/1",
+        vec![ResourceLocation::Opaque {
+            reference: "directory:fixture".to_owned(),
+        }],
+    );
     let mut directory_client = ResourceClient::new(MemoryResolver {
         bytes: Vec::new(),
         entries,
@@ -390,12 +415,12 @@ impl ArtifactStore for MemoryArtifactStore {
     fn commit_write(
         &mut self,
         session: &ResourceWriteSession,
-    ) -> cymule_resource::ResourceResult<ResourceHandle> {
+    ) -> cymule_resource::ResourceResult<ResourcePublication> {
         let (intent, bytes) = self
             .sessions
             .get(&session.write_id)
             .ok_or_else(|| ResourceError::NotFound(session.write_id.clone()))?;
-        ResourceCandidate {
+        let resource = ResourceCandidate {
             resource_version: cymule_resource::RESOURCE_VERSION.to_owned(),
             shape: intent.shape,
             media_type: intent.media_type.clone(),
@@ -404,21 +429,33 @@ impl ArtifactStore for MemoryArtifactStore {
                 digest: format!("sha256:{}", sha256_bytes(bytes)),
                 size: bytes.len() as u64,
             },
-            locations: vec![ResourceLocation::Resolver {
-                binding: session.store_binding.clone(),
-                reference: session.upload_id.clone(),
-            }],
+            manifest: None,
             annotations: intent.annotations.clone(),
         }
-        .seal()
+        .seal()?;
+        Ok(publication(
+            resource,
+            &session.store_binding,
+            vec![ResourceLocation::Opaque {
+                reference: session.upload_id.clone(),
+            }],
+        ))
     }
 
     fn abort_write(
         &mut self,
         session: &ResourceWriteSession,
-    ) -> cymule_resource::ResourceResult<()> {
+    ) -> cymule_resource::ResourceResult<ResourceCleanupReceipt> {
         self.sessions.remove(&session.write_id);
-        Ok(())
+        Ok(ResourceCleanupReceipt {
+            receipt_version: RESOURCE_CLEANUP_RECEIPT_VERSION.to_owned(),
+            write_id: session.write_id.clone(),
+            upload_id: session.upload_id.clone(),
+            store_binding: session.store_binding.clone(),
+            removed_staging_objects: 1,
+            removed_chunks: 0,
+            verified_absent: true,
+        })
     }
 }
 
@@ -453,14 +490,17 @@ fn chunked_store_interface_keeps_provider_details_out_of_resource_identity() {
     ));
     writer.write(&session, 6, b"object").expect("second chunk");
     let handle = writer.commit(&intent, &session).expect("write commits");
-    assert_eq!(handle.replay_class(), ResourceReplayClass::ContentVerified);
+    assert_eq!(
+        handle.resource.replay_class(),
+        ResourceReplayClass::ContentVerified
+    );
     assert!(matches!(
-        handle.integrity,
+        handle.resource.integrity,
         ResourceIntegrity::Content { size: 12, .. }
     ));
 }
 
-fn machine_with_runs() -> Machine {
+fn machine_with_runs() -> (Machine, cymule_core::ArtifactRef) {
     let mut machine = Machine::new();
     let plan = seal_plan(PlanCandidate {
         ir_version: cymule_core::IR_VERSION.to_owned(),
@@ -508,21 +548,52 @@ fn machine_with_runs() -> Machine {
     machine
         .put_artifact("test/input", b"resource input".to_vec())
         .expect("input stores");
-    machine
+    let result = machine
+        .put_artifact("example.producer-result/1", b"producer output".to_vec())
+        .expect("producer result stores");
+    (machine, result)
+}
+
+fn record_producer(
+    coordinator: &mut DurableCoordinator<impl DurableStore>,
+    result: &cymule_core::ArtifactRef,
+) {
+    coordinator
+        .record_component(ComponentOccurrence {
+            occurrence_id: "occurrence:producer:result".to_owned(),
+            run_id: "run:producer".to_owned(),
+            site_id: "site:producer:result".to_owned(),
+            component: "component:producer".to_owned(),
+            input: result.clone(),
+            output: result.clone(),
+            occurrence_binding: "binding:producer/1".to_owned(),
+            implementation_revision: "sha256:producer-revision".to_owned(),
+        })
+        .expect("producer occurrence records");
+}
+
+fn producer_provenance(result: &cymule_core::ArtifactRef) -> ResourceProducerProvenance {
+    ResourceProducerProvenance {
+        run_id: "run:producer".to_owned(),
+        occurrence_id: "occurrence:producer:result".to_owned(),
+        result: result.clone(),
+    }
 }
 
 #[test]
 fn run_to_run_handoff_is_idempotent_conflict_checked_and_reopenable() {
     let store = MemoryStore::new();
+    let (machine, producer_result) = machine_with_runs();
     let mut coordinator = DurableCoordinator::open(store.clone())
         .expect("store opens")
-        .initialize(&machine_with_runs())
+        .initialize(&machine)
         .expect("store initializes");
+    record_producer(&mut coordinator, &producer_result);
     let mut stale = DurableCoordinator::open(store.clone()).expect("stale view opens");
     let handoff = ResourceHandoff {
         handoff_version: cymule_resource::RESOURCE_HANDOFF_VERSION.to_owned(),
         transfer_id: "transfer:producer-result".to_owned(),
-        from_run: "run:producer".to_owned(),
+        producer: producer_provenance(&producer_result),
         to_run: "run:consumer".to_owned(),
         slot: "input.dataset".to_owned(),
         resource: ResourceCandidate::text("producer output").seal().unwrap(),
@@ -538,7 +609,7 @@ fn run_to_run_handoff_is_idempotent_conflict_checked_and_reopenable() {
     conflicting.resource = ResourceCandidate::text("different output").seal().unwrap();
     assert!(matches!(
         ResourceHandoffController::transfer(&mut coordinator, &conflicting),
-        Err(ResourceError::Conflict(_))
+        Err(ResourceError::Integrity(_))
     ));
     let mut competing_slot = handoff.clone();
     competing_slot.transfer_id = "transfer:competing-producer".to_owned();
@@ -556,7 +627,7 @@ fn run_to_run_handoff_is_idempotent_conflict_checked_and_reopenable() {
 
 #[test]
 fn resource_handoff_atomically_activates_matching_input_wait() {
-    let machine = machine_with_runs();
+    let (machine, producer_result) = machine_with_runs();
     let consumer_plan = machine.projection().runs["run:consumer"]
         .current_plan
         .clone();
@@ -569,6 +640,7 @@ fn resource_handoff_atomically_activates_matching_input_wait() {
         .expect("store opens")
         .initialize(&machine)
         .expect("store initializes");
+    record_producer(&mut coordinator, &producer_result);
     coordinator
         .put_continuation(Continuation {
             run_id: "run:consumer".to_owned(),
@@ -620,7 +692,7 @@ fn resource_handoff_atomically_activates_matching_input_wait() {
     let handoff = ResourceHandoff {
         handoff_version: cymule_resource::RESOURCE_HANDOFF_VERSION.to_owned(),
         transfer_id: "transfer:input-activation".to_owned(),
-        from_run: "run:producer".to_owned(),
+        producer: producer_provenance(&producer_result),
         to_run: "run:consumer".to_owned(),
         slot: "input.dataset".to_owned(),
         resource: ResourceCandidate::text("producer output")
@@ -628,15 +700,19 @@ fn resource_handoff_atomically_activates_matching_input_wait() {
             .expect("Resource seals"),
     };
     armed.store(true, Ordering::SeqCst);
-    assert!(matches!(
-        ResourceHandoffController::activate_input(
-            &mut coordinator,
-            &handoff,
-            "wait:resource-input"
+    let lost = ResourceHandoffController::activate_input(
+        &mut coordinator,
+        &handoff,
+        "wait:resource-input",
+    );
+    assert!(
+        matches!(
+            &lost,
+            Err(ResourceError::Persistence(message))
+                if message.contains("simulated lost handoff activation receipt")
         ),
-        Err(ResourceError::Persistence(message))
-            if message.contains("simulated lost handoff activation receipt")
-    ));
+        "unexpected activation result: {lost:?}"
+    );
     let store = coordinator.into_store();
     let mut coordinator = DurableCoordinator::open(store).expect("lost receipt state reopens");
     let activation = ResourceHandoffController::activate_input(

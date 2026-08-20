@@ -325,17 +325,28 @@ const dataset = engine.sealResource(
       digest: "sha256:...",
       size: 48291,
     },
-    [{
-      kind: "resolver",
-      binding: "binding:dataset-resolver/3",
-      reference: "dataset:quarterly-input",
-    }],
+    {
+      manifest_version: "cymule.resource-manifest/1",
+      media_type: "application/vnd.cymule.resource-manifest+jsonl",
+      digest: "sha256:...",
+      size: 48291,
+      entry_count: 120,
+      root_digest: "sha256:...",
+    },
   ),
 );
 
 const handoff = ResourceBuilder.handoff(
   "transfer:analysis-input",
-  "run:prepare",
+  {
+    run_id: "run:prepare",
+    occurrence_id: "occurrence:prepare:dataset",
+    result: {
+      identity_version: "cymule.artifact/2",
+      artifact_id: "sha256:...",
+      kind: "cymule.component-output/1",
+    },
+  },
   "run:analyze",
   "input.dataset",
   dataset,
@@ -343,12 +354,14 @@ const handoff = ResourceBuilder.handoff(
 ```
 
 `inline` and verified `content` Resources carry exact evidence independently of
-location; replay still requires retained inline bytes or a usable resolver.
+location; replay still requires retained inline bytes or a separate usable
+`cymule.resource-locators/1` record.
 An immutable `version` requires its original resolver binding. A mutable `live`
 Resource is intentionally live-only and never advertised as exact replay.
 Public URLs must contain no credentials, query, or fragment; private object
 stores, remote drives, sandboxes, and signed URLs use opaque resolver plugins.
-Directory, collection, and snapshot adapters expose bounded cursor pages, and
+Directory, collection, and snapshot adapters expose bounded cursor pages with
+Merkle inclusion proofs against the exact content manifest, and
 large object reads/writes are chunked rather than loaded into memory.
 
 ## How Cymule handles failures

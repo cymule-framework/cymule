@@ -25,8 +25,9 @@ const resource = new CliEngine("./target/debug/cymule").sealResource(
 ```
 
 Use `ResourceBuilder.external` for content-addressed/version-pinned objects,
-directories, collections, snapshots, and live references. Concrete access stays
-behind resolver plugins; Resource Candidates never contain credentials.
+directories, collections, snapshots, and live references. Its optional manifest
+pins exact list content. Concrete locator, grant, signed-URL, and credential
+revision state stays behind resolver plugins and outside Resource Candidates.
 
 `WaitActivationBuilder` creates provider-neutral signal or timer delivery
 records. `CliEngine.verifyWaitActivation` validates the closed wire contract;

@@ -32,9 +32,11 @@
 - `execution-binding.schema.json` freezes `cymule.execution-binding/1`. Rust
   additionally enforces normalized provider order, exact service ownership,
   Plan requirements, manifest equality, and content identities.
-- `resource.schema.json` owns `cymule.resource/1` candidates/handles and
-  `cymule.resource-handoff/1`. Shape or integrity changes require Rust semantic
-  validation, all SDKs, fixtures, and cross-language Resource ID tests.
+- `resource.schema.json` owns `cymule.resource/2` candidates/handles, separate
+  locator sets/publications, content manifests/list proofs, exact lifecycle
+  receipts, and `cymule.resource-handoff/2` producer provenance. Shape or
+  integrity changes require Rust semantic validation, all SDKs, fixtures, and
+  cross-language Resource ID tests.
 - `wait-activation.schema.json` owns the provider-neutral
   `cymule.wait-activation/1` delivery record. Source, targets, and result must
   stay closed and pass Rust plus four-SDK fixture conformance; concrete clock,

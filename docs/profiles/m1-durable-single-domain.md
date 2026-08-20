@@ -56,11 +56,13 @@ Status: implemented for one production single-domain authority.
   resolution without a second dispatch;
 - canonical component occurrence inputs, outputs, binding, and revision;
 - portable snapshot metadata;
-- provider-neutral `cymule.resource/1` handles for inline values, objects,
+- provider-neutral `cymule.resource/2` semantic handles for inline values, objects,
   collections, directories, and sandbox/workspace snapshots, with
   content-verified, resolver-required, and live-only replay classification;
-- bounded chunk/list `ArtifactResolver`, chunked `ArtifactStore`, and M1 typed
-  Run-to-Run handoff journals with idempotent transfer IDs and reopen replay;
+- separate replaceable locator sets, bounded chunk and content-manifest-proof
+  list resolution, chunked stores with verified staging/chunk cleanup, exact
+  lifecycle receipts, and M1 typed Run-to-Run handoff journals with producer
+  occurrence/result provenance, idempotent transfer IDs, and reopen replay;
 - atomic handoff-to-input activation that stores the canonical Resource Handle
   Artifact, transfer and activation records, input-wait completion, and
   Continuation readiness in one M1 CAS, including lost-receipt replay;
@@ -115,8 +117,11 @@ and it passes the stale-head, acknowledgement-loss, crash, tamper, and GC suite.
 Version decision: segmented storage introduces independent
 `cymule.durable-head/1`, `cymule.durable-segment/1`,
 `cymule.durable-checkpoint/1`, and `cymule.durable-gc-receipt/1` physical
-contracts without changing `cymule.durable-state/2`. Resources introduce independent `cymule.resource/1` and
-`cymule.resource-handoff/1` domains. Identified signal/timer admission introduces
+contracts without changing `cymule.durable-state/2`. Terminal Resources replace the pre-release descriptor and
+handoff domains with `cymule.resource/2` and `cymule.resource-handoff/2`.
+There is no `/1` compatibility reader or dual authority. Locator sets,
+manifests/list proofs, and lifecycle receipts use independent `/1` domains.
+Identified signal/timer admission introduces
 the independent `cymule.wait-activation/1` record inside M1 durable state. The
 additive activation map defaults empty when older M1 state is read. The
 `cymule.durable-control/1` domain is additive and delegates all reduction to

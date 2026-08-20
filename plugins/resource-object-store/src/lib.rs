@@ -4,9 +4,11 @@ use std::future::Future;
 use std::sync::Arc;
 
 use cymule_resource::{
-    ArtifactResolver, ArtifactStore, MAX_WRITE_CHUNK, ResourceCandidate, ResourceChunk,
-    ResourceError, ResourceHandle, ResourceIntegrity, ResourceLocation, ResourceObservation,
-    ResourcePage, ResourceResult, ResourceShape, ResourceWriteIntent, ResourceWriteSession,
+    ArtifactResolver, ArtifactStore, MAX_WRITE_CHUNK, RESOURCE_CLEANUP_RECEIPT_VERSION,
+    RESOURCE_LOCATOR_VERSION, ResourceCandidate, ResourceChunk, ResourceCleanupReceipt,
+    ResourceError, ResourceHandle, ResourceIntegrity, ResourceLocation, ResourceLocatorSet,
+    ResourceObservation, ResourcePage, ResourcePublication, ResourceResult, ResourceShape,
+    ResourceWriteIntent, ResourceWriteSession,
 };
 use futures_util::StreamExt;
 use object_store::path::Path;
@@ -17,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::runtime::{Builder, Runtime};
 
-const BINDING_VERSION: &str = "cymule.resource-object-store/1";
+const BINDING_VERSION: &str = "cymule.resource-object-store/2";
+const UPLOAD_RECORD_VERSION: &str = "cymule.resource-object-store-upload/2";
 const PART_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,12 +41,13 @@ struct ChunkRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UploadRecord {
+    record_version: String,
     intent: ResourceWriteIntent,
     upload_id: String,
     next_offset: u64,
     chunks: Vec<ChunkRecord>,
     state: UploadState,
-    handle: Option<ResourceHandle>,
+    publication: Option<ResourcePublication>,
 }
 
 /// Synchronous Cymule adapter over one asynchronous Apache object store.
@@ -167,6 +171,12 @@ impl ObjectResourceStore {
                 "object-store upload record identity changed".to_owned(),
             ));
         }
+        if record.record_version != UPLOAD_RECORD_VERSION {
+            return Err(ResourceError::Integrity(format!(
+                "unsupported object-store upload record version {}",
+                record.record_version
+            )));
+        }
         Ok((record, version))
     }
 
@@ -191,15 +201,24 @@ impl ObjectResourceStore {
         Ok(result.into())
     }
 
-    fn resource_path(&self, resource: &ResourceHandle) -> ResourceResult<Path> {
-        let reference = resource
+    fn resource_path(
+        &self,
+        resource: &ResourceHandle,
+        locators: &ResourceLocatorSet,
+    ) -> ResourceResult<Path> {
+        locators.verify_for(resource)?;
+        if locators.resolver_binding != self.binding {
+            return Err(ResourceError::NotFound(format!(
+                "Resource {} has no object-store location for {}",
+                resource.resource_id, self.binding
+            )));
+        }
+        let reference = locators
             .locations
             .iter()
             .find_map(|location| match location {
-                ResourceLocation::Resolver { binding, reference } if binding == &self.binding => {
-                    Some(reference.as_str())
-                }
-                _ => None,
+                ResourceLocation::Opaque { reference } => Some(reference.as_str()),
+                ResourceLocation::PublicUrl { .. } => None,
             })
             .ok_or_else(|| {
                 ResourceError::NotFound(format!(
@@ -259,6 +278,60 @@ impl ObjectResourceStore {
         }
         Ok(())
     }
+
+    fn delete_if_present(&self, path: &Path) -> ResourceResult<bool> {
+        let present = !self.is_absent(path)?;
+        if !present {
+            return Ok(false);
+        }
+        let store = Arc::clone(&self.store);
+        let path = path.clone();
+        match self.block_on(async move { store.delete(&path).await })? {
+            Ok(()) => Ok(true),
+            Err(ObjectError::NotFound { .. }) => Ok(false),
+            Err(error) => Err(object_error(error)),
+        }
+    }
+
+    fn is_absent(&self, path: &Path) -> ResourceResult<bool> {
+        let store = Arc::clone(&self.store);
+        let path = path.clone();
+        match self.block_on(async move { store.head(&path).await })? {
+            Err(ObjectError::NotFound { .. }) => Ok(true),
+            Ok(_) => Ok(false),
+            Err(error) => Err(object_error(error)),
+        }
+    }
+
+    fn cleanup_upload(
+        &self,
+        session: &ResourceWriteSession,
+        chunks: &[ChunkRecord],
+    ) -> ResourceResult<ResourceCleanupReceipt> {
+        let staging = self.staging_path(&session.upload_id)?;
+        let removed_staging_objects = u64::from(self.delete_if_present(&staging)?);
+        let mut removed_chunks = 0_u64;
+        for chunk in chunks {
+            let path = self.chunk_path(&session.upload_id, chunk.offset)?;
+            removed_chunks += u64::from(self.delete_if_present(&path)?);
+        }
+        let mut verified_absent = self.is_absent(&staging)?;
+        for chunk in chunks {
+            verified_absent &=
+                self.is_absent(&self.chunk_path(&session.upload_id, chunk.offset)?)?;
+        }
+        let receipt = ResourceCleanupReceipt {
+            receipt_version: RESOURCE_CLEANUP_RECEIPT_VERSION.to_owned(),
+            write_id: session.write_id.clone(),
+            upload_id: session.upload_id.clone(),
+            store_binding: self.binding.clone(),
+            removed_staging_objects,
+            removed_chunks,
+            verified_absent,
+        };
+        receipt.verify()?;
+        Ok(receipt)
+    }
 }
 
 impl Drop for ObjectResourceStore {
@@ -282,12 +355,13 @@ impl ArtifactStore for ObjectResourceStore {
         }
         let upload_id = Self::upload_id(&intent.write_id);
         let record = UploadRecord {
+            record_version: UPLOAD_RECORD_VERSION.to_owned(),
             intent: intent.clone(),
             upload_id: upload_id.clone(),
             next_offset: 0,
             chunks: Vec::new(),
             state: UploadState::Open,
-            handle: None,
+            publication: None,
         };
         match self.put_record(&record, PutMode::Create) {
             Ok(_) => {}
@@ -406,16 +480,43 @@ impl ArtifactStore for ObjectResourceStore {
         }
     }
 
-    fn commit_write(&mut self, session: &ResourceWriteSession) -> ResourceResult<ResourceHandle> {
+    fn commit_write(
+        &mut self,
+        session: &ResourceWriteSession,
+    ) -> ResourceResult<ResourcePublication> {
         let (mut record, version) = self.load_record(&session.upload_id)?;
         if record.intent.write_id != session.write_id || session.store_binding != self.binding {
             return Err(ResourceError::Conflict(
                 "object-store commit identity changed".to_owned(),
             ));
         }
-        if let Some(handle) = &record.handle {
-            handle.verify()?;
-            return Ok(handle.clone());
+        if let Some(publication) = &record.publication {
+            publication.verify()?;
+            self.verify_object(
+                &self.resource_path(&publication.resource, &publication.locators)?,
+                publication
+                    .resource
+                    .integrity
+                    .content_digest()
+                    .ok_or_else(|| {
+                        ResourceError::Integrity(
+                            "object-store publication is not content addressed".to_owned(),
+                        )
+                    })?
+                    .strip_prefix("sha256:")
+                    .expect("validated digest"),
+                publication
+                    .resource
+                    .integrity
+                    .content_size()
+                    .ok_or_else(|| {
+                        ResourceError::Integrity(
+                            "object-store publication is not content addressed".to_owned(),
+                        )
+                    })?,
+            )?;
+            self.cleanup_upload(session, &record.chunks)?;
+            return Ok(publication.clone());
         }
         if record.state != UploadState::Open {
             return Err(ResourceError::Conflict(
@@ -467,7 +568,7 @@ impl ArtifactStore for ObjectResourceStore {
             Err(error) => return Err(object_error(error)),
         }
         self.verify_object(&destination, &hex, observed_size)?;
-        let handle = ResourceCandidate {
+        let resource = ResourceCandidate {
             resource_version: cymule_resource::RESOURCE_VERSION.to_owned(),
             shape: ResourceShape::Object,
             media_type: record.intent.media_type.clone(),
@@ -476,20 +577,29 @@ impl ArtifactStore for ObjectResourceStore {
                 digest: format!("sha256:{hex}"),
                 size: observed_size,
             },
-            locations: vec![ResourceLocation::Resolver {
-                binding: self.binding.clone(),
-                reference: format!("sha256:{hex}"),
-            }],
+            manifest: None,
             annotations: record.intent.annotations.clone(),
         }
         .seal()?;
+        let publication = ResourcePublication {
+            locators: ResourceLocatorSet {
+                locator_version: RESOURCE_LOCATOR_VERSION.to_owned(),
+                resource_id: resource.resource_id.clone(),
+                resolver_binding: self.binding.clone(),
+                locations: vec![ResourceLocation::Opaque {
+                    reference: format!("sha256:{hex}"),
+                }],
+            },
+            resource,
+        };
+        publication.verify()?;
         record.state = UploadState::Committed;
-        record.handle = Some(handle.clone());
+        record.publication = Some(publication.clone());
         match self.put_record(&record, PutMode::Update(version)) {
             Ok(_) => {}
             Err(ResourceError::Conflict(_)) => {
                 let (reopened, _) = self.load_record(&session.upload_id)?;
-                if reopened.handle.as_ref() != Some(&handle) {
+                if reopened.publication.as_ref() != Some(&publication) {
                     return Err(ResourceError::Conflict(
                         "object-store commit receipt changed".to_owned(),
                     ));
@@ -497,12 +607,14 @@ impl ArtifactStore for ObjectResourceStore {
             }
             Err(error) => return Err(error),
         }
-        let store = Arc::clone(&self.store);
-        let _ = self.block_on(async move { store.delete(&staging).await });
-        Ok(handle)
+        self.cleanup_upload(session, &record.chunks)?;
+        Ok(publication)
     }
 
-    fn abort_write(&mut self, session: &ResourceWriteSession) -> ResourceResult<()> {
+    fn abort_write(
+        &mut self,
+        session: &ResourceWriteSession,
+    ) -> ResourceResult<ResourceCleanupReceipt> {
         let (mut record, version) = self.load_record(&session.upload_id)?;
         if record.intent.write_id != session.write_id || session.store_binding != self.binding {
             return Err(ResourceError::Conflict(
@@ -510,18 +622,22 @@ impl ArtifactStore for ObjectResourceStore {
             ));
         }
         if record.state == UploadState::Committed {
-            return Ok(());
+            return self.cleanup_upload(session, &record.chunks);
         }
         record.state = UploadState::Aborted;
         self.put_record(&record, PutMode::Update(version))?;
-        Ok(())
+        self.cleanup_upload(session, &record.chunks)
     }
 }
 
 impl ArtifactResolver for ObjectResourceStore {
-    fn stat(&mut self, resource: &ResourceHandle) -> ResourceResult<ResourceObservation> {
+    fn stat(
+        &mut self,
+        resource: &ResourceHandle,
+        locators: &ResourceLocatorSet,
+    ) -> ResourceResult<ResourceObservation> {
         resource.verify()?;
-        let path = self.resource_path(resource)?;
+        let path = self.resource_path(resource, locators)?;
         let store = Arc::clone(&self.store);
         let metadata = self
             .block_on(async move { store.head(&path).await })?
@@ -542,10 +658,11 @@ impl ArtifactResolver for ObjectResourceStore {
     fn read(
         &mut self,
         resource: &ResourceHandle,
+        locators: &ResourceLocatorSet,
         offset: u64,
         max_bytes: u32,
     ) -> ResourceResult<ResourceChunk> {
-        self.stat(resource)?;
+        self.stat(resource, locators)?;
         let ResourceIntegrity::Content { size, .. } = &resource.integrity else {
             return Err(ResourceError::Validation(
                 "object-store reads require content integrity".to_owned(),
@@ -558,7 +675,7 @@ impl ArtifactResolver for ObjectResourceStore {
             ));
         }
         let end = offset.saturating_add(u64::from(max_bytes)).min(size);
-        let path = self.resource_path(resource)?;
+        let path = self.resource_path(resource, locators)?;
         let store = Arc::clone(&self.store);
         let bytes = self
             .block_on(async move { store.get_range(&path, offset..end).await })?
@@ -573,6 +690,7 @@ impl ArtifactResolver for ObjectResourceStore {
     fn list(
         &mut self,
         _resource: &ResourceHandle,
+        _locators: &ResourceLocatorSet,
         _cursor: Option<&str>,
         _limit: u32,
     ) -> ResourceResult<ResourcePage> {

@@ -200,12 +200,13 @@ history.
 
 Status: implemented.
 
-Run state and outputs can use a versioned resource descriptor rather than
+Run state and outputs use a semantic-only `cymule.resource/2` descriptor rather than
 assuming every Artifact is a small inline blob. The descriptor separates
 logical shape and replay evidence from realization: inline text/JSON/bytes,
 immutable objects, directory or collection manifests, and sandbox/workspace
-snapshots share one contract. External URLs and storage locators are resolved by
-bounded `ArtifactResolver` reads/lists; chunked writes use `ArtifactStore`.
+snapshots share one contract. Separate `cymule.resource-locators/1` records route
+external URLs and opaque storage references through bounded `ArtifactResolver`
+reads/lists; chunked writes use `ArtifactStore`.
 Concrete local, object-storage, remote-drive, WebDAV, sandbox, and HTTP
 implementations remain plugins.
 
@@ -217,13 +218,16 @@ content digest or immutable version evidence.
 
 `cymule-resource` owns this higher-profile contract; `cymule-core` remains
 unchanged. Resource ID covers shape, media type, inline/content/version/live
-evidence, and semantic annotations but deliberately excludes locations. The
+evidence, optional content-manifest descriptor, and semantic annotations. It
+deliberately excludes locator sets, signed URLs, grants, and credential
+revisions. The
 trusted Rust resource sealer validates and hashes candidates. TypeScript,
 Python, Rust, and Go builders call that sealer through the Engine protocol.
 
 `ResourceHandoffController` appends a typed, self-validating transfer to the
-target Run's M1 application journal. The caller supplies source Run, target Run,
-stable transfer ID, and target slot. Handoffs survive reopen, retry
+target Run's M1 application journal. The caller supplies an exact producer Run,
+component occurrence and output Artifact, target Run, stable transfer ID, and
+target slot. Handoffs survive reopen, retry
 idempotently, and reject conflicting ID reuse without adding Resource semantics
 to M1 storage.
 
@@ -232,6 +236,19 @@ can activate it atomically: canonical Resource Handle bytes become an Artifact,
 the transfer and activation records enter separate typed journals, the wait
 completes, and its Continuation becomes ready in one M1 revision. This is a
 generic input-delivery seam, not a queue or Agent message model.
+
+Listable content uses canonical sorted JSON-lines manifests. The semantic
+descriptor retains byte digest/size, entry count, and Merkle root; each bounded
+page supplies contiguous per-entry inclusion paths. This borrows only the
+content-descriptor principle used by OCI: media type, digest, size, immutable
+content, and independent retrieval. Cymule does not import an OCI registry,
+repository, tag, platform, distribution, or credential model.
+
+`ResourceLifecycleLedger` is the provider-neutral pin/release/GC/delete receipt
+authority. Store plugins own physical deletion and must verify exact absence.
+Filesystem and object-store uploads likewise return verified cleanup receipts
+after removing every owned staging/chunk object; a best-effort delete is not a
+terminal state.
 
 ## Large virtual work
 

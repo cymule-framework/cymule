@@ -9,6 +9,11 @@
   Resource-published/consumer-checkpoint-not-yet-acknowledged recovery window.
 - Write and fsync a unique staging object before linking it into the content
   namespace. Never expose partial bytes at a committed Resource location.
+- Whether the content link is newly created or already exists, verify its exact
+  digest and size, fsync the objects directory, remove this upload's staging
+  object, fsync staging, and only then persist the committed publication. A
+  committed import replay compares source and retained content in one sequential
+  pass; never hash the whole object once per retried chunk.
 - `cymule.resource-fs-upload/2` records the only acknowledged chunk frontier.
   Sync bytes and a newly created upload directory entry before atomically
   advancing that frontier. On reopen, truncate only bytes beyond it; bytes below
@@ -25,3 +30,5 @@
   complete tree.
 - Cross-process writer claims are non-blocking. Contention returns a Resource
   conflict; retry policy belongs to the caller.
+- Commit replay and abort remove the upload data and owned staging file, fsync
+  both directories, verify absence, and return `cymule.resource-cleanup-receipt/1`.

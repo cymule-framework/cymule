@@ -2,6 +2,8 @@
 
 mod error;
 mod handoff;
+mod lifecycle;
+mod manifest;
 mod model;
 mod resolver;
 mod store;
@@ -10,11 +12,23 @@ mod type_contract;
 pub use error::{ResourceError, ResourceResult, ResourceSchemaIssue};
 pub use handoff::{
     RESOURCE_HANDOFF_ACTIVATION_VERSION, RESOURCE_HANDOFF_VERSION, ResourceHandoff,
-    ResourceHandoffActivation, ResourceHandoffController,
+    ResourceHandoffActivation, ResourceHandoffController, ResourceProducerProvenance,
+};
+pub use lifecycle::{
+    RESOURCE_CLEANUP_RECEIPT_VERSION, RESOURCE_DELETE_RECEIPT_VERSION, RESOURCE_GC_RECEIPT_VERSION,
+    RESOURCE_PIN_RECEIPT_VERSION, RESOURCE_RELEASE_RECEIPT_VERSION, ResourceCleanupReceipt,
+    ResourceDeleteReceipt, ResourceDeleter, ResourceGcDisposition, ResourceGcReceipt,
+    ResourceLifecycle, ResourceLifecycleLedger, ResourcePinReceipt, ResourceReleaseReceipt,
+};
+pub use manifest::{
+    ManifestInclusionProof, MerkleSide, MerkleStep, RESOURCE_LIST_PROOF_VERSION,
+    RESOURCE_MANIFEST_MEDIA_TYPE, RESOURCE_MANIFEST_VERSION, ResourceListProof,
+    ResourceManifestDescriptor, ResourceManifestEntry, SealedResourceManifest,
 };
 pub use model::{
-    INLINE_RESOURCE_LIMIT, InlineData, RESOURCE_VERSION, ResourceCandidate, ResourceHandle,
-    ResourceIntegrity, ResourceLocation, ResourceReplayClass, ResourceShape,
+    INLINE_RESOURCE_LIMIT, InlineData, RESOURCE_LOCATOR_VERSION, RESOURCE_VERSION,
+    ResourceCandidate, ResourceHandle, ResourceIntegrity, ResourceLocation, ResourceLocatorSet,
+    ResourcePublication, ResourceReplayClass, ResourceShape,
 };
 pub use resolver::{
     ArtifactResolver, MAX_LIST_PAGE, MAX_READ_CHUNK, ResourceChunk, ResourceClient, ResourceEntry,
@@ -25,5 +39,6 @@ pub use store::{
 };
 pub use type_contract::{
     ARTIFACT_TYPE_CONTRACT_KIND, ARTIFACT_TYPE_CONTRACT_VERSION, ArtifactTypeCandidate,
-    ArtifactTypeContract, ArtifactTypeRegistry, CANONICAL_JSON_MEDIA_TYPE, JSON_SCHEMA_DIALECT,
+    ArtifactTypeContract, ArtifactTypeRegistry, CANONICAL_JSON_MEDIA_TYPE, FrameworkArtifactType,
+    JSON_SCHEMA_DIALECT, framework_artifact_contract, framework_artifact_contracts,
 };

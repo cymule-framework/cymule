@@ -12,7 +12,7 @@
 - The Rust `Engine` surface returns `EngineFailure`, not `CoreError`. Preserve
   remote category, phase, code, contract issues, and retry disposition exactly;
   synthesize `transport_failure` only when no valid Engine envelope was received.
-- Resource builders emit `cymule.resource/1` candidates. Only the Rust Engine
+- Resource builders emit semantic-only `cymule.resource/2` candidates. Only the Rust Engine
   seals Resource IDs; the SDK must not duplicate the resource canonicalizer.
 - Re-export the closed `ArtifactRef` with its required `cymule.artifact/2`
   identity version. Typed contract selection remains pinned by the reference,

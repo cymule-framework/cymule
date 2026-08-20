@@ -15,15 +15,24 @@ export type ResourceIntegrity =
   | { kind: "live"; identity: string };
 export type ResourceLocation =
   | { kind: "public_url"; url: string }
-  | { kind: "resolver"; binding: string; reference: string };
+  | { kind: "opaque"; reference: string };
+
+export interface ResourceManifestDescriptor {
+  manifest_version: "cymule.resource-manifest/1";
+  media_type: "application/vnd.cymule.resource-manifest+jsonl";
+  digest: string;
+  size: number;
+  entry_count: number;
+  root_digest: string;
+}
 
 export interface ResourceCandidate {
-  resource_version: "cymule.resource/1";
+  resource_version: "cymule.resource/2";
   shape: ResourceShape;
   media_type: string;
   inline?: InlineData;
   integrity: ResourceIntegrity;
-  locations?: ResourceLocation[];
+  manifest?: ResourceManifestDescriptor;
   annotations?: Record<string, string>;
 }
 
@@ -32,9 +41,9 @@ export interface ResourceHandle extends ResourceCandidate {
 }
 
 export interface ResourceHandoff {
-  handoff_version: "cymule.resource-handoff/1";
+  handoff_version: "cymule.resource-handoff/2";
   transfer_id: string;
-  from_run: string;
+  producer: { run_id: string; occurrence_id: string; result: ArtifactRef };
   to_run: string;
   slot: string;
   resource: ResourceHandle;
@@ -1270,7 +1279,7 @@ export class VirtualSchedulingControlBuilder {
 export class ResourceBuilder {
   static text(text: string, annotations: Record<string, string> = {}): ResourceCandidate {
     return {
-      resource_version: "cymule.resource/1",
+      resource_version: "cymule.resource/2",
       shape: "inline",
       media_type: "text/plain;charset=utf-8",
       inline: { encoding: "utf8", text },
@@ -1281,7 +1290,7 @@ export class ResourceBuilder {
 
   static json(value: Json, annotations: Record<string, string> = {}): ResourceCandidate {
     return {
-      resource_version: "cymule.resource/1",
+      resource_version: "cymule.resource/2",
       shape: "inline",
       media_type: "application/json",
       inline: { encoding: "json", value },
@@ -1294,30 +1303,30 @@ export class ResourceBuilder {
     shape: Exclude<ResourceShape, "inline">,
     mediaType: string,
     integrity: Exclude<ResourceIntegrity, { kind: "inline" }>,
-    locations: ResourceLocation[],
+    manifest: ResourceManifestDescriptor | undefined = undefined,
     annotations: Record<string, string> = {},
   ): ResourceCandidate {
     return {
-      resource_version: "cymule.resource/1",
+      resource_version: "cymule.resource/2",
       shape,
       media_type: mediaType,
       integrity,
-      locations,
+      ...(manifest === undefined ? {} : { manifest }),
       annotations,
     };
   }
 
   static handoff(
     transferId: string,
-    fromRun: string,
+    producer: { run_id: string; occurrence_id: string; result: ArtifactRef },
     toRun: string,
     slot: string,
     resource: ResourceHandle,
   ): ResourceHandoff {
     return {
-      handoff_version: "cymule.resource-handoff/1",
+      handoff_version: "cymule.resource-handoff/2",
       transfer_id: transferId,
-      from_run: fromRun,
+      producer: structuredClone(producer),
       to_run: toRun,
       slot,
       resource,

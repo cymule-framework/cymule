@@ -3,7 +3,10 @@
 - This crate owns provider-neutral resource descriptors, replay classification,
   bounded resolver/store interfaces, and M1 Run-to-Run handoff records. It does
   not own storage credentials, provider configuration, or semantic reduction.
-- Resource identity excludes realization locations. Content digest, immutable
+- `cymule.resource/2` Resource identity excludes realization locations.
+  `ResourceLocatorSet` is a separate replaceable resolver record; signed URLs,
+  access grants, sessions, and credential revisions never enter the semantic
+  descriptor or locator set. Content digest, immutable
   version authority, logical shape, media type, and semantic annotations define
   identity; moving bytes must not create a different resource.
 - Credentials, signed URLs, session tokens, and provider secrets never enter a
@@ -14,10 +17,17 @@
   or verified content-addressed resources are location-independent exact data.
 - Read and list APIs are bounded and cursor-based. Never require a directory,
   collection, snapshot, or large object to materialize in memory.
+- An exact directory, collection, or snapshot list is backed by canonical
+  `cymule.resource-manifest/1` JSON-lines bytes and a semantic descriptor that
+  pins byte digest, byte size, entry count, and Merkle root. Every returned page
+  carries `cymule.resource-list-proof/1`; framework code verifies each entry's
+  contiguous index and inclusion path before exposing the page.
 - Higher-profile handoffs use M1 application journals and stable caller-supplied
   transfer IDs. Reuse with different semantics fails closed.
 - Handoff input activation requires a target input wait whose Run and
-  correlation match the handoff. Commit the canonical Resource Handle Artifact,
+  correlation match the handoff. The handoff must name an existing producer
+  component occurrence and its exact output Artifact, and Resource bytes must
+  match that result. Commit the exact-contract Resource Handle Artifact,
   transfer and activation records, wait result, and Continuation readiness in
   one M1 CAS; lost receipts replay the same activation.
 - Concrete local, object-storage, drive, WebDAV, sandbox, and HTTP adapters live
@@ -30,3 +40,10 @@
   integrity verification finish before contract decode. Opaque file, directory,
   collection, and snapshot bytes remain valid Resources without a contract or
   schema. Schema errors expose pointer paths and never rejected values.
+- Framework Resource Handles, manifests, list proofs, handoffs, and lifecycle
+  receipts use the closed framework `ArtifactTypeContract` registry. Do not
+  replace one of these exact contracts with a caller-chosen schema.
+- Pin, release, GC, delete, and upload cleanup identities are stable and
+  replayable. A delete requires an eligible zero-pin GC receipt plus exact
+  provider absence readback. Abort and completed-write convergence remove every
+  owned staging/chunk object and return verified cleanup evidence.

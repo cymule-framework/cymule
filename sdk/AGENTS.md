@@ -30,8 +30,10 @@
 - Migration and restart commands carry exact safe-point IDs and source epochs.
   SDKs never derive safe points, reinterpret old state, or initialize the
   replacement Run locally.
-- SDKs also author the same `cymule.resource/1` candidates and Run handoff wire
-  records. They delegate Resource ID validation and sealing to the Rust Engine.
+- SDKs also author the same semantic-only `cymule.resource/2` candidates and
+  producer-provenance `cymule.resource-handoff/2` wire records. Locators, grants,
+  signed URLs, and credential revisions never enter candidates. SDKs delegate
+  Resource ID validation and sealing to the Rust Engine.
 - Keep APIs idiomatic in each language while preserving explicit site IDs,
   effect occurrence keys, scopes, risk profiles, and version information.
 - Cross-language fixtures must produce the same Plan ID, Resource ID, and
