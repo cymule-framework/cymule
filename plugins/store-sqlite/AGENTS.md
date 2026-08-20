@@ -16,3 +16,6 @@
 - Real process-death sweeps use the workspace-private `TestWorld` temporary
   domain and `ManagedChild` barrier/reap lifecycle. Do not reintroduce local
   child guards or wall-clock race polling.
+- Process-kill workers construct the same explicit content-addressed execution
+  binding before every open and reopen; the store never invents provider
+  identity from a live manifest.

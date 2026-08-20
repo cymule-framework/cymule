@@ -16,14 +16,15 @@ use std::time::Duration;
 use cymule_core::{
     Definition, DispatchPolicy, EffectContract, EffectProfile, Expression, MutationKind, Operation,
     PlanCandidate, ReconciliationMode, ReconciliationResolution, Region, Step, WorldOutcome,
+    sha256_bytes,
 };
 use cymule_durable::{
     DriveOutcome, DurableResult, DurableState, DurableStore, OutboxState, ResumableRuntime,
     StoreCommit, StoredState,
 };
 use cymule_runtime::{
-    PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginRequest, PluginResponse,
-    RuntimeError, RuntimeResult,
+    ExecutionBinding, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginRequest,
+    PluginResponse, RuntimeError, RuntimeResult,
 };
 use cymule_store_sqlite::SqliteStore;
 use cymule_test_world::{ManagedChild, TestWorld};
@@ -251,6 +252,22 @@ impl PluginHost for LedgerPlugin {
     }
 }
 
+fn open_runtime<S: DurableStore>(
+    store: S,
+    mut plugin: LedgerPlugin,
+) -> ResumableRuntime<S, LedgerPlugin> {
+    let manifest = plugin.describe().expect("ledger manifest describes");
+    let binding = ExecutionBinding::for_local_process(
+        &manifest,
+        format!(
+            "sha256:{}",
+            sha256_bytes(b"cymule-store-sqlite-process-kill-ledger/1")
+        ),
+    )
+    .expect("ledger execution binding admits");
+    ResumableRuntime::open(store, plugin, binding).expect("runtime opens")
+}
+
 fn effect_candidate() -> PlanCandidate {
     PlanCandidate {
         ir_version: cymule_core::IR_VERSION.to_owned(),
@@ -318,8 +335,7 @@ fn m1_process_kill_worker_entry() {
         calls: 0,
         marker,
     };
-    let mut runtime =
-        ResumableRuntime::open(store, LedgerPlugin { database: ledger }).expect("runtime opens");
+    let mut runtime = open_runtime(store, LedgerPlugin { database: ledger });
     runtime
         .start(
             effect_candidate(),
@@ -343,7 +359,7 @@ fn every_m1_effect_run_cas_boundary_survives_real_process_death() {
         .expect("baseline ledger path resolves");
     LedgerPlugin::initialize(&baseline_ledger);
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut runtime = ResumableRuntime::open(
+    let mut runtime = open_runtime(
         CountingStore {
             inner: SqliteStore::open(&baseline_database, "domain:m1-kill")
                 .expect("baseline store opens"),
@@ -352,8 +368,7 @@ fn every_m1_effect_run_cas_boundary_survives_real_process_death() {
         LedgerPlugin {
             database: baseline_ledger,
         },
-    )
-    .expect("baseline runtime opens");
+    );
     assert!(matches!(
         runtime
             .start(
@@ -409,13 +424,12 @@ fn every_m1_effect_run_cas_boundary_survives_real_process_death() {
 
             let store =
                 SqliteStore::open(&database, "domain:m1-kill").expect("durable store reopens");
-            let mut runtime = ResumableRuntime::open(
+            let mut runtime = open_runtime(
                 store,
                 LedgerPlugin {
                     database: ledger.clone(),
                 },
-            )
-            .expect("runtime reopens");
+            );
             let outcome = if runtime.coordinator().revision().is_some() {
                 runtime.resume("run:m1-kill")
             } else {
