@@ -7,11 +7,9 @@ mod error;
 mod plugin;
 
 pub use composition::{
-    AcquiredRuntimeLayer, BINDING_CONTEXT_ID_DOMAIN, BindingContextDescriptor, CompositionError,
-    LayerReleaseFailure, RUNTIME_COMPOSITION_VERSION, RuntimeComposition, RuntimeCompositionGraph,
-    RuntimeImplementation, RuntimeLayerDescriptor, RuntimeLayerFactory, RuntimeLayerFailure,
-    RuntimeLayerLifecycle, RuntimeLayerShareScope, RuntimeServiceBinding, RuntimeServices,
-    ServiceBindingDescriptor, ServiceKey,
+    BINDING_CONTEXT_ID_DOMAIN, BindingContextDescriptor, CompositionError,
+    RUNTIME_COMPOSITION_VERSION, RequirementAdmission, RuntimeCompositionGraph,
+    RuntimeImplementation, RuntimeProviderDescriptor, ServiceBindingDescriptor, ServiceKey,
 };
 pub use contract::{
     CONTRACT_SCHEMA_DIALECT, ContractBoundary, ContractIssue, ContractPhase, ContractResult,

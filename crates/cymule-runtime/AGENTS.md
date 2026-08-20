@@ -23,21 +23,19 @@
   interpret the repeat as a new world mutation.
 - Keep the reference runtime synchronous and dependency-light. Production async,
   durable, and distributed realizations should be separate adapters.
-- Runtime composition binds exact, versioned `ServiceKey` contracts through a
+- Runtime binding admits exact, versioned `ServiceKey` contracts through a
   deterministic provider-before-consumer graph. The content-addressed binding
-  descriptor contains implementation identities, schema digests, and an
-  irreversible fingerprint of canonical non-secret configuration plus
-  secret/version reference identity. It never contains provider configuration,
-  endpoints, credentials, or other secret values.
+  descriptor serializes only normalized provider input: implementation
+  identities, service dependencies, provider properties, schema digests, and
+  an irreversible fingerprint of canonical non-secret configuration plus
+  secret/version reference identity. It never serializes topology, derived
+  binding tables, provider configuration, endpoints, credentials, or secrets.
 - A service binding is not a capability advertisement, policy admission, or
-  authority grant. Keep those decisions outside the composition graph and pin
-  only the resulting opaque binding-context identity in core semantics.
-- `RuntimeLayerFactory` acquisition and reverse-order finalization manage only
-  process-local resources. Finalizers are not durable cleanup and never replace
-  Cymule effect obligations, reconciliation, or crash recovery.
-- Composition is immutable after acquisition and uses no lock as semantic
-  authority. Add concurrency or provider-specific lifecycle machinery only in
-  adapters that preserve the same descriptor and acquisition laws.
-- `binding_context` is the only supported composition share scope. It means one
-  acquired service instance per binding context and does not imply Run- or
-  occurrence-scoped construction.
+  authority grant. `PluginManifest` remains capability advertisement only.
+  Match existing Plan requirement maps exactly against provider properties,
+  then perform policy and authority admission independently. Pin only the final
+  opaque binding-context identity in core semantics.
+- Runtime binding owns no DI container, factory lifecycle, finalizer, or live
+  provider object. Ordinary Rust ownership and provider adapters manage
+  process-local resources; durable cleanup remains an explicit effect
+  obligation and reconciliation concern.
