@@ -27,7 +27,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
@@ -38,15 +38,16 @@ publish = ["crates-io"]
 
 [workspace.dependencies]
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
-cymule = { version = "0.1.4", path = "crates/cymule-sdk" }
-cymule-agent = { version = "0.1.4", path = "plugins/agent-interaction" }
-cymule-core = { version = "0.1.4", path = "crates/cymule-core" }
-cymule-durable = { version = "0.1.4", path = "crates/cymule-durable" }
-cymule-evolution = { version = "0.1.4", path = "crates/cymule-evolution" }
-cymule-executor-process = { version = "0.1.4", path = "plugins/executor-process" }
-cymule-resource = { version = "0.1.4", path = "crates/cymule-resource" }
-cymule-runtime = { version = "0.1.4", path = "crates/cymule-runtime" }
-cymule-virtual = { version = "0.1.4", path = "crates/cymule-virtual" }
+cymule = { version = "0.2.0", path = "crates/cymule-sdk" }
+cymule-agent = { version = "0.2.0", path = "plugins/agent-interaction" }
+cymule-core = { version = "0.2.0", path = "crates/cymule-core" }
+cymule-directory-store = { version = "0.2.0", path = "plugins/directory-store" }
+cymule-durable = { version = "0.2.0", path = "crates/cymule-durable" }
+cymule-evolution = { version = "0.2.0", path = "crates/cymule-evolution" }
+cymule-executor-process = { version = "0.2.0", path = "plugins/executor-process" }
+cymule-resource = { version = "0.2.0", path = "crates/cymule-resource" }
+cymule-runtime = { version = "0.2.0", path = "crates/cymule-runtime" }
+cymule-virtual = { version = "0.2.0", path = "crates/cymule-virtual" }
 axum = "0.8.9"
 futures-util = "0.3.34"
 jsonschema = { version = "0.49.9", default-features = false }

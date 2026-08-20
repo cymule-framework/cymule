@@ -42,7 +42,7 @@ versioned canonical JSON through an `Engine` interface. The supplied CLI engine
 uses stdin/stdout, making the boundary usable in local tools and conformance
 tests without choosing an RPC stack.
 
-`cymule.engine/1` wraps every operation and every response. Success and failure
+`cymule.engine/2` wraps every operation and every response. Success and failure
 share stdout and a single closed envelope; a nonzero process status means the
 transport could not carry that envelope. Failures retain category, processing
 phase, stable code, optional contract issues, and only a recovery disposition

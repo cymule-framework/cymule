@@ -69,12 +69,12 @@ def main() -> int:
                 f"{schema_name} accepted a malformed Artifact reference",
             )
     engine_validator = Draft202012Validator(
-        by_title["Cymule Engine Protocol cymule.engine/1"], registry=registry
+        by_title["Cymule Engine Protocol cymule.engine/2"], registry=registry
     )
 
     def validate_engine_request(request: object) -> None:
         engine_validator.validate(
-            {"engine_protocol": "cymule.engine/1", "request": request}
+            {"engine_protocol": "cymule.engine/2", "request": request}
         )
 
     candidate_validator = Draft202012Validator(
@@ -104,7 +104,7 @@ def main() -> int:
     engine_validator.validate(
         {
             "outcome": "success",
-            "engine_protocol": "cymule.engine/1",
+            "engine_protocol": "cymule.engine/2",
             "response": {"type": "sealed", "plan": sealed},
         }
     )
@@ -126,7 +126,7 @@ def main() -> int:
         engine_validator.validate(
             {
                 "outcome": "failure",
-                "engine_protocol": "cymule.engine/1",
+                "engine_protocol": "cymule.engine/2",
                 "error": {
                     "category": category,
                     "phase": "transport",
@@ -140,7 +140,7 @@ def main() -> int:
             [str(engine), "rpc"],
             input=json.dumps(
                 {
-                    "engine_protocol": "cymule.engine/1",
+                    "engine_protocol": "cymule.engine/2",
                     "request": {"type": "seal", "candidate": candidate, "extra": True},
                 }
             ),
@@ -156,6 +156,24 @@ def main() -> int:
         or malformed_rpc["error"]["phase"] != "decode_request"
     ):
         raise AssertionError("Rust Engine did not return a structured decode failure")
+    duplicate_request = json.dumps(
+        {"engine_protocol": "cymule.engine/2", "request": {"type": "seal", "candidate": candidate}}
+    ).replace(
+        '"engine_protocol": "cymule.engine/2"',
+        '"engine_protocol": "cymule.engine/2", "engine_protocol": "cymule.engine/2"',
+        1,
+    )
+    duplicate_rpc = json.loads(
+        subprocess.run(
+            [str(engine), "rpc"],
+            input=duplicate_request,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    if duplicate_rpc["outcome"] != "failure" or duplicate_rpc["error"]["code"] != "invalid_engine_request":
+        raise AssertionError("Rust Engine accepted a duplicate JSON object key")
 
     plugin_validator = Draft202012Validator(
         by_title["Cymule Process Plugin Protocol cymule.plugin/2"], registry=registry
@@ -363,6 +381,24 @@ def main() -> int:
     validate_engine_request(
         {"type": "verify_durable_command", "command": durable_control}
     )
+    validate_engine_request(
+        {
+            "type": "execute_durable",
+            "store": "/tmp/cymule-schema-domain",
+            "plugin": "/tmp/cymule-schema-plugin",
+            "command": durable_control,
+        }
+    )
+    engine_validator.validate(
+        {
+            "outcome": "success",
+            "engine_protocol": "cymule.engine/2",
+            "response": {
+                "type": "durable_executed",
+                "response": {"type": "domain", "domain": {"revision": None, "run_ids": []}},
+            },
+        }
+    )
     malformed_durable = dict(durable_control)
     malformed_durable["provider"] = "must-not-enter-durable-control"
     try:
@@ -550,6 +586,24 @@ def main() -> int:
         raise AssertionError("Rust Engine changed the live-evolution fixture")
     validate_engine_request(
         {"type": "verify_live_evolution_command", "command": live_evolution}
+    )
+    validate_engine_request(
+        {
+            "type": "execute_live_evolution",
+            "store": "/tmp/cymule-schema-domain",
+            "journal_id": "schema:live-evolution",
+            "command": live_evolution,
+        }
+    )
+    engine_validator.validate(
+        {
+            "outcome": "success",
+            "engine_protocol": "cymule.engine/2",
+            "response": {
+                "type": "live_evolution_executed",
+                "response": {"result": "applied"},
+            },
+        }
     )
     malformed_live_evolution = dict(live_evolution)
     malformed_live_evolution["provider"] = "must-not-enter-live-evolution"

@@ -125,7 +125,7 @@ Use this precedence order when guidance conflicts:
   and must surface contention instead of waiting indefinitely.
 - Cross-language SDKs author the same frozen IR and use the same engine contract.
   They must not implement a second reducer or invent language-specific semantics.
-- `cymule.engine/1` is the only CLI Engine transport. Every request and every
+- `cymule.engine/2` is the only CLI Engine transport. Every request and every
   success or failure uses its versioned envelope; stderr and process status are
   transport diagnostics, never a second semantic error channel. A missing
   response never implies that retrying a potentially mutating request is safe.
@@ -133,6 +133,14 @@ Use this precedence order when guidance conflicts:
   Success tags, nested execution outcomes, and returned evolution commands are
   closed unions; unknown or overlapping variants and fields fail transport
   validation before reaching SDK callers.
+- The public `DurableEngine` is a transport facade over stateful Rust
+  `execute_durable` and `execute_live_evolution` requests. `start`, `get`,
+  `resume`, `signal`, `release`, and `evolve` must never fall back to local SDK
+  reduction or validation-only receipts.
+- Cross-language JSON accepts only unique object keys, finite numbers, and
+  integers in the shared exact range `-9007199254740991..=9007199254740991`.
+  A lost deadline or cancellation response after mutation begins is an
+  `unknown_world_outcome` requiring reconciliation.
 - `cymule.plugin/2` is the only process-plugin protocol. Expected component
   failures and defects are distinct closed response variants; an unclassified
   process error is never an expected application result. The official process

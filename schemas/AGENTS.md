@@ -4,7 +4,7 @@
 - Use JSON Schema Draft 2020-12 and reject unknown fields at closed boundaries.
 - A schema change requires a version-domain decision, fixtures, all SDK updates,
   and corresponding Rust deserialization and semantic-validation tests.
-- `engine-protocol.schema.json` owns both sides of `cymule.engine/1`: one
+- `engine-protocol.schema.json` owns both sides of `cymule.engine/2`: one
   versioned request envelope and one success-or-failure response envelope.
   Failure categories, phases, contract sides, issue bounds, and retry
   dispositions are closed and must match Rust plus every SDK. Contract issues

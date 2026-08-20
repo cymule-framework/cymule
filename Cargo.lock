@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "cymule"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",
@@ -348,11 +348,12 @@ dependencies = [
  "cymule-virtual",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
 name = "cymule-activation-http"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "axum",
  "cymule-core",
@@ -370,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-activation-timer"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-clock-system",
  "cymule-core",
@@ -386,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-agent"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",
@@ -402,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-agent-mcp"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-agent",
  "rmcp",
@@ -412,9 +413,10 @@ dependencies = [
 
 [[package]]
 name = "cymule-cli"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
+ "cymule-directory-store",
  "cymule-durable",
  "cymule-evolution",
  "cymule-executor-process",
@@ -426,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-clock-system"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",
@@ -439,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-core"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "jsonschema",
  "proptest",
@@ -451,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-directory-store"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",
@@ -462,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-durable"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-runtime",
@@ -474,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-evolution"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",
@@ -488,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-example-durable-evaluation-campaign"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",
@@ -505,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-example-hello-world"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule",
  "cymule-core",
@@ -515,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-executor-process"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-runtime",
@@ -526,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-observability-otel"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
@@ -540,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-resource"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "cymule-core",
@@ -555,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-resource-fs"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-resource",
@@ -569,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-resource-object-store"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-resource",
@@ -584,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-runtime"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "jsonschema",
@@ -594,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-store-sqlite"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",
@@ -608,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-test-adapter"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-runtime",
@@ -617,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-test-world"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "rand 0.9.5",
  "serde",
@@ -627,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "cymule-virtual"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",

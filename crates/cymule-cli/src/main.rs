@@ -6,8 +6,17 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use cymule_core::{PlanCandidate, SealedPlan, decode_json, seal_plan};
-use cymule_durable::{DurableCommand, WaitActivation};
-use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
+use cymule_directory_store::DirectoryStore;
+use cymule_durable::{
+    DurableCommand, DurableCoordinator, DurableResponse, DurableRuntimeControl, ResumableRuntime,
+    WaitActivation,
+};
+use cymule_evolution::{
+    DurableLiveEvolutionController, EvolutionCommand, EvolutionError, EvolutionResult,
+    LiveEvolutionCommand, LiveEvolutionResponse, MigrationAdapter, MigrationAdapterDescriptor,
+    MigrationOutput, MigrationRequest, ShadowDriver, ShadowDriverDescriptor, ShadowOutput,
+    ShadowRequest,
+};
 use cymule_executor_process::{ProcessExecutor, ProcessExecutorConfig};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{
@@ -42,6 +51,16 @@ enum EngineRequest {
     VerifyLiveEvolutionCommand {
         command: LiveEvolutionCommand,
     },
+    ExecuteDurable {
+        store: String,
+        plugin: String,
+        command: DurableCommand,
+    },
+    ExecuteLiveEvolution {
+        store: String,
+        journal_id: String,
+        command: LiveEvolutionCommand,
+    },
     Run {
         plan: SealedPlan,
         input: Value,
@@ -60,6 +79,8 @@ enum EngineResponse {
     VerifiedEvolutionCommand { command: EvolutionCommand },
     VerifiedLiveEvolutionCommand { command: LiveEvolutionCommand },
     ExecutionBoundary { execution: ExecutionOutcome },
+    DurableExecuted { response: DurableResponse },
+    LiveEvolutionExecuted { response: LiveEvolutionResponse },
     Verified,
 }
 
@@ -209,6 +230,20 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
             })?;
             EngineResponse::VerifiedLiveEvolutionCommand { command }
         }
+        EngineRequest::ExecuteDurable {
+            store,
+            plugin,
+            command,
+        } => EngineResponse::DurableExecuted {
+            response: execute_durable(&store, &plugin, command)?,
+        },
+        EngineRequest::ExecuteLiveEvolution {
+            store,
+            journal_id,
+            command,
+        } => EngineResponse::LiveEvolutionExecuted {
+            response: execute_live_evolution(&store, &journal_id, command)?,
+        },
         EngineRequest::Run {
             plan,
             input,
@@ -225,6 +260,87 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
         }
     };
     Ok(response)
+}
+
+fn execute_durable(
+    store: &str,
+    plugin: &str,
+    command: DurableCommand,
+) -> Result<DurableResponse, EngineFailure> {
+    let runtime = local_durable_runtime(store, plugin)
+        .map_err(|error| map_durable_error(&error, EnginePhase::ExecuteDurable))?;
+    DurableRuntimeControl::new(runtime)
+        .submit(command)
+        .map_err(|error| map_durable_error(&error, EnginePhase::ExecuteDurable))
+}
+
+fn local_durable_runtime(
+    store: &str,
+    executable: &str,
+) -> cymule_durable::DurableResult<ResumableRuntime<DirectoryStore, ProcessExecutor>> {
+    let store = DirectoryStore::open(store)?;
+    let mut plugin = ProcessExecutor::new(ProcessExecutorConfig::new(executable))
+        .map_err(|error| cymule_durable::DurableError::Substrate(error.to_string()))?;
+    let implementation_revision = plugin.implementation_revision().to_owned();
+    let manifest = plugin
+        .describe()
+        .map_err(|error| cymule_durable::DurableError::Substrate(error.to_string()))?;
+    let binding = ExecutionBinding::for_local_process(&manifest, implementation_revision)
+        .map_err(cymule_durable::DurableError::from)?;
+    ResumableRuntime::open(store, plugin, binding)
+}
+
+fn execute_live_evolution(
+    store: &str,
+    journal_id: &str,
+    command: LiveEvolutionCommand,
+) -> Result<LiveEvolutionResponse, EngineFailure> {
+    let store = DirectoryStore::open(store)
+        .map_err(|error| map_durable_error(&error, EnginePhase::ExecuteLiveEvolution))?;
+    let mut coordinator = DurableCoordinator::open(store)
+        .map_err(|error| map_durable_error(&error, EnginePhase::ExecuteLiveEvolution))?;
+    let mut controller = DurableLiveEvolutionController::load(&coordinator, journal_id)
+        .map_err(|error| map_evolution_error(&error, EnginePhase::ExecuteLiveEvolution))?;
+    let mut unsupported = UnsupportedEvolutionPlugin;
+    DurableLiveEvolutionController::submit(
+        &mut coordinator,
+        &mut controller,
+        journal_id,
+        command,
+        &mut unsupported,
+        &mut UnsupportedEvolutionPlugin,
+    )
+    .map_err(|error| map_evolution_error(&error, EnginePhase::ExecuteLiveEvolution))
+}
+
+struct UnsupportedEvolutionPlugin;
+
+impl MigrationAdapter for UnsupportedEvolutionPlugin {
+    fn describe(&mut self) -> EvolutionResult<MigrationAdapterDescriptor> {
+        Err(EvolutionError::Validation(
+            "the local CLI transport has no migration adapter binding".to_owned(),
+        ))
+    }
+
+    fn migrate(&mut self, _request: &MigrationRequest) -> EvolutionResult<MigrationOutput> {
+        Err(EvolutionError::Validation(
+            "the local CLI transport has no migration adapter binding".to_owned(),
+        ))
+    }
+}
+
+impl ShadowDriver for UnsupportedEvolutionPlugin {
+    fn describe(&mut self) -> EvolutionResult<ShadowDriverDescriptor> {
+        Err(EvolutionError::Validation(
+            "the local CLI transport has no shadow driver binding".to_owned(),
+        ))
+    }
+
+    fn execute(&mut self, _request: &ShadowRequest) -> EvolutionResult<ShadowOutput> {
+        Err(EvolutionError::Validation(
+            "the local CLI transport has no shadow driver binding".to_owned(),
+        ))
+    }
 }
 
 fn local_process_runtime(
@@ -390,7 +506,7 @@ mod tests {
     #[test]
     fn rpc_rejects_nested_duplicate_plan_members_before_typed_decode() {
         let error = decode_and_execute_request(
-            br#"{"engine_protocol":"cymule.engine/1","request":{"type":"seal","candidate":{"ir_version":"cymule.ir/2","ir_version":"changed"}}}"#,
+            br#"{"engine_protocol":"cymule.engine/2","request":{"type":"seal","candidate":{"ir_version":"cymule.ir/2","ir_version":"changed"}}}"#,
         )
         .expect_err("duplicate Plan member is rejected");
         assert_eq!(error.code.as_ref(), "invalid_engine_request");

@@ -142,16 +142,22 @@ tools = ["rust", "node"]
 commands = [["./scripts/verify-sdk.sh", "typescript"]]
 
 [suites.sdk-python]
-description = "Run the Python SDK against the freshly built Rust engine."
+description = "Run Python SDK E2E and install its wheel in a clean environment."
 lane = "sdk-python"
 tools = ["rust", "uv"]
-commands = [["./scripts/verify-sdk.sh", "python"]]
+commands = [
+  ["./scripts/verify-sdk.sh", "python"],
+  ["./scripts/verify-python-package.sh"],
+]
 
 [suites.sdk-go]
-description = "Run the Go SDK against the freshly built Rust engine."
+description = "Run Go SDK E2E and compile a clean external consumer."
 lane = "sdk-go"
 tools = ["rust", "go"]
-commands = [["./scripts/verify-sdk.sh", "go"]]
+commands = [
+  ["./scripts/verify-sdk.sh", "go"],
+  ["./scripts/verify-go-package.sh"],
+]
 
 [suites.example]
 description = "Run Hello World plus durable campaign crash, integrity, lease, and evolution paths."

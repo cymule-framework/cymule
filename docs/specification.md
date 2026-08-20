@@ -37,7 +37,7 @@ The following domains evolve independently:
 | Machine snapshot | `cymule.machine-snapshot/5` | authenticated compacted evidence, invocation paths, and lexical scope origins are required |
 | Event schema | `cymule.event/4` | readers reject incomplete or unknown semantic events |
 | Command protocol | `cymule.command/3` | execution-location proof is required for scope/effect admission |
-| Engine protocol | `cymule.engine/1` | one versioned request and success-or-failure response envelope |
+| Engine protocol | `cymule.engine/2` | stateful durable execution plus versioned success-or-failure envelopes |
 | Plugin protocol | `cymule.plugin/2` | capability negotiation and expected failure are explicit |
 | Resource descriptor | `cymule.resource/2` | semantic identity excludes locator/access state |
 | Resource locator set | `cymule.resource-locators/1` | replaceable resolver records target one exact descriptor |
@@ -67,7 +67,7 @@ or migration meaning requires a new semantic specification version.
 
 ### 3.1 Engine failures
 
-Every CLI Engine request and response MUST use `cymule.engine/1`. A semantic
+Every CLI Engine request and response MUST use `cymule.engine/2`. A semantic
 failure MUST be a successful transport response containing exactly one closed
 failure object with category, phase, stable code, and display-only message.
 Contract identity, side, JSON Pointer, bounded issues, and retry disposition are
@@ -89,6 +89,14 @@ disposition for an admitted external intent whose world outcome is unknown.
 
 SDKs MUST preserve the complete failure object. Process status and stderr are
 transport diagnostics only and MUST NOT become a parallel semantic error path.
+The CLI transport's `execute_durable` request MUST invoke the Rust durable
+runtime against one explicitly configured store and immutable plugin. Its
+`execute_live_evolution` request MUST checkpoint one closed command in the same
+durable domain. Validation-only requests are not execution receipts. Duplicate
+JSON object keys, non-finite numbers, and integers outside the shared exact
+range of `-9007199254740991..=9007199254740991` MUST be rejected before
+semantic admission. If a deadline or cancellation loses the response to a
+mutating request, SDKs MUST report `unknown_world_outcome` with `reconcile`.
 
 ### 3.2 Executable Plan contracts
 

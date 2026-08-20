@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import unittest
 from collections.abc import Callable
 
 from cymule import (
     CliEngine,
+    DurableEngine,
     DurableControlBuilder,
     EngineError,
     EvolutionControlBuilder,
@@ -33,12 +35,17 @@ class EndToEndTest(unittest.TestCase):
     def test_engine_success_and_nested_unions_are_closed(self) -> None:
         invalid_responses = [
             {
-                "engine_protocol": "cymule.engine/1",
+                "engine_protocol": "cymule.engine/2",
+                "outcome": "success",
+                "response": {"type": "sealed", "plan": None},
+            },
+            {
+                "engine_protocol": "cymule.engine/2",
                 "outcome": "success",
                 "response": {"type": "unknown"},
             },
             {
-                "engine_protocol": "cymule.engine/1",
+                "engine_protocol": "cymule.engine/2",
                 "outcome": "success",
                 "response": {
                     "type": "execution_boundary",
@@ -46,14 +53,46 @@ class EndToEndTest(unittest.TestCase):
                 },
             },
             {
-                "engine_protocol": "cymule.engine/1",
+                "engine_protocol": "cymule.engine/2",
                 "outcome": "success",
                 "response": {
                     "type": "verified_evolution_command",
                     "command": {
-                        "control_version": "cymule.evolution-control/2",
+                        "control_version": "cymule.evolution-control/3",
                         "command_id": "command:test",
                         "operation": "future_operation",
+                    },
+                },
+            },
+            {
+                "engine_protocol": "cymule.engine/2",
+                "outcome": "success",
+                "response": {
+                    "type": "execution_boundary",
+                    "execution": {
+                        "status": "suspended",
+                        "suspension": {
+                            "run_id": "run:test",
+                            "plan_id": "sha256:test",
+                            "definition_id": "main",
+                            "invocation_id": "main",
+                            "site_id": "wait:test",
+                            "wait": {"kind": "future", "unexpected": True},
+                            "result_bind": None,
+                        },
+                    },
+                },
+            },
+            {
+                "engine_protocol": "cymule.engine/2",
+                "outcome": "success",
+                "response": {
+                    "type": "verified_evolution_command",
+                    "command": {
+                        "control_version": "cymule.evolution-control/3",
+                        "command_id": "command:test",
+                        "operation": "migrate",
+                        "request": {"unexpected": True},
                     },
                 },
             },
@@ -83,11 +122,21 @@ class EndToEndTest(unittest.TestCase):
         ):
             _validate_engine_envelope(
                 {
-                    "engine_protocol": "cymule.engine/1",
+                    "engine_protocol": "cymule.engine/2",
                     "outcome": "success",
                     "response": {"type": "execution_boundary", "execution": execution},
                 }
             )
+
+    def test_python_rejects_unsafe_json_and_preserves_pre_cancellation(self) -> None:
+        candidate = FlowBuilder("transport", {}, {}).finish({"kind": "input"})
+        with self.assertRaises(EngineError) as cancelled:
+            CliEngine(cancelled=lambda: True).seal(candidate)
+        self.assertEqual(cancelled.exception.failure["category"], "cancelled")
+        candidate["name"] = float("nan")
+        with self.assertRaises(EngineError) as unsafe:
+            CliEngine("missing-engine").seal(candidate)
+        self.assertEqual(unsafe.exception.failure["code"], "request_encoding_failed")
 
     def test_python_preserves_structured_engine_failures(self) -> None:
         engine_path = os.environ.get("CYMULE_BIN")
@@ -229,7 +278,7 @@ class EndToEndTest(unittest.TestCase):
             self.skipTest("cross-language binaries are not configured")
         candidate = (
             FlowBuilder("cross_language_echo", {}, {})
-            .component("test.echo", {}, {})
+            .component("test.echo", {}, {}, {})
             .effect_contract(
                 "test.capture",
                 {},
@@ -241,6 +290,7 @@ class EndToEndTest(unittest.TestCase):
                     "keyed_idempotency": True,
                     "irreversible": False,
                 },
+                {},
             )
             .definition(
                 "echo_subflow",
@@ -279,6 +329,23 @@ class EndToEndTest(unittest.TestCase):
         result = execution["result"]
         self.assertEqual(result["value"], input_value)
         self.assertEqual(len(result["effects"]), 1)
+        with tempfile.TemporaryDirectory(prefix="cymule-python-durable-") as store:
+            durable = DurableEngine(store, plugin_path, engine)
+            self.assertEqual(
+                durable.start("run:python-durable-e2e", candidate, input_value)["type"],
+                "run_boundary",
+            )
+            self.assertIsNotNone(durable.get("run:python-durable-e2e"))
+            self.assertEqual(
+                durable.evolve(
+                    LiveEvolutionControlBuilder.publish_definition(
+                        "evolve:python:publish",
+                        "definition:python:echo",
+                        candidate["definitions"][0],
+                    )
+                )["result"],
+                "definition_published",
+            )
 
     def test_python_resource_seals_through_rust_engine(self) -> None:
         engine_path = os.environ.get("CYMULE_BIN")

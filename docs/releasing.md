@@ -4,7 +4,8 @@ Status: implemented for npm and crates.io public packages.
 
 GitHub Actions is the only publication authority. Local commands build,
 package, inspect, and test candidate bytes but never upload them. A release
-uses one version across the TypeScript packages and every public Rust crate.
+uses one version across the TypeScript packages, Python wheel, Go module
+release notes, and every public Rust crate.
 
 ## Public packages
 
@@ -12,6 +13,13 @@ The TypeScript workflow publishes:
 
 - `cymule`
 - `@cymule/sdk`
+
+Python `cymule` currently has an installed-wheel dry-run but no PyPI trusted
+publisher workflow, so `0.2.0` must not be described as published on PyPI. The
+Go SDK is verified as a fresh external module consumer; public Go resolution
+requires the repository tag `sdk/go/v0.2.0` in addition to the root release
+tag. Creating that tag remains a publication gate until a reviewed GitHub
+Actions release step owns it.
 
 The ordered Rust catalog in `scripts/crates-release.toml` publishes:
 
@@ -53,7 +61,8 @@ extracts the exact archives, and compiles every public library and binary plus
 a fresh `cymule` consumer through a separate local patch-registry simulation.
 
 The release commit must update the workspace and TypeScript package to the same
-version and add a dated changelog entry. Mirror the reviewed private-source
+version, update the Python package to that version, and add a dated changelog
+entry. Mirror the reviewed private-source
 commit through `mirror.yml`; never push it directly to the public repository.
 Require public CI and the applicable independent analysis/compatibility gates
 before publication.

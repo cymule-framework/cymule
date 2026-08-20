@@ -8,7 +8,7 @@ replay remain owned by the Rust engine.
 Add the SDK:
 
 ```sh
-cargo add cymule
+cargo add cymule@0.2.0
 ```
 
 Build a provider-neutral Flow:
@@ -34,8 +34,14 @@ application code.
 Install the CLI separately:
 
 ```sh
-cargo install cymule-cli
+cargo install cymule-cli --version 0.2.0
 ```
+
+`DurableEngine::new("cymule", store, plugin)` provides stateful `start`, `get`,
+`resume`, `signal`, `release`, and `evolve` calls over the closed Engine
+transport. The Rust durable runtime remains the only reducer.
+The local CLI fails closed for migration and shadow variants unless a transport
+with the required pinned adapter or driver is selected.
 
 See the [repository README](https://github.com/cymule-framework/cymule) for the
 complete quick start, execution model, profile boundaries, and plugin APIs.

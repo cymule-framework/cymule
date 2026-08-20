@@ -5,12 +5,13 @@ use std::env;
 use std::path::Path;
 
 use cymule::{
-    CliEngine, DispatchPolicy, DurableCommand, EffectProfile, Engine, EngineFailure,
-    EvolutionCommand, Expression, FlowBuilder, LiveEvolutionCommand, MutationKind, Operation,
-    PlanCandidate, ReconciliationMode, Region, RegionMigrationCommand, ResourceCandidate, Step,
-    VirtualClaimCommand, VirtualCompactionCommand, VirtualLeaseRenewalCommand,
-    VirtualRecoveryCommand, VirtualRehydrationCommand, VirtualRunWeightCommand, WaitActivation,
-    WorkOccurrence, WorkResolutionCommand,
+    CliEngine, DispatchPolicy, DurableCommand, DurableEngine, DurableResponse, EffectProfile,
+    Engine, EngineFailure, EvolutionCommand, Expression, FlowBuilder,
+    LIVE_EVOLUTION_CONTROL_VERSION, LiveEvolutionCommand, LiveEvolutionResponse, MutationKind,
+    Operation, PlanCandidate, ReconciliationMode, Region, RegionMigrationCommand,
+    ResourceCandidate, Step, VirtualClaimCommand, VirtualCompactionCommand,
+    VirtualLeaseRenewalCommand, VirtualRecoveryCommand, VirtualRehydrationCommand,
+    VirtualRunWeightCommand, WaitActivation, WorkOccurrence, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -24,7 +25,7 @@ fn rust_candidate_seals_and_executes_through_the_cli() {
         return;
     };
     let candidate = FlowBuilder::new("cross_language_echo", json!({}), json!({}))
-        .component("test.echo", json!({}), json!({}))
+        .component("test.echo", json!({}), json!({}), BTreeMap::new())
         .effect_contract(
             "test.capture",
             json!({}),
@@ -36,6 +37,7 @@ fn rust_candidate_seals_and_executes_through_the_cli() {
                 keyed_idempotency: true,
                 irreversible: false,
             },
+            BTreeMap::new(),
         )
         .definition(
             "echo_subflow",
@@ -73,7 +75,7 @@ fn rust_candidate_seals_and_executes_through_the_cli() {
             name: "echoed".to_owned(),
         });
 
-    let engine = CliEngine::new(engine_path);
+    let engine = CliEngine::new(&engine_path);
     let plan = engine.seal(&candidate).expect("candidate seals");
     assert_eq!(plan.plan_id, expected_plan_id);
     let input = json!({"message": "hello from Rust"});
@@ -84,6 +86,31 @@ fn rust_candidate_seals_and_executes_through_the_cli() {
         .expect("plan completes");
     assert_eq!(result.value, input);
     assert_eq!(result.effects.len(), 1);
+
+    let domain = tempfile::tempdir().expect("temporary durable domain");
+    let durable = DurableEngine::new(&engine_path, domain.path(), &plugin_path);
+    let response = durable
+        .start("run:rust-durable-e2e", candidate.clone(), input)
+        .expect("durable Run starts through the CLI");
+    assert!(matches!(response, DurableResponse::RunBoundary { .. }));
+    assert!(
+        durable
+            .get("run:rust-durable-e2e")
+            .expect("Run query succeeds")
+            .is_some()
+    );
+    let evolved = durable
+        .evolve(&LiveEvolutionCommand::PublishDefinition {
+            control_version: LIVE_EVOLUTION_CONTROL_VERSION.to_owned(),
+            command_id: "evolve:rust:publish".to_owned(),
+            logical_ref: "definition:rust:echo".to_owned(),
+            definition: candidate.definitions[0].clone(),
+        })
+        .expect("live evolution checkpoints through the CLI");
+    assert!(matches!(
+        evolved,
+        LiveEvolutionResponse::DefinitionPublished { .. }
+    ));
 }
 
 #[test]

@@ -4,6 +4,11 @@
   not own semantic behavior.
 - `rpc` JSON is the cross-language conformance boundary; changes require all SDK
   tests and a command-protocol version decision.
+- `execute_durable` opens the configured store and immutable process binding,
+  then delegates the complete command to `DurableRuntimeControl`.
+  `execute_live_evolution` checkpoints through
+  `DurableLiveEvolutionController`; neither route may return a verify-only
+  receipt as if state changed.
 - `seal_resource` is an additive request/response pair over
   `cymule.resource/2`. The CLI delegates validation and identity to
   `cymule-resource`; it must never compute Resource IDs independently.
@@ -15,7 +20,7 @@
   evidence counting, and durable promotion remain `cymule-evolution` authority.
 - Write only the response JSON to stdout. Diagnostics go to stderr.
 - RPC domain failures return a successful process transport containing one
-  `cymule.engine/1` failure envelope. A nonzero process status is reserved for
+  `cymule.engine/2` failure envelope. A nonzero process status is reserved for
   failure to carry the protocol itself; never duplicate a semantic failure on
   stderr or emit an unversioned success payload.
 - Never expose unrestricted raw event append.

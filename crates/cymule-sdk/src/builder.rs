@@ -38,12 +38,13 @@ impl FlowBuilder {
         id: impl Into<String>,
         input_schema: Value,
         output_schema: Value,
+        requirements: BTreeMap<String, String>,
     ) -> Self {
         self.components.push(ComponentContract {
             id: id.into(),
             input_schema,
             output_schema,
-            requirements: BTreeMap::new(),
+            requirements,
         });
         self
     }
@@ -55,13 +56,14 @@ impl FlowBuilder {
         input_schema: Value,
         output_schema: Value,
         profile: EffectProfile,
+        requirements: BTreeMap<String, String>,
     ) -> Self {
         self.effects.push(EffectContract {
             id: id.into(),
             input_schema,
             output_schema,
             profile,
-            requirements: BTreeMap::new(),
+            requirements,
         });
         self
     }

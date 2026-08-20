@@ -6,6 +6,8 @@ domains described in `docs/specification.md`.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-21
+
 - Replace `cymule.virtual-checkpoint/1` whole-snapshot journal records with
   `cymule.virtual-checkpoint/2` content-addressed incremental deltas, a 4 MiB
   canonical delta bound, authenticated lineage, linear history, and exact
@@ -21,6 +23,15 @@ domains described in `docs/specification.md`.
   composed operations to their exact admitted providers.
 - Advance the affected command, Event, Machine, durable, evolution, live
   evolution, virtual occurrence, and virtual claim wire domains.
+- Replace validation-only durable SDK calls with a real closed CLI transport
+  for Run start, query, resume, signal admission, explicit effect release, and
+  durable live evolution.
+- Require component and effect realization requirements in every language
+  builder and freeze Go candidates at `Finish`.
+- Align Rust, TypeScript, Python, and Go on strict JSON, structured Engine
+  failures, deadlines, cancellation, and unknown-world reconciliation.
+- Publish the TypeScript API under both `cymule` and `@cymule/sdk`, and add
+  installed-package quick starts plus four-language package witnesses.
 
 ## [0.1.4] - 2026-08-18
 

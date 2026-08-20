@@ -9,20 +9,31 @@ latest-compatible registry resolution is performed by the Rust live-evolution
 linker before sealing, never by the SDK.
 
 ```sh
-npm install cymule
+cargo install cymule-cli --version 0.2.0
+npm install cymule@0.2.0
+# Equivalent scoped export: npm install @cymule/sdk@0.2.0
 ```
 
 ```ts
-import { CliEngine, FlowBuilder, ResourceBuilder } from "cymule";
+import { CliEngine, DurableEngine, FlowBuilder, ResourceBuilder } from "cymule";
 ```
 
 Resource Candidates use the same Engine boundary:
 
 ```ts
-const resource = new CliEngine("./target/debug/cymule").sealResource(
+const resource = new CliEngine().sealResource(
   ResourceBuilder.text("input for another Run"),
 );
 ```
+
+`DurableEngine(store, plugin)` calls the installed CLI and exposes real
+`start`, `get`, `resume`, `signal`, `release`, and `evolve` operations. The
+store and process plugin are transport configuration; the Plan and durable
+command remain provider-neutral. A deadline or cancellation after a mutating
+request begins returns a structured `unknown_world_outcome` that callers must
+reconcile.
+Migration and shadow evolution commands require a transport with their pinned
+adapter/driver binding; the local CLI rejects those variants when unbound.
 
 Use `ResourceBuilder.external` for content-addressed/version-pinned objects,
 directories, collections, snapshots, and live references. Its optional manifest

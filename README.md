@@ -22,7 +22,7 @@ are rebuildable projections. Languages, databases, queues, sandboxes,
 providers, and deployment topologies remain replaceable realizations rather
 than framework semantics.
 
-> **Project status:** Cymule `0.1.x` implements the complete single-domain
+> **Project status:** Cymule `0.2.x` implements the complete single-domain
 > execution profile: durable suspension and recovery, honest effect handling,
 > bounded virtual work, safe live evolution, and an optional Agent interaction
 > plugin. It is not a distributed consensus system or an untrusted-code
@@ -130,7 +130,7 @@ rules. TypeScript, Python, Rust, and Go expose the same
 `cymule.evolution-control/3` transport commands without duplicating the Rust
 controller.
 
-## Five-minute quick start
+## Five-minute installed-package quick start
 
 Imagine a team evaluating hundreds of support cases through a model, Agent, or
 rules engine. The run is expensive and may last for hours. Halfway through:
@@ -144,17 +144,39 @@ expensive completed work, maintaining its own recovery database, or accepting
 results whose meaning changed halfway through the run.
 
 Cymule keeps completed work, applies a compatible update only to work that has
-not started, and rejects an incompatible update before it changes the run. Try
-the complete scenario locally with Rust 1.97:
+not started, and rejects an incompatible update before it changes the run. You
+can author and seal a real Plan from published packages without cloning this
+repository:
 
 ```sh
-git clone https://github.com/cymule-framework/cymule.git
-cd cymule
-cargo run -p cymule-example-durable-evaluation-campaign -- demo
+cargo install cymule-cli --version 0.2.0
+npm install cymule@0.2.0
+cat > quickstart.mjs <<'EOF'
+import { CliEngine, FlowBuilder } from "cymule";
+
+const candidate = new FlowBuilder("hello", {}, {})
+  .component("example.echo", {}, {}, { capability: "echo" })
+  .call("call.echo", "example.echo", { kind: "input" }, "message")
+  .finish({ kind: "binding", name: "message" });
+
+console.log(new CliEngine().seal(candidate).plan_id);
+EOF
+node quickstart.mjs
 ```
 
-The demo runs real work, stops the worker after three results, upgrades the
-scoring policy, resumes the evaluation, and tries an unsafe update:
+The command prints the content-addressed Plan ID produced by the installed Rust
+engine. `@cymule/sdk@0.2.0` exports the identical TypeScript API. Applications
+bind their own immutable process plugin and use `DurableEngine` for real
+`start`, `get`, `resume`, `signal`, `release`, and `evolve` calls; SDKs never
+reduce durable state locally.
+The local CLI executes registry, relink, rollout, observation, gate, pin, and
+restart evolution operations. Migration and shadow variants require a
+separately bound adapter/driver transport and fail closed when the local CLI has
+no such binding.
+
+The repository's larger evaluation demo runs real work, stops the worker after
+three results, upgrades the scoring policy, resumes the evaluation, and tries
+an unsafe update:
 
 ```text
 Cymule: safely upgrade a running evaluation
@@ -248,8 +270,10 @@ const captureProfile: EffectProfile = {
 };
 
 const candidate = new FlowBuilder("echo_and_capture", {}, {})
-  .component("example.echo", {}, {})
-  .effectContract("example.capture", {}, {}, captureProfile)
+  .component("example.echo", {}, {}, { capability: "echo" })
+  .effectContract("example.capture", {}, {}, captureProfile, {
+    capability: "capture",
+  })
   .call("call.echo", "example.echo", { kind: "input" }, "echoed")
   .effect(
     "effect.capture",
@@ -259,7 +283,7 @@ const candidate = new FlowBuilder("echo_and_capture", {}, {})
   )
   .finish({ kind: "binding", name: "echoed" });
 
-const engine = new CliEngine("./target/debug/cymule");
+const engine = new CliEngine();
 const plan = engine.seal(candidate);
 const result = engine.run(
   plan,
@@ -273,7 +297,7 @@ The Python, Rust, and Go SDKs expose the same concepts with idiomatic builders.
 All four SDKs send Plan Candidates to the Rust engine; none implements a second
 canonicalizer or state reducer.
 
-Version `0.1.x` keeps all SDK sources in this repository. The Rust facade is
+Version `0.2.x` keeps all SDK sources in this repository. The Rust facade is
 published as `cymule`, the CLI as `cymule-cli`, and advanced profile/plugin
 crates retain their `cymule-*` names. TypeScript is published as both `cymule`
 and `@cymule/sdk`. Public package publication is performed only by reviewed

@@ -1,7 +1,7 @@
 # SDK Guidance
 
 - Every SDK emits the same frozen `cymule.ir/2` JSON shape and calls an Engine.
-- Every CLI client sends and receives only `cymule.engine/1`. Surface a typed
+- Every CLI client sends and receives only `cymule.engine/2`. Surface a typed
   Engine error that preserves the Rust failure object; never parse stderr or a
   human message into semantic categories, and never recommend replay merely
   because the transport ended without a response.
@@ -11,6 +11,13 @@
 - Engine envelopes require response/error exclusivity. Validate the exact
   success tag and nested discriminated unions, including execution and returned
   evolution commands, before returning any payload to application code.
+- Every language exposes one high-level `DurableEngine` with stateful `start`,
+  `get`, `resume`, `signal`, `release`, and `evolve` methods backed by the Rust
+  CLI authority. Validation-only transport is never a durable operation.
+- Reject duplicate JSON object keys, non-finite numbers, and integers outside
+  the shared exact range before accepting a response or sending a request.
+  Deadlines and cancellation preserve structured failure parity; response loss
+  after mutation begins requires reconciliation.
 - Contract issue decoding preserves both the failing value `path` and the
   failing `schema_path`; neither SDK may flatten them into display text.
 - Every SDK exposes reusable definition declaration and `invoke` authoring with

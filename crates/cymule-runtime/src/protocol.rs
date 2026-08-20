@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::RuntimeError;
 
 /// Current Engine transport protocol.
-pub const ENGINE_PROTOCOL_VERSION: &str = "cymule.engine/1";
+pub const ENGINE_PROTOCOL_VERSION: &str = "cymule.engine/2";
 
 /// One versioned Engine request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +145,10 @@ pub enum EnginePhase {
     VerifyLiveEvolutionCommand,
     /// Executing a Plan.
     ExecutePlan,
+    /// Executing one stateful durable command.
+    ExecuteDurable,
+    /// Executing one stateful live-evolution command.
+    ExecuteLiveEvolution,
     /// Describing a selected plugin.
     PluginDescribe,
     /// Calling a component plugin.

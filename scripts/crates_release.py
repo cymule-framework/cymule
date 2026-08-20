@@ -148,6 +148,13 @@ def validate_workspace(crates: list[PublicCrate], requested: str | None = None) 
         raise ValueError(
             f"TypeScript package {typescript_version} does not match Rust {version}"
         )
+    python_version = tomllib.loads(
+        ROOT.joinpath("sdk/python/pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["version"]
+    if python_version != version:
+        raise ValueError(
+            f"Python package {python_version} does not match Rust {version}"
+        )
     for crate in crates:
         package = packages[crate.name]
         if pathlib.Path(package["manifest_path"]).parent != crate.path:

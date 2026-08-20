@@ -3,16 +3,21 @@ package cymule
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"math/big"
 	"os/exec"
 	"slices"
 	"sort"
+	"strings"
+	"time"
 )
 
 // EngineProtocolVersion is the frozen Engine transport contract.
-const EngineProtocolVersion = "cymule.engine/1"
+const EngineProtocolVersion = "cymule.engine/2"
 
 // EngineIssue is one machine-readable validation or contract issue.
 type EngineIssue struct {
@@ -87,6 +92,7 @@ func closedEnginePhase(value string) bool {
 	case "transport", "decode_request", "validate_request", "seal_plan", "verify_plan",
 		"seal_resource", "verify_wait_activation", "verify_durable_command",
 		"verify_evolution_command", "verify_live_evolution_command", "execute_plan",
+		"execute_durable", "execute_live_evolution",
 		"plugin_describe", "plugin_call", "effect_prepare", "effect_dispatch", "effect_reconcile",
 		"encode_response":
 		return true
@@ -291,13 +297,13 @@ type RolloutGate struct {
 
 // MigrationRequest asks a pinned adapter for one safe-point transformation.
 type MigrationRequest struct {
-	MigrationID string      `json:"migration_id"`
-	RunID       string      `json:"run_id"`
-	FromPlan    string      `json:"from_plan"`
-	ToPlan      string      `json:"to_plan"`
-	SafePointID string      `json:"safe_point_id"`
-	SourceEpoch uint64      `json:"source_epoch"`
-	InputState  ArtifactRef `json:"input_state"`
+	MigrationID   string      `json:"migration_id"`
+	RunID         string      `json:"run_id"`
+	FromPlan      string      `json:"from_plan"`
+	ToPlan        string      `json:"to_plan"`
+	SafePointID   string      `json:"safe_point_id"`
+	SourceEpoch   uint64      `json:"source_epoch"`
+	InputState    ArtifactRef `json:"input_state"`
 	SourceBinding ArtifactRef `json:"source_binding"`
 	TargetBinding ArtifactRef `json:"target_binding"`
 }
@@ -422,7 +428,7 @@ func (command *LiveEvolutionCommand) UnmarshalJSON(input []byte) error {
 	if !ok {
 		return fmt.Errorf("live evolution command operation is missing")
 	}
-	if object["control_version"] != "cymule.live-evolution-control/1" {
+	if object["control_version"] != "cymule.live-evolution-control/2" {
 		return fmt.Errorf("unsupported live evolution control version")
 	}
 	expected := map[string][][]string{
@@ -494,7 +500,7 @@ func (command *EvolutionCommand) UnmarshalJSON(input []byte) error {
 	if !ok {
 		return fmt.Errorf("evolution command operation is missing")
 	}
-	if object["control_version"] != "cymule.evolution-control/2" {
+	if object["control_version"] != "cymule.evolution-control/3" {
 		return fmt.Errorf("unsupported evolution control version")
 	}
 	expectedFields, ok := map[string][]string{
@@ -545,16 +551,25 @@ func (command *EvolutionCommand) UnmarshalJSON(input []byte) error {
 		if err := decodeClosedJSON(wire.Request, &request); err != nil {
 			return err
 		}
+		if err := validateMigrationRequest(request); err != nil {
+			return err
+		}
 		command.Migration = &request
 	case "restart_under_new_plan":
 		var request RestartRequest
 		if err := decodeClosedJSON(wire.Request, &request); err != nil {
 			return err
 		}
+		if err := validateRestartRequest(request); err != nil {
+			return err
+		}
 		command.Restart = &request
 	case "shadow":
 		var request ShadowRequest
 		if err := decodeClosedJSON(wire.Request, &request); err != nil {
+			return err
+		}
+		if err := validateShadowRequest(request); err != nil {
 			return err
 		}
 		command.Shadow = &request
@@ -591,6 +606,84 @@ type DurableCommand struct {
 	Value          json.RawMessage       `json:"value,omitempty"`
 	IntentID       string                `json:"intent_id,omitempty"`
 	QueryID        string                `json:"query_id,omitempty"`
+}
+
+// DurableResponse is the closed stateful M1 result union.
+type DurableResponse struct {
+	Type        string          `json:"type"`
+	Boundary    json.RawMessage `json:"boundary,omitempty"`
+	ReadyRunIDs []string        `json:"ready_run_ids,omitempty"`
+	Run         json.RawMessage `json:"run,omitempty"`
+	Domain      json.RawMessage `json:"domain,omitempty"`
+}
+
+func (response DurableResponse) validate() error {
+	switch response.Type {
+	case "run_boundary":
+		if len(response.Boundary) == 0 || len(response.ReadyRunIDs) != 0 || len(response.Run) != 0 || len(response.Domain) != 0 {
+			return fmt.Errorf("durable response fields are not closed")
+		}
+	case "wait_activated":
+		if len(response.Boundary) != 0 || response.ReadyRunIDs == nil || len(response.Run) != 0 || len(response.Domain) != 0 {
+			return fmt.Errorf("durable response fields are not closed")
+		}
+	case "run":
+		if len(response.Boundary) != 0 || len(response.ReadyRunIDs) != 0 || len(response.Run) == 0 || len(response.Domain) != 0 {
+			return fmt.Errorf("durable response fields are not closed")
+		}
+	case "domain":
+		if len(response.Boundary) != 0 || len(response.ReadyRunIDs) != 0 || len(response.Run) != 0 || len(response.Domain) == 0 {
+			return fmt.Errorf("durable response fields are not closed")
+		}
+	default:
+		return fmt.Errorf("durable response variant is unknown")
+	}
+	return nil
+}
+
+// LiveEvolutionResponse is one closed durable live-evolution result.
+type LiveEvolutionResponse struct {
+	Result     string          `json:"result"`
+	Revision   json.RawMessage `json:"revision,omitempty"`
+	Linked     json.RawMessage `json:"linked,omitempty"`
+	Receipt    json.RawMessage `json:"receipt,omitempty"`
+	Edge       json.RawMessage `json:"edge,omitempty"`
+	PlanID     string          `json:"plan_id,omitempty"`
+	Comparison json.RawMessage `json:"comparison,omitempty"`
+	Transition json.RawMessage `json:"transition,omitempty"`
+}
+
+func (response LiveEvolutionResponse) validate() error {
+	present := func(value json.RawMessage) bool { return len(value) != 0 }
+	valid := false
+	switch response.Result {
+	case "definition_published":
+		valid = present(response.Revision)
+	case "template_registered":
+		valid = present(response.Linked)
+	case "publication_applied", "migrated", "restart_authorized":
+		valid = present(response.Receipt)
+	case "patch_applied":
+		valid = present(response.Edge)
+	case "applied":
+		valid = true
+	case "occurrence_selected":
+		valid = response.PlanID != ""
+	case "shadow_recorded":
+		valid = present(response.Comparison)
+	case "gate_applied":
+		valid = present(response.Transition)
+	}
+	count := 0
+	for _, item := range []bool{present(response.Revision), present(response.Linked), present(response.Receipt), present(response.Edge), response.PlanID != "", present(response.Comparison), present(response.Transition)} {
+		if item {
+			count++
+		}
+	}
+	if !valid || (response.Result == "applied" && count != 0) || (response.Result != "applied" && count != 1) {
+		return fmt.Errorf("live-evolution response fields are not closed")
+	}
+	return nil
 }
 
 // ParkReason identifies one exact indexed condition for virtual work.
@@ -1479,6 +1572,31 @@ type SealedPlan struct {
 	Candidate PlanCandidate `json:"candidate"`
 }
 
+// UnmarshalJSON rejects absent or null required Sealed Plan fields.
+func (plan *SealedPlan) UnmarshalJSON(input []byte) error {
+	value, err := decodeUniqueJSON(input)
+	if err != nil {
+		return err
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("sealed Plan is not an object")
+	}
+	if err := requireExactJSONFields(object, []string{"plan_id", "candidate"}); err != nil {
+		return err
+	}
+	type wire SealedPlan
+	var decoded wire
+	if err := decodeClosedValue(value, &decoded); err != nil {
+		return err
+	}
+	if decoded.PlanID == "" || decoded.Candidate.IRVersion == "" || decoded.Candidate.Entry == "" {
+		return fmt.Errorf("sealed Plan required fields are missing")
+	}
+	*plan = SealedPlan(decoded)
+	return nil
+}
+
 // ExecutionResult is a terminal Embedded-profile result.
 type ExecutionResult struct {
 	RunID             string   `json:"run_id"`
@@ -1561,7 +1679,143 @@ func (outcome *ExecutionOutcome) UnmarshalJSON(input []byte) error {
 	if !validPayload {
 		return fmt.Errorf("execution outcome payload is null")
 	}
+	if err := validateExecutionPayload(status, decoded); err != nil {
+		return err
+	}
 	*outcome = ExecutionOutcome(decoded)
+	return nil
+}
+
+func validateExecutionPayload(status string, outcome struct {
+	Status         string                        `json:"status"`
+	Result         *ExecutionResult              `json:"result,omitempty"`
+	Suspension     *SuspensionBoundary           `json:"suspension,omitempty"`
+	Release        *EffectReleaseBoundary        `json:"release,omitempty"`
+	Reconciliation *EffectReconciliationBoundary `json:"reconciliation,omitempty"`
+}) error {
+	switch status {
+	case "completed":
+		result := outcome.Result
+		if result.RunID == "" || result.PlanID == "" || result.ProjectionDigest == "" ||
+			result.PreconditionToken == "" || result.Effects == nil {
+			return fmt.Errorf("completed execution required fields are missing")
+		}
+		for _, effect := range result.Effects {
+			if effect == "" {
+				return fmt.Errorf("completed execution effect identity is empty")
+			}
+		}
+	case "suspended":
+		boundary := outcome.Suspension
+		if boundary.RunID == "" || boundary.PlanID == "" || boundary.DefinitionID == "" ||
+			boundary.InvocationID == "" || boundary.SiteID == "" {
+			return fmt.Errorf("suspension required fields are missing")
+		}
+		if err := validateWaitSpec(boundary.Wait); err != nil {
+			return err
+		}
+		if boundary.ResultBind != nil && *boundary.ResultBind == "" {
+			return fmt.Errorf("suspension result binding is empty")
+		}
+	case "release_required":
+		release := outcome.Release
+		if release.RunID == "" || release.PlanID == "" || len(release.IntentIDs) == 0 {
+			return fmt.Errorf("effect release required fields are missing")
+		}
+		for _, intent := range release.IntentIDs {
+			if intent == "" {
+				return fmt.Errorf("effect release intent identity is empty")
+			}
+		}
+	case "reconciliation_required":
+		reconciliation := outcome.Reconciliation
+		if reconciliation.RunID == "" || reconciliation.PlanID == "" || reconciliation.IntentID == "" {
+			return fmt.Errorf("effect reconciliation required fields are missing")
+		}
+	}
+	return nil
+}
+
+func validateWaitSpec(wait map[string]any) error {
+	kind, ok := wait["kind"].(string)
+	if !ok {
+		return fmt.Errorf("wait contract kind is missing")
+	}
+	var fields []string
+	switch kind {
+	case "signal":
+		fields = []string{"kind", "key", "consume_once"}
+		if key, ok := wait["key"].(string); !ok || key == "" {
+			return fmt.Errorf("signal wait key is invalid")
+		}
+		if _, ok := wait["consume_once"].(bool); !ok {
+			return fmt.Errorf("signal wait consume_once is invalid")
+		}
+	case "timer":
+		fields = []string{"kind", "timer_id"}
+		if timerID, ok := wait["timer_id"].(string); !ok || timerID == "" {
+			return fmt.Errorf("timer wait identity is invalid")
+		}
+	case "input":
+		fields = []string{"kind", "correlation", "schema"}
+		if correlation, ok := wait["correlation"].(string); !ok || correlation == "" {
+			return fmt.Errorf("input wait correlation is invalid")
+		}
+		switch wait["schema"].(type) {
+		case map[string]any, bool:
+		default:
+			return fmt.Errorf("input wait schema is invalid")
+		}
+	default:
+		return fmt.Errorf("unsupported wait contract %q", kind)
+	}
+	return requireExactJSONFields(wait, fields)
+}
+
+func validateMigrationRequest(request MigrationRequest) error {
+	if request.MigrationID == "" || request.RunID == "" || request.FromPlan == "" ||
+		request.ToPlan == "" || request.SafePointID == "" {
+		return fmt.Errorf("migration request required fields are missing")
+	}
+	for _, reference := range []ArtifactRef{request.InputState, request.SourceBinding, request.TargetBinding} {
+		if err := validateArtifactRef(reference); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRestartRequest(request RestartRequest) error {
+	if request.RestartID == "" || request.SourceRun == "" || request.ReplacementRun == "" ||
+		request.FromPlan == "" || request.ToPlan == "" || request.SafePointID == "" {
+		return fmt.Errorf("restart request required fields are missing")
+	}
+	for _, reference := range []ArtifactRef{request.Input, request.Evidence} {
+		if err := validateArtifactRef(reference); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateShadowRequest(request ShadowRequest) error {
+	if request.ComparisonID == "" || request.DecisionID == "" || request.Subject == "" ||
+		request.PrimaryPlan == "" || request.ShadowPlan == "" || request.ComparisonPolicy == "" {
+		return fmt.Errorf("shadow request required fields are missing")
+	}
+	return validateArtifactRef(request.Input)
+}
+
+func validateArtifactRef(reference ArtifactRef) error {
+	if reference.IdentityVersion != "cymule.artifact/2" || reference.Kind == "" ||
+		len(reference.ArtifactID) != len("sha256:")+64 || !strings.HasPrefix(reference.ArtifactID, "sha256:") {
+		return fmt.Errorf("Artifact reference identity is invalid")
+	}
+	for _, character := range reference.ArtifactID[len("sha256:"):] {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return fmt.Errorf("Artifact reference identity is invalid")
+		}
+	}
 	return nil
 }
 
@@ -1589,17 +1843,17 @@ func NewFlow(name string, inputSchema, outputSchema map[string]any) *FlowBuilder
 }
 
 // Component declares an abstract component.
-func (builder *FlowBuilder) Component(id string, inputSchema, outputSchema map[string]any) *FlowBuilder {
+func (builder *FlowBuilder) Component(id string, inputSchema, outputSchema map[string]any, requirements map[string]string) *FlowBuilder {
 	builder.candidate.Components = append(builder.candidate.Components, Contract{
-		ID: id, InputSchema: inputSchema, OutputSchema: outputSchema, Requirements: map[string]string{},
+		ID: id, InputSchema: inputSchema, OutputSchema: outputSchema, Requirements: cloneStrings(requirements),
 	})
 	return builder
 }
 
 // EffectContract declares an abstract world effect.
-func (builder *FlowBuilder) EffectContract(id string, inputSchema, outputSchema map[string]any, profile EffectProfile) *FlowBuilder {
+func (builder *FlowBuilder) EffectContract(id string, inputSchema, outputSchema map[string]any, profile EffectProfile, requirements map[string]string) *FlowBuilder {
 	builder.candidate.Effects = append(builder.candidate.Effects, EffectContract{
-		ID: id, InputSchema: inputSchema, OutputSchema: outputSchema, Profile: profile, Requirements: map[string]string{},
+		ID: id, InputSchema: inputSchema, OutputSchema: outputSchema, Profile: profile, Requirements: cloneStrings(requirements),
 	})
 	return builder
 }
@@ -1660,12 +1914,30 @@ func (builder *FlowBuilder) Scope(site, mode string, body Region, bind string) *
 // Finish returns a complete candidate.
 func (builder *FlowBuilder) Finish(result Expression) PlanCandidate {
 	builder.candidate.Definitions[0].Body.Result = result
-	return builder.candidate
+	encoded, err := json.Marshal(builder.candidate)
+	if err != nil {
+		panic(fmt.Sprintf("Flow candidate is not JSON: %v", err))
+	}
+	var frozen PlanCandidate
+	if err := decodeClosedJSON(encoded, &frozen); err != nil {
+		panic(fmt.Sprintf("Flow candidate cannot be frozen: %v", err))
+	}
+	return frozen
+}
+
+func cloneStrings(values map[string]string) map[string]string {
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // CliEngine invokes the trusted Rust command-line Engine.
 type CliEngine struct {
 	Executable string
+	Context    context.Context
+	Timeout    time.Duration
 }
 
 // Seal validates and content-addresses a candidate.
@@ -1756,6 +2028,110 @@ func (engine CliEngine) VerifyLiveEvolutionCommand(
 	return response.Command, err
 }
 
+// ExecuteDurable submits one stateful command to a durable Rust domain.
+func (engine CliEngine) ExecuteDurable(store, plugin string, command DurableCommand) (DurableResponse, error) {
+	var response struct {
+		Type     string          `json:"type"`
+		Response DurableResponse `json:"response"`
+	}
+	err := engine.request(map[string]any{
+		"type": "execute_durable", "store": store, "plugin": plugin, "command": command,
+	}, &response)
+	if err == nil && response.Type != "durable_executed" {
+		err = unexpectedEngineResponse("durable_executed", response.Type)
+	} else if err == nil {
+		if validation := response.Response.validate(); validation != nil {
+			err = transportFailure("invalid_engine_response", validation.Error())
+		}
+	}
+	return response.Response, err
+}
+
+// ExecuteLiveEvolution submits one atomic command to durable evolution authority.
+func (engine CliEngine) ExecuteLiveEvolution(
+	store, journalID string,
+	command LiveEvolutionCommand,
+) (LiveEvolutionResponse, error) {
+	var response struct {
+		Type     string                `json:"type"`
+		Response LiveEvolutionResponse `json:"response"`
+	}
+	err := engine.request(map[string]any{
+		"type": "execute_live_evolution", "store": store,
+		"journal_id": journalID, "command": command,
+	}, &response)
+	if err == nil && response.Type != "live_evolution_executed" {
+		err = unexpectedEngineResponse("live_evolution_executed", response.Type)
+	} else if err == nil {
+		if validation := response.Response.validate(); validation != nil {
+			err = transportFailure("invalid_engine_response", validation.Error())
+		}
+	}
+	return response.Response, err
+}
+
+// DurableEngine is the high-level provider-neutral durable Run client.
+type DurableEngine struct {
+	Store            string
+	Plugin           string
+	Transport        CliEngine
+	EvolutionJournal string
+}
+
+// Start creates or idempotently reopens one Run.
+func (engine DurableEngine) Start(runID string, candidate PlanCandidate, input any) (DurableResponse, error) {
+	command, err := StartDurableRun(runID, candidate, input)
+	if err != nil {
+		return DurableResponse{}, err
+	}
+	return engine.submit(command)
+}
+
+// Get reads one Run without reducing durable state.
+func (engine DurableEngine) Get(runID string) (json.RawMessage, error) {
+	response, err := engine.submit(QueryDurableRun("sdk:get:"+runID, runID))
+	if err == nil && response.Type != "run" {
+		err = unexpectedEngineResponse("run", response.Type)
+	}
+	return response.Run, err
+}
+
+// Resume advances one ready Run to its next boundary.
+func (engine DurableEngine) Resume(runID string) (DurableResponse, error) {
+	return engine.submit(ResumeDurableRun(runID))
+}
+
+// Signal admits one identified signal delivery.
+func (engine DurableEngine) Signal(
+	activationID, key string,
+	waitIDs []string,
+	value any,
+) (DurableResponse, error) {
+	command, err := ActivateDurableSignal(activationID, key, waitIDs, value)
+	if err != nil {
+		return DurableResponse{}, err
+	}
+	return engine.submit(command)
+}
+
+// Release releases one explicit effect intent.
+func (engine DurableEngine) Release(intentID string) (DurableResponse, error) {
+	return engine.submit(ReleaseDurableEffect(intentID))
+}
+
+// Evolve applies one atomic command to the same durable domain.
+func (engine DurableEngine) Evolve(command LiveEvolutionCommand) (LiveEvolutionResponse, error) {
+	journal := engine.EvolutionJournal
+	if journal == "" {
+		journal = "cymule.sdk.live-evolution"
+	}
+	return engine.Transport.ExecuteLiveEvolution(engine.Store, journal, command)
+}
+
+func (engine DurableEngine) submit(command DurableCommand) (DurableResponse, error) {
+	return engine.Transport.ExecuteDurable(engine.Store, engine.Plugin, command)
+}
+
 // Run executes a sealed plan through one plugin realization.
 func (engine CliEngine) Run(plan SealedPlan, input any, plugin, runID string) (ExecutionOutcome, error) {
 	var response struct {
@@ -1779,13 +2155,32 @@ func (engine CliEngine) request(request any, response any) error {
 	if err != nil {
 		return transportFailure("request_encoding_failed", err.Error())
 	}
-	command := exec.Command(engine.Executable, "rpc")
+	if _, err := decodeUniqueJSON(input); err != nil {
+		return transportFailure("request_encoding_failed", err.Error())
+	}
+	executable := engine.Executable
+	if executable == "" {
+		executable = "cymule"
+	}
+	ctx := engine.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var cancel context.CancelFunc = func() {}
+	if engine.Timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, engine.Timeout)
+	}
+	defer cancel()
+	command := exec.CommandContext(ctx, executable, "rpc")
 	command.Stdin = bytes.NewReader(input)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
+		if ctx.Err() != nil {
+			return interruptedFailure(request, ctx.Err())
+		}
 		return transportFailure("engine_process_failed", "engine exited without a protocol response")
 	}
 	return decodeEngineResponse(stdout.Bytes(), response)
@@ -1894,6 +2289,11 @@ func readUniqueJSONValue(decoder *json.Decoder) (any, error) {
 	}
 	delimiter, ok := token.(json.Delim)
 	if !ok {
+		if number, ok := token.(json.Number); ok {
+			if err := validateSharedJSONNumber(number); err != nil {
+				return nil, err
+			}
+		}
 		return token, nil
 	}
 	switch delimiter {
@@ -1944,6 +2344,58 @@ func readUniqueJSONValue(decoder *json.Decoder) (any, error) {
 		return values, nil
 	default:
 		return nil, fmt.Errorf("unexpected JSON delimiter %q", delimiter)
+	}
+}
+
+func validateSharedJSONNumber(value json.Number) error {
+	text := value.String()
+	if !strings.ContainsAny(text, ".eE") {
+		integer, ok := new(big.Int).SetString(text, 10)
+		if !ok {
+			return fmt.Errorf("invalid JSON integer")
+		}
+		limit := big.NewInt(9_007_199_254_740_991)
+		if new(big.Int).Abs(integer).Cmp(limit) > 0 {
+			return fmt.Errorf("integer is outside the shared JSON domain")
+		}
+		return nil
+	}
+	floating, err := value.Float64()
+	if err != nil {
+		return err
+	}
+	if math.Trunc(floating) == floating && math.Abs(floating) > 9_007_199_254_740_991 {
+		return fmt.Errorf("number is outside the shared JSON domain")
+	}
+	return nil
+}
+
+func interruptedFailure(request any, cause error) EngineFailure {
+	kind := "cancelled"
+	if cause == context.DeadlineExceeded {
+		kind = "timed_out"
+	}
+	mutating := false
+	if object, ok := request.(map[string]any); ok {
+		typeName, _ := object["type"].(string)
+		mutating = typeName == "run" || typeName == "execute_live_evolution"
+		if typeName == "execute_durable" {
+			if command, ok := object["command"].(DurableCommand); ok {
+				mutating = !strings.HasPrefix(command.Type, "query_")
+			}
+		}
+	}
+	if mutating {
+		return EngineFailure{
+			Category: "unknown_world_outcome", Phase: "transport",
+			Code:             "engine_response_" + kind,
+			Message:          "the Engine response was " + kind + " after a mutating request began",
+			RetryDisposition: "reconcile",
+		}
+	}
+	return EngineFailure{
+		Category: kind, Phase: "transport", Code: "engine_response_" + kind,
+		Message: "the Engine response was " + kind,
 	}
 }
 

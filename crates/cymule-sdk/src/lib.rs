@@ -5,7 +5,7 @@ mod client;
 mod control;
 
 pub use builder::FlowBuilder;
-pub use client::{CliEngine, Engine};
+pub use client::{CliEngine, DurableEngine, Engine};
 pub use control::{
     DurableControl, EvolutionControl, LiveEvolutionControl, VirtualSchedulingControl,
     VirtualWorkControl,
@@ -20,14 +20,14 @@ pub use cymule_durable::{
 };
 pub use cymule_evolution::{
     EVOLUTION_CONTROL_VERSION, EvolutionCommand, GateOutcome, LIVE_EVOLUTION_CONTROL_VERSION,
-    LiveEvolutionCommand, LiveMigrationCommand, LivePublicationCommand, LivePublicationReceipt,
-    LiveTemplateUpdate, MIGRATION_SAFE_POINT_VERSION, MigrationAdapterDescriptor,
-    MigrationCapabilityChange, MigrationOutput, MigrationPreservation, MigrationReceipt,
-    MigrationRequest, MigrationSafePoint, MigrationStateCoverage, ObservationOutcome, PlanPatch,
-    PlanTemplate, ReferenceStrategy, RestartReceipt, RestartRequest, RolloutDecision,
-    RolloutEvaluation, RolloutGate, RolloutMode, RolloutObservation, RolloutTransition,
-    ShadowBindingMode, ShadowComparison, ShadowDriverDescriptor, ShadowEffectMode, ShadowOutput,
-    ShadowRequest, SubflowReference,
+    LiveEvolutionCommand, LiveEvolutionResponse, LiveMigrationCommand, LivePublicationCommand,
+    LivePublicationReceipt, LiveTemplateUpdate, MIGRATION_SAFE_POINT_VERSION,
+    MigrationAdapterDescriptor, MigrationCapabilityChange, MigrationOutput, MigrationPreservation,
+    MigrationReceipt, MigrationRequest, MigrationSafePoint, MigrationStateCoverage,
+    ObservationOutcome, PlanPatch, PlanTemplate, ReferenceStrategy, RestartReceipt, RestartRequest,
+    RolloutDecision, RolloutEvaluation, RolloutGate, RolloutMode, RolloutObservation,
+    RolloutTransition, ShadowBindingMode, ShadowComparison, ShadowDriverDescriptor,
+    ShadowEffectMode, ShadowOutput, ShadowRequest, SubflowReference,
 };
 pub use cymule_resource::{
     ARTIFACT_TYPE_CONTRACT_KIND, ARTIFACT_TYPE_CONTRACT_VERSION, ArtifactTypeCandidate,

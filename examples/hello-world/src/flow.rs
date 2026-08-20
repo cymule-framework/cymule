@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use cymule::{
     DispatchPolicy, EffectProfile, Expression, FlowBuilder, MutationKind, PlanCandidate,
     ReconciliationMode,
@@ -17,6 +19,7 @@ pub fn build() -> PlanCandidate {
             "required": ["message"],
             "properties": {"message": {"type": "string"}}
         }),
+        BTreeMap::new(),
     )
     .component(
         "example.greet",
@@ -46,6 +49,7 @@ pub fn build() -> PlanCandidate {
             keyed_idempotency: true,
             irreversible: false,
         },
+        BTreeMap::new(),
     )
     .call("call.greet", "example.greet", Expression::Input, "greeting")
     .effect(

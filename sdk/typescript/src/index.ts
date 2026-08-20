@@ -264,6 +264,24 @@ export interface DurableControl<Response = Json> {
   submit(command: DurableCommand): Promise<Response>;
 }
 
+export type DurableResponse =
+  | { type: "run_boundary"; boundary: Json }
+  | { type: "wait_activated"; ready_run_ids: string[] }
+  | { type: "run"; run: Json | null }
+  | { type: "domain"; domain: Json };
+
+export type LiveEvolutionResponse =
+  | { result: "definition_published"; revision: Json }
+  | { result: "template_registered"; linked: Json }
+  | { result: "publication_applied"; receipt: Json }
+  | { result: "patch_applied"; edge: Json }
+  | { result: "applied" }
+  | { result: "occurrence_selected"; plan_id: string }
+  | { result: "migrated"; receipt: Json }
+  | { result: "restart_authorized"; receipt: Json }
+  | { result: "shadow_recorded"; comparison: Json }
+  | { result: "gate_applied"; transition: Json };
+
 export type ParkReason =
   | { kind: "wait"; key: string }
   | { kind: "dependency"; work_id: string }
@@ -663,12 +681,17 @@ export class FlowBuilder {
     };
   }
 
-  component(id: string, inputSchema: Schema, outputSchema: Schema): this {
+  component(
+    id: string,
+    inputSchema: Schema,
+    outputSchema: Schema,
+    requirements: Record<string, string>,
+  ): this {
     this.#candidate.components.push({
       id,
       input_schema: inputSchema,
       output_schema: outputSchema,
-      requirements: {},
+      requirements: structuredClone(requirements),
     });
     return this;
   }
@@ -678,13 +701,14 @@ export class FlowBuilder {
     inputSchema: Schema,
     outputSchema: Schema,
     profile: EffectProfile,
+    requirements: Record<string, string>,
   ): this {
     this.#candidate.effects.push({
       id,
       input_schema: inputSchema,
       output_schema: outputSchema,
       profile,
-      requirements: {},
+      requirements: structuredClone(requirements),
     });
     return this;
   }
@@ -1342,7 +1366,7 @@ export class ResourceBuilder {
   }
 }
 
-export const ENGINE_PROTOCOL_VERSION = "cymule.engine/1" as const;
+export const ENGINE_PROTOCOL_VERSION = "cymule.engine/2" as const;
 
 export type EngineFailureCategory =
   | "transport_failure"
@@ -1370,6 +1394,8 @@ export type EnginePhase =
   | "verify_evolution_command"
   | "verify_live_evolution_command"
   | "execute_plan"
+  | "execute_durable"
+  | "execute_live_evolution"
   | "plugin_describe"
   | "plugin_call"
   | "effect_prepare"
@@ -1411,8 +1437,16 @@ export class EngineError extends Error {
   }
 }
 
+export interface CliEngineOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 export class CliEngine {
-  constructor(readonly executable: string) {}
+  constructor(
+    readonly executable = "cymule",
+    readonly options: CliEngineOptions = {},
+  ) {}
 
   seal(candidate: PlanCandidate): SealedPlan {
     const response = this.request({ type: "seal", candidate });
@@ -1460,6 +1494,31 @@ export class CliEngine {
     return response.command;
   }
 
+  executeDurable(store: string, plugin: string, command: DurableCommand): DurableResponse {
+    const response = this.request({ type: "execute_durable", store, plugin, command });
+    if (response.type !== "durable_executed") {
+      throw unexpectedResponse("durable_executed", response.type);
+    }
+    return response.response;
+  }
+
+  executeLiveEvolution(
+    store: string,
+    journalId: string,
+    command: LiveEvolutionCommand,
+  ): LiveEvolutionResponse {
+    const response = this.request({
+      type: "execute_live_evolution",
+      store,
+      journal_id: journalId,
+      command,
+    });
+    if (response.type !== "live_evolution_executed") {
+      throw unexpectedResponse("live_evolution_executed", response.type);
+    }
+    return response.response;
+  }
+
   run(plan: SealedPlan, input: Json, plugin: string, runId: string): ExecutionOutcome {
     const response = this.request({ type: "run", plan, input, plugin, run_id: runId });
     if (response.type !== "execution_boundary") {
@@ -1469,12 +1528,22 @@ export class CliEngine {
   }
 
   private request(request: EngineRequest): EngineResponse {
+    if (this.options.signal?.aborted === true) {
+      throw interruptedError(request, "cancelled");
+    }
+    const envelopeRequest = { engine_protocol: ENGINE_PROTOCOL_VERSION, request };
+    assertStrictJson(envelopeRequest);
     const child = spawnSync(this.executable, ["rpc"], {
-      input: JSON.stringify({ engine_protocol: ENGINE_PROTOCOL_VERSION, request }),
+      input: JSON.stringify(envelopeRequest),
       encoding: "utf8",
       maxBuffer: 16 * 1024 * 1024,
+      timeout: this.options.timeoutMs,
+      signal: this.options.signal,
     });
     if (child.error !== undefined) {
+      const code = (child.error as NodeJS.ErrnoException).code;
+      if (code === "ETIMEDOUT") throw interruptedError(request, "timed_out");
+      if (code === "ABORT_ERR") throw interruptedError(request, "cancelled");
       throw transportError("engine_start_failed", child.error.message);
     }
     if (child.status !== 0) {
@@ -1485,7 +1554,7 @@ export class CliEngine {
     }
     let envelope: EngineResponseEnvelope;
     try {
-      envelope = parseEngineEnvelope(parseUniqueJson(child.stdout));
+      envelope = parseEngineEnvelope(parseStrictJson(child.stdout));
     } catch (error) {
       throw transportError(
         "invalid_engine_response",
@@ -1511,90 +1580,52 @@ export class CliEngine {
   }
 }
 
-function parseUniqueJson(input: string): unknown {
-  let offset = 0;
-  const whitespace = () => {
-    while ([" ", "\t", "\r", "\n"].includes(input[offset] ?? "")) offset += 1;
-  };
-  const string = (): string => {
-    const start = offset;
-    if (input[offset] !== '"') throw new SyntaxError("expected a JSON object member name");
-    offset += 1;
-    while (offset < input.length) {
-      if (input[offset] === "\\") {
-        offset += 2;
-      } else if (input[offset] === '"') {
-        offset += 1;
-        return JSON.parse(input.slice(start, offset)) as string;
-      } else {
-        offset += 1;
-      }
-    }
-    throw new SyntaxError("unterminated JSON string");
-  };
-  const value = (): unknown => {
-    whitespace();
-    if (input[offset] === "{") {
-      offset += 1;
-      whitespace();
-      const members = new Map<string, unknown>();
-      if (input[offset] === "}") {
-        offset += 1;
-        return {};
-      }
-      while (offset < input.length) {
-        const key = string();
-        if (members.has(key)) throw new SyntaxError(`duplicate JSON object member ${JSON.stringify(key)}`);
-        whitespace();
-        if (input[offset] !== ":") throw new SyntaxError("expected ':' after JSON object member");
-        offset += 1;
-        members.set(key, value());
-        whitespace();
-        if (input[offset] === "}") {
-          offset += 1;
-          return Object.fromEntries(members);
-        }
-        if (input[offset] !== ",") throw new SyntaxError("expected ',' between JSON object members");
-        offset += 1;
-        whitespace();
-      }
-      throw new SyntaxError("unterminated JSON object");
-    }
-    if (input[offset] === "[") {
-      offset += 1;
-      whitespace();
-      const values: unknown[] = [];
-      if (input[offset] === "]") {
-        offset += 1;
-        return values;
-      }
-      while (offset < input.length) {
-        values.push(value());
-        whitespace();
-        if (input[offset] === "]") {
-          offset += 1;
-          return values;
-        }
-        if (input[offset] !== ",") throw new SyntaxError("expected ',' between JSON array values");
-        offset += 1;
-      }
-      throw new SyntaxError("unterminated JSON array");
-    }
-    if (input[offset] === '"') {
-      return string();
-    }
-    const start = offset;
-    while (
-      offset < input.length
-      && ![" ", "\t", "\r", "\n", ",", "]", "}"].includes(input[offset] ?? "")
-    ) offset += 1;
-    if (offset === start) throw new SyntaxError("expected a JSON value");
-    return JSON.parse(input.slice(start, offset)) as unknown;
-  };
-  const parsed = value();
-  whitespace();
-  if (offset !== input.length) throw new SyntaxError("unexpected trailing JSON value");
-  return parsed;
+export class DurableEngine {
+  readonly #transport: CliEngine;
+
+  constructor(
+    readonly store: string,
+    readonly plugin: string,
+    transport = new CliEngine(),
+    readonly evolutionJournal = "cymule.sdk.live-evolution",
+  ) {
+    this.#transport = transport;
+  }
+
+  start(runId: string, candidate: PlanCandidate, input: Json): DurableResponse {
+    return this.submit(DurableControlBuilder.startRun(runId, candidate, input));
+  }
+
+  get(runId: string): Json | null {
+    const response = this.submit(DurableControlBuilder.queryRun(`sdk:get:${runId}`, runId));
+    if (response.type !== "run") throw unexpectedResponse("run", response.type);
+    return response.run;
+  }
+
+  resume(runId: string): DurableResponse {
+    return this.submit(DurableControlBuilder.resumeRun(runId));
+  }
+
+  signal(
+    activationId: string,
+    key: string,
+    waitIds: string[],
+    value: Json,
+  ): DurableResponse {
+    return this.submit(DurableControlBuilder.activateSignal(activationId, key, waitIds, value));
+  }
+
+  release(intentId: string): DurableResponse {
+    return this.submit(DurableControlBuilder.releaseEffect(intentId));
+  }
+
+  evolve(command: LiveEvolutionCommand): LiveEvolutionResponse {
+    return this.#transport.executeLiveEvolution(this.store, this.evolutionJournal, command);
+  }
+
+  private submit(command: DurableCommand): DurableResponse {
+    return this.#transport.executeDurable(this.store, this.plugin, command);
+  }
 }
 
 function transportError(code: string, message: string): EngineError {
@@ -1623,6 +1654,13 @@ type EngineRequest =
   | { type: "verify_durable_command"; command: DurableCommand }
   | { type: "verify_evolution_command"; command: EvolutionCommand }
   | { type: "verify_live_evolution_command"; command: LiveEvolutionCommand }
+  | { type: "execute_durable"; store: string; plugin: string; command: DurableCommand }
+  | {
+      type: "execute_live_evolution";
+      store: string;
+      journal_id: string;
+      command: LiveEvolutionCommand;
+    }
   | { type: "run"; plan: SealedPlan; input: Json; plugin: string; run_id: string };
 
 type EngineResponse =
@@ -1633,6 +1671,8 @@ type EngineResponse =
   | { type: "verified_evolution_command"; command: EvolutionCommand }
   | { type: "verified_live_evolution_command"; command: LiveEvolutionCommand }
   | { type: "execution_boundary"; execution: ExecutionOutcome }
+  | { type: "durable_executed"; response: DurableResponse }
+  | { type: "live_evolution_executed"; response: LiveEvolutionResponse }
   | { type: "verified" };
 
 type EngineResponseEnvelope =
@@ -1656,6 +1696,7 @@ const ENGINE_PHASES = new Set<EnginePhase>([
   "transport", "decode_request", "validate_request", "seal_plan", "verify_plan",
   "seal_resource", "verify_wait_activation", "verify_durable_command",
   "verify_evolution_command", "verify_live_evolution_command", "execute_plan",
+  "execute_durable", "execute_live_evolution",
   "plugin_describe", "plugin_call", "effect_prepare", "effect_dispatch", "effect_reconcile",
   "encode_response",
 ]);
@@ -1693,13 +1734,18 @@ function validateSuccessResponse(value: unknown): void {
     ["verified_evolution_command", "command,type"],
     ["verified_live_evolution_command", "command,type"],
     ["execution_boundary", "execution,type"], ["verified", "type"],
+    ["durable_executed", "response,type"],
+    ["live_evolution_executed", "response,type"],
   ]).get(value.type);
   if (payload === undefined || Object.keys(value).sort().join(",") !== payload) {
     throw transportError("invalid_engine_response", "success response fields are not closed");
   }
+  if (value.type === "sealed") validateSealedPlan(value.plan);
   if (value.type === "execution_boundary") validateExecutionOutcome(value.execution);
   if (value.type === "verified_evolution_command") validateEvolutionCommand(value.command);
   if (value.type === "verified_live_evolution_command") validateLiveEvolutionCommand(value.command);
+  if (value.type === "durable_executed") validateDurableResponse(value.response);
+  if (value.type === "live_evolution_executed") validateLiveEvolutionResponse(value.response);
 }
 
 function validateExecutionOutcome(value: unknown): void {
@@ -1735,6 +1781,26 @@ function validateExecutionOutcome(value: unknown): void {
   if (!isRecord(nested) || Object.keys(nested).sort().join(",") !== nestedFields) {
     throw transportError("invalid_engine_response", "execution payload fields are not closed");
   }
+  if (value.status === "completed") {
+    requireStrings(nested, ["run_id", "plan_id", "projection_digest", "precondition_token"]);
+    if (!Array.isArray(nested.effects) || !nested.effects.every(isNonEmptyString)) {
+      throw transportError("invalid_engine_response", "execution effects are invalid");
+    }
+  } else if (value.status === "suspended") {
+    requireStrings(nested, ["run_id", "plan_id", "definition_id", "invocation_id", "site_id"]);
+    if (nested.result_bind !== null && !isNonEmptyString(nested.result_bind)) {
+      throw transportError("invalid_engine_response", "wait result binding is invalid");
+    }
+    validateWaitSpec(nested.wait);
+  } else if (value.status === "release_required") {
+    requireStrings(nested, ["run_id", "plan_id"]);
+    if (!Array.isArray(nested.intent_ids) || nested.intent_ids.length === 0 ||
+      !nested.intent_ids.every(isNonEmptyString)) {
+      throw transportError("invalid_engine_response", "effect release intents are invalid");
+    }
+  } else {
+    requireStrings(nested, ["run_id", "plan_id", "intent_id"]);
+  }
 }
 
 function validateEvolutionCommand(value: unknown): void {
@@ -1752,11 +1818,37 @@ function validateEvolutionCommand(value: unknown): void {
     ["apply_gate", "command_id,control_version,gate,next_decision_id,operation"],
   ]).get(String(value.operation));
   if (
-    value.control_version !== "cymule.evolution-control/2"
+    value.control_version !== "cymule.evolution-control/3"
     || fields === undefined
     || Object.keys(value).sort().join(",") !== fields
   ) {
     throw transportError("invalid_engine_response", "evolution command is not closed");
+  }
+  if (value.operation === "migrate") {
+    validateEvolutionRequest(value.request, [
+      "from_plan", "input_state", "migration_id", "run_id", "safe_point_id",
+      "source_binding", "source_epoch", "target_binding", "to_plan",
+    ], ["migration_id", "run_id", "from_plan", "to_plan", "safe_point_id"]);
+    const request = value.request as Record<string, unknown>;
+    validateArtifactRef(request.input_state);
+    validateArtifactRef(request.source_binding);
+    validateArtifactRef(request.target_binding);
+    requireEpoch(request.source_epoch);
+  } else if (value.operation === "restart_under_new_plan") {
+    validateEvolutionRequest(value.request, [
+      "evidence", "from_plan", "input", "replacement_run", "restart_id", "safe_point_id",
+      "source_epoch", "source_run", "to_plan",
+    ], ["restart_id", "source_run", "replacement_run", "from_plan", "to_plan", "safe_point_id"]);
+    const request = value.request as Record<string, unknown>;
+    validateArtifactRef(request.input);
+    validateArtifactRef(request.evidence);
+    requireEpoch(request.source_epoch);
+  } else if (value.operation === "shadow") {
+    validateEvolutionRequest(value.request, [
+      "comparison_id", "comparison_policy", "decision_id", "input", "primary_plan",
+      "shadow_plan", "subject",
+    ], ["comparison_id", "decision_id", "subject", "primary_plan", "shadow_plan", "comparison_policy"]);
+    validateArtifactRef((value.request as Record<string, unknown>).input);
   }
 }
 
@@ -1774,13 +1866,121 @@ function validateLiveEvolutionCommand(value: unknown): void {
     ]],
   ]).get(String(value.operation));
   if (
-    value.control_version !== "cymule.live-evolution-control/1"
+    value.control_version !== "cymule.live-evolution-control/2"
     || fields === undefined
     || !fields.includes(Object.keys(value).sort().join(","))
   ) {
     throw transportError("invalid_engine_response", "live evolution command is not closed");
   }
   if (value.operation === "apply") validateEvolutionCommand(value.command);
+}
+
+function validateDurableResponse(value: unknown): void {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    throw transportError("invalid_engine_response", "durable response is not tagged");
+  }
+  const keys = new Map<string, string>([
+    ["run_boundary", "boundary,type"], ["wait_activated", "ready_run_ids,type"],
+    ["run", "run,type"], ["domain", "domain,type"],
+  ]).get(value.type);
+  if (keys === undefined || Object.keys(value).sort().join(",") !== keys) {
+    throw transportError("invalid_engine_response", "durable response fields are not closed");
+  }
+}
+
+function validateLiveEvolutionResponse(value: unknown): void {
+  if (!isRecord(value) || typeof value.result !== "string") {
+    throw transportError("invalid_engine_response", "live-evolution response is not tagged");
+  }
+  const keys = new Map<string, string>([
+    ["definition_published", "result,revision"], ["template_registered", "linked,result"],
+    ["publication_applied", "receipt,result"], ["patch_applied", "edge,result"],
+    ["applied", "result"], ["occurrence_selected", "plan_id,result"],
+    ["migrated", "receipt,result"], ["restart_authorized", "receipt,result"],
+    ["shadow_recorded", "comparison,result"], ["gate_applied", "result,transition"],
+  ]).get(value.result);
+  if (keys === undefined || Object.keys(value).sort().join(",") !== keys) {
+    throw transportError("invalid_engine_response", "live-evolution response fields are not closed");
+  }
+}
+
+function validateSealedPlan(value: unknown): void {
+  requireClosedRecord(value, ["candidate", "plan_id"], "sealed Plan");
+  requireStrings(value, ["plan_id"]);
+  if (!isRecord(value.candidate)) {
+    throw transportError("invalid_engine_response", "sealed Plan candidate is invalid");
+  }
+}
+
+function validateWaitSpec(value: unknown): void {
+  if (!isRecord(value) || typeof value.kind !== "string") {
+    throw transportError("invalid_engine_response", "wait contract is not tagged");
+  }
+  const fields = new Map<string, string>([
+    ["signal", "consume_once,key,kind"],
+    ["timer", "kind,timer_id"],
+    ["input", "correlation,kind,schema"],
+  ]).get(value.kind);
+  if (fields === undefined || Object.keys(value).sort().join(",") !== fields) {
+    throw transportError("invalid_engine_response", "wait contract fields are not closed");
+  }
+  if (value.kind === "signal") {
+    requireStrings(value, ["key"]);
+    if (typeof value.consume_once !== "boolean") {
+      throw transportError("invalid_engine_response", "signal wait consume_once is invalid");
+    }
+  } else if (value.kind === "timer") {
+    requireStrings(value, ["timer_id"]);
+  } else {
+    requireStrings(value, ["correlation"]);
+    if (!isRecord(value.schema) && typeof value.schema !== "boolean") {
+      throw transportError("invalid_engine_response", "input wait schema is invalid");
+    }
+  }
+}
+
+function validateArtifactRef(value: unknown): void {
+  requireClosedRecord(value, ["artifact_id", "identity_version", "kind"], "Artifact reference");
+  requireStrings(value, ["artifact_id", "identity_version", "kind"]);
+  if (value.identity_version !== "cymule.artifact/2" ||
+    !/^sha256:[0-9a-f]{64}$/.test(String(value.artifact_id))) {
+    throw transportError("invalid_engine_response", "Artifact reference identity is invalid");
+  }
+}
+
+function validateEvolutionRequest(
+  value: unknown,
+  fields: string[],
+  stringFields: string[],
+): asserts value is Record<string, unknown> {
+  requireClosedRecord(value, fields, "evolution request");
+  requireStrings(value, stringFields);
+}
+
+function requireClosedRecord(
+  value: unknown,
+  fields: string[],
+  label: string,
+): asserts value is Record<string, unknown> {
+  if (!isRecord(value) || Object.keys(value).sort().join(",") !== [...fields].sort().join(",")) {
+    throw transportError("invalid_engine_response", `${label} fields are not closed`);
+  }
+}
+
+function requireStrings(value: Record<string, unknown>, fields: string[]): void {
+  if (!fields.every((field) => isNonEmptyString(value[field]))) {
+    throw transportError("invalid_engine_response", "required string field is invalid");
+  }
+}
+
+function requireEpoch(value: unknown): void {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw transportError("invalid_engine_response", "evolution epoch is invalid");
+  }
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 function validateEngineFailure(value: unknown): asserts value is EngineFailure {
@@ -1837,4 +2037,92 @@ function validateEnginePath(value: unknown): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function interruptedError(request: EngineRequest, kind: "cancelled" | "timed_out"): EngineError {
+  const mutating = request.type === "run" || request.type === "execute_live_evolution" ||
+    (request.type === "execute_durable" && !request.command.type.startsWith("query_"));
+  if (mutating) {
+    return new EngineError({
+      category: "unknown_world_outcome",
+      phase: "transport",
+      code: `engine_response_${kind}`,
+      message: `the Engine response was ${kind} after a mutating request began`,
+      retry_disposition: "reconcile",
+    });
+  }
+  return new EngineError({
+    category: kind,
+    phase: "transport",
+    code: `engine_response_${kind}`,
+    message: `the Engine response was ${kind}`,
+  });
+}
+
+const MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991;
+
+function assertStrictJson(value: unknown, seen = new Set<object>()): void {
+  if (typeof value === "bigint") throw transportError("request_encoding_failed", "bigint is not JSON");
+  if (typeof value === "number" && (!Number.isFinite(value) ||
+    (Number.isInteger(value) && Math.abs(value) > MAX_SAFE_JSON_INTEGER))) {
+    throw transportError("request_encoding_failed", "number is outside the shared JSON domain");
+  }
+  if (typeof value !== "object" || value === null) return;
+  if (seen.has(value)) throw transportError("request_encoding_failed", "cyclic value is not JSON");
+  seen.add(value);
+  for (const child of Array.isArray(value) ? value : Object.values(value)) assertStrictJson(child, seen);
+  seen.delete(value);
+}
+
+function parseStrictJson(text: string): unknown {
+  let index = 0;
+  const whitespace = () => { while (/\s/.test(text[index] ?? "")) index += 1; };
+  const stringToken = (): string => {
+    const start = index++;
+    while (index < text.length) {
+      if (text[index] === "\\") { index += 2; continue; }
+      if (text[index++] === '"') return JSON.parse(text.slice(start, index)) as string;
+    }
+    throw new Error("unterminated JSON string");
+  };
+  const value = (): void => {
+    whitespace();
+    if (text[index] === "{") {
+      index += 1; whitespace();
+      const keys = new Set<string>();
+      if (text[index] === "}") { index += 1; return; }
+      while (true) {
+        if (text[index] !== '"') throw new Error("object key is not a string");
+        const key = stringToken();
+        if (keys.has(key)) throw new Error(`duplicate JSON object key ${JSON.stringify(key)}`);
+        keys.add(key); whitespace();
+        if (text[index++] !== ":") throw new Error("missing object colon");
+        value(); whitespace();
+        if (text[index] === "}") { index += 1; return; }
+        if (text[index++] !== ",") throw new Error("missing object comma");
+        whitespace();
+      }
+    }
+    if (text[index] === "[") {
+      index += 1; whitespace();
+      if (text[index] === "]") { index += 1; return; }
+      while (true) {
+        value(); whitespace();
+        if (text[index] === "]") { index += 1; return; }
+        if (text[index++] !== ",") throw new Error("missing array comma");
+      }
+    }
+    if (text[index] === '"') { stringToken(); return; }
+    const match = /^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(text.slice(index));
+    if (match === null) throw new Error("invalid JSON value");
+    if (/^-?\d+$/.test(match[0]) && Math.abs(Number(match[0])) > MAX_SAFE_JSON_INTEGER) {
+      throw new Error("integer is outside the shared JSON domain");
+    }
+    index += match[0].length;
+  };
+  value(); whitespace();
+  if (index !== text.length) throw new Error("trailing JSON content");
+  const parsed = JSON.parse(text) as unknown;
+  assertStrictJson(parsed);
+  return parsed;
 }

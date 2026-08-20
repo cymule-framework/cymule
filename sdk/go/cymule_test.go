@@ -1,13 +1,26 @@
 package cymule
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestCliEnginePreservesPreCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := (CliEngine{Context: ctx}).Seal(NewFlow("cancel", map[string]any{}, map[string]any{}).
+		Finish(Expression{"kind": "input"}))
+	var failure EngineFailure
+	if !errors.As(err, &failure) || failure.Category != "cancelled" {
+		t.Fatalf("expected structured cancellation, got %v", err)
+	}
+}
 
 func TestStructuredEngineFailures(t *testing.T) {
 	enginePath := os.Getenv("CYMULE_BIN")
@@ -91,9 +104,9 @@ func TestEngineJSONRejectsDuplicateObjectMembers(t *testing.T) {
 
 func TestEngineEnvelopeRequiresExclusiveOutcomePayload(t *testing.T) {
 	invalid := []string{
-		`{"engine_protocol":"cymule.engine/1","outcome":"success","response":{"type":"verified"},"error":{"category":"validation","phase":"transport","code":"invalid","message":"invalid"}}`,
-		`{"engine_protocol":"cymule.engine/1","outcome":"failure","response":{"type":"verified"},"error":{"category":"validation","phase":"transport","code":"invalid","message":"invalid"}}`,
-		`{"engine_protocol":"cymule.engine/1","outcome":"success"}`,
+		`{"engine_protocol":"cymule.engine/2","outcome":"success","response":{"type":"verified"},"error":{"category":"validation","phase":"transport","code":"invalid","message":"invalid"}}`,
+		`{"engine_protocol":"cymule.engine/2","outcome":"failure","response":{"type":"verified"},"error":{"category":"validation","phase":"transport","code":"invalid","message":"invalid"}}`,
+		`{"engine_protocol":"cymule.engine/2","outcome":"success"}`,
 	}
 	for _, input := range invalid {
 		var response struct {
@@ -108,8 +121,9 @@ func TestEngineEnvelopeRequiresExclusiveOutcomePayload(t *testing.T) {
 
 func TestEvolutionAndExecutionResponseUnionsAreClosed(t *testing.T) {
 	for _, input := range []string{
-		`{"control_version":"cymule.evolution-control/2","command_id":"command:test","operation":"future"}`,
-		`{"control_version":"cymule.evolution-control/2","command_id":"command:test","operation":"select_occurrence","occurrence_id":"occurrence:test","patch":{}}`,
+		`{"control_version":"cymule.evolution-control/3","command_id":"command:test","operation":"future"}`,
+		`{"control_version":"cymule.evolution-control/3","command_id":"command:test","operation":"select_occurrence","occurrence_id":"occurrence:test","patch":{}}`,
+		`{"control_version":"cymule.evolution-control/3","command_id":"command:test","operation":"migrate","request":{"unexpected":true}}`,
 	} {
 		var command EvolutionCommand
 		if err := decodeClosedJSON([]byte(input), &command); err == nil {
@@ -118,7 +132,7 @@ func TestEvolutionAndExecutionResponseUnionsAreClosed(t *testing.T) {
 	}
 	var live LiveEvolutionCommand
 	if err := decodeClosedJSON([]byte(
-		`{"control_version":"cymule.live-evolution-control/1","command_id":"command:test","operation":"future"}`,
+		`{"control_version":"cymule.live-evolution-control/2","command_id":"command:test","operation":"future"}`,
 	), &live); err == nil {
 		t.Fatal("expected closed live Evolution rejection")
 	}
@@ -126,6 +140,8 @@ func TestEvolutionAndExecutionResponseUnionsAreClosed(t *testing.T) {
 	for _, input := range []string{
 		`{"status":"future"}`,
 		`{"status":"completed","result":{},"suspension":{}}`,
+		`{"status":"completed","result":{}}`,
+		`{"status":"suspended","suspension":{"run_id":"run:test","plan_id":"sha256:test","definition_id":"main","invocation_id":"main","site_id":"wait:test","wait":{"kind":"future","unexpected":true},"result_bind":null}}`,
 		`{"status":"release_required","release":null}`,
 		`{"status":"reconciliation_required","reconciliation":null}`,
 	} {
@@ -253,8 +269,8 @@ func TestCrossLanguageEndToEnd(t *testing.T) {
 		KeyedIdempotency: true, Irreversible: false,
 	}
 	candidate := NewFlow("cross_language_echo", map[string]any{}, map[string]any{}).
-		Component("test.echo", map[string]any{}, map[string]any{}).
-		EffectContract("test.capture", map[string]any{}, map[string]any{}, profile).
+		Component("test.echo", map[string]any{}, map[string]any{}, map[string]string{}).
+		EffectContract("test.capture", map[string]any{}, map[string]any{}, profile, map[string]string{}).
 		Definition(Definition{
 			ID: "echo_subflow", InputSchema: map[string]any{}, OutputSchema: map[string]any{},
 			Body: Region{
@@ -290,6 +306,34 @@ func TestCrossLanguageEndToEnd(t *testing.T) {
 	}
 	if len(execution.Result.Effects) != 1 {
 		t.Fatalf("expected one effect, got %d", len(execution.Result.Effects))
+	}
+	durable := DurableEngine{
+		Store: t.TempDir(), Plugin: pluginPath, Transport: engine,
+	}
+	response, err := durable.Start("run:go-durable-e2e", candidate, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Type != "run_boundary" {
+		t.Fatalf("unexpected durable response %q", response.Type)
+	}
+	if run, err := durable.Get("run:go-durable-e2e"); err != nil || string(run) == "null" {
+		t.Fatalf("durable Run query failed: %s %v", run, err)
+	}
+	evolved, err := durable.Evolve(PublishLiveDefinition(
+		"evolve:go:publish", "definition:go:echo", candidate.Definitions[0],
+	))
+	if err != nil || evolved.Result != "definition_published" {
+		t.Fatalf("durable evolution failed: %#v %v", evolved, err)
+	}
+}
+
+func TestFlowFinishReturnsFrozenCandidate(t *testing.T) {
+	builder := NewFlow("frozen", map[string]any{}, map[string]any{})
+	candidate := builder.Finish(Expression{"kind": "input"})
+	builder.Component("later", map[string]any{}, map[string]any{}, map[string]string{"capability": "late"})
+	if len(candidate.Components) != 0 {
+		t.Fatal("finished candidate changed after builder mutation")
 	}
 }
 

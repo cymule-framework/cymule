@@ -102,6 +102,7 @@ name = "cymule-cli"
 path = "crates/cymule-cli"
 dependencies = [
   "cymule-core",
+  "cymule-directory-store",
   "cymule-durable",
   "cymule-evolution",
   "cymule-executor-process",

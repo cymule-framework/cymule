@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   CliEngine,
+  DurableEngine,
   DurableControlBuilder,
   EngineError,
   EvolutionControlBuilder,
@@ -34,7 +35,7 @@ test("TypeScript Engine ingress rejects duplicate JSON object members", () => {
     executable,
     `#!/bin/sh
 cat >/dev/null
-printf '%s' '{"engine_protocol":"cymule.engine/1","outcome":"success","response":{"type":"sealed","type":"verified"}}'
+printf '%s' '{"engine_protocol":"cymule.engine/2","outcome":"success","response":{"type":"sealed","type":"verified"}}'
 `,
   );
   chmodSync(executable, 0o700);
@@ -43,7 +44,7 @@ printf '%s' '{"engine_protocol":"cymule.engine/1","outcome":"success","response"
       () => new CliEngine(executable).seal({} as PlanCandidate),
       (error: unknown) => error instanceof EngineError
         && error.failure.code === "invalid_engine_response"
-        && error.failure.message.includes("duplicate JSON object member"),
+        && error.failure.message.includes("duplicate JSON object"),
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -53,8 +54,12 @@ printf '%s' '{"engine_protocol":"cymule.engine/1","outcome":"success","response"
 test("TypeScript Engine success and nested unions are closed", () => {
   const cases = [
     {
+      response: { type: "sealed", plan: null },
+      invoke: (engine: CliEngine) => engine.seal({} as never),
+    },
+    {
       response: { type: "verified_evolution_command", command: {
-        control_version: "cymule.evolution-control/2",
+        control_version: "cymule.evolution-control/3",
         command_id: "command:test",
         operation: "future_operation",
       } },
@@ -66,6 +71,30 @@ test("TypeScript Engine success and nested unions are closed", () => {
       } },
       invoke: (engine: CliEngine) => engine.run({} as never, null, "plugin", "run:test"),
     },
+    {
+      response: { type: "execution_boundary", execution: {
+        status: "suspended",
+        suspension: {
+          run_id: "run:test",
+          plan_id: "sha256:test",
+          definition_id: "main",
+          invocation_id: "main",
+          site_id: "wait:test",
+          wait: { kind: "future", unexpected: true },
+          result_bind: null,
+        },
+      } },
+      invoke: (engine: CliEngine) => engine.run({} as never, null, "plugin", "run:test"),
+    },
+    {
+      response: { type: "verified_evolution_command", command: {
+        control_version: "cymule.evolution-control/3",
+        command_id: "command:test",
+        operation: "migrate",
+        request: { unexpected: true },
+      } },
+      invoke: (engine: CliEngine) => engine.verifyEvolutionCommand({} as never),
+    },
   ];
   for (const [index, entry] of cases.entries()) {
     const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-"));
@@ -75,7 +104,7 @@ test("TypeScript Engine success and nested unions are closed", () => {
       `#!/bin/sh
 cat >/dev/null
 printf '%s' '${JSON.stringify({
-        engine_protocol: "cymule.engine/1",
+        engine_protocol: "cymule.engine/2",
         outcome: "success",
         response: entry.response,
       })}'
@@ -121,7 +150,7 @@ test("TypeScript accepts typed Effect execution boundaries", () => {
       `#!/bin/sh
 cat >/dev/null
 printf '%s' '${JSON.stringify({
-        engine_protocol: "cymule.engine/1",
+        engine_protocol: "cymule.engine/2",
         outcome: "success",
         response: { type: "execution_boundary", execution },
       })}'
@@ -148,8 +177,8 @@ test("TypeScript candidate seals and executes through the Rust engine", () => {
   }
 
   const candidate = new FlowBuilder("cross_language_echo", {}, {})
-    .component("test.echo", {}, {})
-    .effectContract("test.capture", {}, {}, profile)
+    .component("test.echo", {}, {}, {})
+    .effectContract("test.capture", {}, {}, profile, {})
     .definition("echo_subflow", {}, {}, {
       steps: [{
         id: "call.echo",
@@ -179,6 +208,25 @@ test("TypeScript candidate seals and executes through the Rust engine", () => {
   const result = execution.result;
   assert.deepEqual(result.value, input);
   assert.equal(result.effects.length, 1);
+
+  const store = mkdtempSync(join(tmpdir(), "cymule-ts-durable-"));
+  try {
+    const durable = new DurableEngine(store, pluginPath, engine);
+    assert.equal(durable.start("run:typescript-durable-e2e", candidate, input).type, "run_boundary");
+    assert.notEqual(durable.get("run:typescript-durable-e2e"), null);
+    assert.equal(
+      durable.evolve(
+        LiveEvolutionControlBuilder.publishDefinition(
+          "evolve:typescript:publish",
+          "definition:typescript:echo",
+          candidate.definitions[0]!,
+        ),
+      ).result,
+      "definition_published",
+    );
+  } finally {
+    rmSync(store, { recursive: true, force: true });
+  }
 });
 
 test("TypeScript resource seals through the Rust engine", () => {
@@ -416,6 +464,28 @@ test("TypeScript preserves structured Rust Engine failures", () => {
       ),
     expected.substrate_failure!,
   );
+});
+
+test("TypeScript rejects unsafe JSON and preserves pre-cancellation", () => {
+  const candidate = new FlowBuilder("transport", {}, {}).finish({ kind: "input" });
+  const cancelled = new AbortController();
+  cancelled.abort();
+  try {
+    new CliEngine("cymule", { signal: cancelled.signal }).seal(candidate);
+    assert.fail("cancelled request unexpectedly started");
+  } catch (error) {
+    assert.ok(error instanceof EngineError);
+    assert.equal(error.failure.category, "cancelled");
+  }
+  try {
+    new CliEngine("missing-engine").seal(
+      { ...candidate, name: Number.NaN } as unknown as PlanCandidate,
+    );
+    assert.fail("non-finite request unexpectedly encoded");
+  } catch (error) {
+    assert.ok(error instanceof EngineError);
+    assert.equal(error.failure.code, "request_encoding_failed");
+  }
 });
 
 function assertEngineFailure(operation: () => unknown, expected: Record<string, string>): void {

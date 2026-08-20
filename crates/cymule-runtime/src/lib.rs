@@ -6,6 +6,7 @@ mod engine;
 mod error;
 mod plugin;
 mod protocol;
+mod strict_json;
 
 pub use composition::{
     BINDING_CONTEXT_ID_DOMAIN, BindingContextDescriptor, CompositionError,
@@ -33,3 +34,4 @@ pub use protocol::{
     EnginePhase, EngineRequestEnvelope, EngineResponseEnvelope, EngineResult,
     EngineRetryDisposition,
 };
+pub use strict_json::validate_strict_json;
