@@ -48,15 +48,18 @@
   original claim. Reopen must query them again and may settle them as applied or
   not applied; it must never redispatch the original Effect or reuse one command
   ID for different reconciliation decisions.
-- Durable retry policy is a content-addressed, provider-neutral state machine,
-  not a scheduler. It consumes a closed failure class, the failed occurrence
-  binding, an explicit logical Clock observation, and optional recorded jitter
-  evidence; it persists the original command and exact stop-or-retry-at result
-  through the application journal CAS. One retry stream pins one Policy ID,
-  advances one attempt at a time after its admitted due time, and becomes
-  immutable after stopping. An `unknown_world` mutating Effect always stops
-  with its original Effect intent retained for reconciliation, even when that
-  failure class appears in the Policy's retryable set.
+- Retry policy is a content-addressed, provider-neutral algebra, not a
+  scheduler. `RetryStream` is only its serializable pure reducer state: it
+  retains the complete canonical Policy, consumes a closed failure class, the
+  failed occurrence binding, content-addressed logical Clock observation, and
+  optional content-addressed jitter evidence, then produces an exact
+  stop-or-retry-at transition. Do not claim durable retry from this reducer
+  alone. An executor must checkpoint it with the failed occurrence,
+  Continuation/timer state, and next-attempt admission in one owning CAS. One
+  stream pins one Policy ID, advances one attempt at a time after its admitted
+  due time, and becomes immutable after stopping. Any `unknown_world` external
+  Effect stops with its original Effect intent retained for reconciliation,
+  even when that failure class appears in the Policy's retryable set.
 - Effect enqueue, claim, observation, and reconciliation checkpoints validate
   the exact appended Machine Events, command receipts, and allowed Artifacts
   against the proposed outbox transition. Never use a generic Machine write for

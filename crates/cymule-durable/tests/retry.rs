@@ -1,41 +1,12 @@
-//! Deterministic and fault-oriented durable retry policy tests.
+//! Deterministic and fault-oriented retry policy reducer tests.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use cymule_core::Machine;
 use cymule_durable::{
-    DurableCoordinator, DurableError, DurableResult, DurableState, DurableStore, FailureClass,
-    FailureOperation, JitterEvidence, JitterStrategy, MemoryStore, RetryCommand, RetryDelay,
-    RetryDisposition, RetryFailure, RetryPolicy, RetryStopReason, StoreCommit, StoredState,
+    ClockObservation, DurableError, FailureClass, FailureOperation, JitterEvidence, JitterStrategy,
+    RetryCommand, RetryDelay, RetryDisposition, RetryFailure, RetryPolicy, RetryStopReason,
+    RetryStream,
 };
-
-#[derive(Clone)]
-struct LostReceiptStore {
-    inner: MemoryStore,
-    armed: Arc<AtomicBool>,
-}
-
-impl DurableStore for LostReceiptStore {
-    fn load(&mut self) -> DurableResult<Option<StoredState>> {
-        self.inner.load()
-    }
-
-    fn compare_and_swap(
-        &mut self,
-        expected_revision: Option<&str>,
-        next: &DurableState,
-    ) -> DurableResult<StoreCommit> {
-        let commit = self.inner.compare_and_swap(expected_revision, next)?;
-        if self.armed.swap(false, Ordering::SeqCst) {
-            return Err(DurableError::Substrate(
-                "simulated lost retry decision receipt".to_owned(),
-            ));
-        }
-        Ok(commit)
-    }
-}
 
 fn classes(classes: impl IntoIterator<Item = FailureClass>) -> BTreeSet<FailureClass> {
     classes.into_iter().collect()
@@ -58,11 +29,12 @@ fn command(
             class,
             operation,
         },
-        logical_observed_at: observed_at,
+        clock: ClockObservation::seal("binding:clock/1", observed_at)
+            .expect("Clock observation seals"),
         occurrence_binding: format!("binding:worker/{attempt}"),
-        jitter_evidence: jitter.map(|delay| JitterEvidence {
-            evidence_id: format!("clock:jitter:{retry_id}:{attempt}"),
-            delay,
+        jitter_evidence: jitter.map(|delay| {
+            JitterEvidence::seal(format!("binding:jitter:{retry_id}:{attempt}"), delay)
+                .expect("jitter evidence seals")
         }),
     }
 }
@@ -165,7 +137,6 @@ fn closed_failure_classes_drive_admission_without_string_matching() {
         FailureClass::Cancelled,
         FailureClass::TimedOut,
         FailureClass::LeaseLost,
-        FailureClass::UnknownWorld,
     ];
     let policy = RetryPolicy::seal(
         2,
@@ -175,19 +146,12 @@ fn closed_failure_classes_drive_admission_without_string_matching() {
     )
     .expect("policy seals");
     for class in retryable {
-        let operation = if class == FailureClass::UnknownWorld {
-            FailureOperation::ObservationalEffect {
-                intent_id: "effect:read".to_owned(),
-            }
-        } else {
-            FailureOperation::Computation
-        };
         let decision = policy
             .evaluate(&command(
                 &format!("class:{class:?}"),
                 1,
                 class,
-                operation,
+                FailureOperation::Computation,
                 0,
                 None,
             ))
@@ -220,7 +184,7 @@ fn closed_failure_classes_drive_admission_without_string_matching() {
 }
 
 #[test]
-fn unknown_mutating_effect_never_retries_and_preserves_reconciliation_identity() {
+fn unknown_external_effect_never_retries_and_preserves_reconciliation_identity() {
     let policy = RetryPolicy::seal(
         10,
         classes([FailureClass::UnknownWorld]),
@@ -228,26 +192,37 @@ fn unknown_mutating_effect_never_retries_and_preserves_reconciliation_identity()
         JitterStrategy::None,
     )
     .expect("policy seals");
-    let decision = policy
-        .evaluate(&command(
-            "mutating-effect",
-            1,
-            FailureClass::UnknownWorld,
+    for (operation, intent_id) in [
+        (
+            FailureOperation::ObservationalEffect {
+                intent_id: "effect:read:42".to_owned(),
+            },
+            "effect:read:42".to_owned(),
+        ),
+        (
             FailureOperation::MutatingEffect {
                 intent_id: "effect:charge:42".to_owned(),
             },
-            80,
-            None,
-        ))
-        .expect("unknown mutating outcome evaluates");
-    assert_eq!(
-        decision,
-        RetryDisposition::Stop {
-            reason: RetryStopReason::ReconciliationRequired {
-                intent_id: "effect:charge:42".to_owned(),
-            },
-        }
-    );
+            "effect:charge:42".to_owned(),
+        ),
+    ] {
+        let decision = policy
+            .evaluate(&command(
+                &format!("unknown:{intent_id}"),
+                1,
+                FailureClass::UnknownWorld,
+                operation,
+                80,
+                None,
+            ))
+            .expect("unknown external outcome evaluates");
+        assert_eq!(
+            decision,
+            RetryDisposition::Stop {
+                reason: RetryStopReason::ReconciliationRequired { intent_id },
+            }
+        );
+    }
 
     let invalid = command(
         "unknown-computation",
@@ -309,12 +284,7 @@ fn delay_and_due_time_overflow_fail_closed() {
 }
 
 #[test]
-fn durable_retry_stream_enforces_due_time_attempt_order_and_terminal_state() {
-    let store = MemoryStore::new();
-    let mut coordinator = DurableCoordinator::open(store)
-        .expect("store opens")
-        .initialize(&Machine::new())
-        .expect("store initializes");
+fn retry_stream_enforces_due_time_attempt_order_and_terminal_state() {
     let policy = RetryPolicy::seal(
         2,
         classes([FailureClass::Transient]),
@@ -322,6 +292,7 @@ fn durable_retry_stream_enforces_due_time_attempt_order_and_terminal_state() {
         JitterStrategy::None,
     )
     .expect("policy seals");
+    let mut stream = RetryStream::new("ordered", policy.clone()).expect("stream creates");
     let first = command(
         "ordered",
         1,
@@ -330,41 +301,23 @@ fn durable_retry_stream_enforces_due_time_attempt_order_and_terminal_state() {
         100,
         None,
     );
-    let first_decision = coordinator
-        .decide_retry(&policy, first.clone())
-        .expect("first decision commits");
+    let first_decision = stream.apply(first.clone()).expect("first decision applies");
     assert_eq!(first_decision.policy_id, policy.policy_id);
     assert_eq!(
-        coordinator
-            .decide_retry(&policy, first)
-            .expect("same command replays"),
+        stream.apply(first).expect("same command replays"),
         first_decision
     );
 
     assert!(matches!(
-        coordinator.decide_retry(
-            &policy,
-            command(
+        stream.apply(command(
                 "ordered",
                 2,
                 FailureClass::Transient,
                 FailureOperation::Computation,
                 109,
                 None,
-            ),
-        ),
+            )),
         Err(DurableError::IllegalTransition(message)) if message.contains("before")
-    ));
-    let changed_policy = RetryPolicy::seal(
-        2,
-        classes([FailureClass::Transient]),
-        RetryDelay::Fixed { delay: 11 },
-        JitterStrategy::None,
-    )
-    .expect("changed policy seals");
-    assert!(matches!(
-        coordinator.retry_decisions(&changed_policy, "ordered"),
-        Err(DurableError::Validation(message)) if message.contains("policy identity")
     ));
     let second = command(
         "ordered",
@@ -375,9 +328,9 @@ fn durable_retry_stream_enforces_due_time_attempt_order_and_terminal_state() {
         None,
     );
     assert!(matches!(
-        coordinator
-            .decide_retry(&policy, second)
-            .expect("second decision commits")
+        stream
+            .apply(second)
+            .expect("second decision applies")
             .disposition,
         RetryDisposition::Stop {
             reason: RetryStopReason::AttemptsExhausted,
@@ -385,40 +338,28 @@ fn durable_retry_stream_enforces_due_time_attempt_order_and_terminal_state() {
         }
     ));
     assert!(matches!(
-        coordinator.decide_retry(
-            &policy,
-            command(
+        stream.apply(command(
                 "ordered",
                 3,
                 FailureClass::Transient,
                 FailureOperation::Computation,
                 120,
                 None,
-            ),
-        ),
+            )),
         Err(DurableError::IllegalTransition(message)) if message.contains("terminal")
     ));
-    assert_eq!(
-        coordinator
-            .retry_decisions(&policy, "ordered")
-            .expect("decisions restore")
-            .len(),
-        2
-    );
+    assert_eq!(stream.decisions.len(), 2);
+    stream.verify().expect("complete stream replays");
+    let mut duplicated = stream;
+    duplicated.decisions.push(duplicated.decisions[1].clone());
+    assert!(matches!(
+        duplicated.verify(),
+        Err(DurableError::Validation(message)) if message.contains("duplicated")
+    ));
 }
 
 #[test]
-fn lost_receipt_reopen_returns_original_jitter_and_binding_decision() {
-    let inner = MemoryStore::new();
-    let armed = Arc::new(AtomicBool::new(false));
-    let store = LostReceiptStore {
-        inner: inner.clone(),
-        armed: armed.clone(),
-    };
-    let mut coordinator = DurableCoordinator::open(store)
-        .expect("store opens")
-        .initialize(&Machine::new())
-        .expect("store initializes");
+fn serialized_stream_retains_canonical_policy_and_reopens_without_caller_policy() {
     let policy = RetryPolicy::seal(
         3,
         classes([FailureClass::Transient]),
@@ -426,52 +367,88 @@ fn lost_receipt_reopen_returns_original_jitter_and_binding_decision() {
         JitterStrategy::Recorded { max_delay: 10 },
     )
     .expect("policy seals");
+    let mut stream = RetryStream::new("reopen", policy.clone()).expect("stream creates");
     let original = command(
-        "lost-receipt",
+        "reopen",
         1,
         FailureClass::Transient,
         FailureOperation::Computation,
         500,
         Some(7),
     );
-    armed.store(true, Ordering::SeqCst);
-    assert!(matches!(
-        coordinator.decide_retry(&policy, original.clone()),
-        Err(DurableError::Substrate(message)) if message == "simulated lost retry decision receipt"
-    ));
-    drop(coordinator);
-
-    let mut reopened = DurableCoordinator::open(inner).expect("store reopens");
+    let first = stream.apply(original.clone()).expect("decision applies");
+    let encoded = serde_json::to_value(&stream).expect("stream serializes");
+    let mut reopened: RetryStream = serde_json::from_value(encoded).expect("stream deserializes");
+    reopened
+        .verify()
+        .expect("stream verifies from retained policy");
+    assert_eq!(reopened.policy, policy);
     let replayed = reopened
-        .decide_retry(&policy, original.clone())
-        .expect("lost receipt returns original decision");
+        .apply(original.clone())
+        .expect("same decision replays after reopen");
+    assert_eq!(replayed, first);
     assert_eq!(replayed.command, original);
     assert_eq!(
         replayed.disposition,
         RetryDisposition::RetryAt {
             next_due_at: 527,
             delay: 27,
-            jitter_evidence: Some(JitterEvidence {
-                evidence_id: "clock:jitter:lost-receipt:1".to_owned(),
-                delay: 7,
-            }),
+            jitter_evidence: original.jitter_evidence.clone(),
         }
     );
-    assert_eq!(
-        reopened
-            .retry_decisions(&policy, "lost-receipt")
-            .expect("stream restores")
-            .len(),
-        1
-    );
+    assert_eq!(reopened.decisions.len(), 1);
 
     let mut conflicting = original;
-    conflicting.jitter_evidence = Some(JitterEvidence {
-        evidence_id: "clock:jitter:lost-receipt:1:changed".to_owned(),
-        delay: 8,
-    });
+    conflicting.jitter_evidence = Some(
+        JitterEvidence::seal("binding:jitter:reopen:changed", 8)
+            .expect("changed jitter evidence seals"),
+    );
     assert!(matches!(
-        reopened.decide_retry(&policy, conflicting),
+        reopened.apply(conflicting),
         Err(DurableError::IllegalTransition(message)) if message.contains("different content")
+    ));
+
+    let mut altered_policy_stream = reopened;
+    altered_policy_stream.policy.delay = RetryDelay::Fixed { delay: 21 };
+    assert!(matches!(
+        altered_policy_stream.verify(),
+        Err(DurableError::Validation(message)) if message.contains("policy identity")
+    ));
+}
+
+#[test]
+fn clock_and_jitter_evidence_reject_identity_preserving_content_changes() {
+    let policy = RetryPolicy::seal(
+        2,
+        classes([FailureClass::Transient]),
+        RetryDelay::Fixed { delay: 10 },
+        JitterStrategy::Recorded { max_delay: 10 },
+    )
+    .expect("policy seals");
+    let original = command(
+        "evidence",
+        1,
+        FailureClass::Transient,
+        FailureOperation::Computation,
+        100,
+        Some(4),
+    );
+
+    let mut altered_clock = original.clone();
+    altered_clock.clock.logical_time = 101;
+    assert!(matches!(
+        policy.evaluate(&altered_clock),
+        Err(DurableError::Validation(message)) if message.contains("Clock observation identity")
+    ));
+
+    let mut altered_jitter = original;
+    altered_jitter
+        .jitter_evidence
+        .as_mut()
+        .expect("jitter exists")
+        .delay = 5;
+    assert!(matches!(
+        policy.evaluate(&altered_jitter),
+        Err(DurableError::Validation(message)) if message.contains("jitter evidence identity")
     ));
 }

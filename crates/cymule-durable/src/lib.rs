@@ -23,9 +23,10 @@ pub use model::{
     WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitState,
 };
 pub use retry::{
-    FailureClass, FailureOperation, JitterEvidence, JitterStrategy, RETRY_DECISION_VERSION,
-    RETRY_POLICY_VERSION, RetryCommand, RetryDecision, RetryDelay, RetryDisposition, RetryFailure,
-    RetryPolicy, RetryStopReason,
+    CLOCK_OBSERVATION_VERSION, ClockObservation, FailureClass, FailureOperation,
+    JITTER_EVIDENCE_VERSION, JitterEvidence, JitterStrategy, RETRY_DECISION_VERSION,
+    RETRY_POLICY_VERSION, RETRY_STREAM_VERSION, RetryCommand, RetryDecision, RetryDelay,
+    RetryDisposition, RetryFailure, RetryPolicy, RetryStopReason, RetryStream,
 };
 pub use store::{DurableStore, MemoryStore, StoreCommit};
 pub use wait_source::{

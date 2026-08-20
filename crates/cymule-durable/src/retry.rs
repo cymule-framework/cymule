@@ -3,14 +3,20 @@ use std::collections::BTreeSet;
 use cymule_core::content_id;
 use serde::{Deserialize, Serialize};
 
-use crate::{DurableCoordinator, DurableError, DurableResult, DurableStore, JournalRecord};
+use crate::{DurableError, DurableResult};
 
 /// Frozen provider-neutral retry policy version.
 pub const RETRY_POLICY_VERSION: &str = "cymule.retry-policy/1";
-/// Durable retry decision record version.
+/// Serializable retry decision record version.
 pub const RETRY_DECISION_VERSION: &str = "cymule.retry-decision/1";
+/// Content-addressed logical Clock observation version.
+pub const CLOCK_OBSERVATION_VERSION: &str = "cymule.clock-observation/1";
+/// Content-addressed recorded jitter evidence version.
+pub const JITTER_EVIDENCE_VERSION: &str = "cymule.jitter-evidence/1";
+/// Serializable retry stream reducer state version.
+pub const RETRY_STREAM_VERSION: &str = "cymule.retry-stream/1";
 
-/// Closed failure classes used by durable retry admission.
+/// Closed failure classes used by retry admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureClass {
@@ -161,7 +167,7 @@ impl RetryDelay {
     }
 }
 
-/// Jitter policy. Randomness is never sampled by the durable reducer.
+/// Jitter policy. Randomness is never sampled by the retry reducer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JitterStrategy {
@@ -186,21 +192,165 @@ impl JitterStrategy {
     }
 }
 
-/// Immutable evidence for one externally sampled jitter value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ClockObservationIdentity<'a> {
+    clock_observation_version: &'a str,
+    source_binding: &'a str,
+    logical_time: u64,
+}
+
+/// Immutable, content-addressed logical Clock observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClockObservation {
+    /// Frozen observation version.
+    pub clock_observation_version: String,
+    /// Content identity of the complete observation.
+    pub evidence_id: String,
+    /// Immutable Clock implementation binding that produced the observation.
+    pub source_binding: String,
+    /// Observed logical time.
+    pub logical_time: u64,
+}
+
+impl ClockObservation {
+    /// Seal one logical Clock observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the source binding is empty or the observation
+    /// cannot be canonically encoded.
+    pub fn seal(source_binding: impl Into<String>, logical_time: u64) -> DurableResult<Self> {
+        let source_binding = source_binding.into();
+        if source_binding.is_empty() {
+            return Err(DurableError::Validation(
+                "Clock observation source binding must not be empty".to_owned(),
+            ));
+        }
+        let clock_observation_version = CLOCK_OBSERVATION_VERSION.to_owned();
+        let evidence_id = content_id(
+            CLOCK_OBSERVATION_VERSION,
+            &ClockObservationIdentity {
+                clock_observation_version: &clock_observation_version,
+                source_binding: &source_binding,
+                logical_time,
+            },
+        )?;
+        Ok(Self {
+            clock_observation_version,
+            evidence_id,
+            source_binding,
+            logical_time,
+        })
+    }
+
+    /// Verify the observation version and content identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the source binding is empty or the identity does
+    /// not match the complete observation content.
+    pub fn verify(&self) -> DurableResult<()> {
+        if self.clock_observation_version != CLOCK_OBSERVATION_VERSION
+            || self.source_binding.is_empty()
+        {
+            return Err(DurableError::Validation(
+                "Clock observation version or source binding is invalid".to_owned(),
+            ));
+        }
+        let expected = content_id(
+            CLOCK_OBSERVATION_VERSION,
+            &ClockObservationIdentity {
+                clock_observation_version: &self.clock_observation_version,
+                source_binding: &self.source_binding,
+                logical_time: self.logical_time,
+            },
+        )?;
+        if self.evidence_id != expected {
+            return Err(DurableError::Validation(
+                "Clock observation identity does not match its content".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct JitterEvidenceIdentity<'a> {
+    jitter_evidence_version: &'a str,
+    source_binding: &'a str,
+    delay: u64,
+}
+
+/// Immutable, content-addressed evidence for one externally sampled jitter value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JitterEvidence {
-    /// Stable identity of the sampled observation.
+    /// Frozen evidence version.
+    pub jitter_evidence_version: String,
+    /// Content identity of the complete sampled observation.
     pub evidence_id: String,
+    /// Immutable jitter-source binding that produced the sample.
+    pub source_binding: String,
     /// Logical duration added to the base schedule delay.
     pub delay: u64,
 }
 
 impl JitterEvidence {
-    fn verify(&self) -> DurableResult<()> {
-        if self.evidence_id.is_empty() {
+    /// Seal one externally sampled jitter value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the source binding is empty or the evidence cannot
+    /// be canonically encoded.
+    pub fn seal(source_binding: impl Into<String>, delay: u64) -> DurableResult<Self> {
+        let source_binding = source_binding.into();
+        if source_binding.is_empty() {
             return Err(DurableError::Validation(
-                "jitter evidence identity must not be empty".to_owned(),
+                "jitter evidence source binding must not be empty".to_owned(),
+            ));
+        }
+        let jitter_evidence_version = JITTER_EVIDENCE_VERSION.to_owned();
+        let evidence_id = content_id(
+            JITTER_EVIDENCE_VERSION,
+            &JitterEvidenceIdentity {
+                jitter_evidence_version: &jitter_evidence_version,
+                source_binding: &source_binding,
+                delay,
+            },
+        )?;
+        Ok(Self {
+            jitter_evidence_version,
+            evidence_id,
+            source_binding,
+            delay,
+        })
+    }
+
+    /// Verify the evidence version and content identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the source binding is empty or the identity does
+    /// not match the complete jitter evidence content.
+    pub fn verify(&self) -> DurableResult<()> {
+        if self.jitter_evidence_version != JITTER_EVIDENCE_VERSION || self.source_binding.is_empty()
+        {
+            return Err(DurableError::Validation(
+                "jitter evidence version or source binding is invalid".to_owned(),
+            ));
+        }
+        let expected = content_id(
+            JITTER_EVIDENCE_VERSION,
+            &JitterEvidenceIdentity {
+                jitter_evidence_version: &self.jitter_evidence_version,
+                source_binding: &self.source_binding,
+                delay: self.delay,
+            },
+        )?;
+        if self.evidence_id != expected {
+            return Err(DurableError::Validation(
+                "jitter evidence identity does not match its content".to_owned(),
             ));
         }
         Ok(())
@@ -333,8 +483,11 @@ impl RetryPolicy {
             }
             _ => {}
         }
-        if let (FailureClass::UnknownWorld, FailureOperation::MutatingEffect { intent_id }) =
-            (&command.failure.class, &command.failure.operation)
+        if let (
+            FailureClass::UnknownWorld,
+            FailureOperation::ObservationalEffect { intent_id }
+            | FailureOperation::MutatingEffect { intent_id },
+        ) = (&command.failure.class, &command.failure.operation)
         {
             return Ok(RetryDisposition::Stop {
                 reason: RetryStopReason::ReconciliationRequired {
@@ -375,7 +528,8 @@ impl RetryPolicy {
             DurableError::Validation("retry delay exceeds logical time range".to_owned())
         })?;
         let next_due_at = command
-            .logical_observed_at
+            .clock
+            .logical_time
             .checked_add(delay)
             .ok_or_else(|| {
                 DurableError::Validation("retry due time exceeds logical time range".to_owned())
@@ -400,8 +554,8 @@ pub struct RetryCommand {
     pub attempt: u32,
     /// Classified failure evidence.
     pub failure: RetryFailure,
-    /// Explicit logical Clock observation.
-    pub logical_observed_at: u64,
+    /// Content-addressed logical Clock observation.
+    pub clock: ClockObservation,
     /// Immutable binding used by the failed occurrence.
     pub occurrence_binding: String,
     /// Optional jitter observation required by a recorded-jitter policy.
@@ -421,6 +575,7 @@ impl RetryCommand {
             ));
         }
         self.failure.verify()?;
+        self.clock.verify()?;
         if let Some(evidence) = &self.jitter_evidence {
             evidence.verify()?;
         }
@@ -428,7 +583,7 @@ impl RetryCommand {
     }
 }
 
-/// Why a durable retry stream stopped.
+/// Why a retry stream stopped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RetryStopReason {
@@ -443,7 +598,7 @@ pub enum RetryStopReason {
     },
 }
 
-/// Closed output of one durable retry decision.
+/// Closed output of one retry decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RetryDisposition {
@@ -464,7 +619,7 @@ pub enum RetryDisposition {
     },
 }
 
-/// Complete persisted decision for one failed occurrence.
+/// Complete serializable decision for one failed occurrence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetryDecision {
@@ -498,54 +653,96 @@ impl RetryDecision {
     }
 }
 
-fn retry_journal_id(retry_id: &str) -> String {
-    format!("cymule:retry:{retry_id}")
+/// Serializable state of one retry policy reducer.
+///
+/// This type deliberately does not perform a durable write. An executor must
+/// checkpoint the updated stream together with the failed occurrence,
+/// Continuation/timer state, and next-attempt admission in its owning CAS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryStream {
+    /// Frozen stream state version.
+    pub retry_stream_version: String,
+    /// Stable identity shared by every command in the stream.
+    pub retry_id: String,
+    /// Complete immutable canonical Policy, retained from the first checkpoint.
+    pub policy: RetryPolicy,
+    /// Ordered exact decisions already admitted by the reducer.
+    pub decisions: Vec<RetryDecision>,
 }
 
-fn decode_decision(record: &JournalRecord, policy: &RetryPolicy) -> DurableResult<RetryDecision> {
-    record.verify()?;
-    if record.schema != RETRY_DECISION_VERSION {
-        return Err(DurableError::Validation(format!(
-            "retry journal contains unsupported schema {:?}",
-            record.schema
-        )));
-    }
-    let decision: RetryDecision = serde_json::from_value(record.payload.clone())?;
-    decision.verify(policy)?;
-    if record.record_id != decision.command.decision_id {
-        return Err(DurableError::Validation(
-            "retry journal record identity does not match its decision".to_owned(),
-        ));
-    }
-    Ok(decision)
-}
-
-impl<S: DurableStore> DurableCoordinator<S> {
-    /// Evaluate and atomically retain one deterministic retry decision.
-    ///
-    /// Reusing a decision identity with the identical command returns the
-    /// original record. A post-commit acknowledgement loss is recovered by
-    /// reopening the coordinator and submitting that same command.
+impl RetryStream {
+    /// Create one empty retry stream with its complete canonical Policy.
     ///
     /// # Errors
     ///
-    /// Returns an error when the Policy or command is invalid, stream order or
-    /// due-time admission fails, an identity conflicts, or the durable CAS
-    /// cannot commit.
-    pub fn decide_retry(
-        &mut self,
-        policy: &RetryPolicy,
-        command: RetryCommand,
-    ) -> DurableResult<RetryDecision> {
-        policy.verify()?;
-        command.verify()?;
-        let journal_id = retry_journal_id(&command.retry_id);
-        let records = self.journal_records(&journal_id)?;
-        let mut decisions = Vec::with_capacity(records.len());
-        for record in records {
-            decisions.push(decode_decision(record, policy)?);
+    /// Returns an error when the retry identity or Policy is invalid.
+    pub fn new(retry_id: impl Into<String>, policy: RetryPolicy) -> DurableResult<Self> {
+        let stream = Self {
+            retry_stream_version: RETRY_STREAM_VERSION.to_owned(),
+            retry_id: retry_id.into(),
+            policy,
+            decisions: Vec::new(),
+        };
+        stream.verify()?;
+        Ok(stream)
+    }
+
+    /// Verify the complete stream from its retained Policy and decision history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a malformed version or identity, altered Policy,
+    /// non-sequential attempt, early Clock observation, duplicate decision, or
+    /// a decision after a terminal result.
+    pub fn verify(&self) -> DurableResult<()> {
+        if self.retry_stream_version != RETRY_STREAM_VERSION || self.retry_id.is_empty() {
+            return Err(DurableError::Validation(
+                "retry stream version or identity is invalid".to_owned(),
+            ));
         }
-        if let Some(existing) = decisions
+        self.policy.verify()?;
+        let mut replay = Self {
+            retry_stream_version: self.retry_stream_version.clone(),
+            retry_id: self.retry_id.clone(),
+            policy: self.policy.clone(),
+            decisions: Vec::new(),
+        };
+        for expected in &self.decisions {
+            let previous_len = replay.decisions.len();
+            let actual = replay.apply(expected.command.clone())?;
+            if &actual != expected || replay.decisions.len() != previous_len + 1 {
+                return Err(DurableError::Validation(format!(
+                    "retry decision {} is duplicated or does not match replay",
+                    expected.command.decision_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply one failed attempt to the pure retry reducer.
+    ///
+    /// An identical decision command replays the original result. The returned
+    /// updated stream remains process-independent and can be included in a
+    /// broader executor-owned atomic checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when command evidence is malformed, an identity is
+    /// reused with different content, attempt order or due-time admission
+    /// fails, or the stream is already terminal.
+    pub fn apply(&mut self, command: RetryCommand) -> DurableResult<RetryDecision> {
+        self.policy.verify()?;
+        command.verify()?;
+        if command.retry_id != self.retry_id {
+            return Err(DurableError::IllegalTransition(format!(
+                "retry command {} does not belong to stream {}",
+                command.retry_id, self.retry_id
+            )));
+        }
+        if let Some(existing) = self
+            .decisions
             .iter()
             .find(|decision| decision.command.decision_id == command.decision_id)
         {
@@ -557,7 +754,8 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 command.decision_id
             )));
         }
-        if decisions
+        if self
+            .decisions
             .iter()
             .any(|decision| decision.command.failure.failure_id == command.failure.failure_id)
         {
@@ -567,7 +765,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             )));
         }
 
-        match decisions.last() {
+        match self.decisions.last() {
             None if command.attempt != 1 => {
                 return Err(DurableError::IllegalTransition(
                     "the first retry decision must describe attempt 1".to_owned(),
@@ -593,7 +791,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
                             command.retry_id, command.attempt
                         )));
                     }
-                    if command.logical_observed_at < *next_due_at {
+                    if command.clock.logical_time < *next_due_at {
                         return Err(DurableError::IllegalTransition(format!(
                             "retry attempt {} was observed before its admitted due time",
                             command.attempt
@@ -606,40 +804,12 @@ impl<S: DurableStore> DurableCoordinator<S> {
 
         let decision = RetryDecision {
             retry_decision_version: RETRY_DECISION_VERSION.to_owned(),
-            policy_id: policy.policy_id.clone(),
-            disposition: policy.evaluate(&command)?,
+            policy_id: self.policy.policy_id.clone(),
+            disposition: self.policy.evaluate(&command)?,
             command,
         };
-        decision.verify(policy)?;
-        let record = JournalRecord::new(
-            decision.command.decision_id.clone(),
-            RETRY_DECISION_VERSION,
-            serde_json::to_value(&decision)?,
-        )?;
-        self.append_journal_record(&journal_id, record)?;
+        decision.verify(&self.policy)?;
+        self.decisions.push(decision.clone());
         Ok(decision)
-    }
-
-    /// Restore and verify all decisions for one retry stream.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the Policy or retry identity is invalid, or a
-    /// persisted decision cannot be verified against the pinned Policy.
-    pub fn retry_decisions(
-        &self,
-        policy: &RetryPolicy,
-        retry_id: &str,
-    ) -> DurableResult<Vec<RetryDecision>> {
-        policy.verify()?;
-        if retry_id.is_empty() {
-            return Err(DurableError::Validation(
-                "retry stream identity must not be empty".to_owned(),
-            ));
-        }
-        self.journal_records(&retry_journal_id(retry_id))?
-            .iter()
-            .map(|record| decode_decision(record, policy))
-            .collect()
     }
 }
