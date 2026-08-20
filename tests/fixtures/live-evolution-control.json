@@ -1,10 +1,10 @@
 {
-  "control_version": "cymule.live-evolution-control/1",
+  "control_version": "cymule.live-evolution-control/2",
   "command_id": "command:live-evolution:fixture:select",
   "operation": "apply",
   "template_id": "template:review-parent",
   "command": {
-    "control_version": "cymule.evolution-control/2",
+    "control_version": "cymule.evolution-control/3",
     "command_id": "command:evolution:fixture:select",
     "operation": "select_occurrence",
     "occurrence_id": "occurrence:fixture:1"

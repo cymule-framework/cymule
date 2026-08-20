@@ -1,8 +1,9 @@
 {
-  "control_version": "cymule.virtual-claim-control/1",
+  "control_version": "cymule.virtual-claim-control/2",
   "command_id": "command:claim:fixture",
   "owner": "worker:fixture",
   "slot_id": "slot:worker-fixture:0",
+  "plan_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
   "occurrence_binding": "binding:worker/fixture@1",
   "capabilities": ["cpu", "sandbox"],
   "logical_now": 100,

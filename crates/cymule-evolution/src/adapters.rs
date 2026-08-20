@@ -174,6 +174,10 @@ pub struct MigrationRequest {
     pub source_epoch: u64,
     /// Immutable source-state artifact.
     pub input_state: ArtifactRef,
+    /// Exact source `ExecutionBinding` Artifact pinned by the safe Continuation.
+    pub source_binding: ArtifactRef,
+    /// Exact target `ExecutionBinding` Artifact admitted against the target Plan.
+    pub target_binding: ArtifactRef,
 }
 
 /// Immutable products returned by a migration adapter.

@@ -304,6 +304,23 @@ impl EvolutionController {
         Ok(())
     }
 
+    /// Return the Plan that may safely receive future work if a new candidate
+    /// is rejected. A rolled-back or in-progress rollout never promotes its
+    /// failed or unproven target into the next decision's fallback chain.
+    pub fn authoritative_fallback_plan(&self) -> EvolutionResult<String> {
+        let rollout = self
+            .snapshot
+            .rollout
+            .as_ref()
+            .ok_or_else(|| EvolutionError::NotFound("no rollout decision exists".to_owned()))?;
+        Ok(match rollout.mode {
+            RolloutMode::Active => rollout.target_plan.clone(),
+            RolloutMode::Shadow | RolloutMode::Canary { .. } | RolloutMode::RolledBack => {
+                rollout.fallback_plan.clone()
+            }
+        })
+    }
+
     /// Select and pin a Plan for one newly admitted occurrence.
     pub fn select_for_occurrence(&mut self, occurrence_id: &str) -> EvolutionResult<String> {
         if let Some(plan) = self.snapshot.occurrence_plans.get(occurrence_id) {
@@ -368,6 +385,7 @@ impl EvolutionController {
             || receipt.run_id != safe_point.run_id
             || receipt.from_plan != safe_point.plan_id
             || safe_point.state.as_ref() != Some(&receipt.input_state)
+            || receipt.target_epoch != receipt.source_epoch.saturating_add(1)
         {
             return Err(EvolutionError::Conflict(
                 "migration receipt does not match its verified safe point".to_owned(),
@@ -378,6 +396,8 @@ impl EvolutionController {
         validate_identity("migration adapter revision", &receipt.adapter_revision)?;
         validate_identity("source schema", &receipt.from_schema)?;
         validate_identity("target schema", &receipt.to_schema)?;
+        validate_execution_binding_ref(&receipt.source_binding)?;
+        validate_execution_binding_ref(&receipt.target_binding)?;
         if !self.snapshot.plans.contains_key(&receipt.from_plan)
             || !self.snapshot.plans.contains_key(&receipt.to_plan)
         {
@@ -427,6 +447,8 @@ impl EvolutionController {
                 "migration request does not match its verified safe point".to_owned(),
             ));
         }
+        validate_execution_binding_ref(&request.source_binding)?;
+        validate_execution_binding_ref(&request.target_binding)?;
         let descriptor = adapter.describe()?;
         validate_identity("migration adapter", &descriptor.adapter_id)?;
         validate_identity("migration adapter revision", &descriptor.adapter_revision)?;
@@ -442,6 +464,8 @@ impl EvolutionController {
                 && existing.safe_point_id == request.safe_point_id
                 && existing.source_epoch == request.source_epoch
                 && existing.input_state == request.input_state
+                && existing.source_binding == request.source_binding
+                && existing.target_binding == request.target_binding
                 && existing.adapter_id == descriptor.adapter_id
                 && existing.adapter_revision == descriptor.adapter_revision
                 && existing.from_schema == descriptor.from_schema
@@ -464,6 +488,11 @@ impl EvolutionController {
             to_plan: request.to_plan,
             safe_point_id: request.safe_point_id,
             source_epoch: request.source_epoch,
+            target_epoch: request.source_epoch.checked_add(1).ok_or_else(|| {
+                EvolutionError::Validation("migration target epoch overflowed".to_owned())
+            })?,
+            source_binding: request.source_binding,
+            target_binding: request.target_binding,
             adapter_id: descriptor.adapter_id,
             adapter_revision: descriptor.adapter_revision,
             from_schema: descriptor.from_schema,
@@ -991,6 +1020,8 @@ impl EvolutionController {
         }
         for (migration_id, receipt) in &self.snapshot.migrations {
             validate_identity("migration", &receipt.migration_id)?;
+            validate_execution_binding_ref(&receipt.source_binding)?;
+            validate_execution_binding_ref(&receipt.target_binding)?;
             if receipt.migration_id != *migration_id {
                 return Err(EvolutionError::Validation(format!(
                     "migration key {migration_id} does not match its identity"
@@ -998,6 +1029,7 @@ impl EvolutionController {
             }
             if !self.snapshot.plans.contains_key(&receipt.from_plan)
                 || !self.snapshot.plans.contains_key(&receipt.to_plan)
+                || receipt.target_epoch != receipt.source_epoch.saturating_add(1)
             {
                 return Err(EvolutionError::NotFound(
                     "migration references a missing Plan".to_owned(),
@@ -1185,6 +1217,18 @@ impl EvolutionController {
         complete.insert(plan_id.to_owned());
         cyclic
     }
+}
+
+fn validate_execution_binding_ref(reference: &ArtifactRef) -> EvolutionResult<()> {
+    reference
+        .validate()
+        .map_err(|error| EvolutionError::Validation(error.to_string()))?;
+    if reference.kind != cymule_runtime::EXECUTION_BINDING_VERSION {
+        return Err(EvolutionError::Validation(
+            "migration binding must be an exact ExecutionBinding Artifact".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_identity(kind: &str, value: &str) -> EvolutionResult<()> {

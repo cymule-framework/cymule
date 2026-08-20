@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use cymule_core::{ArtifactRecord, ArtifactRef, SealedPlan};
+use cymule_core::{
+    ArtifactRecord, ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus,
+    Machine, SealedPlan,
+};
 use cymule_durable::{DurableCoordinator, DurableStore, JournalBatch, JournalRecord};
 use serde::{Deserialize, Serialize};
 
@@ -144,25 +147,6 @@ impl DurableEvolutionController {
         )
     }
 
-    /// Record one safe-point migration and checkpoint its evidence.
-    pub fn record_migration_and_checkpoint<S: DurableStore>(
-        coordinator: &mut DurableCoordinator<S>,
-        controller: &mut EvolutionController,
-        journal_id: &str,
-        checkpoint_id: &str,
-        receipt: MigrationReceipt,
-        safe_point: &MigrationSafePoint,
-    ) -> EvolutionResult<()> {
-        verify_durable_safe_point(coordinator, safe_point)?;
-        apply_and_checkpoint(
-            coordinator,
-            controller,
-            journal_id,
-            checkpoint_id,
-            |controller| controller.record_migration(receipt, safe_point),
-        )
-    }
-
     /// Record shadow evidence and checkpoint before it can gate promotion.
     pub fn record_shadow_and_checkpoint<S: DurableStore>(
         coordinator: &mut DurableCoordinator<S>,
@@ -190,17 +174,28 @@ impl DurableEvolutionController {
         request: MigrationRequest,
         safe_point: &MigrationSafePoint,
     ) -> EvolutionResult<MigrationReceipt> {
+        if let Some(receipt) = replay_migration(coordinator, journal_id, checkpoint_id, &request)? {
+            verify_committed_migration(coordinator, &receipt)?;
+            return Ok(receipt);
+        }
         verify_durable_safe_point(coordinator, safe_point)?;
         let before = controller.snapshot();
         let (receipt, artifacts) =
             controller.execute_migration_with_artifacts(adapter, request, safe_point)?;
-        if let Err(error) = checkpoint_artifacts(
+        let record = checkpoint_record(coordinator, controller, journal_id, checkpoint_id)?;
+        let target_plan = controller.plan(&receipt.to_plan).cloned().ok_or_else(|| {
+            EvolutionError::NotFound("migration target Plan is missing".to_owned())
+        })?;
+        if let Err(error) = checkpoint_migrated_run(
             coordinator,
-            controller,
-            journal_id,
-            checkpoint_id,
+            &receipt,
+            safe_point,
+            &target_plan,
             artifacts,
-            &BTreeSet::from([receipt.output_state.clone(), receipt.evidence.clone()]),
+            &[JournalBatch {
+                journal_id: journal_id.to_owned(),
+                records: vec![record],
+            }],
         ) {
             *controller = EvolutionController::restore(before)
                 .expect("previously valid evolution snapshot restores");
@@ -288,6 +283,225 @@ impl DurableEvolutionController {
             |controller| controller.apply_gate(gate, next_decision_id),
         )
     }
+}
+
+pub(crate) fn checkpoint_migrated_run<S: DurableStore>(
+    coordinator: &mut DurableCoordinator<S>,
+    receipt: &MigrationReceipt,
+    safe_point: &MigrationSafePoint,
+    target_plan: &SealedPlan,
+    artifacts: Vec<ArtifactRecord>,
+    batches: &[JournalBatch],
+) -> EvolutionResult<()> {
+    let source = coordinator
+        .state()
+        .map_err(durable_error)?
+        .continuations
+        .get(&receipt.run_id)
+        .cloned()
+        .ok_or_else(|| {
+            EvolutionError::NotFound("migration source Continuation is missing".to_owned())
+        })?;
+    safe_point.verify_continuation(&source)?;
+    let expected_source_binding = ArtifactRef {
+        identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
+        artifact_id: source.binding_context.clone(),
+        kind: cymule_runtime::EXECUTION_BINDING_VERSION.to_owned(),
+    };
+    if receipt.source_binding != expected_source_binding
+        || receipt.target_binding.artifact_id == receipt.to_plan
+        || receipt.target_epoch != source.epoch.saturating_add(1)
+    {
+        return Err(EvolutionError::Conflict(
+            "migration receipt does not match the source binding and next epoch".to_owned(),
+        ));
+    }
+    let mut machine = coordinator.restore_machine().map_err(durable_error)?;
+    let target_binding_record = machine.artifact(&receipt.target_binding).ok_or_else(|| {
+        EvolutionError::NotFound("migration target ExecutionBinding Artifact is missing".to_owned())
+    })?;
+    let target_binding: cymule_runtime::ExecutionBinding =
+        serde_json::from_slice(&target_binding_record.bytes)
+            .map_err(|error| EvolutionError::Validation(error.to_string()))?;
+    if target_binding
+        .artifact_ref()
+        .map_err(|error| EvolutionError::Validation(error.to_string()))?
+        != receipt.target_binding
+    {
+        return Err(EvolutionError::Validation(
+            "migration target ExecutionBinding Artifact identity is invalid".to_owned(),
+        ));
+    }
+    target_binding
+        .admit_plan(target_plan)
+        .map_err(|error| EvolutionError::Validation(error.to_string()))?;
+    machine
+        .insert_plan(target_plan.clone())
+        .map_err(|error| EvolutionError::Validation(error.to_string()))?;
+    for artifact in artifacts {
+        let derived = machine
+            .put_artifact(artifact.reference.kind.clone(), artifact.bytes)
+            .map_err(|error| EvolutionError::Validation(error.to_string()))?;
+        if derived != artifact.reference {
+            return Err(EvolutionError::Validation(
+                "migration Artifact bytes do not match their references".to_owned(),
+            ));
+        }
+    }
+    submit_machine(
+        &mut machine,
+        &source.run_id,
+        format!("migration:{}:plan", receipt.migration_id),
+        Command::MigrateRun {
+            from_plan: receipt.from_plan.clone(),
+            to_plan: receipt.to_plan.clone(),
+            from_binding: receipt.source_binding.artifact_id.clone(),
+            to_binding: receipt.target_binding.artifact_id.clone(),
+            safe_point_id: receipt.safe_point_id.clone(),
+        },
+    )?;
+    submit_machine(
+        &mut machine,
+        &source.run_id,
+        format!("migration:{}:epoch", receipt.migration_id),
+        Command::AdvanceEpoch,
+    )?;
+    submit_machine(
+        &mut machine,
+        &source.run_id,
+        format!("migration:{}:attempt", receipt.migration_id),
+        Command::BeginAttempt {
+            attempt_id: format!("attempt:{}:{}", source.run_id, receipt.target_epoch),
+            continuation_id: format!("continuation:{}", source.run_id),
+            occurrence_binding: receipt.target_binding.artifact_id.clone(),
+            epoch: receipt.target_epoch,
+        },
+    )?;
+    let mut target = source.clone();
+    target.plan_id.clone_from(&receipt.to_plan);
+    target
+        .binding_context
+        .clone_from(&receipt.target_binding.artifact_id);
+    target.state = Some(receipt.output_state.clone());
+    target.epoch = receipt.target_epoch;
+    target.status = cymule_durable::ContinuationStatus::Running;
+    let required = BTreeSet::from([receipt.output_state.clone(), receipt.evidence.clone()]);
+    coordinator
+        .checkpoint_run_migration_journals(cymule_durable::RunMigrationCheckpoint {
+            machine: &machine,
+            source: &source,
+            target: &target,
+            target_plan,
+            artifacts: &required,
+            safe_point_id: &receipt.safe_point_id,
+            batches,
+        })
+        .map(|_| ())
+        .map_err(durable_error)
+}
+
+fn submit_machine(
+    machine: &mut Machine,
+    run_id: &str,
+    command_id: String,
+    command: Command,
+) -> EvolutionResult<()> {
+    let expected_precondition = Some(
+        machine
+            .projection()
+            .runs
+            .get(run_id)
+            .ok_or_else(|| EvolutionError::NotFound(format!("Run {run_id} is missing")))?
+            .precondition_token(),
+    );
+    let receipt = machine
+        .submit(CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id,
+            actor: "actor:live-evolution".to_owned(),
+            run_id: run_id.to_owned(),
+            expected_precondition,
+            command,
+        })
+        .map_err(|error| EvolutionError::Validation(error.to_string()))?;
+    if receipt.status != CommandReceiptStatus::Applied {
+        return Err(EvolutionError::Conflict(
+            "migration Machine command observed a stale precondition".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn replay_migration<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    journal_id: &str,
+    checkpoint_id: &str,
+    request: &MigrationRequest,
+) -> EvolutionResult<Option<MigrationReceipt>> {
+    let Some(record) = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?
+        .iter()
+        .find(|record| record.record_id == checkpoint_id)
+    else {
+        return Ok(None);
+    };
+    let checkpoint = decode(record)?;
+    let receipt = checkpoint
+        .snapshot
+        .migrations
+        .get(&request.migration_id)
+        .cloned()
+        .ok_or_else(|| EvolutionError::Conflict("checkpoint is not this migration".to_owned()))?;
+    if receipt.run_id != request.run_id
+        || receipt.from_plan != request.from_plan
+        || receipt.to_plan != request.to_plan
+        || receipt.safe_point_id != request.safe_point_id
+        || receipt.source_epoch != request.source_epoch
+        || receipt.input_state != request.input_state
+        || receipt.source_binding != request.source_binding
+        || receipt.target_binding != request.target_binding
+    {
+        return Err(EvolutionError::Conflict(
+            "migration checkpoint identity was reused with different semantics".to_owned(),
+        ));
+    }
+    Ok(Some(receipt))
+}
+
+pub(crate) fn verify_committed_migration<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    receipt: &MigrationReceipt,
+) -> EvolutionResult<()> {
+    let state = coordinator.state().map_err(durable_error)?;
+    let continuation = state.continuations.get(&receipt.run_id).ok_or_else(|| {
+        EvolutionError::NotFound("committed migration Continuation is missing".to_owned())
+    })?;
+    let machine = coordinator.restore_machine().map_err(durable_error)?;
+    let run = machine
+        .projection()
+        .runs
+        .get(&receipt.run_id)
+        .ok_or_else(|| EvolutionError::NotFound("committed migration Run is missing".to_owned()))?;
+    if continuation.plan_id != receipt.to_plan
+        || continuation.binding_context != receipt.target_binding.artifact_id
+        || continuation.state.as_ref() != Some(&receipt.output_state)
+        || continuation.epoch != receipt.target_epoch
+        || continuation.status != cymule_durable::ContinuationStatus::Running
+        || run.current_plan != receipt.to_plan
+        || run.current_binding_context != receipt.target_binding.artifact_id
+        || run.epoch != receipt.target_epoch
+        || !run.attempts.values().any(|attempt| {
+            attempt.epoch == receipt.target_epoch
+                && attempt.active
+                && attempt.occurrence_binding == receipt.target_binding.artifact_id
+        })
+    {
+        return Err(EvolutionError::Conflict(
+            "committed migration journal and durable Run disagree".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn verify_durable_safe_point<S: DurableStore>(

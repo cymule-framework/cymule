@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{DurableError, DurableResult};
 
 /// Durable profile state version.
-pub const DURABLE_STATE_VERSION: &str = "cymule.durable-state/2";
+pub const DURABLE_STATE_VERSION: &str = "cymule.durable-state/3";
 /// Identified external wait activation version.
 pub const WAIT_ACTIVATION_VERSION: &str = "cymule.wait-activation/1";
 /// Canonical Machine history-compaction receipt version.

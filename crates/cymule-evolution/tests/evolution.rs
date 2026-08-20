@@ -15,7 +15,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cymule_core::{
-    ArtifactRecord, ArtifactRef, ComponentContract, Definition, DispatchPolicy, EffectContract,
+    ArtifactRecord, ArtifactRef, COMMAND_VERSION, Command as CoreCommand, CommandEnvelope,
+    CommandReceiptStatus, ComponentContract, Definition, DispatchPolicy, EffectContract,
     EffectProfile, Expression, Machine, MutationKind, PlanCandidate, ReconciliationMode, Region,
     WaitSpec, sha256_bytes,
 };
@@ -123,36 +124,6 @@ fn artifact(id: &str) -> ArtifactRef {
         .expect("evolution Artifact reference derives")
 }
 
-fn retain_artifact<S: DurableStore>(
-    coordinator: &mut DurableCoordinator<S>,
-    value: &str,
-) -> ArtifactRef {
-    let mut machine = coordinator.restore_machine().expect("Machine restores");
-    machine
-        .put_artifact("test/input", b"evolution test input".to_vec())
-        .expect("test input stores");
-    let reference = machine
-        .put_artifact("evolution/evidence", value.as_bytes().to_vec())
-        .expect("evolution Artifact stores");
-    let record = JournalRecord::new(
-        reference.artifact_id.clone(),
-        "test.evolution-evidence/1",
-        json!({"artifact": reference.clone()}),
-    )
-    .expect("evolution evidence record constructs");
-    coordinator
-        .checkpoint_artifact_journals(
-            &machine,
-            &BTreeSet::from([reference.clone()]),
-            &[JournalBatch {
-                journal_id: "test:evolution-evidence".to_owned(),
-                records: vec![record],
-            }],
-        )
-        .expect("evolution Artifact persists");
-    reference
-}
-
 fn artifact_record(kind: &str, value: &str) -> ArtifactRecord {
     let mut machine = Machine::new();
     let reference = machine
@@ -164,11 +135,175 @@ fn artifact_record(kind: &str, value: &str) -> ArtifactRecord {
         .clone()
 }
 
+fn empty_execution_binding() -> ExecutionBinding {
+    let manifest = PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: "test.empty/1".to_owned(),
+        components: BTreeMap::new(),
+        effects: BTreeMap::new(),
+    };
+    ExecutionBinding::for_local_process(
+        &manifest,
+        format!("sha256:{}", sha256_bytes(b"test.empty/1")),
+    )
+    .expect("empty execution binding admits")
+}
+
+fn execution_binding_ref() -> ArtifactRef {
+    empty_execution_binding()
+        .artifact_ref()
+        .expect("execution binding reference derives")
+}
+
+fn retain_plan_and_binding<S: DurableStore>(
+    coordinator: &mut DurableCoordinator<S>,
+    plan: &cymule_core::SealedPlan,
+) -> ArtifactRef {
+    let binding = empty_execution_binding();
+    let mut machine = coordinator.restore_machine().expect("Machine restores");
+    let reference = machine
+        .put_artifact(
+            cymule_runtime::EXECUTION_BINDING_VERSION,
+            binding.canonical_bytes().expect("binding encodes"),
+        )
+        .expect("binding stores");
+    assert_eq!(reference, binding.artifact_ref().unwrap());
+    binding
+        .admit_plan(plan)
+        .expect("binding admits linked Plan");
+    let record = JournalRecord::new(
+        format!("binding:{}", reference.artifact_id),
+        "test.execution-binding/1",
+        json!({"binding": reference.clone()}),
+    )
+    .expect("binding record constructs");
+    coordinator
+        .checkpoint_artifact_journals(
+            &machine,
+            &BTreeSet::from([reference.clone()]),
+            &[JournalBatch {
+                journal_id: "test:execution-bindings".to_owned(),
+                records: vec![record],
+            }],
+        )
+        .expect("Plan and binding persist");
+    reference
+}
+
+fn submit_core(machine: &mut Machine, run_id: &str, command_id: &str, command: CoreCommand) {
+    let expected_precondition = if matches!(command, CoreCommand::StartRun { .. }) {
+        None
+    } else {
+        Some(machine.projection().runs[run_id].precondition_token())
+    };
+    let receipt = machine
+        .submit(CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: command_id.to_owned(),
+            actor: "actor:evolution-test".to_owned(),
+            run_id: run_id.to_owned(),
+            expected_precondition,
+            command,
+        })
+        .expect("core command submits");
+    assert_eq!(receipt.status, CommandReceiptStatus::Applied);
+}
+
+fn durable_migration_safe_point<S: DurableStore>(
+    coordinator: &mut DurableCoordinator<S>,
+    run_id: &str,
+    source_plan: &cymule_core::SealedPlan,
+) -> (MigrationSafePoint, ArtifactRef) {
+    let binding = empty_execution_binding();
+    let binding_ref = binding.artifact_ref().expect("binding reference derives");
+    let mut machine = coordinator.restore_machine().expect("Machine restores");
+    machine
+        .insert_plan(source_plan.clone())
+        .expect("source Plan stores");
+    assert_eq!(
+        machine
+            .put_artifact(
+                cymule_runtime::EXECUTION_BINDING_VERSION,
+                binding.canonical_bytes().expect("binding encodes"),
+            )
+            .expect("binding stores"),
+        binding_ref
+    );
+    let input = machine
+        .put_artifact("test/input", b"migration state".to_vec())
+        .expect("migration input stores");
+    submit_core(
+        &mut machine,
+        run_id,
+        &format!("{run_id}:start"),
+        CoreCommand::StartRun {
+            plan_id: source_plan.plan_id.clone(),
+            binding_context: binding_ref.artifact_id.clone(),
+        },
+    );
+    submit_core(
+        &mut machine,
+        run_id,
+        &format!("{run_id}:attempt:0"),
+        CoreCommand::BeginAttempt {
+            attempt_id: format!("attempt:{run_id}:0"),
+            continuation_id: format!("continuation:{run_id}"),
+            occurrence_binding: binding_ref.artifact_id.clone(),
+            epoch: 0,
+        },
+    );
+    let mut continuation = Continuation {
+        run_id: run_id.to_owned(),
+        plan_id: source_plan.plan_id.clone(),
+        binding_context: binding_ref.artifact_id.clone(),
+        frames: vec![FrameState {
+            definition_id: source_plan.candidate.entry.clone(),
+            invocation_id: source_plan.candidate.entry.clone(),
+            invocation_path: Vec::new(),
+            scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            input: input.clone(),
+            region_path: Vec::new(),
+            next_step: 0,
+            locals: BTreeMap::new(),
+        }],
+        state: Some(input),
+        wait_set: BTreeSet::new(),
+        scope_stack: vec![cymule_core::ROOT_SCOPE_ID.to_owned()],
+        effect_obligations: BTreeSet::new(),
+        authority_leases: BTreeSet::new(),
+        budget: BTreeMap::new(),
+        causal_frontier: BTreeSet::new(),
+        epoch: 0,
+        status: ContinuationStatus::Running,
+    };
+    coordinator
+        .create_run(&machine, continuation.clone())
+        .expect("source Run creates");
+    let mut machine = coordinator.restore_machine().expect("Machine restores");
+    submit_core(
+        &mut machine,
+        run_id,
+        &format!("{run_id}:yield:0"),
+        CoreCommand::YieldAttempt {
+            attempt_id: format!("attempt:{run_id}:0"),
+            epoch: 0,
+        },
+    );
+    continuation.status = ContinuationStatus::Ready;
+    coordinator
+        .checkpoint(&machine, continuation.clone(), None)
+        .expect("safe point checkpoints");
+    (
+        MigrationSafePoint::derive(&continuation).expect("safe point derives"),
+        binding_ref,
+    )
+}
+
 fn continuation(plan_id: &str) -> Continuation {
     Continuation {
         run_id: "run:active".to_owned(),
         plan_id: plan_id.to_owned(),
-        binding_context: "binding:1".to_owned(),
+        binding_context: execution_binding_ref().artifact_id,
         frames: vec![FrameState {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
@@ -1154,6 +1289,7 @@ fn live_selection_and_virtual_claim_share_one_lost_receipt_safe_cas() {
         parent_template(ReferenceStrategy::LatestCompatible),
     )
     .expect("template checkpoints");
+    let execution_binding = retain_plan_and_binding(&mut coordinator, &linked.plan);
 
     let limits = FrontierLimits {
         max_materialized: 2,
@@ -1186,6 +1322,7 @@ fn live_selection_and_virtual_claim_share_one_lost_receipt_safe_cas() {
     let command = LiveVirtualClaimCommand {
         template_id: "template:review-parent".to_owned(),
         selection_id: "live:selection:one".to_owned(),
+        execution_binding: execution_binding.clone(),
         command_id: "virtual:claim:one".to_owned(),
         owner: "worker:one".to_owned(),
         slot_id: "slot:one".to_owned(),
@@ -1221,10 +1358,13 @@ fn live_selection_and_virtual_claim_share_one_lost_receipt_safe_cas() {
         .get("work:live-claim")
         .expect("claim committed")
         .clone();
-    assert_eq!(retained_claim.occurrence_binding, linked.plan.plan_id);
+    assert_eq!(
+        retained_claim.occurrence_binding,
+        execution_binding.artifact_id
+    );
     assert_eq!(
         restored_live.snapshot().templates["template:review-parent"].occurrence_plans["live:selection:one"],
-        retained_claim.occurrence_binding
+        linked.plan.plan_id
     );
     let replay = DurableLiveEvolutionController::claim_virtual_work_and_checkpoint(
         &mut reopened,
@@ -2012,6 +2152,9 @@ fn migration_requires_safe_point_and_shadow_evidence_is_idempotent() {
         to_plan: second.plan_id.clone(),
         safe_point_id: safe_point.safe_point_id.clone(),
         source_epoch: safe_point.epoch,
+        target_epoch: safe_point.epoch + 1,
+        source_binding: execution_binding_ref(),
+        target_binding: execution_binding_ref(),
         adapter_id: "migration:test".to_owned(),
         adapter_revision: "1".to_owned(),
         from_schema: "schema:1".to_owned(),
@@ -2095,6 +2238,8 @@ fn checked_migration_adapter_is_safe_point_gated_pinned_and_idempotent() {
         safe_point_id: safe_point.safe_point_id.clone(),
         source_epoch: safe_point.epoch,
         input_state,
+        source_binding: execution_binding_ref(),
+        target_binding: execution_binding_ref(),
     };
     let mut adapter = TestMigrationAdapter {
         descriptor: descriptor.clone(),
@@ -2267,6 +2412,76 @@ fn restart_under_new_plan_is_explicit_safe_point_authorization() {
         Err(EvolutionError::Conflict(_))
     ));
     EvolutionController::restore(controller.snapshot()).expect("restart snapshot restores");
+}
+
+#[test]
+fn relink_after_rollback_keeps_last_authoritative_plan_as_fallback() {
+    let mut live = LiveEvolutionController::new();
+    live.publish("subflow:review", reusable_definition("1", json!({})))
+        .expect("A publishes");
+    let a = live
+        .register_template(parent_template(ReferenceStrategy::LatestCompatible))
+        .expect("template links A")
+        .plan;
+    let b_receipt = live
+        .publish_and_relink(LivePublicationCommand {
+            logical_ref: "subflow:review".to_owned(),
+            definition: reusable_definition("2", json!({})),
+            evidence: artifact("evidence:a-to-b"),
+            mode: RolloutMode::Canary {
+                basis_points: 10_000,
+            },
+        })
+        .expect("B links");
+    let b = b_receipt.updates[0].current_plan_id.clone();
+    let decision = b_receipt.updates[0]
+        .decision_id
+        .clone()
+        .expect("B rollout exists");
+    live.select_occurrence("template:review-parent", "occurrence:b")
+        .expect("B occurrence pins");
+    live.record_observation(
+        "template:review-parent",
+        RolloutObservation {
+            observation_id: "observation:b:failed".to_owned(),
+            decision_id: decision.clone(),
+            occurrence_id: "occurrence:b".to_owned(),
+            plan_id: b.clone(),
+            outcome: ObservationOutcome::Failed,
+            evidence: artifact("evidence:b:failed"),
+        },
+    )
+    .expect("B failure records");
+    live.apply_gate(
+        "template:review-parent",
+        RolloutGate {
+            gate_id: "gate:b:rollback".to_owned(),
+            decision_id: decision,
+            min_target_observations: 100,
+            max_target_failures: 0,
+            min_equivalent_shadows: 100,
+            max_inequivalent_shadows: 0,
+        },
+        "rollout:b:rolled-back",
+    )
+    .expect("B rolls back to A");
+
+    let c_receipt = live
+        .publish_and_relink(LivePublicationCommand {
+            logical_ref: "subflow:review".to_owned(),
+            definition: reusable_definition("3", json!({})),
+            evidence: artifact("evidence:b-to-c"),
+            mode: RolloutMode::Canary { basis_points: 0 },
+        })
+        .expect("C links without restoring B authority");
+    let snapshot = live.snapshot();
+    let rollout = snapshot.templates["template:review-parent"]
+        .rollout
+        .as_ref()
+        .expect("C rollout exists");
+    assert_eq!(rollout.fallback_plan, a.plan_id);
+    assert_ne!(rollout.fallback_plan, b);
+    assert_eq!(rollout.target_plan, c_receipt.updates[0].current_plan_id);
 }
 
 #[test]
@@ -2553,35 +2768,6 @@ fn durable_mixed_version_pin_reopens_after_lost_checkpoint_receipt() {
         first.plan_id
     );
 
-    let migration_input = retain_artifact(&mut reopened, "state:durable:1");
-    let (migration_continuation, migration_safe_point) =
-        migration_safe_point("run:active", &first.plan_id, migration_input.clone());
-    reopened
-        .put_continuation(migration_continuation)
-        .expect("migration safe point persists");
-    DurableEvolutionController::record_migration_and_checkpoint(
-        &mut reopened,
-        &mut restored,
-        "evolution:main",
-        "checkpoint:migration:1",
-        MigrationReceipt {
-            migration_id: "migration:durable:1".to_owned(),
-            run_id: "run:active".to_owned(),
-            from_plan: first.plan_id.clone(),
-            to_plan: pinned_target.clone(),
-            safe_point_id: migration_safe_point.safe_point_id.clone(),
-            source_epoch: migration_safe_point.epoch,
-            adapter_id: "migration:test".to_owned(),
-            adapter_revision: "1".to_owned(),
-            from_schema: "schema:1".to_owned(),
-            to_schema: "schema:2".to_owned(),
-            input_state: migration_input,
-            output_state: artifact("state:durable:2"),
-            evidence: artifact("evidence:durable:migration"),
-        },
-        &migration_safe_point,
-    )
-    .expect("migration checkpoints");
     DurableEvolutionController::record_shadow_and_checkpoint(
         &mut reopened,
         &mut restored,
@@ -2609,7 +2795,7 @@ fn durable_mixed_version_pin_reopens_after_lost_checkpoint_receipt() {
     let final_state = DurableEvolutionController::load(&final_coordinator, "evolution:main")
         .expect("full evolution journal replays")
         .snapshot();
-    assert!(final_state.migrations.contains_key("migration:durable:1"));
+    assert!(final_state.migrations.is_empty());
     assert!(final_state.shadows.contains_key("shadow:durable:1"));
 }
 
@@ -2751,12 +2937,15 @@ fn durable_restart_reopens_after_lost_receipt_and_rejects_stale_proof() {
         .expect("coordinator opens")
         .initialize(&cymule_core::Machine::new())
         .expect("coordinator initializes");
-    let restart_state = retain_artifact(&mut coordinator, "state:restart-durable");
-    let (continuation, safe_point) =
-        migration_safe_point("run:restart-durable", &first.plan_id, restart_state);
-    coordinator
-        .put_continuation(continuation.clone())
-        .expect("safe point persists");
+    let (safe_point, _) =
+        durable_migration_safe_point(&mut coordinator, "run:restart-durable", &first);
+    let continuation = coordinator
+        .state()
+        .expect("durable state exists")
+        .continuations
+        .get("run:restart-durable")
+        .expect("safe-point Continuation persists")
+        .clone();
     let mut controller = EvolutionController::new();
     controller.register_plan(first.clone()).expect("registers");
     controller.register_plan(second.clone()).expect("registers");
@@ -2861,15 +3050,12 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
             mode: RolloutMode::Shadow,
         })
         .expect("shadow rollout sets");
-    let migration_input = retain_artifact(&mut coordinator, "state:durable-plugin");
-    let (migration_continuation, migration_safe_point) = migration_safe_point(
-        "run:durable-plugin",
-        &first.plan_id,
-        migration_input.clone(),
-    );
-    coordinator
-        .put_continuation(migration_continuation)
-        .expect("migration safe point persists");
+    let (migration_safe_point, migration_binding) =
+        durable_migration_safe_point(&mut coordinator, "run:durable-plugin", &first);
+    let migration_input = migration_safe_point
+        .state
+        .clone()
+        .expect("migration state is retained");
     DurableEvolutionController::checkpoint(
         &mut coordinator,
         &controller,
@@ -2886,6 +3072,8 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
         safe_point_id: migration_safe_point.safe_point_id.clone(),
         source_epoch: migration_safe_point.epoch,
         input_state: migration_input,
+        source_binding: migration_binding.clone(),
+        target_binding: migration_binding,
     };
     let mut migration = TestMigrationAdapter {
         descriptor: MigrationAdapterDescriptor {
@@ -2935,6 +3123,20 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
     let machine = reopened.restore_machine().expect("Machine restores");
     assert!(machine.artifact(&migration_receipt.output_state).is_some());
     assert!(machine.artifact(&migration_receipt.evidence).is_some());
+    let migrated =
+        reopened.state().expect("durable state reads").continuations["run:durable-plugin"].clone();
+    assert_eq!(migrated.plan_id, second.plan_id);
+    assert_eq!(
+        migrated.binding_context,
+        migration_receipt.target_binding.artifact_id
+    );
+    assert_eq!(migrated.state, Some(migration_receipt.output_state.clone()));
+    assert_eq!(migrated.epoch, migration_receipt.target_epoch);
+    assert_eq!(migrated.status, ContinuationStatus::Running);
+    let run = &machine.projection().runs["run:durable-plugin"];
+    assert!(!run.attempts["attempt:run:durable-plugin:0"].active);
+    assert!(run.attempts["attempt:run:durable-plugin:1"].active);
+    assert_eq!(run.current_plan, second.plan_id);
 
     let shadow_request = ShadowRequest {
         comparison_id: "shadow:durable-plugin".to_owned(),

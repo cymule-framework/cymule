@@ -950,6 +950,42 @@ impl Machine {
                     current: binding_context.clone(),
                 })
             }
+            Command::MigrateRun {
+                from_plan,
+                to_plan,
+                from_binding,
+                to_binding,
+                safe_point_id,
+            } => {
+                let run = self.run(&envelope.run_id)?;
+                if &run.current_plan != from_plan
+                    || &run.current_binding_context != from_binding
+                    || to_plan == from_plan
+                    || to_binding.is_empty()
+                    || safe_point_id.is_empty()
+                {
+                    return Err(CoreError::IllegalTransition(
+                        "Run migration does not match current Plan and binding".to_owned(),
+                    ));
+                }
+                if !self.plans.contains_key(to_plan) {
+                    return Err(CoreError::NotFound(format!(
+                        "migration target Plan {to_plan} does not exist"
+                    )));
+                }
+                if run.attempts.values().any(|attempt| attempt.active) {
+                    return Err(CoreError::IllegalTransition(
+                        "Run migration requires every prior Attempt to be inactive".to_owned(),
+                    ));
+                }
+                Ok(EventPayload::RunMigrated {
+                    from_plan: from_plan.clone(),
+                    to_plan: to_plan.clone(),
+                    from_binding: from_binding.clone(),
+                    to_binding: to_binding.clone(),
+                    safe_point_id: safe_point_id.clone(),
+                })
+            }
             Command::RecordFact { key, value } => Ok(EventPayload::FactRecorded {
                 key: key.clone(),
                 value: value.clone(),
@@ -1518,6 +1554,7 @@ fn footprints(
         }
         EventPayload::EpochAdvanced { .. }
         | EventPayload::BindingUpdated { .. }
+        | EventPayload::RunMigrated { .. }
         | EventPayload::RunCompleted { .. } => {
             reads.insert(run_key.clone());
             writes.insert(run_key.clone());

@@ -4,7 +4,7 @@ use cymule_core::{ArtifactRef, ReplayAvailability};
 use serde::{Deserialize, Serialize};
 
 /// Binding-pinned virtual work occurrence version.
-pub const VIRTUAL_WORK_OCCURRENCE_VERSION: &str = "cymule.virtual-work-occurrence/1";
+pub const VIRTUAL_WORK_OCCURRENCE_VERSION: &str = "cymule.virtual-work-occurrence/2";
 /// Provider-neutral virtual work control command version.
 pub const VIRTUAL_WORK_CONTROL_VERSION: &str = "cymule.virtual-work-control/1";
 /// Provider-neutral virtual region migration version.
@@ -21,7 +21,7 @@ pub const VIRTUAL_COMPACTION_CONTROL_VERSION: &str = "cymule.virtual-compaction-
 /// Idempotent partial rehydration command version.
 pub const VIRTUAL_REHYDRATION_CONTROL_VERSION: &str = "cymule.virtual-rehydration-control/1";
 /// Idempotent worker-slot claim command version.
-pub const VIRTUAL_CLAIM_CONTROL_VERSION: &str = "cymule.virtual-claim-control/1";
+pub const VIRTUAL_CLAIM_CONTROL_VERSION: &str = "cymule.virtual-claim-control/2";
 /// Idempotent active-claim lease renewal command version.
 pub const VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION: &str = "cymule.virtual-lease-renewal-control/1";
 /// Idempotent expired-claim recovery command version.
@@ -153,6 +153,8 @@ pub struct ClaimedWork {
     pub epoch: u64,
     /// Stable identity of this exact work attempt occurrence.
     pub occurrence_id: String,
+    /// Exact semantic Plan selected independently from implementation binding.
+    pub plan_id: String,
     /// Immutable implementation binding selected before claim admission.
     pub occurrence_binding: String,
     /// Current fenced worker capacity-slot lease.
@@ -197,6 +199,8 @@ pub struct WorkOccurrence {
     pub epoch: u64,
     /// Current or terminal capacity-slot lease fence for this attempt.
     pub lease_epoch: u64,
+    /// Exact semantic Plan pinned for this attempt.
+    pub plan_id: String,
     /// Immutable execution binding selected before the claim was published.
     pub occurrence_binding: String,
     /// Current occurrence lifecycle.
@@ -276,6 +280,8 @@ pub struct VirtualClaimCommand {
     pub owner: String,
     /// Stable capacity-slot resource owned by the worker substrate.
     pub slot_id: String,
+    /// Exact semantic Plan selected for the new occurrence.
+    pub plan_id: String,
     /// Immutable implementation binding selected for a new occurrence.
     pub occurrence_binding: String,
     /// Worker capabilities used for deterministic selection.

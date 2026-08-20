@@ -120,6 +120,12 @@ pub struct MigrationReceipt {
     pub safe_point_id: String,
     /// Source Attempt fence at that cut.
     pub source_epoch: u64,
+    /// New Attempt fence created by the atomic migration CAS.
+    pub target_epoch: u64,
+    /// Source `ExecutionBinding` Artifact.
+    pub source_binding: ArtifactRef,
+    /// Target `ExecutionBinding` Artifact.
+    pub target_binding: ArtifactRef,
     /// Pinned migration adapter identity.
     pub adapter_id: String,
     /// Pinned migration adapter revision.

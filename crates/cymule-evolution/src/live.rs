@@ -100,6 +100,8 @@ pub struct LiveVirtualClaimCommand {
     pub template_id: String,
     /// Stable identity for the exact future-work selection.
     pub selection_id: String,
+    /// Exact `cymule.execution-binding/1` Artifact authorized for execution.
+    pub execution_binding: ArtifactRef,
     /// Stable worker claim command identity.
     pub command_id: String,
     /// Worker identity.
@@ -271,9 +273,10 @@ impl LiveEvolutionController {
                         ))
                     })?;
                 controller.add_diff_edge(&prior.plan.plan_id, &current.plan, evidence.clone())?;
+                let fallback_plan = controller.authoritative_fallback_plan()?;
                 let decision = update_decision(
                     &current.template_id,
-                    &prior.plan.plan_id,
+                    &fallback_plan,
                     &current.plan.plan_id,
                     mode.clone(),
                 )?;
@@ -638,6 +641,16 @@ impl DurableLiveEvolutionController {
         adapter: &mut A,
         command: LiveMigrationCommand,
     ) -> EvolutionResult<MigrationReceipt> {
+        if let Some(receipt) = replay_live_migration(
+            coordinator,
+            journal_id,
+            checkpoint_id,
+            &command.template_id,
+            &command.request,
+        )? {
+            crate::durable::verify_committed_migration(coordinator, &receipt)?;
+            return Ok(receipt);
+        }
         verify_durable_safe_point(coordinator, &command.safe_point)?;
         let before = controller.snapshot();
         let (receipt, artifacts) = controller.execute_migration_with_artifacts(
@@ -646,14 +659,26 @@ impl DurableLiveEvolutionController {
             command.request,
             &command.safe_point,
         )?;
-        let required = BTreeSet::from([receipt.output_state.clone(), receipt.evidence.clone()]);
-        if let Err(error) = checkpoint_artifacts(
+        let record = checkpoint_record(coordinator, controller, journal_id, checkpoint_id, None)?;
+        let target_plan = controller
+            .snapshot()
+            .templates
+            .get(&command.template_id)
+            .and_then(|snapshot| snapshot.plans.get(&receipt.to_plan))
+            .map(|node| node.plan.clone())
+            .ok_or_else(|| {
+                EvolutionError::NotFound("migration target Plan is missing".to_owned())
+            })?;
+        if let Err(error) = crate::durable::checkpoint_migrated_run(
             coordinator,
-            controller,
-            journal_id,
-            checkpoint_id,
+            &receipt,
+            &command.safe_point,
+            &target_plan,
             artifacts,
-            &required,
+            &[JournalBatch {
+                journal_id: journal_id.to_owned(),
+                records: vec![record],
+            }],
         ) {
             *controller = LiveEvolutionController::restore(before)
                 .expect("previously valid live-evolution snapshot restores");
@@ -935,6 +960,17 @@ impl DurableLiveEvolutionController {
         let live_before = controller.snapshot();
         let scheduler_before = scheduler.clone();
         let plan_id = controller.select_occurrence(&command.template_id, &command.selection_id)?;
+        let machine = coordinator.restore_machine().map_err(durable_error)?;
+        let selected_plan = controller
+            .snapshot()
+            .templates
+            .get(&command.template_id)
+            .and_then(|snapshot| snapshot.plans.get(&plan_id))
+            .map(|node| node.plan.clone())
+            .ok_or_else(|| {
+                EvolutionError::NotFound(format!("selected Plan {plan_id} is missing"))
+            })?;
+        verify_execution_binding(&machine, &command.execution_binding, &selected_plan)?;
         let live_record = match checkpoint_record(
             coordinator,
             controller,
@@ -954,7 +990,8 @@ impl DurableLiveEvolutionController {
             command_id: command.command_id.clone(),
             owner: command.owner.clone(),
             slot_id: command.slot_id.clone(),
-            occurrence_binding: plan_id.clone(),
+            plan_id: plan_id.clone(),
+            occurrence_binding: command.execution_binding.artifact_id.clone(),
             capabilities: command.capabilities.clone(),
             logical_now: command.logical_now,
             lease_ttl: command.lease_ttl,
@@ -980,6 +1017,80 @@ impl DurableLiveEvolutionController {
             }
         }
     }
+}
+
+fn replay_live_migration<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    journal_id: &str,
+    checkpoint_id: &str,
+    template_id: &str,
+    request: &MigrationRequest,
+) -> EvolutionResult<Option<MigrationReceipt>> {
+    let Some(record) = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?
+        .iter()
+        .find(|record| record.record_id == checkpoint_id)
+    else {
+        return Ok(None);
+    };
+    let checkpoint = decode(record)?;
+    let receipt = checkpoint
+        .snapshot
+        .templates
+        .get(template_id)
+        .and_then(|snapshot| snapshot.migrations.get(&request.migration_id))
+        .cloned()
+        .ok_or_else(|| EvolutionError::Conflict("checkpoint is not this migration".to_owned()))?;
+    if receipt.run_id != request.run_id
+        || receipt.from_plan != request.from_plan
+        || receipt.to_plan != request.to_plan
+        || receipt.safe_point_id != request.safe_point_id
+        || receipt.source_epoch != request.source_epoch
+        || receipt.input_state != request.input_state
+        || receipt.source_binding != request.source_binding
+        || receipt.target_binding != request.target_binding
+    {
+        return Err(EvolutionError::Conflict(
+            "migration checkpoint identity was reused with different semantics".to_owned(),
+        ));
+    }
+    Ok(Some(receipt))
+}
+
+fn verify_execution_binding(
+    machine: &Machine,
+    reference: &ArtifactRef,
+    plan: &cymule_core::SealedPlan,
+) -> EvolutionResult<()> {
+    reference
+        .validate()
+        .map_err(|error| EvolutionError::Validation(error.to_string()))?;
+    if reference.kind != cymule_runtime::EXECUTION_BINDING_VERSION {
+        return Err(EvolutionError::Validation(
+            "occurrence binding must reference an exact ExecutionBinding Artifact".to_owned(),
+        ));
+    }
+    let record = machine.artifact(reference).ok_or_else(|| {
+        EvolutionError::NotFound(format!(
+            "execution binding Artifact {} is missing",
+            reference.artifact_id
+        ))
+    })?;
+    let binding: cymule_runtime::ExecutionBinding = serde_json::from_slice(&record.bytes)
+        .map_err(|error| EvolutionError::Validation(error.to_string()))?;
+    if binding
+        .artifact_ref()
+        .map_err(|error| EvolutionError::Validation(error.to_string()))?
+        != *reference
+    {
+        return Err(EvolutionError::Validation(
+            "execution binding Artifact identity does not match its bytes".to_owned(),
+        ));
+    }
+    binding
+        .admit_plan(plan)
+        .map_err(|error| EvolutionError::Validation(error.to_string()))
 }
 
 fn initial_decision(template_id: &str, plan_id: &str) -> EvolutionResult<RolloutDecision> {

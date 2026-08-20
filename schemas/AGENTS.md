@@ -57,7 +57,7 @@
   authenticates its parent and resulting transition head and never repeats a
   full `VirtualSnapshot`. The derived parked-reason index is omitted from wire
   state and rebuilt from the closed parked-work map on restore.
-  Its owned definitions also freeze `cymule.virtual-work-occurrence/1` and
+  Its owned definitions also freeze `cymule.virtual-work-occurrence/2` and
   `cymule.virtual-work-control/1`; disposition variants are closed and preserve
   owner, work epoch, lease epoch, logical observation time, and binding
   preconditions.
@@ -76,7 +76,8 @@
   Run weight. Worker addresses, heartbeats, queue/provider fields, and topology
   remain outside semantic records.
 - `evolution-control.schema.json` owns the closed
-  `cymule.evolution-control/2` command union shared by all SDKs. Commands carry
+  `cymule.evolution-control/3` command union shared by all SDKs. Migration
+  commands additionally pin source and target ExecutionBinding Artifacts; all commands carry
   only immutable Plan/Artifact identities, exact patches, pinned migration or
   shadow requests, observations, and deterministic gates. Provider endpoints,
   credentials, clocks, and Agent-loop state never enter this boundary.

@@ -136,6 +136,11 @@
 - Higher-profile result/evidence Artifacts use `checkpoint_artifact_journals`.
   The proposed Machine may add only the explicitly listed Artifacts; reject
   Plans, Events, commands, or unrelated Artifact changes before CAS.
+- Higher-profile Run migration uses `checkpoint_run_migration_journals`; it is
+  the only CAS seam that may couple one exact target Plan, migration Artifacts,
+  Continuation Plan/state/ExecutionBinding replacement, epoch advance, new
+  Attempt, and owning journals. It rejects Plan IDs as bindings and any
+  incompatible active frame.
 - A higher-profile input delivery that also publishes its Artifact and records
   typed provenance uses `checkpoint_input_wait_journals`; Artifact, journal
   records, input wait, and Continuation readiness must never split across CAS.

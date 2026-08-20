@@ -11,7 +11,7 @@ pub use archive::{
 };
 pub use durable::{
     DurableVirtualController, MAX_VIRTUAL_CHECKPOINT_DELTA_BYTES, MapDelta, SetDelta,
-    VIRTUAL_CHECKPOINT_SCHEMA, VirtualCheckpoint, VirtualDelta,
+    VIRTUAL_CHECKPOINT_SCHEMA, VirtualCheckpoint, VirtualClaimCheckpoint, VirtualDelta,
 };
 pub use error::{VirtualError, VirtualResult};
 pub use model::{

@@ -296,6 +296,7 @@ test("TypeScript virtual work query and control fixtures stay exact", () => {
       "command:claim:fixture",
       "worker:fixture",
       "slot:worker-fixture:0",
+      "sha256:1111111111111111111111111111111111111111111111111111111111111111",
       "binding:worker/fixture@1",
       ["sandbox", "cpu", "cpu"],
       100,

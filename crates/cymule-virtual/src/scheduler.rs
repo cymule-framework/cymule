@@ -515,6 +515,7 @@ impl VirtualScheduler {
     pub fn claim(
         &mut self,
         owner: &str,
+        plan_id: &str,
         occurrence_binding: &str,
         capabilities: &BTreeSet<String>,
     ) -> VirtualResult<Option<ClaimedWork>> {
@@ -525,19 +526,20 @@ impl VirtualScheduler {
             epoch: 1,
             expires_at: u64::MAX,
         };
-        self.claim_with_lease(owner, occurrence_binding, capabilities, &lease)
+        self.claim_with_lease(owner, plan_id, occurrence_binding, capabilities, &lease)
     }
 
     /// Claim one item under an externally coordinated capacity-slot lease.
     pub fn claim_with_lease(
         &mut self,
         owner: &str,
+        plan_id: &str,
         occurrence_binding: &str,
         capabilities: &BTreeSet<String>,
         lease: &VirtualClaimLease,
     ) -> VirtualResult<Option<ClaimedWork>> {
         let before = self.snapshot.clone();
-        match self.claim_inner(owner, occurrence_binding, capabilities, lease) {
+        match self.claim_inner(owner, plan_id, occurrence_binding, capabilities, lease) {
             Ok(claim) => Ok(claim),
             Err(error) => {
                 self.snapshot = before;
@@ -549,18 +551,20 @@ impl VirtualScheduler {
     fn claim_inner(
         &mut self,
         owner: &str,
+        plan_id: &str,
         occurrence_binding: &str,
         capabilities: &BTreeSet<String>,
         lease: &VirtualClaimLease,
     ) -> VirtualResult<Option<ClaimedWork>> {
         if owner.is_empty()
+            || plan_id.is_empty()
             || occurrence_binding.is_empty()
             || lease.resource.is_empty()
             || lease.owner != owner
             || lease.epoch == 0
         {
             return Err(VirtualError::Validation(
-                "claim owner, occurrence binding, and fenced capacity-slot lease are required"
+                "claim owner, Plan, occurrence binding, and fenced capacity-slot lease are required"
                     .to_owned(),
             ));
         }
@@ -647,6 +651,7 @@ impl VirtualScheduler {
             owner: owner.to_owned(),
             epoch: *epoch,
             occurrence_id: occurrence_id.clone(),
+            plan_id: plan_id.to_owned(),
             occurrence_binding: occurrence_binding.to_owned(),
             lease: lease.clone(),
         };
@@ -659,6 +664,7 @@ impl VirtualScheduler {
             owner: owner.to_owned(),
             epoch: *epoch,
             lease_epoch: lease.epoch,
+            plan_id: plan_id.to_owned(),
             occurrence_binding: occurrence_binding.to_owned(),
             state: WorkOccurrenceState::Running,
             result: None,
@@ -725,6 +731,7 @@ impl VirtualScheduler {
         }
         let claim = self.claim_inner(
             &command.owner,
+            &command.plan_id,
             &command.occurrence_binding,
             &command.capabilities,
             lease,
@@ -1594,6 +1601,7 @@ impl VirtualScheduler {
                 || claim.owner.is_empty()
                 || claim.epoch == 0
                 || claim.occurrence_id.is_empty()
+                || claim.plan_id.is_empty()
                 || claim.occurrence_binding.is_empty()
                 || validate_claim_lease(&claim.lease).is_err()
                 || claim.lease.owner != claim.owner
@@ -1625,6 +1633,7 @@ impl VirtualScheduler {
                 || occurrence.owner != claim.owner
                 || occurrence.epoch != claim.epoch
                 || occurrence.lease_epoch != claim.lease.epoch
+                || occurrence.plan_id != claim.plan_id
                 || occurrence.occurrence_binding != claim.occurrence_binding
             {
                 return Err(VirtualError::Validation(format!(
@@ -1775,6 +1784,7 @@ impl VirtualScheduler {
                 let expected_expiry =
                     lease_expiry(receipt.command.logical_now, receipt.command.lease_ttl)?;
                 if claim.owner != receipt.command.owner
+                    || claim.plan_id != receipt.command.plan_id
                     || claim.occurrence_binding != receipt.command.occurrence_binding
                     || claim.lease.resource != receipt.command.slot_id
                     || claim.lease.owner != receipt.command.owner
@@ -1808,6 +1818,7 @@ impl VirtualScheduler {
                         occurrence.work_id == claim.item.work_id
                             && occurrence.epoch == claim.epoch
                             && occurrence.owner == claim.owner
+                            && occurrence.plan_id == claim.plan_id
                             && occurrence.occurrence_binding == claim.occurrence_binding
                     });
                 let occurrence_is_compacted = self
@@ -2084,6 +2095,7 @@ fn validate_claim_command(command: &VirtualClaimCommand) -> VirtualResult<()> {
         || command.command_id.is_empty()
         || command.owner.is_empty()
         || command.slot_id.is_empty()
+        || command.plan_id.is_empty()
         || command.occurrence_binding.is_empty()
         || command.capabilities.iter().any(String::is_empty)
         || command.lease_ttl == 0
@@ -2449,6 +2461,7 @@ fn validate_occurrence(occurrence_id: &str, occurrence: &WorkOccurrence) -> Virt
         || occurrence.owner.is_empty()
         || occurrence.epoch == 0
         || occurrence.lease_epoch == 0
+        || occurrence.plan_id.is_empty()
         || occurrence.occurrence_binding.is_empty()
     {
         return Err(VirtualError::Validation(format!(

@@ -98,11 +98,14 @@ stable implementation ID. Plan contracts own schemas and effect properties.
 Registration never grants authority. Admission independently checks the plan,
 binding, policy, and authority before dispatch.
 
-The reference runtime accepts one explicit `ExecutionBinding`. It first checks
-the live manifest against that immutable selection, then admits every Plan
-requirement against the normalized provider graph. Canonical descriptor bytes
-are stored as `cymule.execution-binding/1`; all execution records point to its
-Artifact identity or to a deterministic operation binding derived from it.
+The reference runtime accepts one explicit `ExecutionBinding`. It checks each
+selected provider's live manifest against that immutable selection, then admits
+every Plan requirement against the normalized provider graph. The admitted
+router dispatches each operation to the provider ID selected by the binding;
+extra advertised capability never becomes routing authority. Canonical
+descriptor bytes are stored as `cymule.execution-binding/1`; all execution
+records point to its Artifact identity or to a deterministic operation binding
+derived from it.
 Process-local construction and finalization remain ordinary adapter ownership,
 not durable semantics.
 
@@ -276,7 +279,8 @@ Concrete databases, object listings, queues, clocks, and signal transports stay
 behind `RegionSource` or activation plugins.
 
 Claims are also checkpoints. Before dispatch, the scheduler pins a concrete
-implementation binding and records a running `cymule.virtual-work-occurrence/1`
+semantic Plan plus exact ExecutionBinding Artifact and records a running
+`cymule.virtual-work-occurrence/2`
 under the new claim epoch. Worker output enters through a closed disposition:
 success, retry, park, terminal failure, or cancellation. `DurableVirtualController`
 atomically checkpoints result/evidence Artifacts and the updated frontier; a
@@ -288,7 +292,8 @@ so historical command replay reads the original receipt even after unrelated
 later claims; it never restores the older scheduler snapshot.
 
 Multi-worker capacity is represented by abstract slot leases. A claim command
-supplies the worker, slot, capabilities, binding, and Clock-derived logical
+supplies the worker, slot, semantic Plan, ExecutionBinding Artifact,
+capabilities, and Clock-derived logical
 lease window; `DurableVirtualController` previews the next M1 lease and commits
 it with the selected work in one CAS. Different slots can claim independently,
 while one slot cannot hold two active claims. An empty poll records an

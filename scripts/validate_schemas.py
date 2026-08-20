@@ -374,7 +374,7 @@ def main() -> int:
 
     evolution_control = load(root / "tests/fixtures/evolution-control.json")
     evolution_validator = Draft202012Validator(
-        by_title["Cymule Evolution Control cymule.evolution-control/2"],
+        by_title["Cymule Evolution Control cymule.evolution-control/3"],
         registry=registry,
     )
     evolution_validator.validate(evolution_control)
@@ -395,9 +395,14 @@ def main() -> int:
     if verified_evolution != evolution_control:
         raise AssertionError("Rust Engine changed the evolution control fixture")
     artifact = canonical_artifact
+    execution_binding = {
+        "identity_version": "cymule.artifact/2",
+        "artifact_id": "sha256:" + "9" * 64,
+        "kind": "cymule.execution-binding/1",
+    }
     evolution_variants = [
         {
-            "control_version": "cymule.evolution-control/2",
+            "control_version": "cymule.evolution-control/3",
             "command_id": "command:patch",
             "operation": "apply_patch",
             "patch": {
@@ -415,7 +420,7 @@ def main() -> int:
             },
         },
         {
-            "control_version": "cymule.evolution-control/2",
+            "control_version": "cymule.evolution-control/3",
             "command_id": "command:rollout",
             "operation": "set_rollout",
             "decision": {
@@ -426,13 +431,13 @@ def main() -> int:
             },
         },
         {
-            "control_version": "cymule.evolution-control/2",
+            "control_version": "cymule.evolution-control/3",
             "command_id": "command:select",
             "operation": "select_occurrence",
             "occurrence_id": "occurrence:1",
         },
         {
-            "control_version": "cymule.evolution-control/2",
+            "control_version": "cymule.evolution-control/3",
             "command_id": "command:migrate",
             "operation": "migrate",
             "request": {
@@ -443,10 +448,12 @@ def main() -> int:
                 "safe_point_id": "sha256:" + "3" * 64,
                 "source_epoch": 7,
                 "input_state": artifact,
+                "source_binding": execution_binding,
+                "target_binding": execution_binding,
             },
         },
         {
-            "control_version": "cymule.evolution-control/2",
+            "control_version": "cymule.evolution-control/3",
             "command_id": "command:restart",
             "operation": "restart_under_new_plan",
             "request": {
@@ -462,7 +469,7 @@ def main() -> int:
             },
         },
         {
-            "control_version": "cymule.evolution-control/2",
+            "control_version": "cymule.evolution-control/3",
             "command_id": "command:shadow",
             "operation": "shadow",
             "request": {
@@ -476,7 +483,7 @@ def main() -> int:
             },
         },
         {
-            "control_version": "cymule.evolution-control/2",
+            "control_version": "cymule.evolution-control/3",
             "command_id": "command:observe",
             "operation": "observe",
             "observation": {
@@ -520,7 +527,7 @@ def main() -> int:
     live_evolution = load(root / "tests/fixtures/live-evolution-control.json")
     live_evolution_validator = Draft202012Validator(
         by_title[
-            "Cymule Live Evolution Control cymule.live-evolution-control/1"
+            "Cymule Live Evolution Control cymule.live-evolution-control/2"
         ],
         registry=registry,
     )

@@ -82,8 +82,10 @@
   implicit mutation; a recovery controller must explicitly retry, fail, or
   cancel under the current expired durable lease. Takeover fences old output.
 - Resolve the immutable execution binding before claim admission. Each claim
-  creates one `cymule.virtual-work-occurrence/1` record keyed by work and epoch;
-  owner and binding are evidence, not mutable scheduler hints.
+  creates one `cymule.virtual-work-occurrence/2` record keyed by work and epoch;
+  owner, semantic `plan_id`, and ExecutionBinding Artifact identity are
+  evidence, not mutable scheduler hints. Never store a Plan ID in
+  `occurrence_binding`.
 - Attempt dispositions are closed: success, retry, park, terminal failure, or
   cancellation. Retry preserves failure evidence and requeues or parks the same
   logical work; its next claim gets a new epoch and may select a new binding.

@@ -109,7 +109,7 @@ fallback because journal lineages are version-homogeneous. `VirtualSnapshot`
 keeps a derived parked-reason index that restore always rebuilds from parked
 work. This does not alter `cymule.semantic/4`, the Plan IR, or M1's generic
 application-journal envelope. Work lifecycle adds independent
-`cymule.virtual-work-occurrence/1`
+`cymule.virtual-work-occurrence/2`
 and `cymule.virtual-work-control/1` domains; SDKs expose their closed wire types
 and transport interfaces but do not reduce scheduler state. Additive scheduling
 policy, integer weight/deficit, dispatch-sequence, and ready-age fields remain
@@ -128,7 +128,7 @@ Machine Artifacts.
 Certificate `/2` is the terminal pre-release replacement for `/1`; no dual
 reader or Artifact-reference fallback remains. Existing `/1` checkpoints must
 be rebuilt from their retained cold manifest before upgrading this profile.
-Multi-worker control adds independent `cymule.virtual-claim-control/1`,
+Multi-worker control adds independent `cymule.virtual-claim-control/2`,
 `cymule.virtual-lease-renewal-control/1`,
 `cymule.virtual-recovery-control/1`, and
 `cymule.virtual-run-weight-control/1` domains. Their receipts and active lease

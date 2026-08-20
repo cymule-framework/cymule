@@ -18,7 +18,7 @@ use cymule_resource::{
 };
 use cymule_resource_fs::FsResourceStore;
 use cymule_runtime::{
-    EmbeddedRuntime, ExecutionBinding, ExecutionOperationKind, PluginHost,
+    AdmittedPluginRouter, EmbeddedRuntime, ExecutionBinding, ExecutionOperationKind, PluginHost,
     RUNTIME_COMPOSITION_VERSION, RuntimeCompositionGraph, RuntimeImplementation,
     RuntimeProviderDescriptor,
 };
@@ -43,6 +43,7 @@ use crate::source::{CURSOR_VERSION, CaseSource, case_reference, parse_suite};
 const VIRTUAL_JOURNAL: &str = "example:virtual-work";
 const LIVE_EVOLUTION_JOURNAL: &str = "example:live-evolution";
 const CAMPAIGN_METADATA_JOURNAL: &str = "example:campaign-metadata";
+const EXECUTION_BINDING_JOURNAL: &str = "example:execution-bindings";
 const REGION_ID: &str = "region:evaluation-suite";
 const RESOURCE_BINDING: &str = "example.fs-resources@1";
 const DEFAULT_LEASE_TTL: u64 = 60_000;
@@ -585,6 +586,29 @@ fn claim_next(
         ),
     )?;
     let selection_id = stable_id("plan-selection", &command_id)?;
+    let binding = campaign_execution_binding(options)?;
+    let binding_ref = binding.artifact_ref()?;
+    let mut machine = coordinator.restore_machine()?;
+    let retained = machine.put_artifact(
+        cymule_runtime::EXECUTION_BINDING_VERSION,
+        binding.canonical_bytes()?,
+    )?;
+    if retained != binding_ref {
+        return Err("execution binding Artifact identity changed".into());
+    }
+    let record = JournalRecord::new(
+        format!("binding:{}", binding_ref.artifact_id),
+        "example.execution-binding/1",
+        serde_json::to_value(&binding_ref)?,
+    )?;
+    coordinator.checkpoint_artifact_journals(
+        &machine,
+        &BTreeSet::from([binding_ref.clone()]),
+        &[JournalBatch {
+            journal_id: EXECUTION_BINDING_JOURNAL.to_owned(),
+            records: vec![record],
+        }],
+    )?;
     let receipt = DurableLiveEvolutionController::claim_virtual_work_and_checkpoint(
         coordinator,
         evolution,
@@ -594,6 +618,7 @@ fn claim_next(
         &LiveVirtualClaimCommand {
             template_id: TEMPLATE_ID.to_owned(),
             selection_id,
+            execution_binding: binding_ref,
             command_id,
             owner: options.worker_id.clone(),
             slot_id: stable_id(
@@ -669,13 +694,8 @@ fn execute_claim(
     cases: &[EvaluationCase],
 ) -> CampaignResult<()> {
     let linked = evolution
-        .historical_link_for(TEMPLATE_ID, &claim.occurrence_binding)
-        .ok_or_else(|| {
-            format!(
-                "occurrence references unknown Plan {}",
-                claim.occurrence_binding
-            )
-        })?;
+        .historical_link_for(TEMPLATE_ID, &claim.plan_id)
+        .ok_or_else(|| format!("occurrence references unknown Plan {}", claim.plan_id))?;
     if claim.item.payload.kind != CASE_ARTIFACT_KIND {
         return Err("case payload kind changed".into());
     }
@@ -692,45 +712,21 @@ fn execute_claim(
     if case_reference(case)? != claim.item.payload {
         return Err("claimed case payload does not match the pinned suite bytes".into());
     }
-    let mut config = ProcessExecutorConfig::new(&options.plugin_executable);
-    config.arguments = vec!["__plugin".to_owned()];
-    config.timeout = Duration::from_secs(5);
-    config.message_limit = 1024 * 1024;
-    let mut executor = ProcessExecutor::new(config)?;
-    let manifest = executor.describe()?;
-    let implementation_revision = format!(
-        "sha256:{}",
-        sha256_bytes(&fs::read(&options.plugin_executable)?)
+    let binding = campaign_execution_binding(options)?;
+    if binding.artifact_ref()?.artifact_id != claim.occurrence_binding {
+        return Err("claim execution binding does not match admitted composition".into());
+    }
+    let mut providers: BTreeMap<String, Box<dyn PluginHost>> = BTreeMap::new();
+    providers.insert(
+        "evaluation-subject".to_owned(),
+        Box::new(campaign_executor(options)?),
     );
-    let empty_digest = format!("sha256:{}", sha256_bytes(b"{}"));
-    let providers = [
-        (
-            "evaluation-subject",
-            SUBJECT_COMPONENT,
-            "evaluation-subject",
-        ),
-        ("evaluation-scorer", SCORER_COMPONENT, "evaluation-scorer"),
-    ]
-    .into_iter()
-    .map(
-        |(provider_id, operation, capability)| RuntimeProviderDescriptor {
-            version: RUNTIME_COMPOSITION_VERSION.to_owned(),
-            provider_id: provider_id.to_owned(),
-            implementation: RuntimeImplementation {
-                implementation_id: manifest.implementation_id.clone(),
-                revision: implementation_revision.clone(),
-            },
-            provides: vec![ExecutionOperationKind::Component.service_key(operation)],
-            requires: Vec::new(),
-            properties: BTreeMap::from([("capability".to_owned(), capability.to_owned())]),
-            configuration_schema_digest: empty_digest.clone(),
-            configuration_fingerprint: empty_digest.clone(),
-        },
-    )
-    .collect();
-    let graph = RuntimeCompositionGraph::build(providers)?;
-    let binding = ExecutionBinding::admit(&graph, &manifest)?;
-    let mut runtime = EmbeddedRuntime::new(executor, binding)?;
+    providers.insert(
+        "evaluation-scorer".to_owned(),
+        Box::new(campaign_executor(options)?),
+    );
+    let router = AdmittedPluginRouter::new(binding.clone(), providers)?;
+    let mut runtime = EmbeddedRuntime::new(router, binding)?;
     let execution = runtime
         .execute(
             linked.plan.clone(),
@@ -768,6 +764,51 @@ fn execute_claim(
         VIRTUAL_JOURNAL,
     )?;
     Ok(())
+}
+
+fn campaign_executor(options: &CampaignOptions) -> CampaignResult<ProcessExecutor> {
+    let mut config = ProcessExecutorConfig::new(&options.plugin_executable);
+    config.arguments = vec!["__plugin".to_owned()];
+    config.timeout = Duration::from_secs(5);
+    config.message_limit = 1024 * 1024;
+    ProcessExecutor::new(config).map_err(Into::into)
+}
+
+fn campaign_execution_binding(options: &CampaignOptions) -> CampaignResult<ExecutionBinding> {
+    let mut executor = campaign_executor(options)?;
+    let manifest = executor.describe()?;
+    let implementation_revision = format!(
+        "sha256:{}",
+        sha256_bytes(&fs::read(&options.plugin_executable)?)
+    );
+    let empty_digest = format!("sha256:{}", sha256_bytes(b"{}"));
+    let providers = [
+        (
+            "evaluation-subject",
+            SUBJECT_COMPONENT,
+            "evaluation-subject",
+        ),
+        ("evaluation-scorer", SCORER_COMPONENT, "evaluation-scorer"),
+    ]
+    .into_iter()
+    .map(
+        |(provider_id, operation, capability)| RuntimeProviderDescriptor {
+            version: RUNTIME_COMPOSITION_VERSION.to_owned(),
+            provider_id: provider_id.to_owned(),
+            implementation: RuntimeImplementation {
+                implementation_id: manifest.implementation_id.clone(),
+                revision: implementation_revision.clone(),
+            },
+            provides: vec![ExecutionOperationKind::Component.service_key(operation)],
+            requires: Vec::new(),
+            properties: BTreeMap::from([("capability".to_owned(), capability.to_owned())]),
+            configuration_schema_digest: empty_digest.clone(),
+            configuration_fingerprint: empty_digest.clone(),
+        },
+    )
+    .collect();
+    let graph = RuntimeCompositionGraph::build(providers)?;
+    ExecutionBinding::admit(&graph, &manifest).map_err(Into::into)
 }
 
 fn build_report(

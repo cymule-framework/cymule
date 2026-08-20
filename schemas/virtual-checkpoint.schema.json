@@ -148,12 +148,13 @@
     "claim": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["item", "owner", "epoch", "occurrence_id", "occurrence_binding", "lease"],
+      "required": ["item", "owner", "epoch", "occurrence_id", "plan_id", "occurrence_binding", "lease"],
       "properties": {
         "item": { "$ref": "#/$defs/work" },
         "owner": { "$ref": "#/$defs/nonEmpty" },
         "epoch": { "type": "integer", "minimum": 1 },
         "occurrence_id": { "$ref": "#/$defs/nonEmpty" },
+        "plan_id": { "$ref": "#/$defs/nonEmpty" },
         "occurrence_binding": { "$ref": "#/$defs/nonEmpty" },
         "lease": { "$ref": "#/$defs/claimLease" }
       }
@@ -196,10 +197,10 @@
       "additionalProperties": false,
       "required": [
         "occurrence_version", "occurrence_id", "work_id", "region_id", "run_id",
-        "owner", "epoch", "lease_epoch", "occurrence_binding", "state", "result", "error", "next_reason"
+        "owner", "epoch", "lease_epoch", "plan_id", "occurrence_binding", "state", "result", "error", "next_reason"
       ],
       "properties": {
-        "occurrence_version": { "const": "cymule.virtual-work-occurrence/1" },
+        "occurrence_version": { "const": "cymule.virtual-work-occurrence/2" },
         "occurrence_id": { "$ref": "#/$defs/nonEmpty" },
         "work_id": { "$ref": "#/$defs/nonEmpty" },
         "region_id": { "$ref": "#/$defs/nonEmpty" },
@@ -207,6 +208,7 @@
         "owner": { "$ref": "#/$defs/nonEmpty" },
         "epoch": { "type": "integer", "minimum": 1 },
         "lease_epoch": { "type": "integer", "minimum": 1 },
+        "plan_id": { "$ref": "#/$defs/nonEmpty" },
         "occurrence_binding": { "$ref": "#/$defs/nonEmpty" },
         "state": {
           "enum": ["running", "succeeded", "retry_scheduled", "parked", "failed", "cancelled"]
@@ -568,14 +570,15 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "control_version", "command_id", "owner", "slot_id", "occurrence_binding",
+        "control_version", "command_id", "owner", "slot_id", "plan_id", "occurrence_binding",
         "capabilities", "logical_now", "lease_ttl"
       ],
       "properties": {
-        "control_version": { "const": "cymule.virtual-claim-control/1" },
+        "control_version": { "const": "cymule.virtual-claim-control/2" },
         "command_id": { "$ref": "#/$defs/nonEmpty" },
         "owner": { "$ref": "#/$defs/nonEmpty" },
         "slot_id": { "$ref": "#/$defs/nonEmpty" },
+        "plan_id": { "$ref": "#/$defs/nonEmpty" },
         "occurrence_binding": { "$ref": "#/$defs/nonEmpty" },
         "capabilities": {
           "type": "array", "uniqueItems": true,

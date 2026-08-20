@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/evolution-control.schema.json",
-  "title": "Cymule Evolution Control cymule.evolution-control/2",
+  "title": "Cymule Evolution Control cymule.evolution-control/3",
   "oneOf": [
     {
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "patch"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/2" },
+        "control_version": { "const": "cymule.evolution-control/3" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "apply_patch" },
         "patch": { "$ref": "#/$defs/patch" }
@@ -17,7 +17,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "decision"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/2" },
+        "control_version": { "const": "cymule.evolution-control/3" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "set_rollout" },
         "decision": { "$ref": "#/$defs/decision" }
@@ -27,7 +27,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "occurrence_id"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/2" },
+        "control_version": { "const": "cymule.evolution-control/3" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "select_occurrence" },
         "occurrence_id": { "$ref": "#/$defs/id" }
@@ -37,7 +37,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "request"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/2" },
+        "control_version": { "const": "cymule.evolution-control/3" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "migrate" },
         "request": { "$ref": "#/$defs/migration" }
@@ -47,7 +47,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "request"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/2" },
+        "control_version": { "const": "cymule.evolution-control/3" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "restart_under_new_plan" },
         "request": { "$ref": "#/$defs/restart" }
@@ -57,7 +57,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "request"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/2" },
+        "control_version": { "const": "cymule.evolution-control/3" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "shadow" },
         "request": { "$ref": "#/$defs/shadow" }
@@ -67,7 +67,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "observation"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/2" },
+        "control_version": { "const": "cymule.evolution-control/3" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "observe" },
         "observation": { "$ref": "#/$defs/observation" }
@@ -77,7 +77,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "gate", "next_decision_id"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/2" },
+        "control_version": { "const": "cymule.evolution-control/3" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "apply_gate" },
         "gate": { "$ref": "#/$defs/gate" },
@@ -94,6 +94,15 @@
         "identity_version": { "const": "cymule.artifact/2" },
         "artifact_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "kind": { "type": "string", "pattern": "^[a-z0-9._+-]+(?:/[a-z0-9._+-]+)+$", "maxLength": 255 }
+      }
+    },
+    "executionBindingArtifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity_version", "artifact_id", "kind"],
+      "properties": {
+        "identity_version": { "const": "cymule.artifact/2" },
+        "artifact_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "kind": { "const": "cymule.execution-binding/1" }
       }
     },
     "patchOperation": {
@@ -136,7 +145,7 @@
     },
     "migration": {
       "type": "object", "additionalProperties": false,
-      "required": ["migration_id", "run_id", "from_plan", "to_plan", "safe_point_id", "source_epoch", "input_state"],
+      "required": ["migration_id", "run_id", "from_plan", "to_plan", "safe_point_id", "source_epoch", "input_state", "source_binding", "target_binding"],
       "properties": {
         "migration_id": { "$ref": "#/$defs/id" },
         "run_id": { "$ref": "#/$defs/id" },
@@ -144,7 +153,9 @@
         "to_plan": { "$ref": "#/$defs/id" },
         "safe_point_id": { "$ref": "#/$defs/id" },
         "source_epoch": { "type": "integer", "minimum": 0 },
-        "input_state": { "$ref": "#/$defs/artifact" }
+        "input_state": { "$ref": "#/$defs/artifact" },
+        "source_binding": { "$ref": "#/$defs/executionBindingArtifact" },
+        "target_binding": { "$ref": "#/$defs/executionBindingArtifact" }
       }
     },
     "restart": {

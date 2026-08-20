@@ -161,6 +161,15 @@ Use this precedence order when guidance conflicts:
   a pinned plugin, observations match immutable occurrence pins, and only Rust
   evaluates deterministic promotion/rollback gates. SDKs carry the closed
   control union without duplicating these decisions.
+- M4 occurrence admission pins semantic `plan_id` separately from an exact
+  `cymule.execution-binding/1` Artifact. Never store a Plan ID in
+  `occurrence_binding`. A safe-point migration commits its receipt and output
+  Artifacts together with the Machine Plan/binding transition, Continuation
+  state replacement, epoch advance, and new Attempt. A lost acknowledgement
+  reopens that one committed transition without reinvoking the adapter.
+- Runtime composition dispatches each bound operation to the exact admitted
+  provider. Live manifests advertise capability only; they cannot select a
+  provider, widen authority, or make an unbound operation callable.
 - Never accept a caller boolean as migration-safe-point authority. Derive a
   content-addressed proof from a quiescent durable Continuation and revalidate it
   against M1 before adapter invocation or replacement-Run authorization.

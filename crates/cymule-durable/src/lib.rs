@@ -13,7 +13,7 @@ pub use control::{
     DURABLE_CONTROL_VERSION, DurableBoundary, DurableCommand, DurableDomainView, DurableResponse,
     DurableRunView, DurableRuntimeControl,
 };
-pub use coordinator::DurableCoordinator;
+pub use coordinator::{DurableCoordinator, RunMigrationCheckpoint};
 pub use error::{DurableError, DurableResult};
 pub use executor::{DriveOutcome, ResumableRuntime};
 pub use model::{

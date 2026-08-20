@@ -25,8 +25,8 @@ pub use engine::{
 };
 pub use error::{RuntimeError, RuntimeResult};
 pub use plugin::{
-    PLUGIN_VERSION, PluginEffect, PluginExpectedFailure, PluginHost, PluginManifest,
-    PluginOperation, PluginRequest, PluginResponse,
+    AdmittedPluginRouter, PLUGIN_VERSION, PluginEffect, PluginExpectedFailure, PluginHost,
+    PluginManifest, PluginOperation, PluginRequest, PluginResponse,
 };
 pub use protocol::{
     ENGINE_PROTOCOL_VERSION, EngineContractSide, EngineFailure, EngineFailureCategory, EngineIssue,

@@ -33,8 +33,18 @@
   one another's dependency or history records.
 - Keep semantic Plan changes separate from Binding Context changes. Rollout and
   rollback affect future selection only; admitted occurrences remain pinned.
+- A new candidate after rollback uses the last authoritative fallback, never
+  the failed target that merely remains the registry's historical link head.
+- Virtual occurrence admission stores the selected Plan and exact
+  ExecutionBinding Artifact as separate immutable fields; Plan identity is
+  never an implementation binding.
 - State migration is legal only at an explicit semantic safe point and must
   record source/target schema, input/output artifacts, and evidence.
+- Durable migration is one owning M1 CAS: revalidate the safe point and source
+  binding, admit the target Plan against the target ExecutionBinding Artifact,
+  commit output/evidence, replace Continuation Plan/state/binding, advance the
+  epoch, close old Attempt authority, create the new Attempt, and append the
+  evolution receipt together.
 - Safe points are derived proofs over current durable Continuations, never
   caller booleans. Restart-under-new-plan authorizes a distinct replacement Run
   and explicit input; it does not mutate the source or execute a loop.

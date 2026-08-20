@@ -369,6 +369,23 @@ fn apply_set_delta(
 /// M1 journal integration for the M3 virtual scheduler.
 pub struct DurableVirtualController;
 
+/// Inputs for one embedded binding-pinned claim checkpoint.
+#[derive(Clone, Copy)]
+pub struct VirtualClaimCheckpoint<'a> {
+    /// Worker identity.
+    pub owner: &'a str,
+    /// Exact semantic Plan.
+    pub plan_id: &'a str,
+    /// Exact immutable execution binding.
+    pub occurrence_binding: &'a str,
+    /// Worker capabilities used for selection.
+    pub capabilities: &'a BTreeSet<String>,
+    /// Owning virtual journal.
+    pub journal_id: &'a str,
+    /// Stable checkpoint identity.
+    pub checkpoint_id: &'a str,
+}
+
 impl DurableVirtualController {
     /// Rebuild the scheduler from an ordered M1 application journal.
     pub fn load<S: DurableStore>(
@@ -461,14 +478,18 @@ impl DurableVirtualController {
     pub fn claim_and_checkpoint<S: DurableStore>(
         coordinator: &mut DurableCoordinator<S>,
         scheduler: &mut VirtualScheduler,
-        owner: &str,
-        occurrence_binding: &str,
-        capabilities: &BTreeSet<String>,
-        journal_id: &str,
-        checkpoint_id: &str,
+        request: VirtualClaimCheckpoint<'_>,
     ) -> VirtualResult<Option<ClaimedWork>> {
+        let VirtualClaimCheckpoint {
+            owner,
+            plan_id,
+            occurrence_binding,
+            capabilities,
+            journal_id,
+            checkpoint_id,
+        } = request;
         let before = scheduler.clone();
-        let claim = scheduler.claim(owner, occurrence_binding, capabilities)?;
+        let claim = scheduler.claim(owner, plan_id, occurrence_binding, capabilities)?;
         let Some(claim) = claim else {
             return Ok(None);
         };

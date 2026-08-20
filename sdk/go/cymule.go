@@ -298,6 +298,8 @@ type MigrationRequest struct {
 	SafePointID string      `json:"safe_point_id"`
 	SourceEpoch uint64      `json:"source_epoch"`
 	InputState  ArtifactRef `json:"input_state"`
+	SourceBinding ArtifactRef `json:"source_binding"`
+	TargetBinding ArtifactRef `json:"target_binding"`
 }
 
 // RestartRequest authorizes one replacement Run under an exact new Plan.
@@ -626,6 +628,7 @@ type ClaimedWork struct {
 	Owner             string            `json:"owner"`
 	Epoch             uint64            `json:"epoch"`
 	OccurrenceID      string            `json:"occurrence_id"`
+	PlanID            string            `json:"plan_id"`
 	OccurrenceBinding string            `json:"occurrence_binding"`
 	Lease             VirtualClaimLease `json:"lease"`
 }
@@ -640,6 +643,7 @@ type WorkOccurrence struct {
 	Owner             string       `json:"owner"`
 	Epoch             uint64       `json:"epoch"`
 	LeaseEpoch        uint64       `json:"lease_epoch"`
+	PlanID            string       `json:"plan_id"`
 	OccurrenceBinding string       `json:"occurrence_binding"`
 	State             string       `json:"state"`
 	Result            *ArtifactRef `json:"result"`
@@ -883,6 +887,7 @@ type VirtualClaimCommand struct {
 	CommandID         string   `json:"command_id"`
 	Owner             string   `json:"owner"`
 	SlotID            string   `json:"slot_id"`
+	PlanID            string   `json:"plan_id"`
 	OccurrenceBinding string   `json:"occurrence_binding"`
 	Capabilities      []string `json:"capabilities"`
 	LogicalNow        uint64   `json:"logical_now"`
@@ -994,7 +999,7 @@ type VirtualSchedulingControl interface {
 
 func evolutionCommand(commandID, operation string) EvolutionCommand {
 	return EvolutionCommand{
-		ControlVersion: "cymule.evolution-control/2",
+		ControlVersion: "cymule.evolution-control/3",
 		CommandID:      commandID,
 		Operation:      operation,
 	}
@@ -1002,7 +1007,7 @@ func evolutionCommand(commandID, operation string) EvolutionCommand {
 
 func liveEvolutionCommand(commandID, operation string) LiveEvolutionCommand {
 	return LiveEvolutionCommand{
-		ControlVersion: "cymule.live-evolution-control/1",
+		ControlVersion: "cymule.live-evolution-control/2",
 		CommandID:      commandID,
 		Operation:      operation,
 	}
@@ -1167,12 +1172,13 @@ func RehydrateVirtualOccurrences(commandID, certificateID string, occurrenceIDs 
 }
 
 // ClaimVirtualWork creates one idempotent capacity-slot claim command.
-func ClaimVirtualWork(commandID, owner, slotID, occurrenceBinding string, capabilities []string, logicalNow, leaseTTL uint64) VirtualClaimCommand {
+func ClaimVirtualWork(commandID, owner, slotID, planID, occurrenceBinding string, capabilities []string, logicalNow, leaseTTL uint64) VirtualClaimCommand {
 	return VirtualClaimCommand{
-		ControlVersion:    "cymule.virtual-claim-control/1",
+		ControlVersion:    "cymule.virtual-claim-control/2",
 		CommandID:         commandID,
 		Owner:             owner,
 		SlotID:            slotID,
+		PlanID:            planID,
 		OccurrenceBinding: occurrenceBinding,
 		Capabilities:      uniqueSorted(capabilities),
 		LogicalNow:        logicalNow,

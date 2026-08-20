@@ -1,12 +1,16 @@
 //! Runtime provider graph and binding admission conformance.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use cymule_runtime::{
-    CompositionError, EXECUTION_BINDING_VERSION, ExecutionBinding, ExecutionOperationKind,
-    PLUGIN_VERSION, PluginEffect, PluginManifest, PluginOperation, RUNTIME_COMPOSITION_VERSION,
-    RuntimeCompositionGraph, RuntimeImplementation, RuntimeProviderDescriptor, ServiceKey,
+    AdmittedPluginRouter, CompositionError, EXECUTION_BINDING_VERSION, ExecutionBinding,
+    ExecutionOperationKind, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest,
+    PluginOperation, PluginRequest, PluginResponse, RUNTIME_COMPOSITION_VERSION,
+    RuntimeCompositionGraph, RuntimeImplementation, RuntimeProviderDescriptor, RuntimeResult,
+    ServiceKey,
 };
+use serde_json::json;
 
 const SCHEMA_DIGEST: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -347,5 +351,106 @@ fn execution_binding_pins_provider_manifest_and_exact_operations() {
     assert_eq!(
         binding.verify_manifest(&changed_manifest),
         Err(CompositionError::ManifestMismatch)
+    );
+}
+
+struct RecordingProvider {
+    manifest: PluginManifest,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl PluginHost for RecordingProvider {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        match request {
+            PluginRequest::Describe => Ok(PluginResponse::Manifest {
+                manifest: self.manifest.clone(),
+            }),
+            PluginRequest::Call { component, .. } => {
+                self.calls.lock().unwrap().push(component);
+                Ok(PluginResponse::CallResult { value: json!(1) })
+            }
+            PluginRequest::PrepareEffect { operation, .. } => {
+                self.calls.lock().unwrap().push(operation);
+                Ok(PluginResponse::Prepared)
+            }
+            request => panic!("unexpected test request {request:?}"),
+        }
+    }
+}
+
+#[test]
+fn admitted_router_dispatches_to_exact_composed_provider_not_capability_superset() {
+    let manifest = execution_manifest();
+    let mut component_provider = execution_provider(
+        CONFIGURATION_FINGERPRINT,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    component_provider.provider_id = "component-provider".to_owned();
+    component_provider.provides = vec![ExecutionOperationKind::Component.service_key("evaluate")];
+    let mut effect_provider = execution_provider(
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    effect_provider.provider_id = "effect-provider".to_owned();
+    effect_provider.provides = vec![ExecutionOperationKind::Effect.service_key("publish")];
+    let graph = RuntimeCompositionGraph::build(vec![component_provider, effect_provider])
+        .expect("multi-provider composition admits");
+    let binding = ExecutionBinding::admit(&graph, &manifest).expect("binding admits");
+
+    let component_calls = Arc::new(Mutex::new(Vec::new()));
+    let effect_calls = Arc::new(Mutex::new(Vec::new()));
+    let mut component_manifest = manifest.clone();
+    component_manifest.effects.clear();
+    component_manifest.components.insert(
+        "advertised_but_unbound".to_owned(),
+        PluginOperation {
+            implementation_revision: "unused-v1".to_owned(),
+        },
+    );
+    let mut effect_manifest = manifest;
+    effect_manifest.components.clear();
+    let mut router = AdmittedPluginRouter::new(
+        binding,
+        BTreeMap::from([
+            (
+                "component-provider".to_owned(),
+                Box::new(RecordingProvider {
+                    manifest: component_manifest,
+                    calls: component_calls.clone(),
+                }) as Box<dyn PluginHost>,
+            ),
+            (
+                "effect-provider".to_owned(),
+                Box::new(RecordingProvider {
+                    manifest: effect_manifest,
+                    calls: effect_calls.clone(),
+                }) as Box<dyn PluginHost>,
+            ),
+        ]),
+    )
+    .expect("router verifies selected provider capabilities");
+
+    router
+        .invoke(PluginRequest::Call {
+            component: "evaluate".to_owned(),
+            input: json!({}),
+        })
+        .expect("component routes");
+    router
+        .invoke(PluginRequest::PrepareEffect {
+            operation: "publish".to_owned(),
+            intent_id: "intent:one".to_owned(),
+            input: json!({}),
+        })
+        .expect("effect routes");
+    assert_eq!(*component_calls.lock().unwrap(), ["evaluate"]);
+    assert_eq!(*effect_calls.lock().unwrap(), ["publish"]);
+    assert!(
+        router
+            .invoke(PluginRequest::Call {
+                component: "advertised_but_unbound".to_owned(),
+                input: json!({}),
+            })
+            .is_err()
     );
 }

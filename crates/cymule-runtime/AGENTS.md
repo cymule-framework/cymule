@@ -39,6 +39,9 @@
   Match existing Plan requirement maps exactly against provider properties,
   then perform policy and authority admission independently. Pin only the final
   opaque binding-context identity in core semantics.
+- `AdmittedPluginRouter` dispatches each operation by the provider ID sealed in
+  `ExecutionBinding`. Provider manifests may advertise extra capability, but
+  extra advertisements never become routing or execution authority.
 - Runtime binding owns no DI container, factory lifecycle, finalizer, or live
   provider object. Ordinary Rust ownership and provider adapters manage
   process-local resources; durable cleanup remains an explicit effect

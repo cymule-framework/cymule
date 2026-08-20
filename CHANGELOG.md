@@ -13,6 +13,14 @@ domains described in `docs/specification.md`.
 - Make durable HTTP signal selection use fair parked-key cursor pages plus an
   indexed SQLite match, and reject timer acknowledgement before durable target
   selection.
+- Complete M4 safe-point migration as one lost-acknowledgement-safe CAS that
+  changes Machine Plan/binding, Continuation state, epoch, Attempt, Artifacts,
+  and evolution receipt together.
+- Separate virtual occurrence Plan pins from exact ExecutionBinding Artifact
+  pins, retain the authoritative fallback across rollback/relink, and route
+  composed operations to their exact admitted providers.
+- Advance the affected command, Event, Machine, durable, evolution, live
+  evolution, virtual occurrence, and virtual claim wire domains.
 
 ## [0.1.4] - 2026-08-18
 

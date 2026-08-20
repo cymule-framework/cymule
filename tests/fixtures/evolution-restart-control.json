@@ -1,5 +1,5 @@
 {
-  "control_version": "cymule.evolution-control/2",
+  "control_version": "cymule.evolution-control/3",
   "command_id": "command:evolution:fixture:restart",
   "operation": "restart_under_new_plan",
   "request": {

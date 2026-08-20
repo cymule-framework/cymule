@@ -27,7 +27,7 @@ Status: implemented for one production single-domain authority.
   one higher-profile transition publishes several typed projections;
 - complete typed Continuation fields for frame, state, waits, scopes,
   obligations, leases, budget, causal frontier, and epoch;
-- `cymule.durable-state/2` frames with separate definition, structural
+- `cymule.durable-state/3` frames with separate definition, structural
   invocation, immutable input Artifact, nested Region path, locals, and next
   step;
 - idempotent wait registration/completion;

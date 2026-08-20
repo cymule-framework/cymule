@@ -16,6 +16,25 @@ pub struct DurableCoordinator<S> {
     stored: Option<StoredState>,
 }
 
+/// Exact inputs for one higher-profile Run migration CAS.
+#[derive(Clone, Copy)]
+pub struct RunMigrationCheckpoint<'a> {
+    /// Proposed canonical Machine after migration Events and Artifacts.
+    pub machine: &'a Machine,
+    /// Current quiescent Continuation.
+    pub source: &'a Continuation,
+    /// Exact replacement Continuation.
+    pub target: &'a Continuation,
+    /// Exact target Plan admitted by the target binding.
+    pub target_plan: &'a SealedPlan,
+    /// Exact Artifact additions allowed in this transition.
+    pub artifacts: &'a std::collections::BTreeSet<cymule_core::ArtifactRef>,
+    /// Content-addressed migration safe-point identity.
+    pub safe_point_id: &'a str,
+    /// Owning higher-profile journal records.
+    pub batches: &'a [JournalBatch],
+}
+
 impl<S: DurableStore> DurableCoordinator<S> {
     /// Open a coordinator and verify the latest durable revision.
     pub fn open(mut store: S) -> DurableResult<Self> {
@@ -1183,6 +1202,93 @@ impl<S: DurableStore> DurableCoordinator<S> {
         self.commit_operations(operations)
     }
 
+    /// Atomically migrate one quiescent Continuation to an admitted Plan and
+    /// `ExecutionBinding`, advance its fence, create the replacement Attempt,
+    /// retain exact migration Artifacts, and append owning journal records.
+    pub fn checkpoint_run_migration_journals(
+        &mut self,
+        checkpoint: RunMigrationCheckpoint<'_>,
+    ) -> DurableResult<String> {
+        let RunMigrationCheckpoint {
+            machine,
+            source,
+            target,
+            target_plan,
+            artifacts,
+            safe_point_id,
+            batches,
+        } = checkpoint;
+        if safe_point_id.is_empty() || batches.is_empty() {
+            return Err(DurableError::Validation(
+                "Run migration requires a safe-point identity and owning journal".to_owned(),
+            ));
+        }
+        let mut journal_ids = std::collections::BTreeSet::new();
+        for batch in batches {
+            validate_journal_batch(&batch.journal_id, &batch.records)?;
+            if batch.records.is_empty() || !journal_ids.insert(&batch.journal_id) {
+                return Err(DurableError::Validation(
+                    "Run migration requires non-empty unique journals".to_owned(),
+                ));
+            }
+        }
+        validate_migration_continuations(source, target, target_plan)?;
+        let machine_snapshot = machine.snapshot();
+        let state = self.state()?;
+        if state.continuations.get(&source.run_id) != Some(source) {
+            return Err(DurableError::Conflict {
+                expected: Some(format!("continuation:{}", source.run_id)),
+                current: state
+                    .continuations
+                    .get(&source.run_id)
+                    .map(|continuation| format!("epoch:{}", continuation.epoch)),
+            });
+        }
+        let events = ensure_canonical_machine_delta_with_plan(
+            &state.machine,
+            &machine_snapshot,
+            Some(target_plan),
+            artifacts,
+            "Run migration",
+        )?;
+        ensure_run_migration_events(&events, source, target, safe_point_id)?;
+        let restored = Machine::restore(machine_snapshot.clone())?;
+        let binding_ref = cymule_core::ArtifactRef {
+            identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
+            artifact_id: target.binding_context.clone(),
+            kind: cymule_runtime::EXECUTION_BINDING_VERSION.to_owned(),
+        };
+        let binding_record = restored.artifact(&binding_ref).ok_or_else(|| {
+            DurableError::Validation(
+                "migration target ExecutionBinding Artifact is missing".to_owned(),
+            )
+        })?;
+        let binding: cymule_runtime::ExecutionBinding =
+            cymule_core::decode_json(&binding_record.bytes)?;
+        if binding.artifact_ref()? != binding_ref {
+            return Err(DurableError::Validation(
+                "migration target ExecutionBinding Artifact identity is invalid".to_owned(),
+            ));
+        }
+        binding.admit_plan(target_plan)?;
+        let mut operations = vec![
+            DurableOperation::PutMachine {
+                machine: machine_snapshot,
+            },
+            DurableOperation::PutContinuation {
+                value: target.clone(),
+            },
+        ];
+        for batch in batches {
+            if let Some(operation) =
+                self.journal_append_operation(&batch.journal_id, &batch.records)?
+            {
+                operations.push(operation);
+            }
+        }
+        self.commit_operations(operations)
+    }
+
     /// Atomically publish one input Artifact, complete its wait, and append
     /// higher-profile records.
     pub fn checkpoint_input_wait_journals(
@@ -1582,6 +1688,129 @@ fn ensure_run_start_machine(
     if !run_matches || !attempt_matches {
         return Err(DurableError::Validation(
             "Run creation Events do not match the initial Continuation".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_migration_continuations(
+    source: &Continuation,
+    target: &Continuation,
+    target_plan: &SealedPlan,
+) -> DurableResult<()> {
+    if source.status != ContinuationStatus::Ready
+        || !source.wait_set.is_empty()
+        || source.scope_stack != [cymule_core::ROOT_SCOPE_ID]
+        || !source.effect_obligations.is_empty()
+        || !source.authority_leases.is_empty()
+        || source.state.is_none()
+        || target.run_id != source.run_id
+        || target.plan_id != target_plan.plan_id
+        || target.binding_context.is_empty()
+        || target.binding_context == target.plan_id
+        || target.state.is_none()
+        || target.frames != source.frames
+        || target.wait_set != source.wait_set
+        || target.scope_stack != source.scope_stack
+        || target.effect_obligations != source.effect_obligations
+        || target.authority_leases != source.authority_leases
+        || target.budget != source.budget
+        || target.causal_frontier != source.causal_frontier
+        || target.epoch
+            != source.epoch.checked_add(1).ok_or_else(|| {
+                DurableError::Validation("migration target epoch overflowed".to_owned())
+            })?
+        || target.status != ContinuationStatus::Running
+    {
+        return Err(DurableError::Validation(
+            "migration Continuation replacement is not an exact safe-point transition".to_owned(),
+        ));
+    }
+    for frame in &target.frames {
+        let definition = target_plan
+            .candidate
+            .definitions
+            .iter()
+            .find(|definition| definition.id == frame.definition_id)
+            .ok_or_else(|| {
+                DurableError::Validation(format!(
+                    "migration target Plan is incompatible with active frame {}",
+                    frame.definition_id
+                ))
+            })?;
+        let mut region = &definition.body;
+        for index in &frame.region_path {
+            let step = region.steps.get(*index).ok_or_else(|| {
+                DurableError::Validation(format!(
+                    "migration target Plan changed active frame path {}",
+                    frame.definition_id
+                ))
+            })?;
+            let cymule_core::Operation::Scope { body: child, .. } = &step.operation else {
+                return Err(DurableError::Validation(format!(
+                    "migration target Plan changed active frame path {}",
+                    frame.definition_id
+                )));
+            };
+            region = child;
+        }
+        if frame.next_step > region.steps.len() {
+            return Err(DurableError::Validation(format!(
+                "migration target Plan shortened active frame {} before its resume point",
+                frame.definition_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_run_migration_events(
+    events: &[Event],
+    source: &Continuation,
+    target: &Continuation,
+    safe_point_id: &str,
+) -> DurableResult<()> {
+    let [migrated, advanced, started] = events else {
+        return Err(DurableError::Validation(
+            "Run migration must append exactly migrate, epoch, and Attempt Events".to_owned(),
+        ));
+    };
+    let migrated_matches = migrated.run_id == source.run_id
+        && matches!(
+            &migrated.payload,
+            EventPayload::RunMigrated {
+                from_plan,
+                to_plan,
+                from_binding,
+                to_binding,
+                safe_point_id: actual_safe_point,
+            } if from_plan == &source.plan_id
+                && to_plan == &target.plan_id
+                && from_binding == &source.binding_context
+                && to_binding == &target.binding_context
+                && actual_safe_point == safe_point_id
+        );
+    let advanced_matches = advanced.run_id == source.run_id
+        && matches!(
+            advanced.payload,
+            EventPayload::EpochAdvanced { epoch } if epoch == target.epoch
+        );
+    let attempt_matches = started.run_id == source.run_id
+        && matches!(
+            &started.payload,
+            EventPayload::AttemptStarted {
+                attempt_id,
+                continuation_id,
+                occurrence_binding,
+                epoch,
+            } if attempt_id == &format!("attempt:{}:{}", source.run_id, target.epoch)
+                && continuation_id == &format!("continuation:{}", source.run_id)
+                && occurrence_binding == &target.binding_context
+                && *epoch == target.epoch
+        );
+    if !migrated_matches || !advanced_matches || !attempt_matches {
+        return Err(DurableError::Validation(
+            "Run migration Events do not match the Continuation replacement".to_owned(),
         ));
     }
     Ok(())

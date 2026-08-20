@@ -37,11 +37,17 @@ Status: implemented for the provider-neutral single-domain profile.
   already released effects, and caller-supplied higher-profile semantic sites;
 - future-only rollout decisions for shadow, deterministic canary, active, and
   rolled-back modes;
-- immutable Plan assignment per admitted occurrence across later decisions;
+- separate immutable Plan and exact ExecutionBinding Artifact assignment per
+  admitted occurrence across later decisions; a Plan ID is never an occurrence binding;
 - M1-backed evolution checkpoints with explicit parent lineage and idempotent
   replay for Plan edges, rollout decisions, mixed-version occurrence pins,
   migrations, and shadow evidence;
-- safe-point-only state migration receipts with input/output/evidence artifacts;
+- safe-point-only state migration receipts with source/target ExecutionBinding,
+  input/output/evidence Artifacts, and source/target Attempt epochs;
+- one owning migration CAS that revalidates the safe point and target
+  compatibility, changes the Machine Plan/binding, replaces Continuation
+  Plan/state/binding, advances the epoch, closes old Attempt authority, creates
+  the new Attempt, and appends the retained receipt atomically;
 - migration output and shadow evidence bytes are content-verified and committed
   to the M1 Machine in the same CAS as their unified evolution checkpoint;
 - pinned migration-adapter contracts that require total reachable-state
@@ -60,9 +66,9 @@ Status: implemented for the provider-neutral single-domain profile.
 - atomic live-version selection plus virtual-work capacity-slot claim, so the
   immutable Plan pin and fenced worker occurrence enter one lease CAS and a
   lost acknowledgement replays only when both journal records are retained;
-- frozen `cymule.evolution-control/2` command union, schema, Rust verifier, and
+- frozen `cymule.evolution-control/3` command union, schema, Rust verifier, and
   TypeScript, Python, Rust, and Go transport interfaces/builders;
-- frozen `cymule.live-evolution-control/1` unified command union and shared
+- frozen `cymule.live-evolution-control/2` unified command union and shared
   four-language fixture for definition publication, template registration,
   atomic relinking, and template-scoped operations with required safe-point
   proofs;
@@ -92,3 +98,6 @@ cross-domain federation remain M5 work, not unfinished M4 semantics.
 
 Rollback is a new future-selection decision. It never removes a child Plan,
 migration receipt, shadow result, released effect, or historical occurrence pin.
+After rollback, a later candidate inherits the last authoritative Plan as its
+fallback; the failed target remains historical evidence and cannot re-enter the
+fallback chain merely because it is the registry's latest linked revision.

@@ -48,7 +48,7 @@ The following domains evolve independently:
 | Wait activation | `cymule.wait-activation/1` | external delivery ID fixes source, targets, and result |
 | Durable control | `cymule.durable-control/1` | closed mutations and queries delegate all admission to Rust |
 | Virtual checkpoint | `cymule.virtual-checkpoint/2` | content-addressed cursor/frontier delta advances one authenticated head |
-| Virtual work occurrence | `cymule.virtual-work-occurrence/1` | one immutable binding per claim epoch |
+| Virtual work occurrence | `cymule.virtual-work-occurrence/2` | separate immutable Plan and ExecutionBinding pins per claim epoch |
 | Virtual work control | `cymule.virtual-work-control/1` | stable command ID plus owner/work/lease/time precondition |
 | Virtual region migration | `cymule.virtual-region-migration/1` | opaque cursor coverage and retirement lineage |
 | Virtual migration control | `cymule.virtual-region-migration-control/1` | stable command ID plus verified plan |
@@ -56,7 +56,7 @@ The following domains evolve independently:
 | Virtual compaction certificate | `cymule.virtual-compaction-certificate/2` | cold Resource descriptor replaces hot Artifact bytes |
 | Virtual compaction control | `cymule.virtual-compaction-control/1` | stable command ID plus pinned archive binding |
 | Virtual rehydration control | `cymule.virtual-rehydration-control/1` | stable command ID plus exact occurrence selection |
-| Virtual claim control | `cymule.virtual-claim-control/1` | stable command ID plus capacity-slot lease proposal |
+| Virtual claim control | `cymule.virtual-claim-control/2` | stable command ID, exact Plan and ExecutionBinding pins, plus capacity-slot lease proposal |
 | Virtual lease renewal control | `cymule.virtual-lease-renewal-control/1` | exact work and slot lease fences |
 | Virtual recovery control | `cymule.virtual-recovery-control/1` | expired lease plus explicit retry/fail/cancel decision |
 | Virtual Run weight control | `cymule.virtual-run-weight-control/1` | stable command ID plus positive future share |
@@ -257,7 +257,7 @@ plan ID | future binding context | frame | typed state | wait set | scope
 effect obligations | authority leases | budget | causal cut | epoch
 ```
 
-M1 `cymule.durable-state/2` frames separate the resolved definition ID,
+M1 `cymule.durable-state/3` frames separate the resolved definition ID,
 structural invocation ID, immutable input Artifact, nested Region path, next
 step, and local Artifact bindings. An invocation pushes a frame without opening
 a scope. A nested scope retains the same definition, invocation, and input.
@@ -366,13 +366,13 @@ relabeled as an atomic cross-profile transition; a retry succeeds only when the
 exact checkpoint record was committed with the activation.
 
 Every M3 work claim MUST resolve an immutable occurrence binding and create one
-`cymule.virtual-work-occurrence/1` record before worker execution. Occurrence
+`cymule.virtual-work-occurrence/2` record before worker execution. Occurrence
 identity is derived from logical work ID and monotonically increasing claim
 epoch. Owner, binding, region, Run, and current capacity-slot lease epoch MUST
 be retained. A stale owner, work epoch, or lease epoch MUST NOT resolve the
 occurrence.
 
-Durable multi-worker admission uses `cymule.virtual-claim-control/1`. A command
+Durable multi-worker admission uses `cymule.virtual-claim-control/2`. A command
 fixes a stable worker identity, abstract capacity-slot ID, occurrence binding,
 capability set, Clock-supplied logical time, and positive lease TTL. A slot is a
 capacity/fencing token only; it MUST NOT encode a queue provider, network
@@ -654,8 +654,8 @@ dispatch a child commit-gated effect while its child scope remains open.
 
 A Plan changes semantic meaning. A Binding Context changes realization defaults
 for future occurrences. `cymule.execution-binding/1` is the closed executable
-binding authority: normalized provider descriptors, the selected plugin
-implementation, and every advertised operation revision are serialized to
+binding authority: normalized provider descriptors, each selected operation's
+provider and implementation, and every advertised operation revision are serialized to
 canonical bytes and stored as an immutable Machine Artifact. Plan requirements
 MUST match the selected provider before Run creation. Run, Continuation, and
 Attempt MUST pin that Artifact ID. Component and Effect occurrence bindings
@@ -664,6 +664,10 @@ abstract operation ID, and exact selected operation record; implementation-ID
 string concatenation is not a binding. Embedded M0 persists this for Attempts
 and Effect Intents, including reconciliation. M1 defines canonical component
 occurrence records and commits the binding Artifact atomically with Run input.
+Runtime dispatch MUST route each operation to the provider selected in that
+Artifact. A provider manifest is capability evidence only: advertising an
+unbound operation MUST NOT authorize or route it, and a bound operation whose
+selected provider no longer advertises the exact revision MUST fail closed.
 Optional plugins MAY define additional domain occurrences, but they MUST
 preserve the same immutable binding rule whenever replay or reconciliation
 depends on a selected implementation. Session, stream, and domain-controller
@@ -738,7 +742,7 @@ rollout, occurrence selection, migration, shadow evidence, promotion, and
 rollback MUST survive stale CAS and lost acknowledgement without changing an
 existing occurrence pin or creating a second decision.
 
-`cymule.live-evolution-control/1` is the complete cross-language envelope. It
+`cymule.live-evolution-control/2` is the complete cross-language envelope. It
 adds reusable-definition publication, parent-template registration, atomic
 publish/relink, and template scope around the closed Plan operations. Migration
 and replacement-Run restart commands MUST carry the exact durable safe-point
@@ -746,6 +750,9 @@ proof; clients MUST NOT sequence registry, rollout, and occurrence mutations.
 When virtual work is dispatched, template-scoped Plan selection, the capacity
 slot lease, and the worker claim MUST enter one CAS revision. Replaying a claim
 whose coupled selection record is absent or different MUST fail closed.
+The claim MUST retain `plan_id` and `occurrence_binding` separately, and
+`occurrence_binding` MUST be the Artifact identity of the exact admitted
+`cymule.execution-binding/1`, never the Plan ID.
 
 A reviewed patch carries the complete target Plan Candidate, an exact declared
 operation list, and evidence. M4 MUST seal the target, recompute the structural
@@ -765,8 +772,13 @@ simulate target mutating effects and pin both occurrence bindings. Migration
 output and shadow comparisons are immutable evidence, never ambient authority.
 Plugins MUST return complete content-addressed Artifact records for new output
 or evidence; Rust MUST verify their bytes and commit them to the M1 Machine in
-the same CAS as the evolution checkpoint. A durable receipt MUST NOT reference
-an Artifact that existed only in plugin memory.
+the same CAS as the evolution checkpoint. That owning CAS MUST also verify the
+source binding and target Plan/binding compatibility, replace the Continuation
+Plan/state/binding, advance the Machine and Continuation epoch, fence every old
+Attempt, and create one active Attempt under the target binding. A durable
+receipt MUST NOT reference an Artifact that existed only in plugin memory.
+After acknowledgement loss, retry MUST return this retained transition without
+invoking the migration adapter again.
 
 `restart_under_new_plan` is an explicit alternative to state migration. At the
 same verified source safe point it authorizes a distinct replacement Run, exact
@@ -781,8 +793,11 @@ exceeded failure or inequivalence ceiling yields rollback immediately; only
 satisfied minimum success/equivalence evidence yields promotion; otherwise the
 gate is pending. Promotion and rollback create new future-only decisions and
 auditable transition receipts. Previously admitted occurrences do not change.
+A later candidate after rollback MUST use the last authoritative fallback; the
+failed target cannot become fallback merely because it remains the latest
+registry link.
 
-`cymule.evolution-control/2` is the closed cross-language command boundary.
+`cymule.evolution-control/3` is the closed cross-language command boundary.
 SDKs may construct and transport its patch, selection, migration, shadow,
 restart, observation, and gate operations, but only the Rust M4 controller
 resolves dependencies, invokes plugins, evaluates evidence, or mutates durable

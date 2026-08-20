@@ -225,6 +225,21 @@ pub enum Command {
         /// New immutable Binding Context reference.
         binding_context: String,
     },
+    /// Replace a quiescent Run's exact Plan and execution binding under a
+    /// higher-profile migration proof. The owning durable CAS validates that
+    /// proof, state compatibility, and Continuation replacement atomically.
+    MigrateRun {
+        /// Exact source Plan expected at the safe point.
+        from_plan: String,
+        /// Exact target Plan admitted for resumed execution.
+        to_plan: String,
+        /// Source `ExecutionBinding` Artifact identity.
+        from_binding: String,
+        /// Target `ExecutionBinding` Artifact identity.
+        to_binding: String,
+        /// Content-addressed higher-profile safe-point proof identity.
+        safe_point_id: String,
+    },
     /// Append an independent immutable fact for causal conformance tests.
     RecordFact {
         /// Stable logical fact key.
@@ -498,6 +513,20 @@ pub enum EventPayload {
         /// New context.
         current: String,
     },
+    /// A verified higher profile migrated a quiescent Run to a new Plan and
+    /// execution binding before advancing its Attempt epoch.
+    RunMigrated {
+        /// Exact source Plan.
+        from_plan: String,
+        /// Exact target Plan.
+        to_plan: String,
+        /// Source `ExecutionBinding` Artifact identity.
+        from_binding: String,
+        /// Target `ExecutionBinding` Artifact identity.
+        to_binding: String,
+        /// Content-addressed migration-safe-point proof identity.
+        safe_point_id: String,
+    },
     /// An append-only fact was recorded.
     FactRecorded {
         /// Logical fact key.
@@ -565,7 +594,7 @@ pub struct RunProjection {
     pub run_id: String,
     /// Initial immutable plan.
     pub initial_plan: String,
-    /// Current semantic plan. Plan migration is not implemented in profile 1.
+    /// Current semantic Plan after any verified safe-point migration.
     pub current_plan: String,
     /// Initial realization default.
     pub initial_binding_context: String,
@@ -1198,6 +1227,25 @@ impl Projection {
                     )));
                 }
                 run.current_binding_context.clone_from(current);
+            }
+            EventPayload::RunMigrated {
+                from_plan,
+                to_plan,
+                from_binding,
+                to_binding,
+                ..
+            } => {
+                if &run.current_plan != from_plan
+                    || &run.current_binding_context != from_binding
+                    || run.attempts.values().any(|attempt| attempt.active)
+                {
+                    return Err(CoreError::IllegalTransition(
+                        "Run migration does not match a quiescent current Plan and binding"
+                            .to_owned(),
+                    ));
+                }
+                run.current_plan.clone_from(to_plan);
+                run.current_binding_context.clone_from(to_binding);
             }
             EventPayload::RunCompleted { result } => {
                 let unresolved = run

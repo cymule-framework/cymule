@@ -142,6 +142,7 @@ class RolloutObservation(TypedDict):
     decision_id: str
     occurrence_id: str
     plan_id: str
+    plan_id: str
     outcome: str
     evidence: ArtifactRef
 
@@ -167,6 +168,8 @@ class MigrationRequest(TypedDict):
     safe_point_id: str
     source_epoch: int
     input_state: ArtifactRef
+    source_binding: ArtifactRef
+    target_binding: ArtifactRef
 
 
 class RestartRequest(TypedDict):
@@ -238,6 +241,7 @@ class WorkOccurrence(TypedDict):
     owner: str
     epoch: int
     lease_epoch: int
+    plan_id: str
     occurrence_binding: str
     state: str
     result: ArtifactRef | None
@@ -386,6 +390,7 @@ class VirtualClaimCommand(TypedDict):
     command_id: str
     owner: str
     slot_id: str
+    plan_id: str
     occurrence_binding: str
     capabilities: list[str]
     logical_now: int
@@ -950,7 +955,7 @@ class EvolutionControlBuilder:
         if not command_id:
             raise ValueError("evolution control requires a command identity")
         return {
-            "control_version": "cymule.evolution-control/2",
+            "control_version": "cymule.evolution-control/3",
             "command_id": command_id,
             **copy.deepcopy(operation),
         }
@@ -1016,7 +1021,7 @@ class LiveEvolutionControlBuilder:
         if not command_id:
             raise ValueError("live-evolution control requires a command identity")
         return {
-            "control_version": "cymule.live-evolution-control/1",
+            "control_version": "cymule.live-evolution-control/2",
             "command_id": command_id,
             **copy.deepcopy(operation),
         }
@@ -1232,6 +1237,7 @@ class VirtualSchedulingControlBuilder:
         command_id: str,
         owner: str,
         slot_id: str,
+        plan_id: str,
         occurrence_binding: str,
         capabilities: list[str],
         logical_now: int,
@@ -1243,6 +1249,7 @@ class VirtualSchedulingControlBuilder:
             not command_id
             or not owner
             or not slot_id
+            or not plan_id
             or not occurrence_binding
             or any(not capability for capability in normalized)
             or logical_now < 0
@@ -1252,10 +1259,11 @@ class VirtualSchedulingControlBuilder:
                 "virtual claim requires identities, binding, logical time, and positive TTL"
             )
         return {
-            "control_version": "cymule.virtual-claim-control/1",
+            "control_version": "cymule.virtual-claim-control/2",
             "command_id": command_id,
             "owner": owner,
             "slot_id": slot_id,
+            "plan_id": plan_id,
             "occurrence_binding": occurrence_binding,
             "capabilities": normalized,
             "logical_now": logical_now,

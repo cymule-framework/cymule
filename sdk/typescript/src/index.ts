@@ -94,6 +94,8 @@ export interface MigrationRequest {
   safe_point_id: string;
   source_epoch: number;
   input_state: ArtifactRef;
+  source_binding: ArtifactRef;
+  target_binding: ArtifactRef;
 }
 
 export interface RestartRequest {
@@ -141,7 +143,7 @@ type EvolutionOperation =
   | { operation: "apply_gate"; gate: RolloutGate; next_decision_id: string };
 
 export type EvolutionCommand = {
-  control_version: "cymule.evolution-control/2";
+  control_version: "cymule.evolution-control/3";
   command_id: string;
 } & EvolutionOperation;
 
@@ -200,7 +202,7 @@ type LiveEvolutionOperation =
     };
 
 export type LiveEvolutionCommand = {
-  control_version: "cymule.live-evolution-control/1";
+  control_version: "cymule.live-evolution-control/2";
   command_id: string;
 } & LiveEvolutionOperation;
 
@@ -299,12 +301,13 @@ export interface ClaimedWork {
   owner: string;
   epoch: number;
   occurrence_id: string;
+  plan_id: string;
   occurrence_binding: string;
   lease: VirtualClaimLease;
 }
 
 export interface WorkOccurrence {
-  occurrence_version: "cymule.virtual-work-occurrence/1";
+  occurrence_version: "cymule.virtual-work-occurrence/2";
   occurrence_id: string;
   work_id: string;
   region_id: string;
@@ -312,6 +315,7 @@ export interface WorkOccurrence {
   owner: string;
   epoch: number;
   lease_epoch: number;
+  plan_id: string;
   occurrence_binding: string;
   state: WorkOccurrenceState;
   result: ArtifactRef | null;
@@ -442,10 +446,11 @@ export interface VirtualRehydrationReceipt {
 }
 
 export interface VirtualClaimCommand {
-  control_version: "cymule.virtual-claim-control/1";
+  control_version: "cymule.virtual-claim-control/2";
   command_id: string;
   owner: string;
   slot_id: string;
+  plan_id: string;
   occurrence_binding: string;
   capabilities: string[];
   logical_now: number;
@@ -938,7 +943,7 @@ export class EvolutionControlBuilder {
   private static build(commandId: string, operation: EvolutionOperation): EvolutionCommand {
     if (commandId.length === 0) throw new Error("evolution control requires a command identity");
     return {
-      control_version: "cymule.evolution-control/2",
+      control_version: "cymule.evolution-control/3",
       command_id: commandId,
       ...structuredClone(operation),
     };
@@ -998,7 +1003,7 @@ export class LiveEvolutionControlBuilder {
       throw new Error("live-evolution control requires a command identity");
     }
     return {
-      control_version: "cymule.live-evolution-control/1",
+      control_version: "cymule.live-evolution-control/2",
       command_id: commandId,
       ...operation,
     };
@@ -1171,6 +1176,7 @@ export class VirtualSchedulingControlBuilder {
     commandId: string,
     owner: string,
     slotId: string,
+    planId: string,
     occurrenceBinding: string,
     capabilities: string[],
     logicalNow: number,
@@ -1181,6 +1187,7 @@ export class VirtualSchedulingControlBuilder {
       commandId.length === 0 ||
       owner.length === 0 ||
       slotId.length === 0 ||
+      planId.length === 0 ||
       occurrenceBinding.length === 0 ||
       sortedCapabilities.some((capability) => capability.length === 0) ||
       logicalNow < 0 ||
@@ -1189,10 +1196,11 @@ export class VirtualSchedulingControlBuilder {
       throw new Error("virtual claim requires identities, binding, logical time, and positive TTL");
     }
     return {
-      control_version: "cymule.virtual-claim-control/1",
+      control_version: "cymule.virtual-claim-control/2",
       command_id: commandId,
       owner,
       slot_id: slotId,
+      plan_id: planId,
       occurrence_binding: occurrenceBinding,
       capabilities: sortedCapabilities,
       logical_now: logicalNow,

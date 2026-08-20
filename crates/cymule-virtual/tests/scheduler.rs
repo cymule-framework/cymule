@@ -25,11 +25,11 @@ use cymule_virtual::{
     VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION, VIRTUAL_RECOVERY_CONTROL_VERSION,
     VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_VERSION,
     VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_RUN_WEIGHT_CONTROL_VERSION,
-    VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive, VirtualCheckpoint, VirtualClaimCommand,
-    VirtualCompactionCommand, VirtualCursor, VirtualError, VirtualLeaseRenewalCommand,
-    VirtualRecoveryCommand, VirtualRegion, VirtualRehydrationCommand, VirtualResult,
-    VirtualRunWeightCommand, VirtualScheduler, WorkItem, WorkOccurrenceState, WorkResolution,
-    WorkResolutionCommand,
+    VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive, VirtualCheckpoint, VirtualClaimCheckpoint,
+    VirtualClaimCommand, VirtualCompactionCommand, VirtualCursor, VirtualError,
+    VirtualLeaseRenewalCommand, VirtualRecoveryCommand, VirtualRegion, VirtualRehydrationCommand,
+    VirtualResult, VirtualRunWeightCommand, VirtualScheduler, WorkItem, WorkOccurrenceState,
+    WorkResolution, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -419,11 +419,11 @@ fn weighted_dispatch_counts(run_b_weight: u32, run_b_cost: u64) -> (usize, usize
             let mut restored =
                 VirtualScheduler::restore(limits, scheduler.snapshot()).expect("snapshot restores");
             let predicted = restored
-                .claim(&owner, &binding, &capabilities)
+                .claim(&owner, "plan:test", &binding, &capabilities)
                 .expect("restored claim")
                 .expect("restored work");
             let actual = scheduler
-                .claim(&owner, &binding, &capabilities)
+                .claim(&owner, "plan:test", &binding, &capabilities)
                 .expect("claim")
                 .expect("work");
             assert_eq!(predicted.item.work_id, actual.item.work_id);
@@ -438,7 +438,7 @@ fn weighted_dispatch_counts(run_b_weight: u32, run_b_cost: u64) -> (usize, usize
                 .expect("work succeeds");
         } else {
             let claim = scheduler
-                .claim(&owner, &binding, &capabilities)
+                .claim(&owner, "plan:test", &binding, &capabilities)
                 .expect("claim")
                 .expect("work");
             *counts.entry(claim.item.run_id.clone()).or_default() += 1;
@@ -620,11 +620,11 @@ fn million_item_regions_keep_a_bounded_fair_frontier_across_restore() {
 
     let capabilities = BTreeSet::from(["cpu".to_owned()]);
     let first = scheduler
-        .claim("worker:1", "binding:worker/1", &capabilities)
+        .claim("worker:1", "plan:test", "binding:worker/1", &capabilities)
         .expect("claim")
         .expect("work");
     let second = scheduler
-        .claim("worker:2", "binding:worker/2", &capabilities)
+        .claim("worker:2", "plan:test", "binding:worker/2", &capabilities)
         .expect("claim")
         .expect("work");
     assert_ne!(first.item.run_id, second.item.run_id);
@@ -692,6 +692,7 @@ fn bounded_materialization_round_robin_keeps_every_region_visible() {
         let claim = scheduler
             .claim(
                 &owner,
+                "plan:test",
                 &format!("binding:worker/materialize/{step}"),
                 &capabilities,
             )
@@ -743,6 +744,7 @@ fn priority_aging_prevents_starvation_under_continuous_high_priority_arrivals() 
         let claim = scheduler
             .claim(
                 &owner,
+                "plan:test",
                 &format!("binding:worker/aging/{step}"),
                 &capabilities,
             )
@@ -1090,6 +1092,7 @@ fn parked_work_wakes_by_exact_indexed_reason() {
     let claim = scheduler
         .claim(
             "worker:1",
+            "plan:test",
             "binding:worker/1",
             &BTreeSet::from(["cpu".to_owned()]),
         )
@@ -1256,6 +1259,7 @@ fn restore_rejects_duplicate_work_and_per_run_claim_overflow() {
     claimed
         .claim(
             "worker:1",
+            "plan:test",
             "binding:worker/1",
             &BTreeSet::from(["cpu".to_owned()]),
         )
@@ -1264,6 +1268,7 @@ fn restore_rejects_duplicate_work_and_per_run_claim_overflow() {
     claimed
         .claim(
             "worker:2",
+            "plan:test",
             "binding:worker/2",
             &BTreeSet::from(["cpu".to_owned()]),
         )
@@ -1318,6 +1323,7 @@ fn wait_activation_and_indexed_virtual_wake_share_one_m1_cas() {
     let claim = scheduler
         .claim(
             "worker:1",
+            "plan:test",
             "binding:worker/1",
             &BTreeSet::from(["cpu".to_owned()]),
         )
@@ -1412,6 +1418,7 @@ fn parked_reason_index_rebuilds_from_a_durable_checkpoint() {
     let claim = scheduler
         .claim(
             "worker:1",
+            "plan:test",
             "binding:worker/1",
             &BTreeSet::from(["cpu".to_owned()]),
         )
@@ -1457,7 +1464,7 @@ fn work_occurrence_retry_success_and_stale_fencing_are_explicit() {
     scheduler.fill(&mut MillionItemSource).expect("fills");
     let capabilities = BTreeSet::from(["cpu".to_owned()]);
     let first = scheduler
-        .claim("worker:1", "binding:worker/1", &capabilities)
+        .claim("worker:1", "plan:test", "binding:worker/1", &capabilities)
         .expect("first claim")
         .expect("first work");
     assert_eq!(
@@ -1492,7 +1499,7 @@ fn work_occurrence_retry_success_and_stale_fencing_are_explicit() {
     ));
 
     let second = scheduler
-        .claim("worker:2", "binding:worker/2", &capabilities)
+        .claim("worker:2", "plan:test", "binding:worker/2", &capabilities)
         .expect("retry claim")
         .expect("retried work");
     assert_eq!(second.item.work_id, first.item.work_id);
@@ -1530,7 +1537,12 @@ fn retry_parking_failure_and_cancellation_have_distinct_terminal_records() {
     scheduler.fill(&mut MillionItemSource).expect("fills");
     let capabilities = BTreeSet::from(["cpu".to_owned()]);
     let parked_claim = scheduler
-        .claim("worker:park", "binding:worker/park", &capabilities)
+        .claim(
+            "worker:park",
+            "plan:test",
+            "binding:worker/park",
+            &capabilities,
+        )
         .expect("park claim")
         .expect("park work");
     let retry_reason = ParkReason::Backpressure {
@@ -1551,7 +1563,12 @@ fn retry_parking_failure_and_cancellation_have_distinct_terminal_records() {
     assert_eq!(scheduler.wake(&retry_reason), 1);
 
     let failed_claim = scheduler
-        .claim("worker:fail", "binding:worker/fail", &capabilities)
+        .claim(
+            "worker:fail",
+            "plan:test",
+            "binding:worker/fail",
+            &capabilities,
+        )
         .expect("failure claim")
         .expect("failure work");
     let failure = scheduler
@@ -1567,7 +1584,12 @@ fn retry_parking_failure_and_cancellation_have_distinct_terminal_records() {
     assert_eq!(failure.state, WorkOccurrenceState::Failed);
 
     let cancelled_claim = scheduler
-        .claim("worker:cancel", "binding:worker/cancel", &capabilities)
+        .claim(
+            "worker:cancel",
+            "plan:test",
+            "binding:worker/cancel",
+            &capabilities,
+        )
         .expect("cancellation claim")
         .expect("cancellation work");
     let cancelled = scheduler
@@ -1615,11 +1637,14 @@ fn durable_claim_and_result_survive_reopen_and_stale_cas() {
     let claim = DurableVirtualController::claim_and_checkpoint(
         &mut current,
         &mut scheduler,
-        "worker:durable",
-        "binding:worker/durable",
-        &BTreeSet::from(["cpu".to_owned()]),
-        "journal:virtual",
-        "virtual:work:claim",
+        VirtualClaimCheckpoint {
+            owner: "worker:durable",
+            plan_id: "plan:test",
+            occurrence_binding: "binding:worker/durable",
+            capabilities: &BTreeSet::from(["cpu".to_owned()]),
+            journal_id: "journal:virtual",
+            checkpoint_id: "virtual:work:claim",
+        },
     )
     .expect("claim checkpoints")
     .expect("work claims");
@@ -1683,11 +1708,14 @@ fn durable_claim_and_result_survive_reopen_and_stale_cas() {
     DurableVirtualController::claim_and_checkpoint(
         &mut reopened,
         &mut restored,
-        "worker:later",
-        "binding:worker/later",
-        &BTreeSet::from(["cpu".to_owned()]),
-        "journal:virtual",
-        "virtual:work:later-claim",
+        VirtualClaimCheckpoint {
+            owner: "worker:later",
+            plan_id: "plan:test",
+            occurrence_binding: "binding:worker/later",
+            capabilities: &BTreeSet::from(["cpu".to_owned()]),
+            journal_id: "journal:virtual",
+            checkpoint_id: "virtual:work:later-claim",
+        },
     )
     .expect("later claim checkpoints")
     .expect("later work claims");
@@ -1759,11 +1787,14 @@ fn weighted_fairness_and_aging_accounting_survive_m1_reopen() {
     let claim = DurableVirtualController::claim_and_checkpoint(
         &mut coordinator,
         &mut scheduler,
-        "worker:fairness",
-        "binding:worker/fairness",
-        &BTreeSet::from(["cpu".to_owned()]),
-        "journal:virtual",
-        "virtual:fairness:claim",
+        VirtualClaimCheckpoint {
+            owner: "worker:fairness",
+            plan_id: "plan:test",
+            occurrence_binding: "binding:worker/fairness",
+            capabilities: &BTreeSet::from(["cpu".to_owned()]),
+            journal_id: "journal:virtual",
+            checkpoint_id: "virtual:fairness:claim",
+        },
     )
     .expect("claim checkpoints")
     .expect("work claims");
@@ -1803,11 +1834,21 @@ fn weighted_fairness_and_aging_accounting_survive_m1_reopen() {
     let mut original = VirtualScheduler::restore(limits, expected).expect("original restores");
     let capabilities = BTreeSet::from(["cpu".to_owned()]);
     let expected_claim = original
-        .claim("worker:next", "binding:worker/next", &capabilities)
+        .claim(
+            "worker:next",
+            "plan:test",
+            "binding:worker/next",
+            &capabilities,
+        )
         .expect("expected claim")
         .expect("expected work");
     let restored_claim = restored
-        .claim("worker:next", "binding:worker/next", &capabilities)
+        .claim(
+            "worker:next",
+            "plan:test",
+            "binding:worker/next",
+            &capabilities,
+        )
         .expect("restored claim")
         .expect("restored work");
     assert_eq!(restored_claim.item.work_id, expected_claim.item.work_id);
@@ -1975,6 +2016,7 @@ fn completed_scheduler() -> (VirtualScheduler, String) {
     let claim = scheduler
         .claim(
             "worker:completed",
+            "plan:test",
             "binding:worker/completed",
             &BTreeSet::from(["cpu".to_owned()]),
         )
@@ -2278,6 +2320,7 @@ fn worker_claim_command(
         command_id: command_id.to_owned(),
         owner: owner.to_owned(),
         slot_id: slot_id.to_owned(),
+        plan_id: "plan:test".to_owned(),
         occurrence_binding: binding.to_owned(),
         capabilities: BTreeSet::from(["cpu".to_owned()]),
         logical_now,

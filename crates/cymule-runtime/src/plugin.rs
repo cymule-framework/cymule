@@ -4,7 +4,7 @@ use cymule_core::{ReconciliationResolution, WorldOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{RuntimeError, RuntimeResult};
+use crate::{ExecutionBinding, ExecutionOperationKind, RuntimeError, RuntimeResult};
 
 /// Process plugin protocol version.
 pub const PLUGIN_VERSION: &str = "cymule.plugin/2";
@@ -190,5 +190,160 @@ pub trait PluginHost {
                 "describe returned unexpected response {response:?}"
             ))),
         }
+    }
+}
+
+/// Runtime router that dispatches each operation to the exact provider selected
+/// by an admitted [`ExecutionBinding`].
+///
+/// Child manifests are capability advertisements only. The immutable binding
+/// remains the routing authority: an advertised but unbound operation is never
+/// callable, and a bound operation must be advertised by its selected provider
+/// with the exact implementation and operation revision.
+pub struct AdmittedPluginRouter {
+    binding: ExecutionBinding,
+    providers: BTreeMap<String, Box<dyn PluginHost>>,
+    manifest: PluginManifest,
+}
+
+impl AdmittedPluginRouter {
+    /// Verify every selected provider against its live capability advertisement.
+    pub fn new(
+        binding: ExecutionBinding,
+        mut providers: BTreeMap<String, Box<dyn PluginHost>>,
+    ) -> RuntimeResult<Self> {
+        binding.verify()?;
+        let mut manifests = BTreeMap::new();
+        for provider_id in binding
+            .components
+            .values()
+            .chain(binding.effects.values())
+            .map(|selected| selected.provider_id.as_str())
+        {
+            if manifests.contains_key(provider_id) {
+                continue;
+            }
+            let provider = providers.get_mut(provider_id).ok_or_else(|| {
+                RuntimeError::plugin_defect(format!(
+                    "execution binding selected missing provider {provider_id}"
+                ))
+            })?;
+            manifests.insert(provider_id.to_owned(), provider.describe()?);
+        }
+
+        for (operation, selected) in &binding.components {
+            let manifest = manifests
+                .get(&selected.provider_id)
+                .expect("selected provider manifest was loaded");
+            if manifest.implementation_id != selected.implementation.implementation_id
+                || manifest
+                    .components
+                    .get(operation)
+                    .map(|advertised| advertised.implementation_revision.as_str())
+                    != Some(selected.operation_revision.as_str())
+            {
+                return Err(RuntimeError::plugin_defect(format!(
+                    "provider {} does not advertise the bound component {operation}",
+                    selected.provider_id
+                )));
+            }
+        }
+        for (operation, selected) in &binding.effects {
+            let manifest = manifests
+                .get(&selected.provider_id)
+                .expect("selected provider manifest was loaded");
+            let advertised = manifest.effects.get(operation);
+            if manifest.implementation_id != selected.implementation.implementation_id
+                || advertised.map(|effect| effect.implementation_revision.as_str())
+                    != Some(selected.operation_revision.as_str())
+                || advertised.map(|effect| effect.can_reconcile) != selected.can_reconcile
+            {
+                return Err(RuntimeError::plugin_defect(format!(
+                    "provider {} does not advertise the bound effect {operation}",
+                    selected.provider_id
+                )));
+            }
+        }
+
+        let manifest = PluginManifest {
+            plugin_version: PLUGIN_VERSION.to_owned(),
+            implementation_id: binding.plugin_implementation_id.clone(),
+            components: binding
+                .components
+                .iter()
+                .map(|(operation, selected)| {
+                    (
+                        operation.clone(),
+                        PluginOperation {
+                            implementation_revision: selected.operation_revision.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            effects: binding
+                .effects
+                .iter()
+                .map(|(operation, selected)| {
+                    (
+                        operation.clone(),
+                        PluginEffect {
+                            implementation_revision: selected.operation_revision.clone(),
+                            can_reconcile: selected.can_reconcile.unwrap_or(false),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        binding.verify_manifest(&manifest)?;
+        Ok(Self {
+            binding,
+            providers,
+            manifest,
+        })
+    }
+
+    fn provider_for(
+        &mut self,
+        kind: ExecutionOperationKind,
+        operation: &str,
+    ) -> RuntimeResult<&mut Box<dyn PluginHost>> {
+        let selected = match kind {
+            ExecutionOperationKind::Component => self.binding.components.get(operation),
+            ExecutionOperationKind::Effect => self.binding.effects.get(operation),
+        }
+        .ok_or_else(|| {
+            RuntimeError::plugin_defect(format!(
+                "operation {operation} is not authorized by the execution binding"
+            ))
+        })?;
+        self.providers
+            .get_mut(&selected.provider_id)
+            .ok_or_else(|| {
+                RuntimeError::plugin_defect(format!(
+                    "execution binding selected missing provider {}",
+                    selected.provider_id
+                ))
+            })
+    }
+}
+
+impl PluginHost for AdmittedPluginRouter {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        let route = match &request {
+            PluginRequest::Describe => {
+                return Ok(PluginResponse::Manifest {
+                    manifest: self.manifest.clone(),
+                });
+            }
+            PluginRequest::Call { component, .. } => {
+                (ExecutionOperationKind::Component, component.clone())
+            }
+            PluginRequest::PrepareEffect { operation, .. }
+            | PluginRequest::DispatchEffect { operation, .. }
+            | PluginRequest::ReconcileEffect { operation, .. } => {
+                (ExecutionOperationKind::Effect, operation.clone())
+            }
+        };
+        self.provider_for(route.0, &route.1)?.invoke(request)
     }
 }
