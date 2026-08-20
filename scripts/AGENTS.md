@@ -11,12 +11,18 @@
 - A narrow path route must select the smallest sufficient evidence family. A
   shared semantic/wire change selects every affected SDK; an unknown path,
   validation-infrastructure change, or incomplete route escalates to `full`.
+- Every Cargo package `src/` or manifest change also selects the workspace
+  all-targets compile witness. The harness derives owner and direct consumers
+  from Cargo manifests; route tests must not hand-maintain a false dependency
+  list or substitute the compile witness for owner-specific tests.
 - Commands in the manifest are argument arrays, never interpolated shell
   fragments. Route tests must pin both narrow selection and fail-closed
   escalation.
 - Scripts must be non-interactive, fail closed, and run from any working
   directory.
-- Do not hide skipped coverage. Optional-tool skips must print the exact reason.
+- Do not hide skipped coverage. Optional-tool skips exit with code 77 and are
+  recorded as `skipped`; execution failures are `infrastructure_error`, never
+  a report whose aggregate status says passed.
 - Cross-language tests must use freshly built Rust binaries and a Plan ID sealed
   from the checked-in shared fixture.
 - Every SDK also runs the same structured Engine negative fixture through that

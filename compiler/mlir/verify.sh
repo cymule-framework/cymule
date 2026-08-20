@@ -10,10 +10,9 @@ if [ -z "$MLIR_OPT" ]; then
     MLIR_OPT=/opt/homebrew/opt/llvm/bin/mlir-opt
   else
     echo "MLIR smoke skipped: mlir-opt is unavailable"
-    exit 0
+    exit 77
   fi
 fi
 
 "$MLIR_OPT" --allow-unregistered-dialect "$SCRIPT_DIR/examples/cross-language.mlir" >/dev/null
 echo "MLIR smoke passed with $($MLIR_OPT --version | head -n 1)"
-

@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,6 +31,7 @@ class ChangeRoutingTests(unittest.TestCase):
             set(suites),
             {
                 "protocol",
+                "rust-consumers",
                 "rust-virtual",
                 "sdk-go",
                 "sdk-python",
@@ -45,7 +50,7 @@ class ChangeRoutingTests(unittest.TestCase):
 
     def test_durable_executor_change_does_not_run_unrelated_profiles(self) -> None:
         suites, _ = HARNESS.select_suites(["crates/cymule-durable/src/executor.rs"])
-        self.assertEqual(suites, ["rust-durable"])
+        self.assertEqual(suites, ["rust-consumers", "rust-durable"])
 
     def test_durable_store_contract_change_selects_direct_consumers(self) -> None:
         suites, _ = HARNESS.select_suites(["crates/cymule-durable/src/store.rs"])
@@ -53,6 +58,7 @@ class ChangeRoutingTests(unittest.TestCase):
             set(suites),
             {
                 "rust-agent-plugin",
+                "rust-consumers",
                 "rust-directory-plugin",
                 "rust-durable",
                 "rust-resource",
@@ -67,6 +73,7 @@ class ChangeRoutingTests(unittest.TestCase):
             {
                 "test-world-deterministic",
                 "test-world-live-process",
+                "rust-consumers",
                 "rust-durable",
                 "rust-store-plugins",
                 "rust-agent-plugin",
@@ -118,6 +125,90 @@ class ChangeRoutingTests(unittest.TestCase):
         manifest["routes"][0]["suites"] = ["missing-suite"]
         with self.assertRaisesRegex(ValueError, "unknown suites"):
             HARNESS.validate_manifest(manifest)
+
+    def test_cargo_source_change_reports_owner_and_direct_consumers(self) -> None:
+        affected = HARNESS.cargo_affected_packages(
+            ["crates/cymule-evolution/src/control.rs"]
+        )
+        packages = affected["crates/cymule-evolution/src/control.rs"]
+        self.assertIn("cymule-evolution", packages)
+        self.assertIn("cymule", packages)
+        self.assertIn("cymule-cli", packages)
+
+    def test_agent_source_change_compiles_agent_mcp_consumer(self) -> None:
+        affected = HARNESS.cargo_affected_packages(
+            ["plugins/agent-interaction/src/lib.rs"]
+        )
+        self.assertIn(
+            "cymule-agent-mcp",
+            affected["plugins/agent-interaction/src/lib.rs"],
+        )
+        suites, _ = HARNESS.select_suites(["plugins/agent-interaction/src/lib.rs"])
+        self.assertIn("rust-consumers", suites)
+
+    @staticmethod
+    def _run_manifest(command: list[str], *, allow_skip: bool = False) -> dict:
+        return {
+            "schema_version": 2,
+            "suites": {
+                "leaf": {
+                    "description": "synthetic leaf",
+                    "lane": "meta",
+                    "tools": [],
+                    "commands": [command],
+                    "allow_skip": allow_skip,
+                },
+                "full": {
+                    "description": "synthetic full",
+                    "abstract": True,
+                    "requires": ["leaf"],
+                },
+            },
+            "execution_classes": {
+                "deterministic": {
+                    "description": "deterministic",
+                    "suites": ["leaf"],
+                },
+                "live_process": {"description": "live", "suites": []},
+                "live_provider": {"description": "provider", "suites": []},
+            },
+            "routes": [{"patterns": ["**"], "suites": ["leaf"]}],
+        }
+
+    def test_executor_exception_is_reported_as_infrastructure_error(self) -> None:
+        manifest = self._run_manifest(["missing-command"])
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            with mock.patch.object(HARNESS, "git", return_value="head"), mock.patch.object(
+                HARNESS.subprocess,
+                "run",
+                side_effect=FileNotFoundError("missing-command"),
+            ):
+                result = HARNESS.run_suites(["leaf"], manifest, False, report)
+            payload = json.loads(report.read_text())
+        self.assertEqual(result, 1)
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["results"][0]["status"], "infrastructure_error")
+        self.assertEqual(
+            payload["results"][0]["commands"][0]["status"],
+            "infrastructure_error",
+        )
+
+    def test_optional_skip_is_distinct_from_pass(self) -> None:
+        manifest = self._run_manifest(["optional-tool"], allow_skip=True)
+        completed = subprocess.CompletedProcess(["optional-tool"], HARNESS.SKIP_EXIT_CODE)
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            with mock.patch.object(HARNESS, "git", return_value="head"), mock.patch.object(
+                HARNESS.subprocess,
+                "run",
+                return_value=completed,
+            ):
+                result = HARNESS.run_suites(["leaf"], manifest, False, report)
+            payload = json.loads(report.read_text())
+        self.assertEqual(result, 0)
+        self.assertEqual(payload["status"], "passed_with_skips")
+        self.assertEqual(payload["results"][0]["status"], "skipped")
 
 
 if __name__ == "__main__":

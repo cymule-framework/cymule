@@ -7,6 +7,7 @@ suites = [
   "harness",
   "test-world-deterministic",
   "rust-core",
+  "rust-consumers",
   "rust-durable",
   "rust-virtual",
   "rust-evolution",
@@ -78,6 +79,12 @@ description = "Run formatting, static analysis, tests, and documentation for the
 lane = "rust"
 tools = ["rust"]
 commands = [["./scripts/verify-rust.sh"]]
+
+[suites.rust-consumers]
+description = "Compile every workspace package and test target as the Cargo reverse-dependency witness."
+lane = "rust"
+tools = ["rust"]
+commands = [["cargo", "check", "--workspace", "--all-targets"]]
 
 [suites.rust-core]
 description = "Run the small Rust semantic kernel and its property tests."
@@ -173,6 +180,7 @@ commands = [["./scripts/verify-crates-package.sh"]]
 description = "Run the optional MLIR workbench smoke test when the pinned toolchain exists."
 lane = "workbench"
 tools = []
+allow_skip = true
 commands = [["./compiler/mlir/verify.sh"]]
 
 [suites.rust-soak]

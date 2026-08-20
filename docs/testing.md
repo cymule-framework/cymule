@@ -94,6 +94,14 @@ class into list, CI matrix, and JSON execution reports. This prevents a fast
 deterministic regression from silently becoming dependent on process timing or
 provider availability.
 
+Reports use four distinct terminal states: `passed`, `failed`, `skipped`, and
+`infrastructure_error`. Optional tools signal skip with exit code 77; missing
+commands, spawn failures, and runner faults can never be serialized as a pass.
+Any Cargo package source or manifest change also compiles the complete workspace
+with all targets, while owner-specific routes retain the narrower behavioral
+tests. This is a reverse-dependency compile witness, not a reason to run every
+behavioral suite for every Rust edit.
+
 ## Evidence families
 
 | Family | Proves | Typical trigger |

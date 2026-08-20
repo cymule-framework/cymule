@@ -15,6 +15,8 @@
   its seed, retained command path, exact Cargo replay command, and minimized
   language-neutral JSON; SDKs consume the promoted fixture instead of owning
   another generator.
+- Shrinking must preserve the exact failure fingerprint, not merely any error.
+  The minimized fixture records that fingerprint with the seed and path.
 - User-example crash tests should execute the built binary and use explicit
   logical clock values. Exit after an identified durable boundary, reopen from
   public adapters, and assert the retained occurrence and Resource identities.

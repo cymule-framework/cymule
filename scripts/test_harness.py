@@ -18,6 +18,77 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "tests" / "harness" / "suites.toml"
+SKIP_EXIT_CODE = 77
+
+
+def workspace_package_graph() -> tuple[dict[str, str], dict[str, set[str]]]:
+    """Return package roots and direct reverse dependencies from Cargo manifests."""
+    with (ROOT / "Cargo.toml").open("rb") as stream:
+        workspace = tomllib.load(stream)
+    members = workspace.get("workspace", {}).get("members", [])
+    if not isinstance(members, list):
+        raise ValueError("workspace members must be a list")
+    roots: dict[str, str] = {}
+    dependencies: dict[str, set[str]] = {}
+    decoded: dict[str, dict[str, Any]] = {}
+    for member in members:
+        if not isinstance(member, str):
+            raise ValueError("workspace member paths must be strings")
+        manifest_path = ROOT / member / "Cargo.toml"
+        with manifest_path.open("rb") as stream:
+            package_manifest = tomllib.load(stream)
+        name = package_manifest.get("package", {}).get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"workspace member {member} has no package name")
+        roots[member.replace(os.sep, "/").rstrip("/")] = name
+        decoded[name] = package_manifest
+        dependencies[name] = set()
+
+    package_names = set(decoded)
+
+    def collect_tables(value: Any, key: str | None = None) -> list[dict[str, Any]]:
+        tables: list[dict[str, Any]] = []
+        if isinstance(value, dict):
+            if key in {"dependencies", "dev-dependencies", "build-dependencies"}:
+                tables.append(value)
+            for child_key, child in value.items():
+                tables.extend(collect_tables(child, child_key))
+        return tables
+
+    for name, package_manifest in decoded.items():
+        for table in collect_tables(package_manifest):
+            for dependency_name, specification in table.items():
+                resolved = dependency_name
+                if isinstance(specification, dict):
+                    package_alias = specification.get("package")
+                    if isinstance(package_alias, str):
+                        resolved = package_alias
+                if resolved in package_names:
+                    dependencies[name].add(resolved)
+
+    reverse = {name: set() for name in package_names}
+    for consumer, owned_dependencies in dependencies.items():
+        for dependency in owned_dependencies:
+            reverse[dependency].add(consumer)
+    return roots, reverse
+
+
+def cargo_affected_packages(paths: list[str]) -> dict[str, list[str]]:
+    """Map changed package source paths to owner plus direct Cargo consumers."""
+    roots, reverse = workspace_package_graph()
+    affected: dict[str, list[str]] = {}
+    for raw_path in sorted(set(paths)):
+        path = raw_path.replace(os.sep, "/")
+        owners = [
+            (root, package)
+            for root, package in roots.items()
+            if path == f"{root}/Cargo.toml" or path.startswith(f"{root}/src/")
+        ]
+        if not owners:
+            continue
+        _, owner = max(owners, key=lambda item: len(item[0]))
+        affected[path] = sorted({owner, *reverse[owner]})
+    return affected
 
 
 def load_manifest(path: Path = MANIFEST) -> dict[str, Any]:
@@ -42,6 +113,8 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"abstract suite {name} has no requirements")
         elif not suite.get("commands"):
             raise ValueError(f"suite {name} has no commands")
+        if "allow_skip" in suite and not isinstance(suite["allow_skip"], bool):
+            raise ValueError(f"suite {name} has invalid allow_skip")
     execution_classes = manifest.get("execution_classes")
     expected_classes = {"deterministic", "live_process", "live_provider"}
     if not isinstance(execution_classes, dict) or set(execution_classes) != expected_classes:
@@ -129,6 +202,10 @@ def select_suites(
         for suite in path_suites:
             selected.add(suite)
             evidence.setdefault(suite, []).append(path)
+    cargo_closure = cargo_affected_packages(paths)
+    if cargo_closure:
+        selected.add("rust-consumers")
+        evidence.setdefault("rust-consumers", []).extend(sorted(cargo_closure))
     if "full" in selected:
         return ["full"], {"full": sorted(set(sum(evidence.values(), [])))}
     return sorted(selected), evidence
@@ -245,7 +322,7 @@ def run_suites(names: list[str], manifest: dict[str, Any], keep_going: bool, rep
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         report_path = ROOT / ".cache" / "test-harness" / f"{stamp}-{os.getpid()}.json"
     report: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "repository": str(ROOT),
         "head": git("rev-parse", "HEAD"),
         "requested_suites": names,
@@ -254,6 +331,7 @@ def run_suites(names: list[str], manifest: dict[str, Any], keep_going: bool, rep
         "results": [],
     }
     failed = False
+    skipped = False
     try:
         for name in expanded:
             suite = manifest["suites"][name]
@@ -262,29 +340,75 @@ def run_suites(names: list[str], manifest: dict[str, Any], keep_going: bool, rep
                 "suite": name,
                 "execution_class": execution_classes[name],
                 "commands": [],
+                "status": "running",
             }
             suite_started = time.monotonic()
+            suite_failed = False
+            suite_skipped = False
             for command in suite["commands"]:
                 if not isinstance(command, list) or not all(isinstance(value, str) for value in command):
                     raise ValueError(f"suite {name} has an invalid command")
                 print("+ " + " ".join(command), flush=True)
                 command_started = time.monotonic()
-                result = subprocess.run(command, cwd=ROOT, check=False)
-                elapsed_ms = round((time.monotonic() - command_started) * 1000)
-                suite_result["commands"].append(
-                    {"argv": command, "exit_code": result.returncode, "duration_ms": elapsed_ms}
-                )
-                if result.returncode != 0:
+                try:
+                    result = subprocess.run(command, cwd=ROOT, check=False)
+                except OSError as error:
+                    elapsed_ms = round((time.monotonic() - command_started) * 1000)
+                    suite_result["commands"].append(
+                        {
+                            "argv": command,
+                            "exit_code": None,
+                            "duration_ms": elapsed_ms,
+                            "status": "infrastructure_error",
+                            "error_type": type(error).__name__,
+                            "error": str(error),
+                        }
+                    )
                     failed = True
+                    suite_failed = True
+                    suite_result["status"] = "infrastructure_error"
+                    break
+                elapsed_ms = round((time.monotonic() - command_started) * 1000)
+                command_status = "passed"
+                if result.returncode == SKIP_EXIT_CODE:
+                    if suite.get("allow_skip", False):
+                        command_status = "skipped"
+                        skipped = True
+                        suite_skipped = True
+                    else:
+                        command_status = "failed"
+                        failed = True
+                        suite_failed = True
+                elif result.returncode != 0:
+                    command_status = "failed"
+                    failed = True
+                    suite_failed = True
+                suite_result["commands"].append(
+                    {
+                        "argv": command,
+                        "exit_code": result.returncode,
+                        "duration_ms": elapsed_ms,
+                        "status": command_status,
+                    }
+                )
+                if command_status != "passed":
                     break
             suite_result["duration_ms"] = round((time.monotonic() - suite_started) * 1000)
-            suite_result["status"] = "failed" if any(command["exit_code"] != 0 for command in suite_result["commands"]) else "passed"
+            if suite_result["status"] == "running":
+                if suite_failed:
+                    suite_result["status"] = "failed"
+                elif suite_skipped:
+                    suite_result["status"] = "skipped"
+                else:
+                    suite_result["status"] = "passed"
             report["results"].append(suite_result)
             if failed and not keep_going:
                 break
     finally:
         report["finished_at_unix_ms"] = int(time.time() * 1000)
-        report["status"] = "failed" if failed else "passed"
+        report["status"] = (
+            "failed" if failed else "passed_with_skips" if skipped else "passed"
+        )
         write_report(report, report_path)
         print(f"\nHarness report: {report_path}", flush=True)
     return 1 if failed else 0
