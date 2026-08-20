@@ -54,6 +54,8 @@
   an existing decision or reinterpret an admitted occurrence.
 - Tests must prove mixed-version execution, deterministic canaries, safe-point
   migration, rollback without history rewrite, and DAG cycle rejection.
+- Executable evolution tests must construct an explicit binding whose provider
+  properties satisfy the selected Plan; a manifest alone is never admission.
 - Durable evolution records use the generic M1 journal with explicit checkpoint
   lineage. Receipt loss must reopen to the committed occurrence pin or control
   decision without creating a second edge or selection.

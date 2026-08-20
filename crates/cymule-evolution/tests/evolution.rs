@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use cymule_core::{
     ArtifactRecord, ArtifactRef, ComponentContract, Definition, DispatchPolicy, EffectContract,
     EffectProfile, Expression, Machine, MutationKind, PlanCandidate, ReconciliationMode, Region,
-    WaitSpec,
+    WaitSpec, sha256_bytes,
 };
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
@@ -36,8 +36,10 @@ use cymule_evolution::{
     ShadowRequest, SubflowReference, analyze_relink, diff_plans,
 };
 use cymule_runtime::{
-    EmbeddedRuntime, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginRequest,
-    PluginResponse, RuntimeError, RuntimeResult,
+    EmbeddedRuntime, ExecutionBinding, ExecutionOperationKind, PLUGIN_VERSION, PluginEffect,
+    PluginHost, PluginManifest, PluginRequest, PluginResponse, RUNTIME_COMPOSITION_VERSION,
+    RuntimeCompositionGraph, RuntimeError, RuntimeImplementation, RuntimeProviderDescriptor,
+    RuntimeResult,
 };
 #[cfg(unix)]
 use cymule_store_sqlite::SqliteStore;
@@ -48,6 +50,50 @@ use cymule_virtual::{
 use serde_json::json;
 #[cfg(unix)]
 use tempfile::tempdir;
+
+fn embedded_runtime<P: PluginHost>(plugin: P) -> EmbeddedRuntime<P> {
+    embedded_runtime_with_properties(plugin, BTreeMap::new())
+}
+
+fn embedded_runtime_with_properties<P: PluginHost>(
+    mut plugin: P,
+    properties: BTreeMap<String, String>,
+) -> EmbeddedRuntime<P> {
+    let manifest = plugin.describe().expect("test plugin describes");
+    let implementation_revision = format!(
+        "sha256:{}",
+        sha256_bytes(manifest.implementation_id.as_bytes())
+    );
+    let provides = manifest
+        .components
+        .keys()
+        .map(|operation| ExecutionOperationKind::Component.service_key(operation))
+        .chain(
+            manifest
+                .effects
+                .keys()
+                .map(|operation| ExecutionOperationKind::Effect.service_key(operation)),
+        )
+        .collect();
+    let empty_digest = format!("sha256:{}", sha256_bytes(b"{}"));
+    let graph = RuntimeCompositionGraph::build(vec![RuntimeProviderDescriptor {
+        version: RUNTIME_COMPOSITION_VERSION.to_owned(),
+        provider_id: "test-plugin".to_owned(),
+        implementation: RuntimeImplementation {
+            implementation_id: manifest.implementation_id.clone(),
+            revision: implementation_revision,
+        },
+        provides,
+        requires: Vec::new(),
+        properties,
+        configuration_schema_digest: empty_digest.clone(),
+        configuration_fingerprint: empty_digest,
+    }])
+    .expect("test provider graph admits");
+    let binding =
+        ExecutionBinding::admit(&graph, &manifest).expect("test execution binding admits");
+    EmbeddedRuntime::new(plugin, binding).expect("test runtime opens")
+}
 
 fn plan(version: &str) -> cymule_core::SealedPlan {
     PlanCandidate {
@@ -1269,10 +1315,16 @@ fn automatic_relink_blocks_new_effect_surface_and_later_safe_head_advances() {
     assert_eq!(advanced.len(), 1);
     assert_ne!(advanced[0].plan.plan_id, initial.plan.plan_id);
     assert_eq!(
-        EmbeddedRuntime::new(DeclaredEffectPlugin)
-            .execute(advanced[0].plan.clone(), &json!({}), "run:safe-head")
-            .expect("safe head executes")
-            .value,
+        embedded_runtime_with_properties(
+            DeclaredEffectPlugin,
+            BTreeMap::from([
+                ("capability".to_owned(), "capture".to_owned()),
+                ("authority".to_owned(), "external-write".to_owned()),
+            ]),
+        )
+        .execute(advanced[0].plan.clone(), &json!({}), "run:safe-head")
+        .expect("safe head executes")
+        .value,
         json!({"version": "3"})
     );
 }
@@ -1467,7 +1519,7 @@ fn transitive_latest_compatible_module_relinks_and_executes_new_leaf() {
     );
     assert_eq!(initial.plan.candidate.definitions.len(), 3);
     assert_eq!(
-        EmbeddedRuntime::new(EmptyPlugin)
+        embedded_runtime(EmptyPlugin)
             .execute(initial.plan.clone(), &json!({}), "run:transitive:1")
             .expect("initial module executes")
             .value,
@@ -1488,7 +1540,7 @@ fn transitive_latest_compatible_module_relinks_and_executes_new_leaf() {
     );
     assert_ne!(relinked[0].plan.plan_id, initial.plan.plan_id);
     assert_eq!(
-        EmbeddedRuntime::new(EmptyPlugin)
+        embedded_runtime(EmptyPlugin)
             .execute(relinked[0].plan.clone(), &json!({}), "run:transitive:2")
             .expect("relinked module executes")
             .value,
@@ -2330,14 +2382,14 @@ fn shadow_gate_promotes_and_failure_gate_rolls_back_future_only() {
         .select_plan_for_occurrence("occurrence:after-rollback")
         .expect("runtime receives fallback Plan");
     assert_eq!(
-        EmbeddedRuntime::new(EmptyPlugin)
+        embedded_runtime(EmptyPlugin)
             .execute(pinned_plan, &json!({}), "run:mixed:target")
             .expect("target Plan executes")
             .value,
         json!({"version": "2"})
     );
     assert_eq!(
-        EmbeddedRuntime::new(EmptyPlugin)
+        embedded_runtime(EmptyPlugin)
             .execute(fallback_plan, &json!({}), "run:mixed:fallback")
             .expect("fallback Plan executes")
             .value,
