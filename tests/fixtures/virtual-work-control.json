@@ -9,6 +9,7 @@
   "resolution": {
     "resolution": "succeeded",
     "result": {
+      "identity_version": "cymule.artifact/2",
       "artifact_id": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
       "kind": "example/result"
     }

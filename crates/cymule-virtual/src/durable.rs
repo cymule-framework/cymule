@@ -584,7 +584,9 @@ impl DurableVirtualController {
                 "archive manifest changed before its durable checkpoint".to_owned(),
             ));
         }
-        let stored = machine.put_artifact(record.reference.kind.clone(), record.bytes);
+        let stored = machine
+            .put_artifact(record.reference.kind.clone(), record.bytes)
+            .map_err(|error| VirtualError::Validation(error.to_string()))?;
         if stored != record.reference {
             *scheduler = scheduler_before;
             *machine = machine_before;

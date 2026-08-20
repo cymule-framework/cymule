@@ -98,7 +98,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             let contracts = PlanContracts::compile(&plan.candidate)?;
             contracts.validate_definition_input(&plan.candidate.entry, input)?;
             validate_manifest(plan, &self.manifest)?;
-            let expected_input = Machine::new().put_artifact("cymule.input/1", input_bytes);
+            let expected_input = Machine::new().put_artifact("cymule.input/1", input_bytes)?;
             if existing.frames.first().map(|frame| &frame.input) != Some(&expected_input) {
                 return Err(DurableError::IllegalTransition(format!(
                     "Run {run_id} already exists with different input"
@@ -140,7 +140,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             },
         )?;
         begin_attempt(&mut machine, &run_id, &self.manifest, 0)?;
-        let input_ref = machine.put_artifact("cymule.input/1", input_bytes);
+        let input_ref = machine.put_artifact("cymule.input/1", input_bytes)?;
         let continuation = Continuation {
             run_id: run_id.clone(),
             plan_id: plan.plan_id,
@@ -177,7 +177,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?
             .clone();
         validate_wait_completion(&wait, value)?;
-        let result = machine.put_artifact("cymule.wait-result/1", canonical_bytes(value)?);
+        let result = machine.put_artifact("cymule.wait-result/1", canonical_bytes(value)?)?;
         let run_id = wait.run_id;
         self.coordinator
             .complete_wait_with_machine(&machine, wait_id, result)?;
@@ -200,7 +200,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
     ) -> DurableResult<BTreeSet<String>> {
         let mut machine = self.coordinator.restore_machine()?;
         let result =
-            machine.put_artifact("cymule.wait-activation-result/1", canonical_bytes(value)?);
+            machine.put_artifact("cymule.wait-activation-result/1", canonical_bytes(value)?)?;
         let mut run_ids = BTreeSet::new();
         for wait_id in &wait_ids {
             let wait = self
@@ -470,7 +470,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                             ));
                         }
                     };
-                    let result_ref = machine.put_artifact(result_kind, canonical_bytes(&value)?);
+                    let result_ref = machine.put_artifact(result_kind, canonical_bytes(&value)?)?;
                     continuation.frames.pop();
                     if closes_scope {
                         continuation.scope_stack.pop();
@@ -515,7 +515,8 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 }
                 machine = self.coordinator.restore_machine()?;
                 yield_attempt(&mut machine, run_id, continuation.epoch)?;
-                let result_ref = machine.put_artifact("cymule.result/1", canonical_bytes(&value)?);
+                let result_ref =
+                    machine.put_artifact("cymule.result/1", canonical_bytes(&value)?)?;
                 submit(
                     &mut machine,
                     run_id,
@@ -546,8 +547,8 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 } => {
                     let value = evaluate(&machine, expression, &input, &frame.locals)?;
                     contracts.validate_component_input(component, &value)?;
-                    let input_ref =
-                        machine.put_artifact("cymule.component-input/1", canonical_bytes(&value)?);
+                    let input_ref = machine
+                        .put_artifact("cymule.component-input/1", canonical_bytes(&value)?)?;
                     let operation = self.manifest.components.get(component).ok_or_else(|| {
                         DurableError::Validation(format!(
                             "plugin does not implement component {component}"
@@ -588,7 +589,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                             )));
                         };
                         let output_ref = machine
-                            .put_artifact("cymule.component-output/1", canonical_bytes(&value)?);
+                            .put_artifact("cymule.component-output/1", canonical_bytes(&value)?)?;
                         let occurrence = ComponentOccurrence {
                             occurrence_id,
                             run_id: run_id.to_owned(),
@@ -617,8 +618,8 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 } => {
                     let value = evaluate(&machine, expression, &input, &frame.locals)?;
                     contracts.validate_definition_input(definition, &value)?;
-                    let input_ref =
-                        machine.put_artifact("cymule.invocation-input/1", canonical_bytes(&value)?);
+                    let input_ref = machine
+                        .put_artifact("cymule.invocation-input/1", canonical_bytes(&value)?)?;
                     let invocation_id = durable_invocation_id(
                         run_id,
                         &frame.invocation_id,
@@ -705,7 +706,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     let value = evaluate(&machine, expression, &input, &frame.locals)?;
                     contracts.validate_effect_input(effect, &value)?;
                     let args =
-                        machine.put_artifact("cymule.effect-args/1", canonical_bytes(&value)?);
+                        machine.put_artifact("cymule.effect-args/1", canonical_bytes(&value)?)?;
                     let implementation = self.manifest.effects.get(effect).ok_or_else(|| {
                         DurableError::Validation(format!(
                             "plugin does not implement effect {effect}"
@@ -977,8 +978,8 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     )?;
                     let result = value
                         .map(|value| {
-                            canonical_bytes(&value)
-                                .map(|bytes| machine.put_artifact("cymule.effect-result/1", bytes))
+                            let bytes = canonical_bytes(&value)?;
+                            machine.put_artifact("cymule.effect-result/1", bytes)
                         })
                         .transpose()?;
                     self.coordinator.checkpoint_effect_settlement(
@@ -1075,8 +1076,8 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             )?;
             let result = value
                 .map(|value| {
-                    canonical_bytes(&value)
-                        .map(|bytes| machine.put_artifact("cymule.effect-result/1", bytes))
+                    let bytes = canonical_bytes(&value)?;
+                    machine.put_artifact("cymule.effect-result/1", bytes)
                 })
                 .transpose()?;
             let settled = match resolution {

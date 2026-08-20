@@ -636,13 +636,9 @@ fn validate_chunk(chunk: &AgentStreamChunk) -> AgentResult<()> {
                     "agent stream text chunk must not be empty".to_owned(),
                 ));
             }
-            ContentBlock::Artifact { artifact }
-                if artifact.artifact_id.is_empty() || artifact.kind.is_empty() =>
-            {
-                return Err(AgentError::Validation(
-                    "agent stream Artifact reference is invalid".to_owned(),
-                ));
-            }
+            ContentBlock::Artifact { artifact } => artifact
+                .validate()
+                .map_err(|error| AgentError::Validation(error.to_string()))?,
             ContentBlock::Resource { uri, .. } if uri.is_empty() => {
                 return Err(AgentError::Validation(
                     "agent stream legacy resource URI must not be empty".to_owned(),

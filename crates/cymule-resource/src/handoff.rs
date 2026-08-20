@@ -152,11 +152,13 @@ impl ResourceHandoffController {
                 "resource handoff input wait is cancelled".to_owned(),
             ));
         }
-        let result = machine.put_artifact(
-            "cymule.resource-handoff-input/1",
-            cymule_core::canonical_bytes(&handoff.resource)
-                .map_err(|error| ResourceError::Persistence(error.to_string()))?,
-        );
+        let result = machine
+            .put_artifact(
+                "cymule.resource-handoff-input/1",
+                cymule_core::canonical_bytes(&handoff.resource)
+                    .map_err(|error| ResourceError::Persistence(error.to_string()))?,
+            )
+            .map_err(|error| ResourceError::Persistence(error.to_string()))?;
         let activation = ResourceHandoffActivation {
             activation_version: RESOURCE_HANDOFF_ACTIVATION_VERSION.to_owned(),
             activation_id: format!("activation:{}:{wait_id}", handoff.transfer_id),

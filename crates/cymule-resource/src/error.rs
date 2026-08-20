@@ -6,14 +6,12 @@ pub type ResourceResult<T> = std::result::Result<T, ResourceError>;
 /// Stable local JSON Schema issue at a typed Artifact boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceSchemaIssue {
-    /// Exact immutable codec that rejected the value.
-    pub codec_id: String,
+    /// Exact immutable contract that rejected the value.
+    pub contract_id: String,
     /// JSON Pointer to the rejected instance location.
     pub instance_path: String,
     /// JSON Pointer to the rejecting schema keyword.
     pub schema_path: String,
-    /// Human-readable validator detail; paths above remain the stable fields.
-    pub message: String,
 }
 
 /// Stable resource contract errors.
@@ -41,8 +39,8 @@ impl Display for ResourceError {
             Self::Validation(message) => write!(formatter, "validation_failed: {message}"),
             Self::Schema(issue) => write!(
                 formatter,
-                "schema_failed: codec={} instance={} schema={}: {}",
-                issue.codec_id, issue.instance_path, issue.schema_path, issue.message
+                "schema_failed: contract={} instance={} schema={}",
+                issue.contract_id, issue.instance_path, issue.schema_path
             ),
             Self::Conflict(message) => write!(formatter, "conflict: {message}"),
             Self::NotFound(message) => write!(formatter, "not_found: {message}"),

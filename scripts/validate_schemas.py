@@ -205,6 +205,35 @@ def main() -> int:
         pass
     else:
         raise AssertionError("wait activation schema accepted a provider field")
+    for invalid_result in [
+        {
+            "artifact_id": wait_activation["result"]["artifact_id"],
+            "kind": wait_activation["result"]["kind"],
+        },
+        {**wait_activation["result"], "identity_version": "cymule.artifact/1"},
+    ]:
+        invalid_activation = {**wait_activation, "result": invalid_result}
+        try:
+            activation_validator.validate(invalid_activation)
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError("wait activation accepted a non-v2 Artifact reference")
+
+    artifact_contract_validator = Draft202012Validator(
+        by_title[
+            "Cymule Artifact Type Contract cymule.artifact-type-contract/1"
+        ],
+        registry=registry,
+    )
+    artifact_contract_validator.validate(
+        {
+            "contract_version": "cymule.artifact-type-contract/1",
+            "artifact_kind": "example.value/1",
+            "media_type": "application/json",
+            "schema": {"type": "object"},
+        }
+    )
 
     durable_control = load(root / "tests/fixtures/durable-control.json")
     durable_validator = Draft202012Validator(
@@ -295,6 +324,7 @@ def main() -> int:
     if verified_evolution != evolution_control:
         raise AssertionError("Rust Engine changed the evolution control fixture")
     artifact = {
+        "identity_version": "cymule.artifact/2",
         "artifact_id": "sha256:" + "a" * 64,
         "kind": "test/evidence",
     }

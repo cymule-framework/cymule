@@ -75,6 +75,7 @@ fn plan(version: &str) -> cymule_core::SealedPlan {
 
 fn artifact(id: &str) -> ArtifactRef {
     ArtifactRef {
+        identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
         artifact_id: id.to_owned(),
         kind: "evolution/evidence".to_owned(),
     }
@@ -82,7 +83,9 @@ fn artifact(id: &str) -> ArtifactRef {
 
 fn artifact_record(kind: &str, value: &str) -> ArtifactRecord {
     let mut machine = Machine::new();
-    let reference = machine.put_artifact(kind, value.as_bytes().to_vec());
+    let reference = machine
+        .put_artifact(kind, value.as_bytes().to_vec())
+        .expect("Artifact stores");
     machine
         .artifact(&reference)
         .expect("Artifact record exists")
@@ -98,6 +101,7 @@ fn continuation(plan_id: &str) -> Continuation {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
             input: cymule_core::ArtifactRef {
+                identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
                 artifact_id: format!("sha256:{}", "0".repeat(64)),
                 kind: "test/input".to_owned(),
             },
@@ -373,6 +377,7 @@ impl RegionSource for OneWorkSource {
                 region_id: region.region_id.clone(),
                 run_id: region.run_id.clone(),
                 payload: ArtifactRef {
+                    identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
                     artifact_id: format!("sha256:{}", "a".repeat(64)),
                     kind: "test/work".to_owned(),
                 },
@@ -612,7 +617,9 @@ fn unified_live_evolution_relinks_all_parents_and_pins_history() {
     );
 
     let mut machine = Machine::new();
-    let evidence = machine.put_artifact("evolution/evidence", b"reviewed revision 2".to_vec());
+    let evidence = machine
+        .put_artifact("evolution/evidence", b"reviewed revision 2".to_vec())
+        .expect("Artifact stores");
     let receipt = controller
         .publish_and_relink(LivePublicationCommand {
             logical_ref: "subflow:review".to_owned(),
@@ -654,7 +661,9 @@ fn unified_live_evolution_relinks_all_parents_and_pins_history() {
         .publish_and_relink(LivePublicationCommand {
             logical_ref: "subflow:review".to_owned(),
             definition: reusable_definition("3", json!({"type": "string"})),
-            evidence: machine.put_artifact("evolution/evidence", b"incompatible revision".to_vec()),
+            evidence: machine
+                .put_artifact("evolution/evidence", b"incompatible revision".to_vec())
+                .expect("Artifact stores"),
             mode: RolloutMode::Active,
         })
         .expect("incompatible revision remains retained");
@@ -716,7 +725,9 @@ fn unified_live_evolution_publication_replays_after_lost_receipt() {
         .plan_id
         .clone();
     let mut machine = coordinator.restore_machine().expect("Machine restores");
-    let evidence = machine.put_artifact("evolution/evidence", b"reviewed revision 2".to_vec());
+    let evidence = machine
+        .put_artifact("evolution/evidence", b"reviewed revision 2".to_vec())
+        .expect("Artifact stores");
     armed.store(true, Ordering::SeqCst);
     assert!(matches!(
         DurableLiveEvolutionController::publish_and_relink_and_checkpoint(
@@ -882,10 +893,12 @@ fn process_kill_worker_entry() {
         .expect("live authority restores");
     let machine = coordinator.restore_machine().expect("Machine restores");
     let mut identity = Machine::new();
-    let evidence = identity.put_artifact(
-        "evolution/evidence",
-        b"process-kill reviewed revision 2".to_vec(),
-    );
+    let evidence = identity
+        .put_artifact(
+            "evolution/evidence",
+            b"process-kill reviewed revision 2".to_vec(),
+        )
+        .expect("Artifact stores");
     DurableLiveEvolutionController::publish_and_relink_and_checkpoint(
         &mut coordinator,
         &mut live,
@@ -911,10 +924,12 @@ fn live_publication_recovers_from_real_process_kill_on_both_cas_sides() {
         let database = directory.path().join("live.sqlite");
         let marker = directory.path().join("kill-ready");
         let mut machine = Machine::new();
-        let evidence = machine.put_artifact(
-            "evolution/evidence",
-            b"process-kill reviewed revision 2".to_vec(),
-        );
+        let evidence = machine
+            .put_artifact(
+                "evolution/evidence",
+                b"process-kill reviewed revision 2".to_vec(),
+            )
+            .expect("Artifact stores");
         let store = SqliteStore::open(&database, "domain:live-kill").expect("SQLite store opens");
         let mut coordinator = DurableCoordinator::open(store)
             .expect("domain opens")

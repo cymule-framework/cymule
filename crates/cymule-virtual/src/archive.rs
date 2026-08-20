@@ -1,4 +1,4 @@
-use cymule_core::{ArtifactRecord, ArtifactRef, canonical_bytes, sha256_bytes};
+use cymule_core::{ArtifactRecord, ArtifactRef, artifact_ref, canonical_bytes};
 
 use crate::{VirtualArchiveManifest, VirtualError, VirtualResult};
 
@@ -22,16 +22,9 @@ pub trait VirtualArchive {
 pub fn virtual_archive_record(manifest: &VirtualArchiveManifest) -> VirtualResult<ArtifactRecord> {
     let bytes =
         canonical_bytes(manifest).map_err(|error| VirtualError::Validation(error.to_string()))?;
-    let mut preimage = Vec::with_capacity(VIRTUAL_ARCHIVE_MANIFEST_KIND.len() + bytes.len() + 20);
-    preimage.extend_from_slice(b"cymule.artifact/1\0");
-    preimage.extend_from_slice(VIRTUAL_ARCHIVE_MANIFEST_KIND.as_bytes());
-    preimage.push(0);
-    preimage.extend_from_slice(&bytes);
     Ok(ArtifactRecord {
-        reference: ArtifactRef {
-            artifact_id: format!("sha256:{}", sha256_bytes(&preimage)),
-            kind: VIRTUAL_ARCHIVE_MANIFEST_KIND.to_owned(),
-        },
+        reference: artifact_ref(VIRTUAL_ARCHIVE_MANIFEST_KIND, &bytes)
+            .map_err(|error| VirtualError::Validation(error.to_string()))?,
         bytes,
     })
 }

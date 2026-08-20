@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use cymule_core::{ArtifactRef, content_id};
+use cymule_core::{ArtifactRef, artifact_ref, canonical_bytes};
 use cymule_virtual::{
     MaterializedPage, RegionSource, VirtualCursor, VirtualError, VirtualRegion, VirtualResult,
     WorkItem,
@@ -52,11 +52,9 @@ impl<'a> CaseSource<'a> {
 }
 
 pub fn case_reference(case: &EvaluationCase) -> VirtualResult<ArtifactRef> {
-    Ok(ArtifactRef {
-        artifact_id: content_id(CASE_ARTIFACT_KIND, case)
-            .map_err(|error| VirtualError::Source(error.to_string()))?,
-        kind: CASE_ARTIFACT_KIND.to_owned(),
-    })
+    let bytes = canonical_bytes(case).map_err(|error| VirtualError::Source(error.to_string()))?;
+    artifact_ref(CASE_ARTIFACT_KIND, &bytes)
+        .map_err(|error| VirtualError::Source(error.to_string()))
 }
 
 impl RegionSource for CaseSource<'_> {

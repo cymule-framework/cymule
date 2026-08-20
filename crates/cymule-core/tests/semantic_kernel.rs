@@ -14,6 +14,34 @@ use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 use serde_json::json;
 
+#[test]
+fn artifact_v2_identity_is_closed_length_prefixed_and_golden() {
+    let reference = cymule_core::artifact_ref("example/state", b"durable")
+        .expect("closed Artifact kind derives");
+    assert_eq!(reference.identity_version, "cymule.artifact/2");
+    assert_eq!(
+        reference.artifact_id,
+        "sha256:db4f17f110d4fcb3afb606e7fdce996fc12f4cb9966e0e4956636f6294083250"
+    );
+    assert!(cymule_core::artifact_ref("example/state\0suffix", b"durable").is_err());
+    assert!(cymule_core::artifact_ref("unversioned", b"durable").is_err());
+    assert_ne!(
+        cymule_core::artifact_ref("example/a", b"b\0c").expect("left derives"),
+        cymule_core::artifact_ref("example/a-b", b"c").expect("right derives")
+    );
+
+    let mut machine = Machine::new();
+    machine
+        .put_artifact("example/state", b"durable".to_vec())
+        .expect("Artifact stores");
+    let mut snapshot = machine.snapshot();
+    snapshot.artifacts[0].reference.identity_version = "cymule.artifact/1".to_owned();
+    assert!(matches!(
+        Machine::restore(snapshot),
+        Err(CoreError::Validation(_))
+    ));
+}
+
 fn candidate() -> PlanCandidate {
     PlanCandidate {
         ir_version: cymule_core::IR_VERSION.to_owned(),
@@ -534,7 +562,9 @@ fn machine_snapshot_restores_projection_artifacts_and_command_deduplication() {
         },
     );
     let receipt = machine.submit(start.clone()).expect("run starts");
-    let artifact = machine.put_artifact("example/state", b"durable".to_vec());
+    let artifact = machine
+        .put_artifact("example/state", b"durable".to_vec())
+        .expect("Artifact stores");
     let snapshot = machine.snapshot();
     let snapshot_digest = snapshot.digest().expect("snapshot hashes");
     let command_digests = snapshot.command_digests().expect("commands hash");
@@ -568,7 +598,9 @@ fn machine_snapshot_restores_projection_artifacts_and_command_deduplication() {
             .expect("restored commands hash"),
         command_digests
     );
-    restored.put_artifact("example/state", b"changed".to_vec());
+    restored
+        .put_artifact("example/state", b"changed".to_vec())
+        .expect("Artifact stores");
     assert_ne!(
         restored
             .snapshot()
@@ -625,9 +657,14 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
         .events()
         .map(|event| event.event_id.clone())
         .collect();
-    let mut legacy_snapshot = machine.snapshot();
-    legacy_snapshot.snapshot_version = "cymule.machine-snapshot/1".to_owned();
-    Machine::restore(legacy_snapshot).expect("legacy base-less snapshot restores");
+    for old_version in ["cymule.machine-snapshot/1", "cymule.machine-snapshot/2"] {
+        let mut old_snapshot = machine.snapshot();
+        old_snapshot.snapshot_version = old_version.to_owned();
+        assert!(matches!(
+            Machine::restore(old_snapshot),
+            Err(CoreError::Validation(_))
+        ));
+    }
     let mut unsupported = machine.snapshot();
     unsupported.snapshot_version = "cymule.machine-snapshot/999".to_owned();
     assert!(matches!(
@@ -739,6 +776,7 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
 #[test]
 fn structural_effect_identifiers_are_content_sensitive() {
     let args = ArtifactRef {
+        identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
         artifact_id: format!("sha256:{}", "a".repeat(64)),
         kind: "cymule.effect-args/1".to_owned(),
     };
@@ -791,7 +829,9 @@ fn binding_is_pinned_and_unknown_effect_must_reconcile() {
             },
         ))
         .expect("run starts");
-    let args = machine.put_artifact("cymule.effect-args/1", br#"{"value":1}"#.to_vec());
+    let args = machine
+        .put_artifact("cymule.effect-args/1", br#"{"value":1}"#.to_vec())
+        .expect("Artifact stores");
     machine
         .submit(envelope(
             &machine,
@@ -1198,7 +1238,9 @@ fn replay_orders_a_causal_set_and_reports_retention_loss() {
         right.digest().expect("digest")
     );
 
-    let artifact = machine.put_artifact("test/value", b"retained".to_vec());
+    let artifact = machine
+        .put_artifact("test/value", b"retained".to_vec())
+        .expect("Artifact stores");
     assert_eq!(
         machine.replay_availability(std::slice::from_ref(&artifact)),
         ReplayAvailability::Exact

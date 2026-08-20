@@ -233,8 +233,9 @@ type ResourceHandoff struct {
 
 // ArtifactRef identifies immutable typed bytes in the semantic artifact store.
 type ArtifactRef struct {
-	ArtifactID string `json:"artifact_id"`
-	Kind       string `json:"kind"`
+	IdentityVersion string `json:"identity_version"`
+	ArtifactID      string `json:"artifact_id"`
+	Kind            string `json:"kind"`
 }
 
 // RolloutMode selects shadow, canary, active, or rolled-back future work.

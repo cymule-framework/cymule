@@ -7,6 +7,8 @@
 - Return `EngineFailure` as the typed Go error for remote failures and
   response-less transport failures. Callers use fields or `errors.As`, never
   parse `Error()` text for control flow.
+- Every `ArtifactRef` carries the exact `cymule.artifact/2` identity version;
+  Go preserves it without deriving or upgrading identities.
 - `Definition` and `Invoke` author exact local reusable calls; logical subflow
   registry resolution remains Rust M4 authority.
 - Keep Resource Candidate, Handle, Integrity, Location, and Handoff wire structs

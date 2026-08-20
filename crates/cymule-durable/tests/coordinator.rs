@@ -141,7 +141,9 @@ fn prepared_effect_transition() -> (Machine, Machine, Continuation, EffectDispat
         })
         .expect("Run starts");
     let base = machine.clone();
-    let args = machine.put_artifact("cymule.effect-args/1", b"{}".to_vec());
+    let args = machine
+        .put_artifact("cymule.effect-args/1", b"{}".to_vec())
+        .expect("Artifact stores");
     let binding = "binding:effect/test@1".to_owned();
     let intent_id = effect_intent_id(
         "run:effect-delta",
@@ -204,6 +206,7 @@ fn continuation(plan_id: String) -> Continuation {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
             input: cymule_core::ArtifactRef {
+                identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
                 artifact_id: format!("sha256:{}", "0".repeat(64)),
                 kind: "test/input".to_owned(),
             },
@@ -241,7 +244,9 @@ fn frozen_wait_activation_fixture_matches_the_rust_contract() {
 #[test]
 fn wait_completion_survives_reopen_and_readies_the_continuation() {
     let (mut machine, plan_id) = machine_with_run();
-    let result = machine.put_artifact("example/input", b"accepted".to_vec());
+    let result = machine
+        .put_artifact("example/input", b"accepted".to_vec())
+        .expect("Artifact stores");
     let store = MemoryStore::new();
     let mut coordinator = DurableCoordinator::open(store.clone())
         .expect("store opens")
@@ -309,7 +314,9 @@ fn identified_signal_activation_is_atomic_idempotent_and_reopenable() {
             })
             .expect("signal wait registers");
     }
-    let result = machine.put_artifact("example/signal", b"approved".to_vec());
+    let result = machine
+        .put_artifact("example/signal", b"approved".to_vec())
+        .expect("Artifact stores");
     let activation = WaitActivation::new(
         "activation:signal:1",
         WaitActivationSource::Signal {
@@ -394,7 +401,9 @@ fn identified_signal_activation_is_atomic_idempotent_and_reopenable() {
 #[test]
 fn signal_activation_rejects_wrong_or_multiple_consume_once_targets_atomically() {
     let (mut machine, plan_id) = machine_with_run();
-    let result = machine.put_artifact("example/signal", b"payload".to_vec());
+    let result = machine
+        .put_artifact("example/signal", b"payload".to_vec())
+        .expect("Artifact stores");
     let store = MemoryStore::new();
     let mut coordinator = DurableCoordinator::open(store)
         .expect("store opens")
@@ -447,7 +456,9 @@ fn signal_activation_rejects_wrong_or_multiple_consume_once_targets_atomically()
     let mut unrelated_machine = coordinator
         .restore_machine()
         .expect("durable Machine restores");
-    unrelated_machine.put_artifact("example/unrelated", b"unrelated".to_vec());
+    unrelated_machine
+        .put_artifact("example/unrelated", b"unrelated".to_vec())
+        .expect("Artifact stores");
     let unrelated = WaitActivation::new(
         "activation:signal:unrelated-machine",
         WaitActivationSource::Signal {
@@ -507,7 +518,9 @@ fn timer_activation_is_exactly_identified_and_stale_writers_fail_closed() {
         })
         .expect("timer wait registers");
     let mut stale = DurableCoordinator::open(store).expect("stale view opens");
-    let result = machine.put_artifact("example/timer", b"fired".to_vec());
+    let result = machine
+        .put_artifact("example/timer", b"fired".to_vec())
+        .expect("Artifact stores");
     let activation = WaitActivation::new(
         "activation:timer:1",
         WaitActivationSource::Timer {
@@ -565,7 +578,9 @@ fn conflicting_projection_checkpoint_rejects_wait_activation_atomically() {
         )
         .expect("existing record appends");
     let before = coordinator.revision().expect("revision").to_owned();
-    let result = machine.put_artifact("example/signal", b"accepted".to_vec());
+    let result = machine
+        .put_artifact("example/signal", b"accepted".to_vec())
+        .expect("Artifact stores");
     let activation = WaitActivation::new(
         "activation:atomic-projection",
         WaitActivationSource::Signal {
@@ -609,7 +624,9 @@ fn conflicting_projection_checkpoint_rejects_wait_activation_atomically() {
 #[test]
 fn stale_coordinator_and_stale_dispatch_owner_fail_closed() {
     let (mut machine, plan_id) = machine_with_run();
-    let input = machine.put_artifact("example/effect-input", b"payload".to_vec());
+    let input = machine
+        .put_artifact("example/effect-input", b"payload".to_vec())
+        .expect("Artifact stores");
     let store = MemoryStore::new();
     let mut current = DurableCoordinator::open(store.clone())
         .expect("store opens")
@@ -865,7 +882,9 @@ fn effect_outbox_stages_reject_unrelated_canonical_machine_changes() {
             transition: EffectTransition::Observe(WorldOutcome::Applied),
         },
     );
-    let result = observed.put_artifact("cymule.effect-result/1", b"result".to_vec());
+    let result = observed
+        .put_artifact("cymule.effect-result/1", b"result".to_vec())
+        .expect("Artifact stores");
     let mut unrelated_settlement = observed.clone();
     submit(
         &mut unrelated_settlement,
@@ -913,8 +932,12 @@ fn effect_outbox_stages_reject_unrelated_canonical_machine_changes() {
 #[test]
 fn component_occurrence_is_exactly_once_by_content() {
     let (mut machine, _) = machine_with_run();
-    let input = machine.put_artifact("example/component-input", b"in".to_vec());
-    let output = machine.put_artifact("example/component-output", b"out".to_vec());
+    let input = machine
+        .put_artifact("example/component-input", b"in".to_vec())
+        .expect("Artifact stores");
+    let output = machine
+        .put_artifact("example/component-output", b"out".to_vec())
+        .expect("Artifact stores");
     let store = MemoryStore::new();
     let mut coordinator = DurableCoordinator::open(store)
         .expect("store opens")
@@ -1183,8 +1206,12 @@ fn artifact_journal_checkpoint_rejects_unlisted_machine_changes_atomically() {
         .initialize(&machine)
         .expect("store initializes");
     let mut proposed = coordinator.restore_machine().expect("Machine restores");
-    let result = proposed.put_artifact("example/result", b"result".to_vec());
-    proposed.put_artifact("example/unrelated", b"unrelated".to_vec());
+    let result = proposed
+        .put_artifact("example/result", b"result".to_vec())
+        .expect("Artifact stores");
+    proposed
+        .put_artifact("example/unrelated", b"unrelated".to_vec())
+        .expect("Artifact stores");
     let record = JournalRecord::new(
         "record:artifact-result",
         "example.result/1",
@@ -1213,7 +1240,9 @@ fn artifact_journal_checkpoint_rejects_unlisted_machine_changes_atomically() {
 
     let mut valid = coordinator.restore_machine().expect("Machine restores");
     assert_eq!(
-        valid.put_artifact("example/result", b"result".to_vec()),
+        valid
+            .put_artifact("example/result", b"result".to_vec())
+            .expect("Artifact stores"),
         result
     );
     coordinator

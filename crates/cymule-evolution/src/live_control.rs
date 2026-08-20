@@ -217,19 +217,7 @@ fn validate_identity(kind: &str, value: &str) -> EvolutionResult<()> {
 }
 
 fn validate_artifact(artifact: &cymule_core::ArtifactRef) -> EvolutionResult<()> {
-    let digest = artifact
-        .artifact_id
-        .strip_prefix("sha256:")
-        .ok_or_else(|| {
-            EvolutionError::Validation("publication evidence must be content-addressed".to_owned())
-        })?;
-    if digest.len() != 64
-        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || artifact.kind.is_empty()
-    {
-        return Err(EvolutionError::Validation(
-            "publication evidence Artifact is malformed".to_owned(),
-        ));
-    }
-    Ok(())
+    artifact
+        .validate()
+        .map_err(|error| EvolutionError::Validation(error.to_string()))
 }

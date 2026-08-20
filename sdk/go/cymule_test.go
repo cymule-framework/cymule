@@ -251,8 +251,9 @@ func TestWaitActivationValidatesThroughRustEngine(t *testing.T) {
 		"signal:continue",
 		[]string{"wait:shared:1"},
 		ArtifactRef{
-			ArtifactID: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-			Kind:       "cymule.wait-activation-result/1",
+			IdentityVersion: "cymule.artifact/2",
+			ArtifactID:      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Kind:            "cymule.wait-activation-result/1",
 		},
 	)
 	fixtureBytes, err := os.ReadFile(fixturePath)
@@ -337,8 +338,9 @@ func TestVirtualWorkQueryAndControlFixturesStayExact(t *testing.T) {
 		1,
 		101,
 		ArtifactRef{
-			ArtifactID: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-			Kind:       "example/result",
+			IdentityVersion: "cymule.artifact/2",
+			ArtifactID:      "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+			Kind:            "example/result",
 		},
 	)
 	encoded, err := json.Marshal(command)

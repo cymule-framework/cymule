@@ -28,6 +28,9 @@
   effect occurrence keys, scopes, risk profiles, and version information.
 - Cross-language fixtures must produce the same Plan ID, Resource ID, and
   execution result.
+- Every SDK preserves the required `cymule.artifact/2` identity version on every
+  Artifact reference. SDKs neither derive Artifact IDs nor substitute a local
+  typed-contract registry alias for the exact contract pinned by Rust.
 - Wait activation clients must preserve `cymule.wait-activation/1` delivery,
   source, exact targets, and Artifact identity. All SDKs submit the shared
   fixture to the Rust Engine; only a durable runtime admits it against state.

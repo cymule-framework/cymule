@@ -66,11 +66,9 @@ impl WorkspaceScopeRequest {
                 )));
             }
         }
-        if self.overlay.artifact_id.is_empty() || self.overlay.kind.is_empty() {
-            return Err(AgentError::Validation(
-                "workspace overlay artifact identity and kind must not be empty".to_owned(),
-            ));
-        }
+        self.overlay
+            .validate()
+            .map_err(|error| AgentError::Validation(error.to_string()))?;
         Ok(())
     }
 }

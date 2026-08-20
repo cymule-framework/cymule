@@ -9,6 +9,11 @@
   Failure categories, phases, contract sides, issue bounds, and retry
   dispositions are closed and must match Rust plus every SDK. Contract issues
   preserve separate instance `path` and `schema_path` JSON Pointers.
+- Every public `ArtifactRef` requires `identity_version = cymule.artifact/2`, a
+  lowercase SHA-256 ID, and a closed lowercase path kind. The v2 identity and
+  machine snapshot v3 replace their predecessors without fallback. The
+  `artifact-type-contract.schema.json` file freezes recoverable canonical JSON
+  contracts; opaque Artifacts do not use that schema.
 - `cymule.ir/2` adds the closed `invoke` operation. Future operation additions
   require a new IR version rather than widening this frozen schema in place.
 - Keep semantic validation in the Rust kernel. JSON Schema validates wire shape;

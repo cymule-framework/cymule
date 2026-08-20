@@ -19,6 +19,10 @@ Use this precedence order when guidance conflicts:
 - Canonical truth consists of sealed plans, causal events, and immutable
   artifacts. Views, indexes, graphs, attention items, and schedulers are
   rebuildable projections.
+- Every Artifact reference pins `cymule.artifact/2`; its sole identity authority
+  is the core length-prefixed helper. Typed JSON references additionally pin the
+  exact content-addressed Artifact type contract in their kind. Opaque Artifact
+  bytes remain schema-free. Do not retain v1 identity or snapshot fallback paths.
 - Cross-Run resources use provider-neutral, versioned descriptors. Keep content
   identity, media/kind, shape, and replay evidence separate from resolver
   locators and access grants. Never persist credentials in an Artifact or claim

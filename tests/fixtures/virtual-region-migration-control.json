@@ -38,6 +38,7 @@
     ],
     "migration_binding": "binding:migrator/fixture@1",
     "coverage_evidence": {
+      "identity_version": "cymule.artifact/2",
       "artifact_id": "sha256:123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
       "kind": "example/migration-evidence"
     }

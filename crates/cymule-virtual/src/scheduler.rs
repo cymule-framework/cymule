@@ -2245,6 +2245,7 @@ fn virtual_certificate_id(certificate: &VirtualCompactionCertificate) -> Virtual
 }
 
 fn validate_virtual_certificate(certificate: &VirtualCompactionCertificate) -> VirtualResult<()> {
+    validate_artifact(&certificate.rehydration_manifest)?;
     if certificate.certificate_version != VIRTUAL_COMPACTION_CERTIFICATE_VERSION
         || certificate.certificate_id != virtual_certificate_id(certificate)?
         || certificate.source_causal_cut.is_empty()
@@ -2254,7 +2255,6 @@ fn validate_virtual_certificate(certificate: &VirtualCompactionCertificate) -> V
         || certificate.summary_state_digest.is_empty()
         || certificate.compactor_binding.is_empty()
         || certificate.compactor_revision.is_empty()
-        || certificate.rehydration_manifest.artifact_id.is_empty()
         || certificate.rehydration_manifest.kind != crate::VIRTUAL_ARCHIVE_MANIFEST_KIND
         || !certificate.unresolved_obligations.is_empty()
         || certificate
@@ -2383,14 +2383,13 @@ fn validate_region(region: &VirtualRegion) -> VirtualResult<()> {
 }
 
 fn validate_work_item(item: &WorkItem, region: &VirtualRegion) -> VirtualResult<()> {
+    validate_artifact(&item.payload)?;
     if item.region_id != region.region_id || item.run_id != region.run_id {
         return Err(VirtualError::Validation(
             "materialized work escaped its region or Run".to_owned(),
         ));
     }
     if item.work_id.is_empty()
-        || item.payload.artifact_id.is_empty()
-        || item.payload.kind.is_empty()
         || item.cost == 0
         || item.capability.as_ref().is_some_and(String::is_empty)
     {
@@ -2485,12 +2484,9 @@ fn validate_resolution(resolution: &WorkResolution) -> VirtualResult<()> {
 }
 
 fn validate_artifact(artifact: &cymule_core::ArtifactRef) -> VirtualResult<()> {
-    if artifact.artifact_id.is_empty() || artifact.kind.is_empty() {
-        return Err(VirtualError::Validation(
-            "work disposition Artifact identity and kind must not be empty".to_owned(),
-        ));
-    }
-    Ok(())
+    artifact
+        .validate()
+        .map_err(|error| VirtualError::Validation(error.to_string()))
 }
 
 fn validate_park_reason(reason: &ParkReason) -> VirtualResult<()> {

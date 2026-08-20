@@ -29,11 +29,14 @@ The following domains evolve independently:
 
 | Domain | Current version | Compatibility rule |
 | --- | --- | --- |
-| Semantic specification | `cymule.semantic/1` | transition meaning is frozen |
+| Semantic specification | `cymule.semantic/2` | Artifact v2 transition meaning is frozen |
 | Canonical IR | `cymule.ir/2` | unknown operations are rejected |
 | Canonical encoding | `cymule.jcs/1` | RFC 8785 JSON, SHA-256 IDs |
-| Event schema | `cymule.event/1` | readers reject unknown semantic events |
-| Command protocol | `cymule.command/1` | typed envelope and stable error codes |
+| Artifact identity | `cymule.artifact/2` | closed kind and explicit length-prefixed bytes |
+| Artifact type contract | `cymule.artifact-type-contract/1` | exact contract is pinned in typed references |
+| Machine snapshot | `cymule.machine-snapshot/3` | only Artifact v2 references are accepted |
+| Event schema | `cymule.event/2` | readers reject unknown semantic events |
+| Command protocol | `cymule.command/2` | typed envelope and stable error codes |
 | Engine protocol | `cymule.engine/1` | one versioned request and success-or-failure response envelope |
 | Plugin protocol | `cymule.plugin/1` | capability negotiation is explicit |
 | Resource descriptor | `cymule.resource/1` | identity excludes realization locations |
@@ -120,9 +123,35 @@ hashed preimage. Duplicate JSON property names and non-finite numbers are
 invalid. A writer MUST validate the semantic schema before hashing.
 
 `PlanId` identifies a sealed plan. `EventId` identifies the event payload and
-causal parents. `ArtifactId` identifies artifact type metadata and bytes.
+causal parents. Every `ArtifactRef` MUST carry
+`identity_version = "cymule.artifact/2"`. Its `ArtifactId` is SHA-256 over the fixed identity-version
+bytes, a big-endian 32-bit Artifact-kind length and kind bytes, then a big-endian
+64-bit content length and the immutable bytes. Artifact kinds are closed,
+lowercase ASCII path segments and MUST NOT contain control characters or
+ambiguous delimiters. Snapshot restore MUST recompute this exact identity.
+There is no v1 reader or writer.
 
-### 5.1 Cross-Run resource values
+### 5.1 Typed Artifact contracts
+
+An opaque Artifact needs only its versioned kind and immutable bytes. Files,
+directories, snapshots, and provider payloads MUST NOT be forced through a
+schema. A typed canonical JSON Artifact additionally pins its exact immutable
+`cymule.artifact-type-contract/1` ID in its reference kind. The contract retains
+the logical Artifact kind, `application/json` media type, complete document-local
+JSON Schema Draft 2020-12 value, and schema digest. Different contracts MUST
+produce different Artifact references even for identical bytes.
+
+Type contracts are themselves retained as canonical content-addressed Artifacts
+so a registry can be reconstructed after process loss. Encoding MUST validate
+before emitting RFC 8785 bytes. Decoding MUST derive the contract ID from the
+Artifact reference, verify Artifact identity and canonical bytes, then validate
+the value. A caller-supplied registry alias MUST NOT reinterpret a retained
+Artifact. Validation issues expose only contract ID and JSON Pointer paths; they
+MUST NOT include rejected instance values. Contract code performs no I/O;
+resource resolution, clocks, networks, and conversions that require I/O remain
+plugin responsibilities.
+
+### 5.2 Cross-Run resource values
 
 M1 Artifact exchange includes a versioned provider-neutral Resource descriptor.
 A Resource has a logical shape (`inline`, `object`, `collection`, `directory`,
@@ -654,12 +683,14 @@ binding, or required authority MUST downgrade the claim. The runtime MUST NOT
 silently regenerate missing data. M0 verifies exact canonical state replay; its
 one-shot component calls are not an exact execution-replay implementation.
 
-`cymule.machine-snapshot/2` MAY replace a causally closed Event prefix with an
+`cymule.machine-snapshot/3` MAY replace a causally closed Event prefix with an
 authenticated base projection, cumulative prefix digest, and exact compacted
 Event identities. Every remaining Event stays in full and MUST have all parents
 in either the base or retained suffix. Restore verifies the base projection,
-replays the suffix, and retains command receipts so old idempotent commands do
-not append duplicate Events. M1 compaction is a CAS transition with explicit
+every v2 Artifact reference, replays the suffix, and retains command receipts so
+old idempotent commands do not append duplicate Events. Older snapshot versions
+are rejected rather than upgraded implicitly. M1 compaction is a CAS transition
+with explicit
 lineage; stale writers lose and acknowledgement loss reopens to the committed
 base. Compaction preserves current state replay but does not claim the removed
 Event bodies remain available for historical inspection unless a higher-profile

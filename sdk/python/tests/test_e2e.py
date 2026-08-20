@@ -223,6 +223,7 @@ class EndToEndTest(unittest.TestCase):
             "signal:continue",
             ["wait:shared:1"],
             {
+                "identity_version": "cymule.artifact/2",
                 "artifact_id": (
                     "sha256:0123456789abcdef0123456789abcdef"
                     "0123456789abcdef0123456789abcdef"
@@ -252,6 +253,7 @@ class EndToEndTest(unittest.TestCase):
             1,
             101,
             {
+                "identity_version": "cymule.artifact/2",
                 "artifact_id": (
                     "sha256:abcdef0123456789abcdef0123456789"
                     "abcdef0123456789abcdef0123456789"

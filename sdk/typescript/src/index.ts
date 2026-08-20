@@ -41,6 +41,7 @@ export interface ResourceHandoff {
 }
 
 export interface ArtifactRef {
+  identity_version: "cymule.artifact/2";
   artifact_id: string;
   kind: string;
 }

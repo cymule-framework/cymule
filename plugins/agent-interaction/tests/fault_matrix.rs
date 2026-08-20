@@ -114,6 +114,7 @@ fn requests() -> Vec<AgentHostRequest> {
         AgentHostRequest::Workspace(WorkspaceChange {
             change_id: "workspace:matrix".to_owned(),
             overlay: ArtifactRef {
+                identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
                 artifact_id: format!("sha256:{}", "1".repeat(64)),
                 kind: "workspace/overlay".to_owned(),
             },

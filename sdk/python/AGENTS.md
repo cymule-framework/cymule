@@ -9,6 +9,8 @@
   responses. A timed-out mutating Run is an unknown-world outcome, not a safe
   generic retry.
 - The Rust engine remains the only authoritative sealer and reducer.
+- `ArtifactRef` is a closed `TypedDict` requiring `identity_version =
+  cymule.artifact/2`; Python never derives Artifact identities.
 - `definition()` and `invoke()` emit exact `cymule.ir/2` wire records. Python
   must not resolve or cache logical subflow heads.
 - Resource builders preserve exact wire names and send candidates to the Rust

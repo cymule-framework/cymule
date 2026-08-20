@@ -97,7 +97,7 @@ pub struct MachineSnapshot {
 
 impl MachineSnapshot {
     /// Current snapshot schema version.
-    pub const VERSION: &'static str = "cymule.machine-snapshot/2";
+    pub const VERSION: &'static str = "cymule.machine-snapshot/3";
 
     /// Content digest used by conditional durable-store writes.
     pub fn digest(&self) -> Result<String> {
@@ -151,9 +151,7 @@ impl Machine {
 
     /// Restore a Machine and deterministically rebuild all projections.
     pub fn restore(snapshot: MachineSnapshot) -> Result<Self> {
-        if snapshot.snapshot_version != MachineSnapshot::VERSION
-            && snapshot.snapshot_version != "cymule.machine-snapshot/1"
-        {
+        if snapshot.snapshot_version != MachineSnapshot::VERSION {
             return Err(CoreError::Validation(format!(
                 "unsupported machine snapshot version {:?}",
                 snapshot.snapshot_version
@@ -164,7 +162,8 @@ impl Machine {
             machine.insert_plan(plan)?;
         }
         for artifact in snapshot.artifacts {
-            let restored = machine.put_artifact(artifact.reference.kind.clone(), artifact.bytes);
+            artifact.reference.validate()?;
+            let restored = machine.put_artifact(artifact.reference.kind.clone(), artifact.bytes)?;
             if restored != artifact.reference {
                 return Err(CoreError::IdentityMismatch(format!(
                     "artifact ID {} does not match its bytes",
@@ -289,22 +288,22 @@ impl Machine {
     }
 
     /// Store immutable typed bytes and return their content reference.
-    pub fn put_artifact(&mut self, kind: impl Into<String>, bytes: Vec<u8>) -> ArtifactRef {
-        let reference = artifact_ref(kind, &bytes);
+    pub fn put_artifact(&mut self, kind: impl Into<String>, bytes: Vec<u8>) -> Result<ArtifactRef> {
+        let reference = artifact_ref(kind, &bytes)?;
         self.artifacts
             .entry(reference.artifact_id.clone())
             .or_insert_with(|| ArtifactRecord {
                 reference: reference.clone(),
                 bytes,
             });
-        reference
+        Ok(reference)
     }
 
     /// Read an immutable artifact.
     pub fn artifact(&self, reference: &ArtifactRef) -> Option<&ArtifactRecord> {
         self.artifacts
             .get(&reference.artifact_id)
-            .filter(|record| record.reference.kind == reference.kind)
+            .filter(|record| record.reference == *reference)
     }
 
     /// Remove an artifact to exercise retention behavior in conformance tests.

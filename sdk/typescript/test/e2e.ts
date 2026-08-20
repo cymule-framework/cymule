@@ -87,6 +87,7 @@ test("TypeScript wait activation validates through the Rust engine", () => {
     "signal:continue",
     ["wait:shared:1"],
     {
+      identity_version: "cymule.artifact/2",
       artifact_id: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       kind: "cymule.wait-activation-result/1",
     },
@@ -128,6 +129,7 @@ test("TypeScript virtual work query and control fixtures stay exact", () => {
     1,
     101,
     {
+      identity_version: "cymule.artifact/2",
       artifact_id: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
       kind: "example/result",
     },

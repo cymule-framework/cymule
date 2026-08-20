@@ -33,6 +33,9 @@
 - Every SDK submits the shared wait activation fixture to the Rust Engine. This
   proves the closed wire boundary only; stateful source and consume-once cases
   stay in the M1 fault suite.
+- Shared Artifact fixtures always carry `identity_version = cymule.artifact/2`;
+  schema validation must reject missing or legacy identity versions in every
+  public protocol family.
 - Every SDK parses the same virtual work occurrence and constructs the same
   owner/work-epoch/lease-epoch/time-fenced control command. Stateful reduction
   remains in the Rust M3 controller and its M1 checkpoint fault suite.

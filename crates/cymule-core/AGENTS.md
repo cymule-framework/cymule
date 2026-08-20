@@ -5,8 +5,10 @@
 - Never read the clock, random source, environment, filesystem, or network.
 - Canonical IDs are computed only after semantic validation with the versioned
   JCS encoding in `canonical.rs`.
-- `artifact_ref` is the sole authority for the `cymule.artifact/1` identity
-  preimage. Higher layers must call it rather than copy its framing.
+- `artifact_ref` is the sole authority for the collision-free,
+  length-prefixed `cymule.artifact/2` identity preimage. Artifact references pin
+  this identity version; higher layers must call the helper rather than copy its
+  framing. Snapshot v3 is the only accepted snapshot wire version.
 - Reducers are pure over prior projection plus event. Do not hide mutations in
   caches or global state.
 - Preserve closed effect, scope, attempt, and Run state machines. Illegal jumps

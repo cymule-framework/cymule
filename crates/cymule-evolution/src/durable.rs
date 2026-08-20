@@ -338,7 +338,9 @@ fn checkpoint_artifacts<S: DurableStore>(
     let record = checkpoint_record(coordinator, controller, journal_id, checkpoint_id)?;
     let mut machine = coordinator.restore_machine().map_err(durable_error)?;
     for artifact in artifacts {
-        let derived = machine.put_artifact(artifact.reference.kind.clone(), artifact.bytes);
+        let derived = machine
+            .put_artifact(artifact.reference.kind.clone(), artifact.bytes)
+            .map_err(|error| EvolutionError::Validation(error.to_string()))?;
         if derived != artifact.reference {
             return Err(EvolutionError::Validation(format!(
                 "Artifact {} does not match plugin output bytes",

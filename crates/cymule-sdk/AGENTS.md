@@ -14,6 +14,9 @@
   synthesize `transport_failure` only when no valid Engine envelope was received.
 - Resource builders emit `cymule.resource/1` candidates. Only the Rust Engine
   seals Resource IDs; the SDK must not duplicate the resource canonicalizer.
+- Re-export the closed `ArtifactRef` with its required `cymule.artifact/2`
+  identity version. Typed contract selection remains pinned by the reference,
+  never by a mutable SDK alias.
 - Wait activation DTOs preserve stable delivery, source, target, and Artifact
   identities. CLI verification covers the closed record; only a durable runtime
   CAS can admit it against pending waits and enforce consume-once semantics.

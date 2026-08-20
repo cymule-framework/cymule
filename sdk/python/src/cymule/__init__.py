@@ -6,10 +6,17 @@ import copy
 import json
 import subprocess
 from pathlib import Path
-from typing import Any, Protocol, TypedDict
+from typing import Any, Literal, Protocol, TypedDict
 
 Json = None | bool | int | float | str | list["Json"] | dict[str, "Json"]
-ArtifactRef = dict[str, str]
+class ArtifactRef(TypedDict):
+    """One immutable Artifact reference under the closed identity version."""
+
+    identity_version: Literal["cymule.artifact/2"]
+    artifact_id: str
+    kind: str
+
+
 ParkReason = dict[str, str]
 WorkResolution = dict[str, Any]
 EvolutionCommand = dict[str, Any]

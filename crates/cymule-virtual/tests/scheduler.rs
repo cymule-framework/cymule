@@ -83,6 +83,10 @@ struct TestRegionMigrator {
     binding: String,
 }
 
+fn artifact(kind: &str, value: impl AsRef<[u8]>) -> ArtifactRef {
+    cymule_core::artifact_ref(kind, value.as_ref()).expect("test Artifact reference derives")
+}
+
 impl RegionSource for MillionItemSource {
     fn materialize(
         &mut self,
@@ -96,10 +100,7 @@ impl RegionSource for MillionItemSource {
                 work_id: format!("{}:{index}", region.region_id),
                 region_id: region.region_id.clone(),
                 run_id: region.run_id.clone(),
-                payload: ArtifactRef {
-                    artifact_id: format!("artifact:{index}"),
-                    kind: "example/work".to_owned(),
-                },
+                payload: artifact("example/work", index.to_be_bytes()),
                 capability: Some("cpu".to_owned()),
                 priority: 0,
                 cost: 1,
@@ -130,10 +131,7 @@ impl RegionSource for FailsAfterFirstRegion {
                 work_id: "region:a:partial".to_owned(),
                 region_id: region.region_id.clone(),
                 run_id: region.run_id.clone(),
-                payload: ArtifactRef {
-                    artifact_id: "artifact:partial".to_owned(),
-                    kind: "example/work".to_owned(),
-                },
+                payload: artifact("example/work", b"partial"),
                 capability: None,
                 priority: 0,
                 cost: 1,
@@ -179,10 +177,7 @@ impl RegionSource for FairSource {
                     work_id: format!("{}:{index}", region.region_id),
                     region_id: region.region_id.clone(),
                     run_id: region.run_id.clone(),
-                    payload: ArtifactRef {
-                        artifact_id: format!("artifact:fair:{index}"),
-                        kind: "example/work".to_owned(),
-                    },
+                    payload: artifact("example/work", format!("fair:{index}")),
                     capability: Some("cpu".to_owned()),
                     priority: 0,
                     cost,
@@ -215,10 +210,7 @@ impl RegionSource for PriorityAgingSource {
                     },
                     region_id: region.region_id.clone(),
                     run_id: region.run_id.clone(),
-                    payload: ArtifactRef {
-                        artifact_id: format!("artifact:aging:{index}"),
-                        kind: "example/work".to_owned(),
-                    },
+                    payload: artifact("example/work", format!("aging:{index}")),
                     capability: Some("cpu".to_owned()),
                     priority: if index == 0 { 0 } else { 5 },
                     cost: 1,
@@ -247,10 +239,7 @@ impl RegionSource for CompletedSource {
                     work_id: format!("{}:complete", region.region_id),
                     region_id: region.region_id.clone(),
                     run_id: region.run_id.clone(),
-                    payload: ArtifactRef {
-                        artifact_id: "artifact:completed-input".to_owned(),
-                        kind: "example/work".to_owned(),
-                    },
+                    payload: artifact("example/work", b"completed-input"),
                     capability: Some("cpu".to_owned()),
                     priority: 0,
                     cost: 1,
@@ -434,10 +423,7 @@ fn weighted_dispatch_counts(run_b_weight: u32, run_b_cost: u64) -> (usize, usize
                     &actual.item.work_id,
                     &owner,
                     actual.epoch,
-                    ArtifactRef {
-                        artifact_id: format!("artifact:fair-result:{step}"),
-                        kind: "example/result".to_owned(),
-                    },
+                    artifact("example/result", format!("fair-result:{step}")),
                 )
                 .expect("work succeeds");
         } else {
@@ -451,10 +437,7 @@ fn weighted_dispatch_counts(run_b_weight: u32, run_b_cost: u64) -> (usize, usize
                     &claim.item.work_id,
                     &owner,
                     claim.epoch,
-                    ArtifactRef {
-                        artifact_id: format!("artifact:fair-result:{step}"),
-                        kind: "example/result".to_owned(),
-                    },
+                    artifact("example/result", format!("fair-result:{step}")),
                 )
                 .expect("work succeeds");
         }
@@ -508,6 +491,7 @@ fn durable_machine_with_wait() -> (Machine, Continuation, WaitCondition) {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
             input: cymule_core::ArtifactRef {
+                identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
                 artifact_id: format!("sha256:{}", "0".repeat(64)),
                 kind: "test/input".to_owned(),
             },
@@ -595,10 +579,7 @@ fn million_item_regions_keep_a_bounded_fair_frontier_across_restore() {
             &first.item.work_id,
             "worker:1",
             first.epoch,
-            ArtifactRef {
-                artifact_id: "artifact:result:1".to_owned(),
-                kind: "example/result".to_owned(),
-            },
+            artifact("example/result", b"result:1"),
         )
         .expect("current owner completes");
     assert!(
@@ -607,10 +588,7 @@ fn million_item_regions_keep_a_bounded_fair_frontier_across_restore() {
                 &second.item.work_id,
                 "worker:wrong",
                 second.epoch,
-                ArtifactRef {
-                    artifact_id: "artifact:result:2".to_owned(),
-                    kind: "example/result".to_owned(),
-                },
+                artifact("example/result", b"result:2"),
             )
             .is_err()
     );
@@ -660,10 +638,7 @@ fn bounded_materialization_round_robin_keeps_every_region_visible() {
                 &claim.item.work_id,
                 &owner,
                 claim.epoch,
-                ArtifactRef {
-                    artifact_id: format!("artifact:materialize-result:{step}"),
-                    kind: "example/result".to_owned(),
-                },
+                artifact("example/result", format!("materialize-result:{step}")),
             )
             .expect("work succeeds");
     }
@@ -714,10 +689,7 @@ fn priority_aging_prevents_starvation_under_continuous_high_priority_arrivals() 
                 &claim.item.work_id,
                 &owner,
                 claim.epoch,
-                ArtifactRef {
-                    artifact_id: format!("artifact:aging-result:{step}"),
-                    kind: "example/result".to_owned(),
-                },
+                artifact("example/result", format!("aging-result:{step}")),
             )
             .expect("work succeeds");
         if is_low {
@@ -742,10 +714,7 @@ fn region_split_merge_retires_sources_without_rewriting_materialized_work() {
         .iter()
         .map(|item| item.work_id.clone())
         .collect();
-    let evidence = ArtifactRef {
-        artifact_id: "artifact:migration:split-evidence".to_owned(),
-        kind: "example/migration-evidence".to_owned(),
-    };
+    let evidence = artifact("example/migration-evidence", b"split-evidence");
     let request = RegionMigrationRequest {
         migration_id: "migration:split:a".to_owned(),
         kind: RegionMigrationKind::Split,
@@ -778,10 +747,7 @@ fn region_split_merge_retires_sources_without_rewriting_materialized_work() {
     assert!(matches!(
         scheduler.migrate(
             &mut TestRegionMigrator {
-                evidence: ArtifactRef {
-                    artifact_id: "artifact:migration:wrong-evidence".to_owned(),
-                    kind: "example/migration-evidence".to_owned(),
-                },
+                evidence: artifact("example/migration-evidence", b"wrong-evidence"),
                 corrupt_binding: false,
                 binding: "binding:migrator/1".to_owned(),
             },
@@ -840,10 +806,7 @@ fn region_split_merge_retires_sources_without_rewriting_materialized_work() {
         target_count: 1,
         migration_binding: "binding:migrator/1".to_owned(),
     };
-    let merge_evidence = ArtifactRef {
-        artifact_id: "artifact:migration:merge-evidence".to_owned(),
-        kind: "example/migration-evidence".to_owned(),
-    };
+    let merge_evidence = artifact("example/migration-evidence", b"merge-evidence");
     let merge_plan = scheduler
         .plan_migration(
             &mut TestRegionMigrator {
@@ -882,10 +845,7 @@ fn cursor_change_rejects_migration_without_partial_retirement() {
         target_count: 2,
         migration_binding: "binding:migrator/1".to_owned(),
     };
-    let stale_evidence = ArtifactRef {
-        artifact_id: "artifact:migration:stale".to_owned(),
-        kind: "example/migration-evidence".to_owned(),
-    };
+    let stale_evidence = artifact("example/migration-evidence", b"stale");
     let plan = scheduler
         .plan_migration(
             &mut TestRegionMigrator {
@@ -940,10 +900,12 @@ fn durable_region_migration_reopens_and_stale_cas_retires_nothing() {
     let mut stale_scheduler = DurableVirtualController::load(&stale, "journal:virtual", limits())
         .expect("stale scheduler restores");
 
-    let evidence = machine.put_artifact(
-        "example/migration-evidence",
-        b"complete non-overlapping split".to_vec(),
-    );
+    let evidence = machine
+        .put_artifact(
+            "example/migration-evidence",
+            b"complete non-overlapping split".to_vec(),
+        )
+        .expect("Artifact stores");
     let request = RegionMigrationRequest {
         migration_id: "migration:durable-split".to_owned(),
         kind: RegionMigrationKind::Split,
@@ -1308,7 +1270,9 @@ fn wait_activation_and_indexed_virtual_wake_share_one_m1_cas() {
         .expect("work parks");
     let mut stale_scheduler = scheduler.clone();
 
-    let result = machine.put_artifact("cymule.wait-activation-result/1", b"approved".to_vec());
+    let result = machine
+        .put_artifact("cymule.wait-activation-result/1", b"approved".to_vec())
+        .expect("Artifact stores");
     let activation = WaitActivation::new(
         "activation:virtual:1",
         WaitActivationSource::Signal {
@@ -1435,10 +1399,7 @@ fn work_occurrence_retry_success_and_stale_fencing_are_explicit() {
         scheduler.snapshot().occurrences[&first.occurrence_id].state,
         WorkOccurrenceState::Running
     );
-    let error = ArtifactRef {
-        artifact_id: "artifact:retry-error".to_owned(),
-        kind: "example/error".to_owned(),
-    };
+    let error = artifact("example/error", b"retry-error");
     let retry = WorkResolution::Retry {
         error: error.clone(),
         next_reason: None,
@@ -1472,10 +1433,7 @@ fn work_occurrence_retry_success_and_stale_fencing_are_explicit() {
     assert_eq!(second.item.work_id, first.item.work_id);
     assert_eq!(second.epoch, first.epoch + 1);
     assert_ne!(second.occurrence_id, first.occurrence_id);
-    let result = ArtifactRef {
-        artifact_id: "artifact:success".to_owned(),
-        kind: "example/result".to_owned(),
-    };
+    let result = artifact("example/result", b"success");
     assert!(matches!(
         scheduler.succeed(&first.item.work_id, "worker:1", first.epoch, result.clone(),),
         Err(VirtualError::Conflict(_))
@@ -1519,10 +1477,7 @@ fn retry_parking_failure_and_cancellation_have_distinct_terminal_records() {
             "worker:park",
             parked_claim.epoch,
             &WorkResolution::Retry {
-                error: ArtifactRef {
-                    artifact_id: "artifact:retry".to_owned(),
-                    kind: "example/error".to_owned(),
-                },
+                error: artifact("example/error", b"retry"),
                 next_reason: Some(retry_reason.clone()),
             },
         )
@@ -1540,10 +1495,7 @@ fn retry_parking_failure_and_cancellation_have_distinct_terminal_records() {
             "worker:fail",
             failed_claim.epoch,
             &WorkResolution::Failed {
-                error: ArtifactRef {
-                    artifact_id: "artifact:terminal-error".to_owned(),
-                    kind: "example/error".to_owned(),
-                },
+                error: artifact("example/error", b"terminal-error"),
             },
         )
         .expect("terminal failure records");
@@ -1559,10 +1511,7 @@ fn retry_parking_failure_and_cancellation_have_distinct_terminal_records() {
             "worker:cancel",
             cancelled_claim.epoch,
             &WorkResolution::Cancelled {
-                reason: ArtifactRef {
-                    artifact_id: "artifact:cancel-reason".to_owned(),
-                    kind: "example/cancellation".to_owned(),
-                },
+                reason: artifact("example/cancellation", b"cancel-reason"),
             },
         )
         .expect("cancellation records");
@@ -1572,10 +1521,7 @@ fn retry_parking_failure_and_cancellation_have_distinct_terminal_records() {
             &cancelled_claim.item.work_id,
             "worker:cancel",
             cancelled_claim.epoch,
-            ArtifactRef {
-                artifact_id: "artifact:late".to_owned(),
-                kind: "example/result".to_owned(),
-            },
+            artifact("example/result", b"late"),
         ),
         Err(VirtualError::Conflict(_))
     ));
@@ -1616,7 +1562,9 @@ fn durable_claim_and_result_survive_reopen_and_stale_cas() {
     let mut stale_scheduler = DurableVirtualController::load(&stale, "journal:virtual", limits())
         .expect("stale scheduler restores");
 
-    let result = machine.put_artifact("example/result", b"durable result".to_vec());
+    let result = machine
+        .put_artifact("example/result", b"durable result".to_vec())
+        .expect("Artifact stores");
     let resolution = WorkResolution::Succeeded {
         result: result.clone(),
     };
@@ -1900,10 +1848,7 @@ fn completed_scheduler() -> (VirtualScheduler, String) {
             &claim.item.work_id,
             "worker:completed",
             claim.epoch,
-            ArtifactRef {
-                artifact_id: "artifact:completed-output".to_owned(),
-                kind: "example/result".to_owned(),
-            },
+            artifact("example/result", b"completed-output"),
         )
         .expect("work succeeds");
     (scheduler, claim.occurrence_id)
@@ -2327,7 +2272,9 @@ fn multi_worker_claim_renew_recover_and_late_output_matrix_is_fenced() {
         renewed
     );
 
-    let failure = machine.put_artifact("example/worker-crash", b"worker A expired".to_vec());
+    let failure = machine
+        .put_artifact("example/worker-crash", b"worker A expired".to_vec())
+        .expect("Artifact stores");
     let too_early = VirtualRecoveryCommand {
         control_version: VIRTUAL_RECOVERY_CONTROL_VERSION.to_owned(),
         command_id: "command:recover:too-early".to_owned(),
@@ -2354,7 +2301,9 @@ fn multi_worker_claim_renew_recover_and_late_output_matrix_is_fenced() {
     ));
     assert_eq!(scheduler.snapshot(), before_early_recovery);
 
-    let expired_result = machine.put_artifact("example/result", b"expired worker output".to_vec());
+    let expired_result = machine
+        .put_artifact("example/result", b"expired worker output".to_vec())
+        .expect("Artifact stores");
     let before_expired_result = scheduler.snapshot();
     assert!(matches!(
         DurableVirtualController::resolve_command_and_checkpoint(
@@ -2420,10 +2369,7 @@ fn multi_worker_claim_renew_recover_and_late_output_matrix_is_fenced() {
             &active_a.item.work_id,
             "worker:a",
             active_a.epoch,
-            ArtifactRef {
-                artifact_id: "artifact:late-worker-a".to_owned(),
-                kind: "example/result".to_owned(),
-            },
+            artifact("example/result", b"late-worker-a"),
         ),
         Err(VirtualError::Conflict(_))
     ));
@@ -2448,7 +2394,9 @@ fn multi_worker_claim_renew_recover_and_late_output_matrix_is_fenced() {
     assert_eq!(active_b.epoch, active_a.epoch + 1);
     assert_ne!(active_b.occurrence_binding, active_a.occurrence_binding);
 
-    let result = machine.put_artifact("example/result", b"worker B result".to_vec());
+    let result = machine
+        .put_artifact("example/result", b"worker B result".to_vec())
+        .expect("Artifact stores");
     DurableVirtualController::resolve_command_and_checkpoint(
         &mut current,
         &mut scheduler,
@@ -2668,7 +2616,9 @@ fn claim_renewal_and_recovery_receipt_loss_reopen_to_one_transition() {
     .expect("renewal receipt replays after lost acknowledgement");
     assert_eq!(renewal_receipt.lease.epoch, 2);
 
-    let failure = machine.put_artifact("example/worker-crash", b"expired worker".to_vec());
+    let failure = machine
+        .put_artifact("example/worker-crash", b"expired worker".to_vec())
+        .expect("Artifact stores");
     let recovery_command = VirtualRecoveryCommand {
         control_version: VIRTUAL_RECOVERY_CONTROL_VERSION.to_owned(),
         command_id: "command:lost-receipt:recover".to_owned(),

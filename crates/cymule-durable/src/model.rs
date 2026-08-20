@@ -523,21 +523,9 @@ impl WaitActivation {
                 "wait activation target identity must not be empty".to_owned(),
             ));
         }
-        let Some(digest) = self.result.artifact_id.strip_prefix("sha256:") else {
-            return Err(DurableError::Validation(
-                "wait activation result must use a sha256 Artifact identity".to_owned(),
-            ));
-        };
-        if digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            || self.result.kind.is_empty()
-        {
-            return Err(DurableError::Validation(
-                "wait activation result Artifact is malformed".to_owned(),
-            ));
-        }
+        self.result
+            .validate()
+            .map_err(|error| DurableError::Validation(error.to_string()))?;
         self.source.verify()
     }
 }

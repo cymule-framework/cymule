@@ -1300,7 +1300,9 @@ fn diff_named<T: Serialize>(
 
 fn verify_artifact_record(record: &ArtifactRecord) -> EvolutionResult<()> {
     let mut machine = Machine::new();
-    let derived = machine.put_artifact(record.reference.kind.clone(), record.bytes.clone());
+    let derived = machine
+        .put_artifact(record.reference.kind.clone(), record.bytes.clone())
+        .map_err(|error| EvolutionError::Validation(error.to_string()))?;
     if derived != record.reference {
         return Err(EvolutionError::Validation(format!(
             "Artifact {} does not match its immutable bytes",

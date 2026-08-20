@@ -6,11 +6,13 @@ use crate::sha256_bytes;
 use crate::{CoreError, Result, canonical_digest, content_id};
 
 /// Semantic specification version.
-pub const SEMANTIC_VERSION: &str = "cymule.semantic/1";
+pub const SEMANTIC_VERSION: &str = "cymule.semantic/2";
 /// Canonical event version.
-pub const EVENT_VERSION: &str = "cymule.event/1";
+pub const EVENT_VERSION: &str = "cymule.event/2";
 /// Public command version.
-pub const COMMAND_VERSION: &str = "cymule.command/1";
+pub const COMMAND_VERSION: &str = "cymule.command/2";
+/// Canonical Artifact reference identity version.
+pub const ARTIFACT_IDENTITY_VERSION: &str = "cymule.artifact/2";
 /// Stable root scope identifier within every Run.
 pub const ROOT_SCOPE_ID: &str = "scope:root";
 
@@ -18,6 +20,8 @@ pub const ROOT_SCOPE_ID: &str = "scope:root";
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactRef {
+    /// Artifact identity algorithm and wire version.
+    pub identity_version: String,
     /// Content-addressed identity.
     pub artifact_id: String,
     /// Stable artifact type.
@@ -36,20 +40,76 @@ pub struct ArtifactRecord {
 
 /// Derive the canonical content reference for immutable typed bytes.
 ///
-/// This is the sole implementation of the `cymule.artifact/1` identity
-/// preimage. Stores and typed codec layers must call it rather than duplicate
+/// This is the sole implementation of the `cymule.artifact/2` identity
+/// preimage. Stores and typed-contract layers must call it rather than duplicate
 /// the domain separator or framing.
-pub fn artifact_ref(kind: impl Into<String>, bytes: &[u8]) -> ArtifactRef {
+pub fn artifact_ref(kind: impl Into<String>, bytes: &[u8]) -> Result<ArtifactRef> {
     let kind = kind.into();
-    let mut preimage = Vec::with_capacity(kind.len() + bytes.len() + 20);
-    preimage.extend_from_slice(b"cymule.artifact/1\0");
+    validate_artifact_kind(&kind)?;
+    let kind_len = u32::try_from(kind.len())
+        .map_err(|_| CoreError::Validation("Artifact kind length exceeds u32".to_owned()))?;
+    let bytes_len = u64::try_from(bytes.len())
+        .map_err(|_| CoreError::Validation("Artifact byte length exceeds u64".to_owned()))?;
+    let mut preimage = Vec::with_capacity(kind.len() + bytes.len() + 36);
+    preimage.extend_from_slice(ARTIFACT_IDENTITY_VERSION.as_bytes());
+    preimage.extend_from_slice(&kind_len.to_be_bytes());
     preimage.extend_from_slice(kind.as_bytes());
-    preimage.push(0);
+    preimage.extend_from_slice(&bytes_len.to_be_bytes());
     preimage.extend_from_slice(bytes);
-    ArtifactRef {
+    Ok(ArtifactRef {
+        identity_version: ARTIFACT_IDENTITY_VERSION.to_owned(),
         artifact_id: format!("sha256:{}", sha256_bytes(&preimage)),
         kind,
+    })
+}
+
+impl ArtifactRef {
+    /// Validate the closed Artifact identity version, digest, and kind shape.
+    pub fn validate(&self) -> Result<()> {
+        if self.identity_version != ARTIFACT_IDENTITY_VERSION {
+            return Err(CoreError::Validation(format!(
+                "unsupported Artifact identity version {:?}",
+                self.identity_version
+            )));
+        }
+        validate_artifact_kind(&self.kind)?;
+        let Some(digest) = self.artifact_id.strip_prefix("sha256:") else {
+            return Err(CoreError::Validation(
+                "Artifact ID must use lowercase sha256".to_owned(),
+            ));
+        };
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(CoreError::Validation(
+                "Artifact ID must contain 64 lowercase hexadecimal digits".to_owned(),
+            ));
+        }
+        Ok(())
     }
+}
+
+fn validate_artifact_kind(kind: &str) -> Result<()> {
+    if kind.is_empty()
+        || kind.len() > 255
+        || !kind.is_ascii()
+        || !kind.contains('/')
+        || kind.split('/').any(|segment| {
+            segment.is_empty()
+                || !segment.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'_' | b'-' | b'+')
+                })
+        })
+    {
+        return Err(CoreError::Validation(
+            "Artifact kind must be 1..=255 bytes of lowercase versioned path segments".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// A preconditioned, idempotent command proposal.
@@ -245,7 +305,7 @@ impl Event {
             coordination_key: &coordination_key,
             payload: &payload,
         };
-        let event_id = content_id("cymule.event/1", &preimage)?;
+        let event_id = content_id(EVENT_VERSION, &preimage)?;
         Ok(Self {
             event_id,
             event_version: EVENT_VERSION.to_owned(),
@@ -268,6 +328,13 @@ impl Event {
                 self.event_version
             )));
         }
+        match &self.payload {
+            EventPayload::EffectProposed { args, .. } => args.validate()?,
+            EventPayload::RunCompleted {
+                result: Some(result),
+            } => result.validate()?,
+            _ => {}
+        }
         let preimage = EventPreimage {
             event_version: &self.event_version,
             command_id: &self.command_id,
@@ -279,7 +346,7 @@ impl Event {
             coordination_key: &self.coordination_key,
             payload: &self.payload,
         };
-        let expected = content_id("cymule.event/1", &preimage)?;
+        let expected = content_id(EVENT_VERSION, &preimage)?;
         if expected != self.event_id {
             return Err(CoreError::IdentityMismatch(format!(
                 "event ID {} does not match {expected}",
@@ -1050,6 +1117,7 @@ pub fn effect_intent_id(
         args: &'a ArtifactRef,
         effect_schema_version: &'a str,
     }
+    args.validate()?;
     content_id(
         "cymule.effect-intent/1",
         &IntentPreimage {

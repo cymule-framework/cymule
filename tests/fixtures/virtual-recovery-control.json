@@ -9,6 +9,7 @@
   "resolution": {
     "resolution": "retry",
     "error": {
+      "identity_version": "cymule.artifact/2",
       "artifact_id": "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
       "kind": "example/worker-crash"
     },

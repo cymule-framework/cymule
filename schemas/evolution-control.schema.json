@@ -89,10 +89,11 @@
     "id": { "type": "string", "minLength": 1, "maxLength": 256 },
     "artifact": {
       "type": "object", "additionalProperties": false,
-      "required": ["artifact_id", "kind"],
+      "required": ["identity_version", "artifact_id", "kind"],
       "properties": {
+        "identity_version": { "const": "cymule.artifact/2" },
         "artifact_id": { "$ref": "#/$defs/id" },
-        "kind": { "$ref": "#/$defs/id" }
+        "kind": { "type": "string", "pattern": "^[a-z0-9._+-]+(?:/[a-z0-9._+-]+)+$", "maxLength": 255 }
       }
     },
     "patchOperation": {

@@ -11,10 +11,12 @@
     "safe_point_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
     "source_epoch": 7,
     "input": {
+      "identity_version": "cymule.artifact/2",
       "artifact_id": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
       "kind": "cymule.input/1"
     },
     "evidence": {
+      "identity_version": "cymule.artifact/2",
       "artifact_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
       "kind": "cymule.restart-evidence/1"
     }

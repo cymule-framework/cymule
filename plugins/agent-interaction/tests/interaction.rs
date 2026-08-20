@@ -306,6 +306,7 @@ fn agent_continuation(run_id: &str) -> Continuation {
             definition_id: "agent-turn".to_owned(),
             invocation_id: "agent-turn".to_owned(),
             input: cymule_core::ArtifactRef {
+                identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
                 artifact_id: format!("sha256:{}", "0".repeat(64)),
                 kind: "test/input".to_owned(),
             },
@@ -371,7 +372,9 @@ fn workspace_machine(run_id: &str) -> (Machine, String, ArtifactRef) {
             },
         })
         .expect("workspace Run starts");
-    let overlay = machine.put_artifact("workspace/overlay", b"prepared overlay".to_vec());
+    let overlay = machine
+        .put_artifact("workspace/overlay", b"prepared overlay".to_vec())
+        .expect("Artifact stores");
     (machine, plan.plan_id, overlay)
 }
 
@@ -870,8 +873,12 @@ fn lost_workspace_completion_receipt_is_reconciled_from_the_started_claim() {
 #[test]
 fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
     let mut machine = Machine::new();
-    let result = machine.put_artifact("agent/input", br#"{"answer":"yes"}"#.to_vec());
-    let second_result = machine.put_artifact("agent/input", br#"{"details":"ready"}"#.to_vec());
+    let result = machine
+        .put_artifact("agent/input", br#"{"answer":"yes"}"#.to_vec())
+        .expect("Artifact stores");
+    let second_result = machine
+        .put_artifact("agent/input", br#"{"details":"ready"}"#.to_vec())
+        .expect("Artifact stores");
     let store = MemoryStore::new();
     let mut coordinator = DurableCoordinator::open(store.clone())
         .expect("store opens")
@@ -1057,7 +1064,9 @@ fn input_schema_and_external_references_fail_before_suspension() {
 #[test]
 fn invalid_completed_input_leaves_wait_and_session_pending() {
     let mut machine = Machine::new();
-    let result = machine.put_artifact("agent/input", br#"{"answer":42}"#.to_vec());
+    let result = machine
+        .put_artifact("agent/input", br#"{"answer":42}"#.to_vec())
+        .expect("Artifact stores");
     let store = MemoryStore::new();
     let mut coordinator = DurableCoordinator::open(store.clone())
         .expect("store opens")
@@ -1138,7 +1147,9 @@ fn invalid_completed_input_leaves_wait_and_session_pending() {
 #[test]
 fn declined_input_completes_without_an_instance_value() {
     let mut machine = Machine::new();
-    let result = machine.put_artifact("agent/input-declined", b"null".to_vec());
+    let result = machine
+        .put_artifact("agent/input-declined", b"null".to_vec())
+        .expect("Artifact stores");
     let store = MemoryStore::new();
     let mut coordinator = DurableCoordinator::open(store)
         .expect("store opens")
@@ -1241,6 +1252,7 @@ fn elicitation_and_workspace_calls_are_pinned_occurrences() {
         .apply_workspace(WorkspaceChange {
             change_id: "workspace:1".to_owned(),
             overlay: ArtifactRef {
+                identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
                 artifact_id: "sha256:overlay".to_owned(),
                 kind: "workspace/overlay".to_owned(),
             },

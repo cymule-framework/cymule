@@ -161,7 +161,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
         )?;
 
         let result_bytes = canonical_bytes(&outcome.value)?;
-        let result_ref = self.machine.put_artifact("cymule.result/1", result_bytes);
+        let result_ref = self.machine.put_artifact("cymule.result/1", result_bytes)?;
         self.submit(
             &run_id,
             Command::CompleteRun {
@@ -270,7 +270,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                     contracts.validate_effect_input(effect, &value)?;
                     let args = self
                         .machine
-                        .put_artifact("cymule.effect-args/1", canonical_bytes(&value)?);
+                        .put_artifact("cymule.effect-args/1", canonical_bytes(&value)?)?;
                     let occurrence_binding = format!(
                         "binding:{}/effect/{}/{}",
                         manifest.implementation_id,

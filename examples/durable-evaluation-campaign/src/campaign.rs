@@ -341,7 +341,7 @@ pub fn evolve(options: &CampaignOptions, policy: &str) -> CampaignResult<Evoluti
     let evidence = machine.put_artifact(
         "example.evolution-review/1",
         canonical_bytes(&(policy, &definition))?,
-    );
+    )?;
     let receipt = DurableLiveEvolutionController::publish_and_relink_and_checkpoint(
         &mut coordinator,
         &mut evolution,
@@ -441,7 +441,7 @@ fn load_or_initialize_suite(
         suite,
         case_count: cases.len(),
     };
-    machine.put_artifact(SUITE_ARTIFACT_KIND, canonical_bytes(&metadata)?);
+    machine.put_artifact(SUITE_ARTIFACT_KIND, canonical_bytes(&metadata)?)?;
     coordinator.persist_machine(machine)?;
     Ok((metadata, cases))
 }
@@ -616,7 +616,7 @@ fn recover_expired_claims(
             active.owner, active.lease.epoch
         )
         .into_bytes(),
-    );
+    )?;
     let command = VirtualRecoveryCommand {
         control_version: VIRTUAL_RECOVERY_CONTROL_VERSION.to_owned(),
         command_id: stable_id("recover", &active.occurrence_id)?,
@@ -689,11 +689,11 @@ fn execute_claim(
         Ok(result) => {
             let output: CaseOutput = serde_json::from_value(result.value)?;
             WorkResolution::Succeeded {
-                result: machine.put_artifact(RESULT_ARTIFACT_KIND, canonical_bytes(&output)?),
+                result: machine.put_artifact(RESULT_ARTIFACT_KIND, canonical_bytes(&output)?)?,
             }
         }
         Err(error) => WorkResolution::Failed {
-            error: machine.put_artifact(ERROR_ARTIFACT_KIND, error.to_string().into_bytes()),
+            error: machine.put_artifact(ERROR_ARTIFACT_KIND, error.to_string().into_bytes())?,
         },
     };
     let command = WorkResolutionCommand {

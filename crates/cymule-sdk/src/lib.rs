@@ -30,8 +30,10 @@ pub use cymule_evolution::{
     ShadowRequest, SubflowReference,
 };
 pub use cymule_resource::{
-    InlineData, ResourceCandidate, ResourceHandle, ResourceHandoff, ResourceIntegrity,
-    ResourceLocation, ResourceReplayClass, ResourceShape,
+    ARTIFACT_TYPE_CONTRACT_KIND, ARTIFACT_TYPE_CONTRACT_VERSION, ArtifactTypeCandidate,
+    ArtifactTypeContract, ArtifactTypeRegistry, InlineData, ResourceCandidate, ResourceHandle,
+    ResourceHandoff, ResourceIntegrity, ResourceLocation, ResourceReplayClass, ResourceSchemaIssue,
+    ResourceShape,
 };
 pub use cymule_runtime::{
     ENGINE_PROTOCOL_VERSION, EngineContractSide, EngineFailure, EngineFailureCategory, EngineIssue,

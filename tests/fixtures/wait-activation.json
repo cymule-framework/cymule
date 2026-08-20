@@ -9,6 +9,7 @@
     "wait:shared:1"
   ],
   "result": {
+    "identity_version": "cymule.artifact/2",
     "artifact_id": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "kind": "cymule.wait-activation-result/1"
   }

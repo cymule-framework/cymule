@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/artifact-type-contract.schema.json",
+  "title": "Cymule Artifact Type Contract cymule.artifact-type-contract/1",
+  "oneOf": [
+    { "$ref": "#/$defs/candidate" },
+    { "$ref": "#/$defs/contract" }
+  ],
+  "$defs": {
+    "schema": {
+      "oneOf": [{ "type": "boolean" }, { "type": "object" }]
+    },
+    "kind": {
+      "type": "string",
+      "pattern": "^[a-z0-9._+-]+(?:/[a-z0-9._+-]+)+$",
+      "maxLength": 255
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "artifact_kind", "media_type", "schema"],
+      "properties": {
+        "contract_version": { "const": "cymule.artifact-type-contract/1" },
+        "artifact_kind": { "$ref": "#/$defs/kind" },
+        "media_type": { "const": "application/json" },
+        "schema": { "$ref": "#/$defs/schema" }
+      }
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_id",
+        "contract_version",
+        "artifact_kind",
+        "media_type",
+        "schema_digest",
+        "schema"
+      ],
+      "properties": {
+        "contract_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "contract_version": { "const": "cymule.artifact-type-contract/1" },
+        "artifact_kind": { "$ref": "#/$defs/kind" },
+        "media_type": { "const": "application/json" },
+        "schema_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "schema": { "$ref": "#/$defs/schema" }
+      }
+    }
+  }
+}
