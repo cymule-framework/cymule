@@ -30,7 +30,7 @@ fn recording_exporters_capture_parent_child_identity_error_and_low_cardinality_m
     let trace_exporter = InMemorySpanExporter::default();
     let metric_exporter = InMemoryMetricExporter::default();
     let config = OtelConfig {
-        metric_export_interval: Duration::from_secs(3_600),
+        metric_export_interval: Duration::from_hours(1),
         ..OtelConfig::default()
     };
     let pipeline =
