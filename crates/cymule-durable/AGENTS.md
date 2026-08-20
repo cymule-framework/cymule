@@ -133,5 +133,8 @@
   as recovered state.
 - The generated durable model trace is the single command-sequence generator.
   It composes `cymule-test-world` faults with reopen through public durable
-  interfaces, checks each response against a small domain model, and emits a
-  minimized language-neutral fixture on failure. SDKs must not duplicate it.
+  interfaces, checks all six public command variants against an independent
+  domain model, and emits a minimized language-neutral fixture on failure.
+  Fault paths retain original command indexes while shrinking, and a minimized
+  fixture must reproduce the exact failure code, phase, and invariant. SDKs
+  must not duplicate this generator.

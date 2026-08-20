@@ -21,6 +21,8 @@ cargo test -p cymule-core --test semantic_kernel \
 iteration=1
 while [ "$iteration" -le "$CYMULE_SOAK_REPETITIONS" ]; do
   echo "== Deterministic fault sweep $iteration/$CYMULE_SOAK_REPETITIONS =="
+  cargo test -p cymule-durable --test model_trace \
+    generated_durable_commands_match_the_reference_model -- --exact
   cargo test -p cymule-durable --test resume \
     every_run_cas_boundary_recovers_from_io_failure_or_lost_acknowledgement -- --exact
   cargo test -p cymule-durable --test resume \
