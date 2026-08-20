@@ -6,7 +6,10 @@ use cymule_core::{
     ReconciliationResolution, Region, SealedPlan, WaitSpec, WorldOutcome, canonical_bytes,
     content_id, effect_intent_id,
 };
-use cymule_runtime::{ExecutionResult, PluginHost, PluginManifest, PluginRequest, PluginResponse};
+use cymule_runtime::{
+    ContractTarget, ContractValidator, ExecutionResult, PlanContracts, PluginHost, PluginManifest,
+    PluginRequest, PluginResponse, seal_plan,
+};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -69,8 +72,10 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
         run_id: impl Into<String>,
     ) -> DurableResult<DriveOutcome> {
         let run_id = run_id.into();
+        let proposed_plan = seal_plan(candidate)?;
+        let proposed_contracts = PlanContracts::compile(&proposed_plan.candidate)?;
+        proposed_contracts.validate_definition_input(&proposed_plan.candidate.entry, input)?;
         let input_bytes = canonical_bytes(input)?;
-        let proposed_plan = candidate.clone().seal()?;
         let existing = if self.coordinator.revision().is_some() {
             self.coordinator
                 .state()?
@@ -90,6 +95,8 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             let plan = machine
                 .plan(&existing.plan_id)
                 .ok_or_else(|| DurableError::NotFound("existing Run Plan is missing".to_owned()))?;
+            let contracts = PlanContracts::compile(&plan.candidate)?;
+            contracts.validate_definition_input(&plan.candidate.entry, input)?;
             validate_manifest(plan, &self.manifest)?;
             let expected_input = Machine::new().put_artifact("cymule.input/1", input_bytes);
             if existing.frames.first().map(|frame| &frame.input) != Some(&expected_input) {
@@ -120,7 +127,8 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
         } else {
             Machine::new()
         };
-        let plan = machine.seal_plan(candidate)?;
+        machine.insert_plan(proposed_plan.clone())?;
+        let plan = proposed_plan;
         validate_manifest(&plan, &self.manifest)?;
         submit(
             &mut machine,
@@ -162,15 +170,15 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
     /// Complete a durable wait with typed JSON and resume its owning Run.
     pub fn complete_wait(&mut self, wait_id: &str, value: &Value) -> DurableResult<DriveOutcome> {
         let mut machine = self.coordinator.restore_machine()?;
-        let result = machine.put_artifact("cymule.wait-result/1", canonical_bytes(value)?);
-        let run_id = self
-            .coordinator
-            .state()?
+        let state = self.coordinator.state()?;
+        let wait = state
             .waits
             .get(wait_id)
             .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?
-            .run_id
             .clone();
+        validate_wait_completion(&wait, value)?;
+        let result = machine.put_artifact("cymule.wait-result/1", canonical_bytes(value)?);
+        let run_id = wait.run_id;
         self.coordinator
             .complete_wait_with_machine(&machine, wait_id, result)?;
         self.resume(&run_id)
@@ -201,6 +209,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 .waits
                 .get(wait_id)
                 .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
+            validate_wait_completion(wait, value)?;
             run_ids.insert(wait.run_id.clone());
         }
         let activation = WaitActivation::new(activation_id, source, wait_ids, result)?;
@@ -364,6 +373,19 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
     }
 
     fn drive(&mut self, run_id: &str) -> DurableResult<DriveOutcome> {
+        let admitted_machine = self.coordinator.restore_machine()?;
+        let admitted_plan_id = self
+            .coordinator
+            .state()?
+            .continuations
+            .get(run_id)
+            .ok_or_else(|| DurableError::NotFound(format!("continuation {run_id} is missing")))?
+            .plan_id
+            .clone();
+        let admitted_plan = admitted_machine
+            .plan(&admitted_plan_id)
+            .ok_or_else(|| DurableError::NotFound(format!("Plan {admitted_plan_id} is missing")))?;
+        let contracts = PlanContracts::compile(&admitted_plan.candidate)?;
         loop {
             let mut machine = self.coordinator.restore_machine()?;
             let mut continuation = self.coordinator.state()?.continuations[run_id].clone();
@@ -388,6 +410,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     ))
                 })?;
             let input = read_value(&machine, &current_frame.input)?;
+            contracts.validate_definition_input(&current_frame.definition_id, &input)?;
             let region = region_at_path(&definition.body, &current_frame.region_path)?.clone();
             let current_scope =
                 continuation.scope_stack.last().cloned().ok_or_else(|| {
@@ -400,6 +423,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
 
             let Some(step) = region.steps.get(frame.next_step) else {
                 let value = evaluate(&machine, &region.result, &input, &frame.locals)?;
+                contracts.validate_definition_output(&current_frame.definition_id, &value)?;
                 if frame_index > 0 {
                     let parent_index = frame_index - 1;
                     let parent_frame = continuation.frames[parent_index].clone();
@@ -521,6 +545,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     bind,
                 } => {
                     let value = evaluate(&machine, expression, &input, &frame.locals)?;
+                    contracts.validate_component_input(component, &value)?;
                     let input_ref =
                         machine.put_artifact("cymule.component-input/1", canonical_bytes(&value)?);
                     let operation = self.manifest.components.get(component).ok_or_else(|| {
@@ -576,6 +601,8 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         };
                         (output_ref, Some(occurrence))
                     };
+                    let output = read_value(&machine, &output_ref)?;
+                    contracts.validate_component_output(component, &output)?;
                     if let Some(binding) = bind {
                         frame.locals.insert(binding.clone(), output_ref);
                     }
@@ -589,6 +616,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     ..
                 } => {
                     let value = evaluate(&machine, expression, &input, &frame.locals)?;
+                    contracts.validate_definition_input(definition, &value)?;
                     let input_ref =
                         machine.put_artifact("cymule.invocation-input/1", canonical_bytes(&value)?);
                     let invocation_id = durable_invocation_id(
@@ -675,6 +703,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         ));
                     }
                     let value = evaluate(&machine, expression, &input, &frame.locals)?;
+                    contracts.validate_effect_input(effect, &value)?;
                     let args =
                         machine.put_artifact("cymule.effect-args/1", canonical_bytes(&value)?);
                     let implementation = self.manifest.effects.get(effect).ok_or_else(|| {
@@ -839,6 +868,12 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             .runs
             .get(run_id)
             .ok_or_else(|| DurableError::NotFound(format!("Run {run_id} is missing")))?;
+        let scheduling_plan = scheduling_machine
+            .plan(&scheduling_run.current_plan)
+            .ok_or_else(|| {
+                DurableError::NotFound(format!("Plan {} is missing", scheduling_run.current_plan))
+            })?;
+        let contracts = PlanContracts::compile(&scheduling_plan.candidate)?;
         let mut entries = Vec::new();
         for dispatch in self.coordinator.state()?.outbox.values() {
             if dispatch.run_id != run_id {
@@ -877,6 +912,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
         for entry in entries {
             let mut machine = self.coordinator.restore_machine()?;
             let input = read_value(&machine, &entry.input)?;
+            contracts.validate_effect_input(&entry.operation, &input)?;
             let (owner, claim_epoch) = if entry.state == OutboxState::Pending {
                 let owner = "dispatcher:durable-runtime";
                 let lease = self.coordinator.acquire_lease(
@@ -923,6 +959,12 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         entry.operation
                     )));
                 };
+                validate_optional_effect_output(
+                    &contracts,
+                    &entry.operation,
+                    outcome,
+                    value.as_ref(),
+                )?;
                 if outcome != WorldOutcome::Unknown {
                     submit(
                         &mut machine,
@@ -1012,6 +1054,12 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     entry.operation
                 )));
             };
+            validate_optional_reconciliation_output(
+                &contracts,
+                &entry.operation,
+                resolution,
+                value.as_ref(),
+            )?;
             submit(
                 &mut machine,
                 run_id,
@@ -1062,6 +1110,41 @@ const fn reconciliation_suffix(resolution: ReconciliationResolution) -> &'static
         ReconciliationResolution::StillUnknown => "still-unknown",
         ReconciliationResolution::GovernanceRequired => "governance-required",
     }
+}
+
+fn validate_wait_completion(wait: &WaitCondition, value: &Value) -> DurableResult<()> {
+    if let WaitKind::Input { schema, .. } = &wait.kind {
+        ContractValidator::compile(ContractTarget::wait(&wait.wait_id), schema)?.validate(value)?;
+    }
+    Ok(())
+}
+
+fn validate_optional_effect_output(
+    contracts: &PlanContracts,
+    operation: &str,
+    outcome: WorldOutcome,
+    value: Option<&Value>,
+) -> DurableResult<()> {
+    if let Some(value) = value {
+        contracts.validate_effect_output(operation, value)?;
+    } else if outcome == WorldOutcome::Applied {
+        contracts.validate_effect_output(operation, &Value::Null)?;
+    }
+    Ok(())
+}
+
+fn validate_optional_reconciliation_output(
+    contracts: &PlanContracts,
+    operation: &str,
+    resolution: ReconciliationResolution,
+    value: Option<&Value>,
+) -> DurableResult<()> {
+    if let Some(value) = value {
+        contracts.validate_effect_output(operation, value)?;
+    } else if resolution == ReconciliationResolution::ResolvedApplied {
+        contracts.validate_effect_output(operation, &Value::Null)?;
+    }
+    Ok(())
 }
 
 fn region_at_path<'a>(root: &'a Region, path: &[usize]) -> DurableResult<&'a Region> {
@@ -1145,6 +1228,11 @@ fn completed_result(machine: &Machine, run_id: &str) -> DurableResult<ExecutionR
         .map(|reference| read_value(machine, reference))
         .transpose()?
         .unwrap_or(Value::Null);
+    let plan = machine
+        .plan(&run.current_plan)
+        .ok_or_else(|| DurableError::NotFound(format!("Plan {} is missing", run.current_plan)))?;
+    PlanContracts::compile(&plan.candidate)?
+        .validate_definition_output(&plan.candidate.entry, &value)?;
     Ok(ExecutionResult {
         run_id: run_id.to_owned(),
         plan_id: run.current_plan.clone(),

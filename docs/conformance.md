@@ -27,6 +27,15 @@ provider-level exactly-once behavior, or multi-domain failover.
 The local suite verifies:
 
 - identical Plan Candidates seal to an identical Plan ID;
+- every definition/component/effect/typed-wait schema compiles under exact
+  Draft 2020-12 semantics before sealing; another declared dialect and external
+  resolution fail, while `$ref`-shaped `const` data remains legal;
+- Run/invocation/component/effect/wait/result values are checked at their exact
+  boundary; invalid inputs call no operation plugin and create no associated
+  durable record, while invalid outputs create no occurrence, Result Artifact,
+  or outbox settlement;
+- contract failures retain boundary, side, instance path, schema path, masked
+  issues, and retry disposition through the Engine envelope and all SDKs;
 - malformed plans and unknown references fail before hashing;
 - missing causal parents and tampered event IDs are rejected;
 - independent event order produces the same projection digest;

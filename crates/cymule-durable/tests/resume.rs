@@ -266,9 +266,10 @@ impl PluginHost for SweepPlugin {
                     value: applied.then_some(input),
                 })
             }
-            request @ PluginRequest::Call { .. } => Err(RuntimeError::Plugin(format!(
-                "unsupported CAS sweep request: {request:?}"
-            ))),
+            request @ PluginRequest::Call { .. } => Err(RuntimeError::PluginDefect {
+                code: "unsupported_test_request".to_owned(),
+                message: format!("unsupported CAS sweep request: {request:?}"),
+            }),
         }
     }
 }
@@ -293,9 +294,10 @@ impl PluginHost for StagePlugin {
             PluginRequest::PrepareEffect { .. } => {
                 let attempt = self.prepares.fetch_add(1, Ordering::SeqCst) + 1;
                 if self.lose_first_prepare_response && attempt == 1 {
-                    return Err(RuntimeError::Io(
-                        "simulated lost response after external prepare".to_owned(),
-                    ));
+                    return Err(RuntimeError::Substrate {
+                        code: "simulated_response_loss".to_owned(),
+                        message: "simulated lost response after external prepare".to_owned(),
+                    });
                 }
                 Ok(PluginResponse::Prepared)
             }
@@ -314,9 +316,10 @@ impl PluginHost for StagePlugin {
                         .then_some(input),
                 })
             }
-            request @ PluginRequest::Call { .. } => Err(RuntimeError::Plugin(format!(
-                "unsupported stage test request: {request:?}"
-            ))),
+            request @ PluginRequest::Call { .. } => Err(RuntimeError::PluginDefect {
+                code: "unsupported_test_request".to_owned(),
+                message: format!("unsupported stage test request: {request:?}"),
+            }),
         }
     }
 }
@@ -342,13 +345,15 @@ impl PluginHost for CrashAfterApplyPlugin {
             PluginRequest::DispatchEffect { .. } => {
                 self.dispatches.fetch_add(1, Ordering::SeqCst);
                 if self.crash_after_apply {
-                    Err(RuntimeError::Io(
-                        "simulated crash after provider application".to_owned(),
-                    ))
+                    Err(RuntimeError::Substrate {
+                        code: "simulated_process_crash".to_owned(),
+                        message: "simulated crash after provider application".to_owned(),
+                    })
                 } else {
-                    Err(RuntimeError::Plugin(
-                        "recovery must not redispatch the original intent".to_owned(),
-                    ))
+                    Err(RuntimeError::PluginDefect {
+                        code: "duplicate_test_dispatch".to_owned(),
+                        message: "recovery must not redispatch the original intent".to_owned(),
+                    })
                 }
             }
             PluginRequest::ReconcileEffect { input, .. } => {
@@ -362,9 +367,10 @@ impl PluginHost for CrashAfterApplyPlugin {
                     value: (attempt > self.unknown_reconciliations).then_some(input),
                 })
             }
-            request @ PluginRequest::Call { .. } => Err(RuntimeError::Plugin(format!(
-                "unsupported effect recovery request: {request:?}"
-            ))),
+            request @ PluginRequest::Call { .. } => Err(RuntimeError::PluginDefect {
+                code: "unsupported_test_request".to_owned(),
+                message: format!("unsupported effect recovery request: {request:?}"),
+            }),
         }
     }
 }
@@ -391,9 +397,10 @@ impl PluginHost for CountingPlugin {
                     value: json!({"greeting": format!("Hello, {}!", input["name"].as_str().unwrap())}),
                 })
             }
-            request => Err(RuntimeError::Plugin(format!(
-                "unsupported resume test request: {request:?}"
-            ))),
+            request => Err(RuntimeError::PluginDefect {
+                code: "unsupported_test_request".to_owned(),
+                message: format!("unsupported resume test request: {request:?}"),
+            }),
         }
     }
 }

@@ -159,7 +159,7 @@ impl EvolutionController {
             })?
             .plan
             .clone();
-        let child = patch.target.seal()?;
+        let child = cymule_runtime::seal_plan(patch.target)?;
         let actual = diff_plans(&parent, &child)?;
         if actual.is_empty() {
             return Err(EvolutionError::Validation(

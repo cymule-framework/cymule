@@ -12,6 +12,41 @@ pub const CONTRACT_SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12
 /// Result type for executable contract compilation and validation.
 pub type ContractResult<T> = std::result::Result<T, ContractViolation>;
 
+/// Result type for canonical and executable Plan admission.
+pub type PlanAdmissionResult<T> = std::result::Result<T, PlanAdmissionError>;
+
+/// Exact failure domain of Plan sealing and verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanAdmissionError {
+    /// The trusted semantic kernel rejected structure or canonical identity.
+    Core(cymule_core::CoreError),
+    /// An executable schema contract was invalid.
+    Contract(ContractViolation),
+}
+
+impl Display for PlanAdmissionError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Core(error) => Display::fmt(error, formatter),
+            Self::Contract(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for PlanAdmissionError {}
+
+impl From<cymule_core::CoreError> for PlanAdmissionError {
+    fn from(error: cymule_core::CoreError) -> Self {
+        Self::Core(error)
+    }
+}
+
+impl From<ContractViolation> for PlanAdmissionError {
+    fn from(error: ContractViolation) -> Self {
+        Self::Contract(error)
+    }
+}
+
 /// Whether a contract failed while being admitted or while checking a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -160,12 +195,16 @@ impl ContractValidator {
     /// Compile a schema without permitting filesystem, network, or ambient
     /// registry resolution.
     pub fn compile(target: ContractTarget, schema: &Value) -> ContractResult<Self> {
-        if let Some(issue) = find_external_reference(schema, "") {
-            return Err(ContractViolation {
-                phase: ContractPhase::Admission,
+        if let Some(declared) = schema.get("$schema")
+            && declared.as_str() != Some(CONTRACT_SCHEMA_DIALECT)
+        {
+            return Err(admission_issue(
                 target,
-                issues: vec![issue],
-            });
+                "/$schema",
+                format!(
+                    "schema dialect must be exactly {CONTRACT_SCHEMA_DIALECT:?}, received {declared}"
+                ),
+            ));
         }
         let validator = jsonschema::draft202012::options()
             .with_retriever(DenyExternalReferences)
@@ -374,6 +413,22 @@ fn missing_contract(target: ContractTarget) -> ContractViolation {
     }
 }
 
+fn admission_issue(
+    target: ContractTarget,
+    instance_path: &str,
+    message: String,
+) -> ContractViolation {
+    ContractViolation {
+        phase: ContractPhase::Admission,
+        target,
+        issues: vec![ContractIssue {
+            instance_path: instance_path.to_owned(),
+            schema_path: String::new(),
+            message,
+        }],
+    }
+}
+
 fn compile_waits(
     region: &Region,
     validators: &mut BTreeMap<String, ContractValidator>,
@@ -396,40 +451,6 @@ fn compile_waits(
         }
     }
     Ok(())
-}
-
-fn find_external_reference(value: &Value, path: &str) -> Option<ContractIssue> {
-    match value {
-        Value::Object(object) => {
-            for keyword in ["$ref", "$dynamicRef"] {
-                if let Some(reference) = object.get(keyword).and_then(Value::as_str)
-                    && !reference.starts_with('#')
-                {
-                    return Some(ContractIssue {
-                        instance_path: format!("{path}/{}", escape_pointer(keyword)),
-                        schema_path: String::new(),
-                        message: format!("external schema reference {reference:?} is forbidden"),
-                    });
-                }
-            }
-            for (key, nested) in object {
-                if let Some(issue) =
-                    find_external_reference(nested, &format!("{path}/{}", escape_pointer(key)))
-                {
-                    return Some(issue);
-                }
-            }
-            None
-        }
-        Value::Array(values) => values.iter().enumerate().find_map(|(index, nested)| {
-            find_external_reference(nested, &format!("{path}/{index}"))
-        }),
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
-    }
-}
-
-fn escape_pointer(value: &str) -> String {
-    value.replace('~', "~0").replace('/', "~1")
 }
 
 fn issue_from_error(error: &jsonschema::ValidationError<'_>) -> ContractIssue {

@@ -18,6 +18,11 @@
 - Each durable frame separates `definition_id`, structural `invocation_id`, and
   immutable input Artifact. Invoked definitions push frames without pushing a
   scope; nested scopes retain the current definition, invocation, and input.
+- Compile the admitted Plan through `cymule-runtime` and validate Run,
+  invocation, component, effect, typed-wait, definition-result, and terminal
+  Result values at their exact boundary. Invalid input may not create its
+  Artifact, occurrence, outbox entry, or plugin dispatch; invalid output may
+  not enter a checkpoint or settle an outbox claim.
 - Wait completion, lease acquisition, outbox claims, occurrence recording, and
   snapshot publication must be idempotent and fenced.
 - Event-prefix compaction retains an authenticated Machine base and full suffix

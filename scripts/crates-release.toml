@@ -28,7 +28,7 @@ dependencies = ["cymule-core", "cymule-durable"]
 [[crate]]
 name = "cymule-evolution"
 path = "crates/cymule-evolution"
-dependencies = ["cymule-core", "cymule-durable", "cymule-virtual"]
+dependencies = ["cymule-core", "cymule-durable", "cymule-runtime", "cymule-virtual"]
 
 [[crate]]
 name = "cymule-directory-store"

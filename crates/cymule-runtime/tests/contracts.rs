@@ -1,6 +1,8 @@
 //! Executable Plan contract compiler conformance.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cymule_core::{
     ComponentContract, Definition, DispatchPolicy, EffectContract, EffectProfile, Expression,
@@ -8,7 +10,10 @@ use cymule_core::{
     Step, WaitSpec,
 };
 use cymule_runtime::{
-    ContractBoundary, ContractPhase, ContractSide, ContractTarget, ContractValidator, PlanContracts,
+    ContractBoundary, ContractPhase, ContractSide, ContractTarget, ContractValidator,
+    EmbeddedRuntime, EngineContractSide, EngineFailure, EngineFailureCategory, EnginePhase,
+    PLUGIN_VERSION, PlanContracts, PluginEffect, PluginHost, PluginManifest, PluginOperation,
+    PluginRequest, PluginResponse, RuntimeError, RuntimeResult, seal_plan,
 };
 use serde_json::{Value, json};
 
@@ -133,6 +138,100 @@ fn candidate() -> PlanCandidate {
         ],
         metadata: BTreeMap::new(),
     }
+}
+
+#[derive(Default)]
+struct PluginCounts {
+    describe: AtomicUsize,
+    call: AtomicUsize,
+    prepare: AtomicUsize,
+    dispatch: AtomicUsize,
+}
+
+struct ContractPlugin {
+    counts: Arc<PluginCounts>,
+    component_output: Value,
+    effect_output: Value,
+}
+
+impl PluginHost for ContractPlugin {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        match request {
+            PluginRequest::Describe => {
+                self.counts.describe.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::Manifest {
+                    manifest: PluginManifest {
+                        plugin_version: PLUGIN_VERSION.to_owned(),
+                        implementation_id: "contract-plugin@1".to_owned(),
+                        components: BTreeMap::from([(
+                            "example.component".to_owned(),
+                            PluginOperation {
+                                implementation_revision: "1".to_owned(),
+                            },
+                        )]),
+                        effects: BTreeMap::from([(
+                            "example.effect".to_owned(),
+                            PluginEffect {
+                                implementation_revision: "1".to_owned(),
+                                can_reconcile: true,
+                            },
+                        )]),
+                    },
+                })
+            }
+            PluginRequest::Call { .. } => {
+                self.counts.call.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::CallResult {
+                    value: self.component_output.clone(),
+                })
+            }
+            PluginRequest::PrepareEffect { .. } => {
+                self.counts.prepare.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::Prepared)
+            }
+            PluginRequest::DispatchEffect { .. } => {
+                self.counts.dispatch.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::EffectResult {
+                    outcome: cymule_core::WorldOutcome::Applied,
+                    value: Some(self.effect_output.clone()),
+                })
+            }
+            PluginRequest::ReconcileEffect { .. } => {
+                panic!("test effects do not become ambiguous")
+            }
+        }
+    }
+}
+
+fn runtime(
+    counts: Arc<PluginCounts>,
+    component_output: Value,
+    effect_output: Value,
+) -> EmbeddedRuntime<ContractPlugin> {
+    EmbeddedRuntime::new(ContractPlugin {
+        counts,
+        component_output,
+        effect_output,
+    })
+}
+
+fn effect_only_candidate(input: Value, output: Value) -> PlanCandidate {
+    let mut plan = candidate();
+    plan.components.clear();
+    plan.effects[0].input_schema = input;
+    plan.effects[0].output_schema = output;
+    plan.definitions
+        .retain(|definition| definition.id == "main");
+    plan.definitions[0].body.steps = vec![Step {
+        id: "effect.observe".to_owned(),
+        operation: Operation::Effect {
+            effect: "example.effect".to_owned(),
+            input: Expression::Literal { value: json!(7) },
+            occurrence: "primary".to_owned(),
+            bind: Some("effect_result".to_owned()),
+        },
+    }];
+    plan
 }
 
 #[test]
@@ -266,13 +365,35 @@ fn external_references_are_rejected_without_resolution() {
             panic!("external reference must fail admission")
         };
         assert_eq!(error.phase, ContractPhase::Admission);
-        assert!(
-            error.issues[0]
-                .message
-                .contains("external schema reference")
-        );
-        assert!(error.issues[0].instance_path.contains("$defs"));
+        assert!(error.issues[0].message.contains("retriev"), "{error:?}");
     }
+}
+
+#[test]
+fn schema_dialect_is_exact_and_ref_shaped_instance_data_remains_legal() {
+    let target = ContractTarget {
+        boundary: ContractBoundary::Definition,
+        id: "dialect".to_owned(),
+        side: ContractSide::Input,
+    };
+    let wrong_draft = json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "string"
+    });
+    let error = ContractValidator::compile(target.clone(), &wrong_draft)
+        .err()
+        .expect("another dialect must fail admission");
+    assert_eq!(error.phase, ContractPhase::Admission);
+    assert_eq!(error.issues[0].instance_path, "/$schema");
+
+    let data_schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "const": {"$ref": "ordinary application data"}
+    });
+    ContractValidator::compile(target, &data_schema)
+        .expect("a ref-shaped field inside const is instance data")
+        .validate(&json!({"$ref": "ordinary application data"}))
+        .expect("const instance validates");
 }
 
 #[test]
@@ -331,4 +452,131 @@ fn compilation_never_normalizes_or_weakens_plan_identity() {
     PlanContracts::compile(&changed).expect("changed schema compiles");
     let second = changed.seal().expect("changed Plan seals");
     assert_ne!(first.plan_id, second.plan_id);
+}
+
+#[test]
+fn invalid_run_input_has_zero_plugin_calls_and_zero_machine_mutation() {
+    let plan = seal_plan(candidate()).expect("Plan admits");
+    let counts = Arc::new(PluginCounts::default());
+    let mut runtime = runtime(counts.clone(), json!(42), json!(42));
+    let error = runtime
+        .execute(plan, &json!({"request": 7}), "run:invalid-input")
+        .expect_err("Run input must fail its entry contract");
+
+    assert!(matches!(error, RuntimeError::Contract(_)));
+    assert_eq!(counts.describe.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.call.load(Ordering::SeqCst), 0);
+    let snapshot = runtime.machine().snapshot();
+    assert!(snapshot.plans.is_empty());
+    assert!(snapshot.artifacts.is_empty());
+    assert!(snapshot.events.is_empty());
+}
+
+#[test]
+fn component_input_fails_before_call_and_effect_input_before_prepare() {
+    let mut component_plan = candidate();
+    let Operation::Call { input, .. } = &mut component_plan.definitions[0].body.steps[0].operation
+    else {
+        panic!("fixture begins with a component call")
+    };
+    *input = Expression::Literal {
+        value: json!({"name": 7}),
+    };
+    let counts = Arc::new(PluginCounts::default());
+    let mut component_runtime = runtime(counts.clone(), json!(42), json!(42));
+    let error = component_runtime
+        .execute(
+            seal_plan(component_plan).expect("Plan admits"),
+            &json!({"request": "run"}),
+            "run:component-input",
+        )
+        .expect_err("component input must fail");
+    assert!(matches!(error, RuntimeError::Contract(_)));
+    assert_eq!(counts.call.load(Ordering::SeqCst), 0);
+
+    let mut effect_plan = effect_only_candidate(json!({"type": "string"}), json!({}));
+    let Operation::Effect { input, .. } = &mut effect_plan.definitions[0].body.steps[0].operation
+    else {
+        panic!("fixture contains one effect")
+    };
+    *input = Expression::Literal { value: json!(7) };
+    let effect_counts = Arc::new(PluginCounts::default());
+    let mut effect_runtime = runtime(effect_counts.clone(), json!(42), json!(42));
+    let error = effect_runtime
+        .execute(
+            seal_plan(effect_plan).expect("Plan admits"),
+            &json!({"request": "run"}),
+            "run:effect-input",
+        )
+        .expect_err("effect input must fail");
+    assert!(matches!(error, RuntimeError::Contract(_)));
+    assert_eq!(effect_counts.prepare.load(Ordering::SeqCst), 0);
+    assert_eq!(effect_counts.dispatch.load(Ordering::SeqCst), 0);
+    assert!(
+        effect_runtime.machine().projection().runs["run:effect-input"]
+            .effects
+            .is_empty()
+    );
+}
+
+#[test]
+fn output_failures_never_bind_or_record_terminal_results() {
+    let counts = Arc::new(PluginCounts::default());
+    let mut component_runtime = runtime(counts.clone(), json!("not-an-integer"), json!(42));
+    let error = component_runtime
+        .execute(
+            seal_plan(candidate()).expect("Plan admits"),
+            &json!({"request": "run"}),
+            "run:component-output",
+        )
+        .expect_err("component output must fail");
+    assert!(matches!(error, RuntimeError::Contract(_)));
+    assert_eq!(counts.call.load(Ordering::SeqCst), 1);
+    assert!(
+        component_runtime.machine().projection().runs["run:component-output"]
+            .result
+            .is_none()
+    );
+
+    let effect_plan = effect_only_candidate(json!({"type": "integer"}), json!({"type": "string"}));
+    let effect_counts = Arc::new(PluginCounts::default());
+    let mut effect_runtime = runtime(effect_counts.clone(), json!(42), json!(42));
+    let error = effect_runtime
+        .execute(
+            seal_plan(effect_plan).expect("Plan admits"),
+            &json!({"request": "run"}),
+            "run:effect-output",
+        )
+        .expect_err("effect output must fail");
+    assert!(matches!(error, RuntimeError::Contract(_)));
+    assert_eq!(effect_counts.dispatch.load(Ordering::SeqCst), 1);
+    let effect = effect_runtime.machine().projection().runs["run:effect-output"]
+        .effects
+        .values()
+        .next()
+        .expect("effect intent exists");
+    assert_eq!(effect.outcome, cymule_core::WorldOutcome::Unobserved);
+}
+
+#[test]
+fn contract_violation_projects_to_engine_failure_without_losing_paths() {
+    let contracts = PlanContracts::compile(&candidate()).expect("schemas compile");
+    let violation = contracts
+        .validate_component_input("example.component", &json!({"name": 7}))
+        .expect_err("component input must fail");
+    let failure = EngineFailure::from_contract_violation(&violation, EnginePhase::PluginCall);
+
+    assert_eq!(failure.category, EngineFailureCategory::ContractViolation);
+    assert_eq!(
+        failure.contract.as_deref(),
+        Some("component:example.component")
+    );
+    assert_eq!(failure.contract_side, Some(EngineContractSide::Input));
+    assert_eq!(failure.path.as_deref(), Some("/name"));
+    assert_eq!(failure.issues.len(), violation.issues.len());
+    assert_eq!(
+        failure.issues[0].schema_path.as_deref(),
+        Some(violation.issues[0].schema_path.as_str())
+    );
+    failure.verify().expect("projected failure is wire-valid");
 }

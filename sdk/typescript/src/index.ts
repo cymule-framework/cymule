@@ -1340,6 +1340,7 @@ export interface EngineIssue {
   code: string;
   message: string;
   path?: string;
+  schema_path?: string;
 }
 
 export interface EngineFailure {
@@ -1596,12 +1597,13 @@ function validateEngineFailure(value: unknown): asserts value is EngineFailure {
       throw transportError("invalid_engine_response", "Engine issue set is invalid");
     }
     for (const issue of value.issues) {
-      if (!isRecord(issue) || !Object.keys(issue).every((key) => ["code", "message", "path"].includes(key)) ||
+      if (!isRecord(issue) || !Object.keys(issue).every((key) => ["code", "message", "path", "schema_path"].includes(key)) ||
         typeof issue.code !== "string" || Buffer.byteLength(issue.code) < 1 || Buffer.byteLength(issue.code) > 200 ||
         typeof issue.message !== "string" || Buffer.byteLength(issue.message) < 1 || Buffer.byteLength(issue.message) > 2000) {
         throw transportError("invalid_engine_response", "Engine issue is invalid");
       }
       validateEnginePath(issue.path);
+      validateEnginePath(issue.schema_path);
     }
   }
 }

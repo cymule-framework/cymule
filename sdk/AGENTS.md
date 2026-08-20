@@ -5,6 +5,8 @@
   Engine error that preserves the Rust failure object; never parse stderr or a
   human message into semantic categories, and never recommend replay merely
   because the transport ended without a response.
+- Contract issue decoding preserves both the failing value `path` and the
+  failing `schema_path`; neither SDK may flatten them into display text.
 - Every SDK exposes reusable definition declaration and `invoke` authoring with
   the same explicit local definition ID, input expression, site ID, and result
   binding. Linking logical latest-compatible references remains Rust authority.

@@ -15,9 +15,10 @@ const EngineProtocolVersion = "cymule.engine/1"
 
 // EngineIssue is one machine-readable validation or contract issue.
 type EngineIssue struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Path    string `json:"path,omitempty"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Path       string `json:"path,omitempty"`
+	SchemaPath string `json:"schema_path,omitempty"`
 }
 
 // EngineFailure is one closed semantic or transport failure.
@@ -55,7 +56,8 @@ func (failure EngineFailure) validate() error {
 	}
 	for _, issue := range failure.Issues {
 		if len(issue.Code) < 1 || len(issue.Code) > 200 || len(issue.Message) < 1 ||
-			len(issue.Message) > 2000 || !validEnginePath(issue.Path) {
+			len(issue.Message) > 2000 || !validEnginePath(issue.Path) ||
+			!validEnginePath(issue.SchemaPath) {
 			return fmt.Errorf("Engine issue is invalid")
 		}
 	}

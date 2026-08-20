@@ -27,9 +27,10 @@ impl PluginHost for EmptyPlugin {
                     effects: BTreeMap::new(),
                 },
             }),
-            request => Err(RuntimeError::Plugin(format!(
-                "unexpected wait-source request: {request:?}"
-            ))),
+            request => Err(RuntimeError::PluginDefect {
+                code: "unexpected_test_request".to_owned(),
+                message: format!("unexpected wait-source request: {request:?}"),
+            }),
         }
     }
 }

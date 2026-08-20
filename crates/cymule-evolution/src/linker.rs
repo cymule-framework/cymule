@@ -456,7 +456,7 @@ impl DefinitionRegistry {
                 template.template_id
             )));
         }
-        let plan = candidate.seal()?;
+        let plan = cymule_runtime::seal_plan(candidate)?;
         Ok(LinkedPlan {
             template_id: template.template_id.clone(),
             plan,

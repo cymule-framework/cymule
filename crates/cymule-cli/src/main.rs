@@ -12,7 +12,8 @@ use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{
     ENGINE_PROTOCOL_VERSION, EmbeddedRuntime, EngineContractSide, EngineFailure,
     EngineFailureCategory, EngineIssue, EnginePhase, EngineRequestEnvelope,
-    EngineResponseEnvelope, EngineRetryDisposition, ExecutionResult, ProcessPlugin,
+    EngineResponseEnvelope, EngineRetryDisposition, ExecutionResult, ProcessPlugin, seal_plan,
+    verify_plan,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -75,12 +76,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("rpc") => rpc(),
         Some("seal") => {
             let candidate: PlanCandidate = read_path(argument_value(&arguments, "--input")?)?;
-            let plan = candidate.seal()?;
+            let plan = seal_plan(candidate)?;
             print_json(&plan)
         }
         Some("verify") => {
             let plan: SealedPlan = read_path(argument_value(&arguments, "--plan")?)?;
-            plan.verify()?;
+            verify_plan(&plan)?;
             println!("verified {}", plan.plan_id);
             Ok(())
         }
@@ -170,13 +171,14 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
     }
     let response = match envelope.request {
         EngineRequest::Seal { candidate } => EngineResponse::Sealed {
-            plan: candidate
-                .seal()
-                .map_err(|error| EngineFailure::from_core(&error, EnginePhase::SealPlan))?,
+            plan: seal_plan(candidate).map_err(|error| {
+                EngineFailure::from_runtime(error.into(), EnginePhase::SealPlan)
+            })?,
         },
         EngineRequest::Verify { plan } => {
-            plan.verify()
-                .map_err(|error| EngineFailure::from_core(&error, EnginePhase::VerifyPlan))?;
+            verify_plan(&plan).map_err(|error| {
+                EngineFailure::from_runtime(error.into(), EnginePhase::VerifyPlan)
+            })?;
             EngineResponse::Verified
         }
         EngineRequest::SealResource { candidate } => EngineResponse::SealedResource {
@@ -281,6 +283,9 @@ fn map_durable_error(error: &cymule_durable::DurableError, phase: EnginePhase) -
     use cymule_durable::DurableError;
 
     let (category, code, retry) = match &error {
+        DurableError::Contract(error) => {
+            return EngineFailure::from_contract_violation(error, phase);
+        }
         DurableError::Validation(_) | DurableError::Encoding(_) => (
             EngineFailureCategory::Validation,
             "durable_command_validation_failed",
@@ -319,6 +324,9 @@ fn map_evolution_error(
     use cymule_evolution::EvolutionError;
 
     let (category, code, retry) = match &error {
+        EvolutionError::Contract(error) => {
+            return EngineFailure::from_contract_violation(error, phase);
+        }
         EvolutionError::Validation(_) => (
             EngineFailureCategory::Validation,
             "evolution_command_validation_failed",

@@ -262,9 +262,10 @@ impl PluginHost for EmptyPlugin {
                     effects: BTreeMap::new(),
                 },
             }),
-            _ => Err(RuntimeError::Plugin(
-                "empty plugin received an executable request".to_owned(),
-            )),
+            _ => Err(RuntimeError::PluginDefect {
+                code: "unexpected_test_request".to_owned(),
+                message: "empty plugin received an executable request".to_owned(),
+            }),
         }
     }
 }
@@ -288,9 +289,10 @@ impl PluginHost for DeclaredEffectPlugin {
                     )]),
                 },
             }),
-            _ => Err(RuntimeError::Plugin(
-                "safe relink unexpectedly dispatched an effect".to_owned(),
-            )),
+            _ => Err(RuntimeError::PluginDefect {
+                code: "unexpected_test_dispatch".to_owned(),
+                message: "safe relink unexpectedly dispatched an effect".to_owned(),
+            }),
         }
     }
 }

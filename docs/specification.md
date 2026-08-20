@@ -77,6 +77,29 @@ disposition for an admitted external intent whose world outcome is unknown.
 SDKs MUST preserve the complete failure object. Process status and stderr are
 transport diagnostics only and MUST NOT become a parallel semantic error path.
 
+### 3.2 Executable Plan contracts
+
+Every definition, component, effect, and typed input-wait schema MUST compile
+as JSON Schema Draft 2020-12 before a Plan is sealed or admitted. If `$schema`
+is present, it MUST equal the canonical Draft 2020-12 dialect URI. External
+schema resolution is forbidden; fragment-local references remain legal. The
+compiler MUST interpret schema-bearing keywords without treating `$ref`-shaped
+application data inside `const` or `enum` as a reference.
+
+The submitted schema remains unchanged in the canonical Plan preimage. A
+runtime MUST validate Run and invocation inputs, component and effect inputs,
+typed wait completions, component and effect outputs, definition returns, and
+the terminal Result at their exact boundary. Invalid input MUST be rejected
+before plugin dispatch or boundary-specific durable mutation. Invalid output
+MUST NOT be bound, stored as a result Artifact, recorded as a component
+occurrence, or used to settle an outbox entry. A mutating Effect may already
+have changed the world before its returned output is found invalid; its claimed
+intent remains unresolved and follows the existing reconciliation path.
+
+Contract failures MUST retain boundary identity, schema/input/output side,
+instance and schema JSON Pointers, masked issues, and an explicit retry
+disposition in the Engine failure envelope.
+
 ## 4. Canonical stores
 
 Cymule has exactly three canonical stores:

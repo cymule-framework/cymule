@@ -14,9 +14,10 @@ pub use composition::{
 };
 pub use contract::{
     CONTRACT_SCHEMA_DIALECT, ContractBoundary, ContractIssue, ContractPhase, ContractResult,
-    ContractSide, ContractTarget, ContractValidator, ContractViolation, PlanContracts,
+    ContractSide, ContractTarget, ContractValidator, ContractViolation, PlanAdmissionError,
+    PlanAdmissionResult, PlanContracts,
 };
-pub use engine::{EmbeddedRuntime, ExecutionResult};
+pub use engine::{EmbeddedRuntime, ExecutionResult, seal_plan, verify_plan};
 pub use error::{RuntimeError, RuntimeResult};
 pub use plugin::{
     PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginOperation, PluginRequest,

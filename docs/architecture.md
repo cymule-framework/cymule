@@ -98,6 +98,14 @@ stable implementation ID. Plan contracts own schemas and effect properties.
 Registration never grants authority. Admission independently checks the plan,
 binding, policy, and authority before dispatch.
 
+`cymule-runtime` compiles those schemas with the maintained `jsonschema`
+implementation under fixed Draft 2020-12 semantics and a resolver that cannot
+load ambient files or network resources. `cymule-core` continues to own the
+unchanged canonical schema bytes and Plan identity; it does not depend on the
+schema compiler. Embedded execution, durable execution, CLI sealing, durable
+control, and live-evolution linking all use the same runtime Plan-admission
+entry point.
+
 The reference process protocol is request/response JSON over stdin/stdout. It is
 designed for testability, not as the only production transport. Future WIT and
 network transports can implement the same `PluginHost` trait.

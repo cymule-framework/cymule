@@ -198,6 +198,9 @@ pub struct EngineIssue {
     /// JSON Pointer relative to the selected contract side.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<Box<str>>,
+    /// JSON Pointer to the failing schema keyword for contract issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_path: Option<Box<str>>,
 }
 
 /// One structured Engine failure.
@@ -279,6 +282,9 @@ impl EngineFailure {
             if let Some(path) = &issue.path {
                 verify_path(path, "issue path")?;
             }
+            if let Some(path) = &issue.schema_path {
+                verify_path(path, "issue schema path")?;
+            }
         }
         Ok(())
     }
@@ -315,6 +321,7 @@ impl EngineFailure {
     pub fn from_runtime(error: RuntimeError, phase: EnginePhase) -> Self {
         match error {
             RuntimeError::Core(error) => Self::from_core(&error, phase),
+            RuntimeError::Contract(error) => Self::from_contract_violation(&error, phase),
             RuntimeError::PluginDefect { code, message } => {
                 let mut failure =
                     Self::new(EngineFailureCategory::PluginDefect, phase, code, message);
@@ -352,6 +359,63 @@ impl EngineFailure {
                 failure
             }
         }
+    }
+
+    /// Project an executable Plan contract violation without flattening its
+    /// boundary, side, or issue paths.
+    pub fn from_contract_violation(error: &crate::ContractViolation, phase: EnginePhase) -> Self {
+        use crate::{ContractBoundary, ContractPhase, ContractSide};
+
+        let contract_kind = match error.target.boundary {
+            ContractBoundary::Definition => "definition",
+            ContractBoundary::Component => "component",
+            ContractBoundary::Effect => "effect",
+            ContractBoundary::Wait => "wait",
+        };
+        let contract_side = match error.phase {
+            ContractPhase::Admission => EngineContractSide::Schema,
+            ContractPhase::Execution => match error.target.side {
+                ContractSide::Input => EngineContractSide::Input,
+                ContractSide::Output => EngineContractSide::Output,
+            },
+        };
+        let code = match error.phase {
+            ContractPhase::Admission => "invalid_contract_schema",
+            ContractPhase::Execution => "contract_value_mismatch",
+        };
+        let mut failure = Self::new(
+            EngineFailureCategory::ContractViolation,
+            phase,
+            code,
+            format!(
+                "{contract_kind} {:?} {:?} contract rejected {} issue(s)",
+                error.target.id,
+                contract_side,
+                error.issues.len()
+            ),
+        );
+        failure.contract = Some(format!("{contract_kind}:{}", error.target.id).into_boxed_str());
+        failure.contract_side = Some(contract_side);
+        failure.path = error
+            .issues
+            .first()
+            .map(|issue| issue.instance_path.clone().into_boxed_str());
+        failure.issues = error
+            .issues
+            .iter()
+            .map(|issue| EngineIssue {
+                code: code.into(),
+                message: issue.message.clone().into_boxed_str(),
+                path: Some(issue.instance_path.clone().into_boxed_str()),
+                schema_path: Some(issue.schema_path.clone().into_boxed_str()),
+            })
+            .collect();
+        failure.retry_disposition = Some(match error.phase {
+            ContractPhase::Admission | ContractPhase::Execution => {
+                EngineRetryDisposition::CorrectAndRetry
+            }
+        });
+        failure
     }
 }
 

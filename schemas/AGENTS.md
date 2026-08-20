@@ -7,7 +7,8 @@
 - `engine-protocol.schema.json` owns both sides of `cymule.engine/1`: one
   versioned request envelope and one success-or-failure response envelope.
   Failure categories, phases, contract sides, issue bounds, and retry
-  dispositions are closed and must match Rust plus every SDK.
+  dispositions are closed and must match Rust plus every SDK. Contract issues
+  preserve separate instance `path` and `schema_path` JSON Pointers.
 - `cymule.ir/2` adds the closed `invoke` operation. Future operation additions
   require a new IR version rather than widening this frozen schema in place.
 - Keep semantic validation in the Rust kernel. JSON Schema validates wire shape;

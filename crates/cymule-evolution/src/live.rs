@@ -1188,6 +1188,7 @@ fn decode(record: &JournalRecord) -> EvolutionResult<LiveEvolutionCheckpoint> {
 
 fn durable_error(error: cymule_durable::DurableError) -> EvolutionError {
     match error {
+        cymule_durable::DurableError::Contract(error) => EvolutionError::Contract(error),
         cymule_durable::DurableError::Validation(message)
         | cymule_durable::DurableError::Encoding(message) => EvolutionError::Validation(message),
         cymule_durable::DurableError::NotFound(message) => EvolutionError::NotFound(message),

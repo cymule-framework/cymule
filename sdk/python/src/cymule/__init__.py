@@ -24,6 +24,7 @@ class EngineIssue(TypedDict, total=False):
     code: str
     message: str
     path: str
+    schema_path: str
 
 
 class _EngineFailureRequired(TypedDict):
@@ -1496,7 +1497,7 @@ def _validate_engine_failure(value: object) -> None:
     if not isinstance(issues, list) or len(issues) > 100:
         raise _transport_error("invalid_engine_response", "Engine issue set is invalid")
     for issue in issues:
-        if not isinstance(issue, dict) or not {"code", "message"} <= set(issue) or not set(issue) <= {"code", "message", "path"}:
+        if not isinstance(issue, dict) or not {"code", "message"} <= set(issue) or not set(issue) <= {"code", "message", "path", "schema_path"}:
             raise _transport_error("invalid_engine_response", "Engine issue fields are not closed")
         if (
             not isinstance(issue["code"], str)
@@ -1506,6 +1507,7 @@ def _validate_engine_failure(value: object) -> None:
         ):
             raise _transport_error("invalid_engine_response", "Engine issue bounds are invalid")
         _validate_engine_path(issue.get("path"), "issue path")
+        _validate_engine_path(issue.get("schema_path"), "issue schema path")
 
 
 def _validate_engine_path(value: object, label: str) -> None:

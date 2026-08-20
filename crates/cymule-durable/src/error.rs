@@ -8,6 +8,8 @@ pub type DurableResult<T> = std::result::Result<T, DurableError>;
 pub enum DurableError {
     /// Stored or proposed state is malformed.
     Validation(String),
+    /// An executable Plan contract failed admission or value validation.
+    Contract(cymule_runtime::ContractViolation),
     /// A conditional write observed another committed revision.
     Conflict {
         /// Caller-observed revision.
@@ -29,6 +31,7 @@ impl Display for DurableError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Validation(message) => write!(formatter, "validation_failed: {message}"),
+            Self::Contract(error) => write!(formatter, "contract_violation: {error}"),
             Self::Conflict { expected, current } => {
                 write!(
                     formatter,
@@ -56,5 +59,20 @@ impl From<cymule_core::CoreError> for DurableError {
 impl From<serde_json::Error> for DurableError {
     fn from(error: serde_json::Error) -> Self {
         Self::Encoding(error.to_string())
+    }
+}
+
+impl From<cymule_runtime::ContractViolation> for DurableError {
+    fn from(error: cymule_runtime::ContractViolation) -> Self {
+        Self::Contract(error)
+    }
+}
+
+impl From<cymule_runtime::PlanAdmissionError> for DurableError {
+    fn from(error: cymule_runtime::PlanAdmissionError) -> Self {
+        match error {
+            cymule_runtime::PlanAdmissionError::Core(error) => Self::from(error),
+            cymule_runtime::PlanAdmissionError::Contract(error) => Self::Contract(error),
+        }
     }
 }

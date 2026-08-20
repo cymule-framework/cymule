@@ -8,6 +8,8 @@ pub type RuntimeResult<T> = std::result::Result<T, RuntimeError>;
 pub enum RuntimeError {
     /// Trusted semantic kernel rejected an operation.
     Core(cymule_core::CoreError),
+    /// An executable Plan contract failed admission or value validation.
+    Contract(crate::ContractViolation),
     /// Plugin protocol or behavior was invalid.
     PluginDefect {
         /// Stable host-owned defect code.
@@ -50,6 +52,7 @@ impl Display for RuntimeError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Core(error) => Display::fmt(error, formatter),
+            Self::Contract(error) => write!(formatter, "contract_violation: {error}"),
             Self::PluginDefect { code, message } => {
                 write!(formatter, "plugin_defect: {code}: {message}")
             }
@@ -67,6 +70,21 @@ impl std::error::Error for RuntimeError {}
 impl From<cymule_core::CoreError> for RuntimeError {
     fn from(error: cymule_core::CoreError) -> Self {
         Self::Core(error)
+    }
+}
+
+impl From<crate::ContractViolation> for RuntimeError {
+    fn from(error: crate::ContractViolation) -> Self {
+        Self::Contract(error)
+    }
+}
+
+impl From<crate::PlanAdmissionError> for RuntimeError {
+    fn from(error: crate::PlanAdmissionError) -> Self {
+        match error {
+            crate::PlanAdmissionError::Core(error) => Self::Core(error),
+            crate::PlanAdmissionError::Contract(error) => Self::Contract(error),
+        }
     }
 }
 

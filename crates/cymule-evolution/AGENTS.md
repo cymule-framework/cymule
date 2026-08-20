@@ -5,6 +5,9 @@
 - Reusable definitions and subflows are semantic dependencies, not mutable
   pointers. Sealing resolves them into an immutable Plan dependency graph; an
   update creates new child and dependent Plan commits for future calls.
+- Patch and linker sealing use the single executable Plan admission path from
+  `cymule-runtime`; malformed JSON Schema may not enter the evolution DAG or a
+  future default head.
 - Never implement a dynamic `latest` reference inside a sealed Plan. Existing
   invocations remain pinned; yielded work changes Plan only through safe-point
   migration, and cross-version calls require checked contract adapters.
