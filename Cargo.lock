@@ -357,6 +357,9 @@ dependencies = [
  "axum",
  "cymule-core",
  "cymule-durable",
+ "cymule-runtime",
+ "cymule-store-sqlite",
+ "cymule-test-world",
  "rusqlite",
  "serde",
  "serde_json",
@@ -372,6 +375,9 @@ dependencies = [
  "cymule-clock-system",
  "cymule-core",
  "cymule-durable",
+ "cymule-runtime",
+ "cymule-store-sqlite",
+ "cymule-test-world",
  "rusqlite",
  "serde",
  "serde_json",
@@ -424,8 +430,10 @@ version = "0.1.4"
 dependencies = [
  "cymule-core",
  "cymule-durable",
+ "cymule-test-world",
  "rusqlite",
  "serde",
+ "serde_json",
  "tempfile",
 ]
 
@@ -547,6 +555,7 @@ version = "0.1.4"
 dependencies = [
  "cymule-core",
  "cymule-resource",
+ "cymule-test-world",
  "fs4",
  "serde",
  "serde_json",

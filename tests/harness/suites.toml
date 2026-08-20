@@ -39,6 +39,9 @@ suites = [
   "rust-store-plugins",
   "rust-resource-plugins",
   "rust-executor-plugin",
+  "rust-activation-http",
+  "rust-activation-timer",
+  "rust-clock-system",
 ]
 
 [execution_classes.live_provider]
@@ -46,7 +49,6 @@ description = "Evidence against a real adapter or provider boundary, kept indepe
 suites = [
   "rust-directory-plugin",
   "rust-portability",
-  "rust-activation-plugins",
   "rust-observability-plugin",
 ]
 
@@ -244,11 +246,23 @@ commands = [
   ["cargo", "check", "--package", "cymule-resource-object-store", "--all-features"],
 ]
 
-[suites.rust-activation-plugins]
-description = "Run HTTP signal and durable timer activation adapters."
+[suites.rust-activation-http]
+description = "Run HTTP activation semantics and real ingress/selection/activation/acknowledgement process-death witnesses."
 lane = "rust-plugins"
 tools = ["rust"]
-commands = [["bash", "./scripts/verify-rust.sh", "cymule-activation-http", "cymule-activation-timer", "cymule-clock-system"]]
+commands = [["bash", "./scripts/verify-rust.sh", "cymule-activation-http"]]
+
+[suites.rust-activation-timer]
+description = "Run timer activation semantics and real schedule/selection/activation/acknowledgement process-death witnesses."
+lane = "rust-plugins"
+tools = ["rust"]
+commands = [["bash", "./scripts/verify-rust.sh", "cymule-activation-timer"]]
+
+[suites.rust-clock-system]
+description = "Run restart-monotonic clock semantics and real process death on both observation sides."
+lane = "rust-plugins"
+tools = ["rust"]
+commands = [["bash", "./scripts/verify-rust.sh", "cymule-clock-system"]]
 
 [suites.rust-executor-plugin]
 description = "Run the hardened process executor adapter."
@@ -294,7 +308,9 @@ requires = [
   "package-rust",
   "rust-store-plugins",
   "rust-resource-plugins",
-  "rust-activation-plugins",
+  "rust-activation-http",
+  "rust-activation-timer",
+  "rust-clock-system",
   "rust-executor-plugin",
   "rust-observability-plugin",
   "rust-agent-mcp-plugin",
@@ -365,8 +381,16 @@ patterns = ["plugins/resource-fs/**", "plugins/resource-object-store/**"]
 suites = ["rust-resource-plugins"]
 
 [[routes]]
-patterns = ["plugins/activation-http/**", "plugins/activation-timer/**", "plugins/clock-system/**"]
-suites = ["rust-activation-plugins"]
+patterns = ["plugins/activation-http/**"]
+suites = ["rust-activation-http"]
+
+[[routes]]
+patterns = ["plugins/activation-timer/**"]
+suites = ["rust-activation-timer"]
+
+[[routes]]
+patterns = ["plugins/clock-system/**"]
+suites = ["rust-clock-system"]
 
 [[routes]]
 patterns = ["plugins/executor-process/**"]

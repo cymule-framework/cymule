@@ -34,6 +34,9 @@
   plugin leaves.
 - The SQLite plugin route also selects the example leaf because campaign status
   relies on its non-mutating read-only observation contract.
+- HTTP activation, timer activation, and restart-monotonic clock adapters own
+  separate live-process suites. Do not recombine them into one activation leaf;
+  each package must expose its process-death result independently.
 - Export the Resource ID sealed from the checked-in Resource Candidate so every
   SDK verifies the same Rust-owned identity.
 - Every SDK submits the shared wait activation fixture to the Rust Engine. This

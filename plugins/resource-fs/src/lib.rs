@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 const BINDING_VERSION: &str = "cymule.resource-fs/1";
 const DIRECTORY_MEDIA_TYPE: &str = "application/vnd.cymule.directory+jsonl";
+const UPLOAD_RECORD_VERSION: &str = "cymule.resource-fs-upload/2";
 
 /// One entry in a content-addressed directory manifest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,9 +40,11 @@ enum UploadState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UploadRecord {
+    record_version: String,
     intent: ResourceWriteIntent,
     upload_id: String,
     state: UploadState,
+    committed_length: u64,
     handle: Option<ResourceHandle>,
 }
 
@@ -242,6 +245,12 @@ impl FsResourceStore {
                 "filesystem upload record identity changed".to_owned(),
             ));
         }
+        if record.record_version != UPLOAD_RECORD_VERSION {
+            return Err(ResourceError::Integrity(format!(
+                "unsupported filesystem upload record version {}",
+                record.record_version
+            )));
+        }
         Ok(record)
     }
 
@@ -254,7 +263,8 @@ impl FsResourceStore {
             .join(format!("record-{}", Self::upload_key(&record.upload_id)?));
         write_synced(&staging, &bytes)?;
         fs::rename(staging, destination).map_err(substrate)?;
-        sync_directory(&self.root.join("uploads"))
+        sync_directory(&self.root.join("uploads"))?;
+        sync_directory(&self.root.join("staging"))
     }
 
     fn resource_path(&self, resource: &ResourceHandle) -> ResourceResult<PathBuf> {
@@ -304,9 +314,11 @@ impl ArtifactStore for FsResourceStore {
             }
         } else {
             self.store_record(&UploadRecord {
+                record_version: UPLOAD_RECORD_VERSION.to_owned(),
                 intent: intent.clone(),
                 upload_id: upload_id.clone(),
                 state: UploadState::Open,
+                committed_length: 0,
                 handle: None,
             })?;
         }
@@ -332,7 +344,7 @@ impl ArtifactStore for FsResourceStore {
             ));
         }
         let _claim = self.claim(&session.upload_id)?;
-        let record = self.load_record(&session.upload_id)?;
+        let mut record = self.load_record(&session.upload_id)?;
         if record.write_id() != session.write_id {
             return Err(ResourceError::Conflict(
                 "filesystem upload identity changed".to_owned(),
@@ -346,11 +358,16 @@ impl ArtifactStore for FsResourceStore {
             })?;
             handle.verify()?;
             let path = self.resource_path(handle)?;
-            let size = fs::metadata(&path).map_err(substrate)?.len();
+            let ResourceIntegrity::Content { digest, size } = &handle.integrity else {
+                return Err(ResourceError::Integrity(
+                    "filesystem Resource is not content verified".to_owned(),
+                ));
+            };
+            verify_content(&path, digest, *size)?;
             let end = offset
                 .checked_add(bytes.len() as u64)
                 .ok_or_else(|| ResourceError::Integrity("resource size overflow".to_owned()))?;
-            if end > size {
+            if end > *size {
                 return Err(ResourceError::Conflict(
                     "filesystem write retry exceeds committed bytes".to_owned(),
                 ));
@@ -373,14 +390,29 @@ impl ArtifactStore for FsResourceStore {
             ));
         }
         let path = self.data_path(&session.upload_id)?;
+        let created = !path.exists();
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(path)
+            .open(&path)
             .map_err(substrate)?;
-        let length = file.metadata().map_err(substrate)?.len();
+        let mut length = file.metadata().map_err(substrate)?.len();
+        if length < record.committed_length {
+            return Err(ResourceError::Integrity(format!(
+                "filesystem upload lost acknowledged bytes: retained {length}, committed {}",
+                record.committed_length
+            )));
+        }
+        if length > record.committed_length {
+            file.set_len(record.committed_length).map_err(substrate)?;
+            file.sync_all().map_err(substrate)?;
+            length = record.committed_length;
+        }
+        if created {
+            sync_directory(&self.root.join("uploads"))?;
+        }
         let end = offset
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| ResourceError::Integrity("resource size overflow".to_owned()))?;
@@ -408,7 +440,9 @@ impl ArtifactStore for FsResourceStore {
         }
         file.seek(SeekFrom::End(0)).map_err(substrate)?;
         file.write_all(bytes).map_err(substrate)?;
-        file.sync_all().map_err(substrate)
+        file.sync_all().map_err(substrate)?;
+        record.committed_length = end;
+        self.store_record(&record)
     }
 
     fn commit_write(&mut self, session: &ResourceWriteSession) -> ResourceResult<ResourceHandle> {
@@ -426,7 +460,9 @@ impl ArtifactStore for FsResourceStore {
         }
         if let Some(handle) = &record.handle {
             handle.verify()?;
-            return Ok(handle.clone());
+            let handle = handle.clone();
+            self.stat(&handle)?;
+            return Ok(handle);
         }
         if record.state != UploadState::Open {
             return Err(ResourceError::Conflict(
@@ -436,6 +472,22 @@ impl ArtifactStore for FsResourceStore {
         let data_path = self.data_path(&session.upload_id)?;
         if !data_path.exists() {
             write_synced(&data_path, &[])?;
+            sync_directory(&self.root.join("uploads"))?;
+        }
+        let data_length = fs::metadata(&data_path).map_err(substrate)?.len();
+        if data_length < record.committed_length {
+            return Err(ResourceError::Integrity(format!(
+                "filesystem upload lost acknowledged bytes: retained {data_length}, committed {}",
+                record.committed_length
+            )));
+        }
+        if data_length > record.committed_length {
+            let data = OpenOptions::new()
+                .write(true)
+                .open(&data_path)
+                .map_err(substrate)?;
+            data.set_len(record.committed_length).map_err(substrate)?;
+            data.sync_all().map_err(substrate)?;
         }
         if matches!(
             record.intent.shape,
@@ -460,7 +512,9 @@ impl ArtifactStore for FsResourceStore {
         let hex = hex_digest(&hasher.finalize());
         let digest = format!("sha256:{hex}");
         let object = self.root.join("objects").join(&hex);
-        if !object.exists() {
+        if object.exists() {
+            verify_content(&object, &digest, size)?;
+        } else {
             let staging = self
                 .root
                 .join("staging")
@@ -474,7 +528,9 @@ impl ArtifactStore for FsResourceStore {
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(substrate(error)),
             }
+            verify_content(&object, &digest, size)?;
             fs::remove_file(staging).map_err(substrate)?;
+            sync_directory(&self.root.join("staging"))?;
         }
         let handle = ResourceCandidate {
             resource_version: cymule_resource::RESOURCE_VERSION.to_owned(),
@@ -520,13 +576,8 @@ impl ArtifactResolver for FsResourceStore {
     fn stat(&mut self, resource: &ResourceHandle) -> ResourceResult<ResourceObservation> {
         resource.verify()?;
         let path = self.resource_path(resource)?;
-        let metadata = fs::metadata(path).map_err(substrate)?;
-        if let ResourceIntegrity::Content { size, .. } = resource.integrity
-            && metadata.len() != size
-        {
-            return Err(ResourceError::Integrity(
-                "filesystem object size changed".to_owned(),
-            ));
+        if let ResourceIntegrity::Content { ref digest, size } = resource.integrity {
+            verify_content(&path, digest, size)?;
         }
         Ok(ResourceObservation {
             media_type: resource.media_type.clone(),
@@ -682,6 +733,32 @@ fn write_synced(path: &Path, bytes: &[u8]) -> ResourceResult<()> {
         .map_err(substrate)?;
     file.write_all(bytes).map_err(substrate)?;
     file.sync_all().map_err(substrate)
+}
+
+fn verify_content(path: &Path, expected_digest: &str, expected_size: u64) -> ResourceResult<()> {
+    let metadata = fs::metadata(path).map_err(substrate)?;
+    if metadata.len() != expected_size {
+        return Err(ResourceError::Integrity(
+            "filesystem object size changed".to_owned(),
+        ));
+    }
+    let mut file = File::open(path).map_err(substrate)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(substrate)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let actual = format!("sha256:{}", hex_digest(&hasher.finalize()));
+    if actual != expected_digest {
+        return Err(ResourceError::Integrity(format!(
+            "filesystem object digest changed: expected {expected_digest}, found {actual}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

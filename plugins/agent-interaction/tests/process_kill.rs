@@ -3,8 +3,13 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::thread;
 use std::time::Duration;
 
@@ -12,10 +17,10 @@ use cymule_agent::{
     AgentError, AgentHost, AgentHostOccurrence, AgentHostOccurrenceState, AgentHostRequest,
     AgentHostResponse, AgentInteractionController, AgentJournal, AgentOccurrenceResolution,
     AgentOccurrenceStore, AgentRecoveryController, AgentResult, AgentSession, AgentState,
-    AgentStreamChunk, AgentStreamController, AgentStreamTarget, AgentUpdate, ContentBlock,
-    ContextRequest, ContextSnapshot, ElicitationRequest, ElicitationResponse, MessageRole,
-    ModelRequest, ModelResponse, PermissionRequest, PermissionResponse, ToolRequest, ToolResponse,
-    WorkspaceChange, WorkspaceReceipt,
+    AgentStreamChunk, AgentStreamController, AgentStreamState, AgentStreamTarget, AgentUpdate,
+    ContentBlock, ContextRequest, ContextSnapshot, ElicitationRequest, ElicitationResponse,
+    MessageRole, ModelRequest, ModelResponse, PermissionRequest, PermissionResponse, ToolRequest,
+    ToolResponse, WorkspaceChange, WorkspaceReceipt,
 };
 use cymule_core::Machine;
 use cymule_durable::{
@@ -38,6 +43,26 @@ struct KillStore {
     fail_at: usize,
     calls: usize,
     marker: PathBuf,
+}
+
+struct CountingStore {
+    inner: SqliteStore,
+    calls: Arc<AtomicUsize>,
+}
+
+impl DurableStore for CountingStore {
+    fn load(&mut self) -> DurableResult<Option<StoredState>> {
+        self.inner.load()
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        expected_revision: Option<&str>,
+        next: &DurableState,
+    ) -> DurableResult<StoreCommit> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.compare_and_swap(expected_revision, next)
+    }
 }
 
 impl KillStore {
@@ -265,7 +290,7 @@ fn agent_session_process_kill_worker_entry() {
         inner: SqliteStore::open(durable_database, "domain:agent-session-kill")
             .expect("durable store opens"),
         phase: kill_phase("CYMULE_AGENT_SESSION_KILL_PHASE"),
-        fail_at: 1,
+        fail_at: kill_at("CYMULE_AGENT_SESSION_KILL_AT"),
         calls: 0,
         marker,
     };
@@ -295,7 +320,7 @@ fn agent_stream_process_kill_worker_entry() {
         inner: SqliteStore::open(durable_database, "domain:agent-stream-kill")
             .expect("durable store opens"),
         phase: kill_phase("CYMULE_AGENT_STREAM_KILL_PHASE"),
-        fail_at: 1,
+        fail_at: kill_at("CYMULE_AGENT_STREAM_KILL_AT"),
         calls: 0,
         marker,
     };
@@ -311,9 +336,48 @@ fn agent_stream_process_kill_worker_entry() {
 
 #[test]
 fn every_agent_occurrence_journal_boundary_survives_real_process_death() {
+    let baseline = TestWorld::new(0).expect("Agent occurrence baseline world creates");
+    let baseline_database = baseline
+        .domain()
+        .path("occurrence-baseline.sqlite")
+        .expect("baseline database path resolves");
+    let baseline_ledger = baseline
+        .domain()
+        .path("occurrence-ledger.sqlite")
+        .expect("baseline ledger path resolves");
+    LedgerHost::initialize(&baseline_ledger);
+    DurableCoordinator::open(
+        SqliteStore::open(&baseline_database, "domain:agent-kill").expect("baseline store opens"),
+    )
+    .expect("baseline domain opens")
+    .initialize(&Machine::new())
+    .expect("baseline domain initializes");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let coordinator = DurableCoordinator::open(CountingStore {
+        inner: SqliteStore::open(&baseline_database, "domain:agent-kill")
+            .expect("counting store opens"),
+        calls: Arc::clone(&calls),
+    })
+    .expect("counting domain opens");
+    AgentInteractionController::resume(
+        "session:process-kill",
+        LedgerHost {
+            database: baseline_ledger,
+        },
+        coordinator,
+    )
+    .expect("baseline controller opens")
+    .execute("occurrence:process-kill", tool_request("tool:process-kill"))
+    .expect("baseline occurrence completes");
+    let boundary_count = calls.load(Ordering::SeqCst);
+    assert!(
+        boundary_count > 0,
+        "an Agent occurrence must cross at least one durable boundary"
+    );
+
     for phase in ["before_commit", "after_commit"] {
-        for fail_at in 1..=3 {
-            let phase_seed = usize::from(phase == "after_commit") * 3 + fail_at;
+        for fail_at in 1..=boundary_count {
+            let phase_seed = usize::from(phase == "after_commit") * boundary_count + fail_at;
             let world =
                 TestWorld::new(u64::try_from(phase_seed).expect("fault-matrix position fits u64"))
                     .expect("Agent fault test world creates");
@@ -355,7 +419,17 @@ fn every_agent_occurrence_journal_boundary_survives_real_process_death() {
             child
                 .wait_for_path(&marker, Duration::from_secs(20))
                 .expect("kill worker reaches the selected journal barrier");
-            assert!(!child.terminate().expect("worker is reaped").success());
+            assert_eq!(
+                fs::read_to_string(&marker)
+                    .expect("occurrence barrier reads")
+                    .parse::<usize>()
+                    .expect("occurrence barrier parses"),
+                fail_at
+            );
+            assert_eq!(
+                child.terminate().expect("worker is reaped").signal(),
+                Some(9)
+            );
             assert!(child.is_reaped());
 
             let store = SqliteStore::open(&durable_database, "domain:agent-kill")
@@ -444,120 +518,278 @@ fn every_agent_occurrence_journal_boundary_survives_real_process_death() {
 
 #[test]
 fn session_and_stream_journals_survive_real_process_death_on_both_cas_sides() {
+    let session_boundaries = baseline_session_append_boundaries();
+    let stream_boundaries = baseline_stream_finalize_boundaries();
     for phase in ["before_commit", "after_commit"] {
-        let world = TestWorld::new(u64::from(phase == "after_commit"))
-            .expect("Agent journal test world creates");
-        let session_database = world
-            .domain()
-            .path("session.sqlite")
-            .expect("Session database path resolves");
-        DurableCoordinator::open(
-            SqliteStore::open(&session_database, "domain:agent-session-kill")
-                .expect("Session store opens"),
-        )
-        .expect("Session domain opens")
-        .initialize(&Machine::new())
-        .expect("Session domain initializes");
-        let session_marker = world
-            .domain()
-            .path("session-ready")
-            .expect("Session marker path resolves");
-        run_and_kill(
-            "agent_session_process_kill_worker_entry",
-            &session_marker,
-            &[
-                ("CYMULE_AGENT_SESSION_KILL_DB", session_database.as_path()),
-                ("CYMULE_AGENT_SESSION_KILL_PHASE", Path::new(phase)),
-                ("CYMULE_AGENT_SESSION_KILL_MARKER", session_marker.as_path()),
-            ],
-        );
-        let mut session_coordinator = DurableCoordinator::open(
-            SqliteStore::open(&session_database, "domain:agent-session-kill")
-                .expect("Session store reopens"),
-        )
-        .expect("Session domain reopens");
-        let running = AgentUpdate::State {
-            update_id: "update:session:running".to_owned(),
-            state: AgentState::Running,
-            stop_reason: None,
-        };
-        session_coordinator
-            .append("session:journal-kill", &running)
-            .expect("Session append converges");
-        assert_eq!(
-            session_coordinator
-                .load("session:journal-kill")
-                .expect("Session journal loads"),
-            vec![running]
-        );
-
-        let stream_database = world
-            .domain()
-            .path("stream.sqlite")
-            .expect("stream database path resolves");
-        let mut stream_coordinator = DurableCoordinator::open(
-            SqliteStore::open(&stream_database, "domain:agent-stream-kill")
-                .expect("stream store opens"),
-        )
-        .expect("stream domain opens")
-        .initialize(&Machine::new())
-        .expect("stream domain initializes");
-        AgentStreamController::open(
-            &mut stream_coordinator,
-            "session:stream-kill",
-            "stream:process-kill",
-            AgentStreamTarget::Message {
-                message_id: "message:process-kill".to_owned(),
-                role: MessageRole::Agent,
-            },
-        )
-        .expect("stream opens");
-        AgentStreamController::append(
-            &mut stream_coordinator,
-            "session:stream-kill",
-            "stream:process-kill",
-            AgentStreamChunk {
-                sequence: 0,
-                content: vec![ContentBlock::Text {
-                    text: "durable output".to_owned(),
-                }],
-            },
-        )
-        .expect("stream chunk persists");
-        drop(stream_coordinator);
-        let stream_marker = world
-            .domain()
-            .path("stream-ready")
-            .expect("stream marker path resolves");
-        run_and_kill(
-            "agent_stream_process_kill_worker_entry",
-            &stream_marker,
-            &[
-                ("CYMULE_AGENT_STREAM_KILL_DB", stream_database.as_path()),
-                ("CYMULE_AGENT_STREAM_KILL_PHASE", Path::new(phase)),
-                ("CYMULE_AGENT_STREAM_KILL_MARKER", stream_marker.as_path()),
-            ],
-        );
-        let mut reopened_stream = DurableCoordinator::open(
-            SqliteStore::open(&stream_database, "domain:agent-stream-kill")
-                .expect("stream store reopens"),
-        )
-        .expect("stream domain reopens");
-        AgentStreamController::finalize(
-            &mut reopened_stream,
-            "session:stream-kill",
-            "stream:process-kill",
-        )
-        .expect("stream finalization converges");
-        let session = AgentSession::replay(
-            "session:stream-kill",
-            reopened_stream
-                .load("session:stream-kill")
-                .expect("Session journal loads"),
-        )
-        .expect("Session replays");
-        assert_eq!(session.message_order, ["message:process-kill"]);
+        for fail_at in 1..=session_boundaries {
+            verify_session_journal_kill(phase, fail_at, session_boundaries);
+        }
+        for fail_at in 1..=stream_boundaries {
+            verify_stream_journal_kill(phase, fail_at, stream_boundaries);
+        }
     }
+}
+
+fn baseline_session_append_boundaries() -> usize {
+    let world = TestWorld::new(10_001).expect("Session baseline world creates");
+    let database = world
+        .domain()
+        .path("session-baseline.sqlite")
+        .expect("Session baseline path resolves");
+    initialize_domain(&database, "domain:agent-session-kill");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut coordinator = DurableCoordinator::open(CountingStore {
+        inner: SqliteStore::open(&database, "domain:agent-session-kill")
+            .expect("Session baseline store opens"),
+        calls: Arc::clone(&calls),
+    })
+    .expect("Session baseline domain opens");
+    coordinator
+        .append(
+            "session:journal-kill",
+            &AgentUpdate::State {
+                update_id: "update:session:running".to_owned(),
+                state: AgentState::Running,
+                stop_reason: None,
+            },
+        )
+        .expect("Session baseline append completes");
+    let count = calls.load(Ordering::SeqCst);
+    assert!(count > 0, "Session append must cross a durable boundary");
+    count
+}
+
+fn baseline_stream_finalize_boundaries() -> usize {
+    let world = TestWorld::new(10_002).expect("stream baseline world creates");
+    let database = world
+        .domain()
+        .path("stream-baseline.sqlite")
+        .expect("stream baseline path resolves");
+    prepare_stream(&database);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut coordinator = DurableCoordinator::open(CountingStore {
+        inner: SqliteStore::open(&database, "domain:agent-stream-kill")
+            .expect("stream baseline store opens"),
+        calls: Arc::clone(&calls),
+    })
+    .expect("stream baseline domain opens");
+    AgentStreamController::finalize(
+        &mut coordinator,
+        "session:stream-kill",
+        "stream:process-kill",
+    )
+    .expect("stream baseline finalization completes");
+    let count = calls.load(Ordering::SeqCst);
+    assert!(
+        count > 0,
+        "stream finalization must cross a durable boundary"
+    );
+    count
+}
+
+fn verify_session_journal_kill(phase: &str, fail_at: usize, boundary_count: usize) {
+    let phase_seed = usize::from(phase == "after_commit") * boundary_count + fail_at;
+    let world =
+        TestWorld::new(u64::try_from(20_000 + phase_seed).expect("Session matrix seed fits u64"))
+            .expect("Agent Session test world creates");
+    let session_database = world
+        .domain()
+        .path("session.sqlite")
+        .expect("Session database path resolves");
+    initialize_domain(&session_database, "domain:agent-session-kill");
+    let session_marker = world
+        .domain()
+        .path("session-ready")
+        .expect("Session marker path resolves");
+    run_and_kill(
+        "agent_session_process_kill_worker_entry",
+        &session_marker,
+        fail_at,
+        &[
+            ("CYMULE_AGENT_SESSION_KILL_DB", session_database.as_path()),
+            ("CYMULE_AGENT_SESSION_KILL_PHASE", Path::new(phase)),
+            (
+                "CYMULE_AGENT_SESSION_KILL_AT",
+                Path::new(&fail_at.to_string()),
+            ),
+            ("CYMULE_AGENT_SESSION_KILL_MARKER", session_marker.as_path()),
+        ],
+    );
+    let mut session_coordinator = DurableCoordinator::open(
+        SqliteStore::open(&session_database, "domain:agent-session-kill")
+            .expect("Session store reopens"),
+    )
+    .expect("Session domain reopens");
+    let running = AgentUpdate::State {
+        update_id: "update:session:running".to_owned(),
+        state: AgentState::Running,
+        stop_reason: None,
+    };
+    let retained_before_recovery = session_coordinator
+        .load("session:journal-kill")
+        .expect("Session journal loads before recovery");
+    assert!(
+        retained_before_recovery.is_empty() || retained_before_recovery == [running.clone()],
+        "Session kill must retain either the old or complete new journal"
+    );
+    session_coordinator
+        .append("session:journal-kill", &running)
+        .expect("Session append converges");
+    assert_eq!(
+        session_coordinator
+            .load("session:journal-kill")
+            .expect("Session journal loads"),
+        vec![running]
+    );
+    session_coordinator
+        .restore_machine()
+        .expect("Session M1 Machine remains replayable");
+}
+
+fn verify_stream_journal_kill(phase: &str, fail_at: usize, boundary_count: usize) {
+    let phase_seed = usize::from(phase == "after_commit") * boundary_count + fail_at;
+    let world =
+        TestWorld::new(u64::try_from(30_000 + phase_seed).expect("stream matrix seed fits u64"))
+            .expect("Agent stream test world creates");
+    let stream_database = world
+        .domain()
+        .path("stream.sqlite")
+        .expect("stream database path resolves");
+    prepare_stream(&stream_database);
+    let stream_marker = world
+        .domain()
+        .path("stream-ready")
+        .expect("stream marker path resolves");
+    run_and_kill(
+        "agent_stream_process_kill_worker_entry",
+        &stream_marker,
+        fail_at,
+        &[
+            ("CYMULE_AGENT_STREAM_KILL_DB", stream_database.as_path()),
+            ("CYMULE_AGENT_STREAM_KILL_PHASE", Path::new(phase)),
+            (
+                "CYMULE_AGENT_STREAM_KILL_AT",
+                Path::new(&fail_at.to_string()),
+            ),
+            ("CYMULE_AGENT_STREAM_KILL_MARKER", stream_marker.as_path()),
+        ],
+    );
+    let mut reopened_stream = DurableCoordinator::open(
+        SqliteStore::open(&stream_database, "domain:agent-stream-kill")
+            .expect("stream store reopens"),
+    )
+    .expect("stream domain reopens");
+    let retained_stream = AgentStreamController::load(
+        &mut reopened_stream,
+        "session:stream-kill",
+        "stream:process-kill",
+    )
+    .expect("stream projection loads before recovery");
+    let retained_session = AgentSession::replay(
+        "session:stream-kill",
+        reopened_stream
+            .load("session:stream-kill")
+            .expect("Session journal loads before recovery"),
+    )
+    .expect("Session projection replays before recovery");
+    match retained_stream.state {
+        AgentStreamState::Open => {
+            assert!(retained_stream.final_update.is_none());
+            assert!(retained_session.messages.is_empty());
+        }
+        AgentStreamState::Finalized => {
+            assert!(retained_stream.final_update.is_some());
+            assert_eq!(retained_session.message_order, ["message:process-kill"]);
+        }
+        AgentStreamState::Aborted => panic!("finalization cannot retain an aborted stream"),
+    }
+    let finalized = AgentStreamController::finalize(
+        &mut reopened_stream,
+        "session:stream-kill",
+        "stream:process-kill",
+    )
+    .expect("stream finalization converges");
+    assert_eq!(finalized.stream.state, AgentStreamState::Finalized);
+    let session = finalized.session.expect("finalized Session returns");
+    assert_eq!(session.message_order, ["message:process-kill"]);
+    let message = &session.messages["message:process-kill"];
+    assert_eq!(message.role, MessageRole::Agent);
+    assert_eq!(
+        message.content,
+        [ContentBlock::Text {
+            text: "durable output".to_owned(),
+        }]
+    );
+    let stream_count = reopened_stream
+        .journal_records("cymule.agent.streams/session:stream-kill")
+        .expect("stream journal reads")
+        .len();
+    let session_count = reopened_stream
+        .journal_records("session:stream-kill")
+        .expect("Session journal reads")
+        .len();
+    let replay = AgentStreamController::finalize(
+        &mut reopened_stream,
+        "session:stream-kill",
+        "stream:process-kill",
+    )
+    .expect("stream finalization replays");
+    assert_eq!(replay.stream.state, AgentStreamState::Finalized);
+    assert_eq!(
+        reopened_stream
+            .journal_records("cymule.agent.streams/session:stream-kill")
+            .expect("stream journal rereads")
+            .len(),
+        stream_count
+    );
+    assert_eq!(
+        reopened_stream
+            .journal_records("session:stream-kill")
+            .expect("Session journal rereads")
+            .len(),
+        session_count
+    );
+    reopened_stream
+        .restore_machine()
+        .expect("stream M1 Machine remains replayable");
+}
+
+fn initialize_domain(database: &Path, domain: &str) {
+    DurableCoordinator::open(SqliteStore::open(database, domain).expect("durable store opens"))
+        .expect("durable domain opens")
+        .initialize(&Machine::new())
+        .expect("durable domain initializes");
+}
+
+fn prepare_stream(stream_database: &Path) {
+    let mut stream_coordinator = DurableCoordinator::open(
+        SqliteStore::open(stream_database, "domain:agent-stream-kill").expect("stream store opens"),
+    )
+    .expect("stream domain opens")
+    .initialize(&Machine::new())
+    .expect("stream domain initializes");
+    AgentStreamController::open(
+        &mut stream_coordinator,
+        "session:stream-kill",
+        "stream:process-kill",
+        AgentStreamTarget::Message {
+            message_id: "message:process-kill".to_owned(),
+            role: MessageRole::Agent,
+        },
+    )
+    .expect("stream opens");
+    AgentStreamController::append(
+        &mut stream_coordinator,
+        "session:stream-kill",
+        "stream:process-kill",
+        AgentStreamChunk {
+            sequence: 0,
+            content: vec![ContentBlock::Text {
+                text: "durable output".to_owned(),
+            }],
+        },
+    )
+    .expect("stream chunk persists");
 }
 
 fn kill_phase(variable: &str) -> KillPhase {
@@ -568,7 +800,19 @@ fn kill_phase(variable: &str) -> KillPhase {
     }
 }
 
-fn run_and_kill(test_name: &str, marker: &Path, environment: &[(&str, &Path)]) {
+fn kill_at(variable: &str) -> usize {
+    std::env::var(variable)
+        .expect("kill boundary exists")
+        .parse()
+        .expect("kill boundary parses")
+}
+
+fn run_and_kill(
+    test_name: &str,
+    marker: &Path,
+    expected_boundary: usize,
+    environment: &[(&str, &Path)],
+) {
     let mut command = Command::new(std::env::current_exe().expect("test executable resolves"));
     command
         .arg("--exact")
@@ -584,7 +828,17 @@ fn run_and_kill(test_name: &str, marker: &Path, environment: &[(&str, &Path)]) {
     child
         .wait_for_path(marker, Duration::from_secs(20))
         .expect("kill worker reaches the selected journal barrier");
-    assert!(!child.terminate().expect("worker is reaped").success());
+    assert_eq!(
+        fs::read_to_string(marker)
+            .expect("journal barrier reads")
+            .parse::<usize>()
+            .expect("journal barrier parses"),
+        expected_boundary
+    );
+    assert_eq!(
+        child.terminate().expect("worker is reaped").signal(),
+        Some(9)
+    );
     assert!(child.is_reaped());
 }
 

@@ -5,6 +5,13 @@
 addressed, upload retries compare retained bytes, and committed paths never
 expose partial data.
 
+The upload journal uses a durable acknowledged-byte frontier. A restart drops
+only an unacknowledged partial suffix and lets the caller replay the original
+chunk. New upload entries, record replacement, object publication, and staging
+removal are directory-synced before acknowledgement. Reads and directory lists
+recompute the complete SHA-256 digest, so same-size object or manifest changes
+fail closed.
+
 ```sh
 cargo add cymule-resource-fs
 ```

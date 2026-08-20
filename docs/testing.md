@@ -291,11 +291,32 @@ its first Continuation.
 
 The production SQLite witness repeats that automatically discovered boundary
 set with real child-process death on both CAS sides. A separate SQLite provider
-ledger counts dispatch and reconciliation independently of Cymule state. The
-filesystem Resource witness likewise kills after a retained chunk and after
-publication. M4 kills both sides of unified publication, and the optional Agent
-suite partitions occurrence, Session, and stream journal death from its
-host-kind failure/refusal matrix.
+ledger counts dispatch and reconciliation independently of Cymule state. Every
+reopen runs `PRAGMA integrity_check`, checkpoints the WAL, and runs the integrity
+probe again. The filesystem Resource witness likewise kills after a retained
+chunk and after publication, then verifies the exact content digest. Its upload
+record is the durable chunk frontier: bytes are synced before the frontier
+advances, and reopen discards only a suffix that was never acknowledged.
+
+HTTP and timer sources own independent live-process leaves. Each kills a child
+after ingress or schedule persistence, after target selection, on both M1
+activation-CAS sides, and on both source-acknowledgement sides. Reopen must
+redeliver the identical source delivery before acknowledgement, retain exactly
+one activation, stop redelivery after acknowledgement, replay the Machine, and
+resume the Run. The clock leaf kills before and after `observe`; an observation
+whose caller receipt was lost still forces the next value to advance after
+reopen and backward wall-clock movement. M4 kills both sides of unified
+publication, and the optional Agent suite discovers occurrence, Session, and
+stream CAS counts from successful baselines before killing every boundary.
+
+These are process-death and public-operation-boundary claims, not an emulated
+power-loss claim. `SIGKILL` leaves the kernel page cache intact. Deterministic
+SQLite `xWrite`/`xSync`/WAL/checkpoint fault injection and reordered or torn
+unsynced filesystem images require an independent pinned test VFS or disk model;
+the current safe `rusqlite` adapter exposes no mature faithful seam for that
+matrix. That evidence family is therefore unsupported today and is never
+reported as passed or inferred from `FULL` synchronous mode, `fsync`, a
+temporary directory, or API-side process death.
 
 Run that matrix independently for nested commit-gated, eager observational, and
 explicit-release effects. Nested tests inspect the child scope on both sides of

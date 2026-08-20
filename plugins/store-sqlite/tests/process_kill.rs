@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -419,8 +420,12 @@ fn every_m1_effect_run_cas_boundary_survives_real_process_death() {
             child
                 .wait_for_path(&marker, Duration::from_secs(20))
                 .expect("kill worker reaches the selected CAS barrier");
-            assert!(!child.terminate().expect("worker is reaped").success());
+            assert_eq!(
+                child.terminate().expect("worker is reaped").signal(),
+                Some(9)
+            );
             assert!(child.is_reaped());
+            assert_sqlite_integrity(&database);
 
             let store =
                 SqliteStore::open(&database, "domain:m1-kill").expect("durable store reopens");
@@ -465,6 +470,31 @@ fn every_m1_effect_run_cas_boundary_survives_real_process_death() {
                     "a killed post-claim/pre-dispatch window settles only through reconciliation"
                 );
             }
+            drop(runtime);
+            assert_sqlite_integrity(&database);
         }
     }
+}
+
+fn assert_sqlite_integrity(path: &Path) {
+    let connection = Connection::open(path).expect("durable database opens for integrity probe");
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("journal mode reads");
+    assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+    let results = connection
+        .prepare("PRAGMA integrity_check")
+        .expect("integrity statement prepares")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("integrity check runs")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("integrity rows read");
+    assert_eq!(results, ["ok"]);
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .expect("WAL checkpoint completes");
+    let after_checkpoint: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("post-checkpoint integrity check runs");
+    assert_eq!(after_checkpoint, "ok");
 }

@@ -11,3 +11,7 @@
   command remains the durable semantic authority.
 - Source and scope identities are configuration, not authorization. Do not put
   credentials, hostnames, or provider-specific topology into observations.
+- Real process-death tests bracket the public `observe` boundary. A committed
+  observation with a lost caller receipt remains consumed, and a regressed wall
+  clock cannot reuse its logical time after reopen. This is not an intra-WAL or
+  power-loss claim.

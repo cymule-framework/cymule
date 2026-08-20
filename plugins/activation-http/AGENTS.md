@@ -12,3 +12,7 @@
   in deliveries, values, logs, or Cymule state.
 - This plugin owns signal ingress only. Typed input completion remains with its
   owning higher-profile controller until a generic M1 input-source seam exists.
+- The live-process suite kills after durable ingress, target selection, both M1
+  activation-CAS sides, and both acknowledgement sides. An identical request
+  must receive no success before acknowledgement and must converge after
+  reopen; every SQLite file passes `integrity_check`.

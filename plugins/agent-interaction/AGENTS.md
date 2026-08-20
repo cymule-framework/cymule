@@ -69,3 +69,8 @@
 - The process-death suite reuses the workspace-private `TestWorld` temporary
   domain and `ManagedChild` barrier/reap lifecycle. Agent semantics never own a
   hidden crash switch, test clock, or global child registry.
+- Discover occurrence, Session, and stream CAS counts from successful runs with
+  the same preconditions as their workers. Sweep both sides of every discovered
+  boundary, assert the marker's exact boundary number, and inspect Session plus
+  stream closure before recovery so a split multi-journal commit cannot hide
+  behind a successful retry.

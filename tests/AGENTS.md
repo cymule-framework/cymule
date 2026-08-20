@@ -70,6 +70,15 @@
   marker immediately before or after CAS, then let the parent send `SIGKILL`.
   The wrapper belongs only in integration tests; never add a pause or crash
   switch to a reducer or production adapter.
+- HTTP and timer live-process leaves cover retained ingress/schedule, target
+  selection, both M1 activation-CAS sides, and both acknowledgement sides.
+  Clock covers both public observation sides. Every case reads the exact
+  barrier identity, reopens public authority, runs SQLite integrity checks, and
+  proves redelivery or terminal acknowledgement as appropriate.
+- Keep process death, injected I/O error, and modeled power loss as separate
+  evidence. `SIGKILL` at an API or CAS barrier does not prove SQLite VFS write,
+  sync, WAL, checkpoint, torn-sector, or filesystem reorder behavior. An absent
+  faithful test VFS is unsupported coverage, never a skipped-as-passed lane.
 - Use `ManagedChild` for shared process-death tests. Its Drop path must kill and
   wait even when the caller forgets explicit termination; keep an independent
   leak probe in the live-process suite.

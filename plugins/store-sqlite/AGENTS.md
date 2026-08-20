@@ -16,6 +16,10 @@
 - Real process-death sweeps use the workspace-private `TestWorld` temporary
   domain and `ManagedChild` barrier/reap lifecycle. Do not reintroduce local
   child guards or wall-clock race polling.
+- After every killed boundary, run the complete `PRAGMA integrity_check`,
+  checkpoint the WAL, repeat the check, and then reopen through `SqliteStore`.
+  This proves process-death recovery at the CAS boundary, not failures inside a
+  SQLite VFS operation or physical power loss.
 - Process-kill workers construct the same explicit content-addressed execution
   binding before every open and reopen; the store never invents provider
   identity from a live manifest.
