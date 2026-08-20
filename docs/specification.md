@@ -201,13 +201,19 @@ MUST NOT complete the wait twice.
   `scope`;
 - reusable definition invocation inside the same immutable Plan with explicit
   input and result binding;
+- acyclic definition invocation: sealing rejects self-recursion and every
+  recursive SCC, including invokes nested in scopes;
+- wait suspension with an optional result binding whose omission intentionally
+  discards the admitted result;
 - literal, input, binding, object, and array expressions;
 - explicit input/output JSON Schemas;
 - provider-neutral effect and execution properties.
 
 The IR MUST NOT contain provider endpoints, credentials, queue names, database
 products, worker addresses, or deployment topology. Frontends are proposal
-producers. The trusted Rust sealer validates and computes the Plan ID.
+producers. `cymule_core::seal_plan` is the only trusted sealer. It compiles every
+schema as Draft 2020-12 with external retrieval disabled before computing the
+Plan ID; Machine insertion and restore reverify the same admission.
 
 ## 7. Versioned effectful continuation
 
@@ -222,7 +228,11 @@ effect obligations | authority leases | budget | causal cut | epoch
 M1 `cymule.durable-state/2` frames separate the resolved definition ID,
 structural invocation ID, immutable input Artifact, nested Region path, next
 step, and local Artifact bindings. An invocation pushes a frame without opening
-a scope. A nested scope retains the same definition, invocation, and input.
+a scope. A nested scope retains the same definition, invocation, and input. A
+Plan wait pins its exact owning frame, definition, Region path, site, step, and
+optional local. Activation atomically stores the result Artifact, completes the
+wait, writes the local when present, and readies the Continuation. Resume
+consumes that durable local in later expressions or the terminal return.
 
 Process memory and host-language stacks are not canonical. An Attempt pins an
 immutable occurrence binding and the continuation epoch. Output from a stale
@@ -755,8 +765,8 @@ archive retained them.
 The Embedded profile implements canonicalization, sealing, in-memory stores,
 causal replay, command idempotency and stale-action rejection, attempt fencing,
 scope/obligation semantics, effect lifecycle, process plugins, and all four SDK
-chains. `wait` is an authoring and suspension boundary but has no durable resume
-loop in M0. The profile does not claim complete VEC persistence, exact replay of
+chains. `wait` returns a typed site/wait/optional-bind boundary but no fake
+Continuation or resume token; durable resume belongs to M1. The profile does not claim complete VEC persistence, exact replay of
 unrecorded component outputs, persistent crash recovery, multi-process
 consensus, tenant isolation, distributed scheduling, or provider-level
 exactly-once.

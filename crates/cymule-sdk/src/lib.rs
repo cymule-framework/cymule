@@ -37,7 +37,8 @@ pub use cymule_resource::{
 };
 pub use cymule_runtime::{
     ENGINE_PROTOCOL_VERSION, EngineContractSide, EngineFailure, EngineFailureCategory, EngineIssue,
-    EnginePhase, EngineResult, EngineRetryDisposition, ExecutionResult,
+    EnginePhase, EngineResult, EngineRetryDisposition, ExecutionOutcome, ExecutionResult,
+    SuspensionBoundary,
 };
 pub use cymule_virtual::{
     ArchivedWorkIndex, CompactedWorkIndex, ParkReason, RegionMigrationCommand, RegionMigrationKind,

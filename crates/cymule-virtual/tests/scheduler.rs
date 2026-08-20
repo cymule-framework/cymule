@@ -6,6 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use cymule_core::seal_plan;
 use cymule_core::{
     ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, Definition, Expression, Machine,
     PlanCandidate, Region,
@@ -451,25 +452,25 @@ fn weighted_dispatch_counts(run_b_weight: u32, run_b_cost: u64) -> (usize, usize
 
 fn durable_machine_with_wait() -> (Machine, Continuation, WaitCondition) {
     let mut machine = Machine::new();
-    let plan = machine
-        .seal_plan(PlanCandidate {
-            ir_version: cymule_core::IR_VERSION.to_owned(),
-            name: "virtual_activation".to_owned(),
-            entry: "main".to_owned(),
-            components: Vec::new(),
-            effects: Vec::new(),
-            definitions: vec![Definition {
-                id: "main".to_owned(),
-                input_schema: json!({}),
-                output_schema: json!({}),
-                body: Region {
-                    steps: Vec::new(),
-                    result: Expression::Literal { value: json!(null) },
-                },
-            }],
-            metadata: BTreeMap::new(),
-        })
-        .expect("Plan seals");
+    let plan = seal_plan(PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "virtual_activation".to_owned(),
+        entry: "main".to_owned(),
+        components: Vec::new(),
+        effects: Vec::new(),
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: Vec::new(),
+                result: Expression::Literal { value: json!(null) },
+            },
+        }],
+        metadata: BTreeMap::new(),
+    })
+    .expect("Plan seals");
+    machine.insert_plan(plan.clone()).expect("Plan inserts");
     machine
         .submit(CommandEnvelope {
             command_version: COMMAND_VERSION.to_owned(),
@@ -515,6 +516,7 @@ fn durable_machine_with_wait() -> (Machine, Continuation, WaitCondition) {
             key: "signal:approval".to_owned(),
         },
         consume_once: true,
+        result_binding: None,
         state: WaitState::Pending,
         result: None,
     };

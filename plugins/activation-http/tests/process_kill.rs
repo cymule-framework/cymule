@@ -82,6 +82,7 @@ fn candidate() -> PlanCandidate {
                             key: SIGNAL_KEY.to_owned(),
                             consume_once: true,
                         },
+                        bind: None,
                     },
                 }],
                 result: Expression::Input,

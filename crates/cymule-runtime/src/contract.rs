@@ -437,6 +437,7 @@ fn compile_waits(
         match &step.operation {
             Operation::Wait {
                 wait: WaitSpec::Input { schema, .. },
+                ..
             } => {
                 validators.insert(
                     step.id.clone(),

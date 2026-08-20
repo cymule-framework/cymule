@@ -7,13 +7,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use cymule_core::{
     ComponentContract, Definition, DispatchPolicy, EffectContract, EffectProfile, Expression,
     IR_VERSION, MutationKind, Operation, PlanCandidate, ReconciliationMode, Region, ScopeMode,
-    Step, WaitSpec,
+    Step, WaitSpec, seal_plan,
 };
 use cymule_runtime::{
     ContractBoundary, ContractPhase, ContractSide, ContractTarget, ContractValidator,
     EmbeddedRuntime, EngineContractSide, EngineFailure, EngineFailureCategory, EnginePhase,
     ExecutionBinding, PLUGIN_VERSION, PlanContracts, PluginEffect, PluginHost, PluginManifest,
-    PluginOperation, PluginRequest, PluginResponse, RuntimeError, RuntimeResult, seal_plan,
+    PluginOperation, PluginRequest, PluginResponse, RuntimeError, RuntimeResult,
 };
 use serde_json::{Value, json};
 
@@ -97,6 +97,7 @@ fn candidate() -> PlanCandidate {
                                                     &["approved"],
                                                 ),
                                             },
+                                            bind: Some("approval".to_owned()),
                                         },
                                     }],
                                     result: Expression::Literal { value: Value::Null },
@@ -371,6 +372,7 @@ fn malformed_schemas_fail_admission_at_the_exact_boundary() {
                 };
                 let Operation::Wait {
                     wait: WaitSpec::Input { schema, .. },
+                    ..
                 } = &mut body.steps[0].operation
                 else {
                     panic!("fixture owns a typed wait")
@@ -493,12 +495,35 @@ fn compilation_never_normalizes_or_weakens_plan_identity() {
     PlanContracts::compile(&original).expect("schemas compile");
     assert_eq!(original, before);
 
-    let first = original.seal().expect("original Plan seals");
+    let first = seal_plan(original).expect("original Plan seals");
     let mut changed = candidate();
     changed.components[0].input_schema["properties"]["name"]["minLength"] = json!(1);
     PlanContracts::compile(&changed).expect("changed schema compiles");
-    let second = changed.seal().expect("changed Plan seals");
+    let second = seal_plan(changed).expect("changed Plan seals");
     assert_ne!(first.plan_id, second.plan_id);
+}
+
+#[test]
+fn embedded_wait_returns_typed_boundary_without_a_continuation() {
+    let plan = seal_plan(candidate()).expect("Plan seals");
+    let outcome = runtime(Arc::new(PluginCounts::default()), json!(1), json!("ok"))
+        .execute(plan.clone(), &json!({"request": "run"}), "run:suspended")
+        .expect("Embedded execution reaches a semantic boundary");
+    let cymule_runtime::ExecutionOutcome::Suspended { suspension } = outcome else {
+        panic!("wait must return a typed suspension")
+    };
+    assert_eq!(suspension.run_id, "run:suspended");
+    assert_eq!(suspension.plan_id, plan.plan_id);
+    assert_eq!(suspension.definition_id, "main");
+    assert_eq!(suspension.site_id, "wait.approval");
+    assert_eq!(suspension.result_bind.as_deref(), Some("approval"));
+    assert!(
+        !serde_json::to_value(suspension)
+            .expect("boundary serializes")
+            .as_object()
+            .expect("boundary is an object")
+            .contains_key("continuation")
+    );
 }
 
 #[test]

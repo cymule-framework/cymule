@@ -11,6 +11,10 @@
 - Validate definition, component, effect, typed-wait, and terminal-result values
   at their exact boundary. Input validation must finish before plugin dispatch;
   output validation must finish before recording or binding the response.
+- Do not add a runtime Plan sealer. Core sealing owns schema admission; runtime
+  compilation only materializes validators for boundary values.
+- Embedded waits return a typed site, wait, and optional-result-binding boundary
+  without synthesizing a Continuation or resume token.
 - Every plugin call pins an immutable occurrence binding before execution.
 - Reusable definition calls create a distinct deterministic invocation identity,
   receive only their explicit input, and return only their declared result.

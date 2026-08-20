@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use jsonschema::{Retrieve, Uri};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -191,6 +192,9 @@ pub enum Operation {
     Wait {
         /// Wait description.
         wait: WaitSpec,
+        /// Optional local binding for the admitted wait result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bind: Option<String>,
     },
     /// Propose an abstract external effect.
     Effect {
@@ -281,16 +285,6 @@ pub enum Expression {
 }
 
 impl PlanCandidate {
-    /// Validate and content-address a Plan Candidate.
-    pub fn seal(self) -> Result<SealedPlan> {
-        self.validate()?;
-        let plan_id = content_id("cymule.plan/1", &self)?;
-        Ok(SealedPlan {
-            plan_id,
-            candidate: self,
-        })
-    }
-
     /// Validate semantic structure before canonical identity is computed.
     pub fn validate(&self) -> Result<()> {
         if self.ir_version != IR_VERSION {
@@ -352,8 +346,16 @@ impl PlanCandidate {
                 &BTreeSet::new(),
             )?;
         }
+        validate_invocation_graph(&self.definitions)?;
         Ok(())
     }
+}
+
+/// Validate every semantic and Draft 2020-12 contract, then seal one Plan.
+pub fn seal_plan(candidate: PlanCandidate) -> Result<SealedPlan> {
+    candidate.validate()?;
+    let plan_id = content_id("cymule.plan/1", &candidate)?;
+    Ok(SealedPlan { plan_id, candidate })
 }
 
 impl SealedPlan {
@@ -432,9 +434,9 @@ fn validate_region(
                 validate_expression(input, &bindings)?;
                 bind.as_ref()
             }
-            Operation::Wait { wait } => {
+            Operation::Wait { wait, bind } => {
                 validate_wait(wait)?;
-                None
+                bind.as_ref()
             }
             Operation::Effect {
                 effect,
@@ -468,6 +470,57 @@ fn validate_region(
         }
     }
     validate_expression(&region.result, &bindings)
+}
+
+fn validate_invocation_graph(definitions: &[Definition]) -> Result<()> {
+    let graph = definitions
+        .iter()
+        .map(|definition| {
+            let mut targets = BTreeSet::new();
+            collect_invocations(&definition.body, &mut targets);
+            (definition.id.as_str(), targets)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut visiting = BTreeSet::new();
+    let mut complete = BTreeSet::new();
+    for definition in graph.keys() {
+        visit_definition(definition, &graph, &mut visiting, &mut complete)?;
+    }
+    Ok(())
+}
+
+fn collect_invocations<'a>(region: &'a Region, targets: &mut BTreeSet<&'a str>) {
+    for step in &region.steps {
+        match &step.operation {
+            Operation::Invoke { definition, .. } => {
+                targets.insert(definition);
+            }
+            Operation::Scope { body, .. } => collect_invocations(body, targets),
+            Operation::Call { .. } | Operation::Wait { .. } | Operation::Effect { .. } => {}
+        }
+    }
+}
+
+fn visit_definition<'a>(
+    definition: &'a str,
+    graph: &BTreeMap<&'a str, BTreeSet<&'a str>>,
+    visiting: &mut BTreeSet<&'a str>,
+    complete: &mut BTreeSet<&'a str>,
+) -> Result<()> {
+    if complete.contains(definition) {
+        return Ok(());
+    }
+    if !visiting.insert(definition) {
+        return Err(CoreError::Validation(format!(
+            "recursive definition invocation reaches {definition:?}"
+        )));
+    }
+    for target in &graph[definition] {
+        visit_definition(target, graph, visiting, complete)?;
+    }
+    visiting.remove(definition);
+    complete.insert(definition);
+    Ok(())
 }
 
 fn validate_wait(wait: &WaitSpec) -> Result<()> {
@@ -517,7 +570,31 @@ fn validate_schema(kind: &str, schema: &Value) -> Result<()> {
             "{kind} schema must be a JSON object or boolean"
         )));
     }
+    const DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
+    if let Some(declared) = schema.get("$schema")
+        && declared.as_str() != Some(DIALECT)
+    {
+        return Err(CoreError::Validation(format!(
+            "{kind} schema dialect must be exactly {DIALECT:?}"
+        )));
+    }
+    jsonschema::draft202012::options()
+        .with_retriever(DenyExternalReferences)
+        .build(schema)
+        .map_err(|error| CoreError::Validation(format!("{kind} schema is invalid: {error}")))?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct DenyExternalReferences;
+
+impl Retrieve for DenyExternalReferences {
+    fn retrieve(
+        &self,
+        uri: &Uri<String>,
+    ) -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err(format!("external schema reference {uri} is forbidden").into())
+    }
 }
 
 fn validate_id(kind: &str, id: &str) -> Result<()> {

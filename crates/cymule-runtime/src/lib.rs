@@ -19,7 +19,9 @@ pub use contract::{
     ContractSide, ContractTarget, ContractValidator, ContractViolation, PlanAdmissionError,
     PlanAdmissionResult, PlanContracts,
 };
-pub use engine::{EmbeddedRuntime, ExecutionResult, seal_plan, verify_plan};
+pub use engine::{
+    EmbeddedRuntime, ExecutionOutcome, ExecutionResult, SuspensionBoundary, verify_plan,
+};
 pub use error::{RuntimeError, RuntimeResult};
 pub use plugin::{
     PLUGIN_VERSION, PluginEffect, PluginExpectedFailure, PluginHost, PluginManifest,

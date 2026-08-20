@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ir::{EffectContract, MutationKind, Operation, Region};
+use crate::ir::{EffectContract, MutationKind, Operation, PlanCandidate, Region};
 use crate::model::{effect_intent_id, effect_obligation_id};
 use crate::{
     ArtifactRecord, ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, CommandReceipt,
-    CommandReceiptStatus, CoreError, Event, EventPayload, ObligationProjection, PlanCandidate,
-    Projection, ReplayAvailability, Result, SealedPlan, WorldOutcome, artifact_ref,
-    canonical_digest, content_id,
+    CommandReceiptStatus, CoreError, Event, EventPayload, ObligationProjection, Projection,
+    ReplayAvailability, Result, SealedPlan, WorldOutcome, artifact_ref, canonical_digest,
+    content_id,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -253,13 +253,6 @@ impl Machine {
             causal_frontier,
             projection_digest,
         })
-    }
-
-    /// Validate, seal, and store a Plan Candidate.
-    pub fn seal_plan(&mut self, candidate: PlanCandidate) -> Result<SealedPlan> {
-        let plan = candidate.seal()?;
-        self.insert_plan(plan.clone())?;
-        Ok(plan)
     }
 
     /// Insert and verify an already sealed plan.

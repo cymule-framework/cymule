@@ -222,15 +222,18 @@ func TestCrossLanguageEndToEnd(t *testing.T) {
 		t.Fatalf("plan ID %q does not match expected", plan.PlanID)
 	}
 	input := map[string]any{"message": "hello from Go"}
-	result, err := engine.Run(plan, input, pluginPath, "run:go-e2e")
+	execution, err := engine.Run(plan, input, pluginPath, "run:go-e2e")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(result.Value, input) {
-		t.Fatalf("result %#v does not equal input %#v", result.Value, input)
+	if execution.Status != "completed" || execution.Result == nil {
+		t.Fatalf("expected completed execution, got %#v", execution)
 	}
-	if len(result.Effects) != 1 {
-		t.Fatalf("expected one effect, got %d", len(result.Effects))
+	if !reflect.DeepEqual(execution.Result.Value, input) {
+		t.Fatalf("result %#v does not equal input %#v", execution.Result.Value, input)
+	}
+	if len(execution.Result.Effects) != 1 {
+		t.Fatalf("expected one effect, got %d", len(execution.Result.Effects))
 	}
 }
 

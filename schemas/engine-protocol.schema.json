@@ -84,21 +84,47 @@
         { "type": "object", "additionalProperties": false, "required": ["type", "command"], "properties": { "type": { "const": "verified_evolution_command" }, "command": { "$ref": "evolution-control.schema.json" } } },
         { "type": "object", "additionalProperties": false, "required": ["type", "command"], "properties": { "type": { "const": "verified_live_evolution_command" }, "command": { "$ref": "live-evolution-control.schema.json" } } },
         {
-          "type": "object", "additionalProperties": false, "required": ["type", "result"],
+          "type": "object", "additionalProperties": false, "required": ["type", "execution"],
           "properties": {
-            "type": { "const": "executed" },
-            "result": {
-              "type": "object", "additionalProperties": false,
-              "required": ["run_id", "plan_id", "value", "projection_digest", "precondition_token", "effects"],
-              "properties": {
-                "run_id": { "type": "string" }, "plan_id": { "type": "string" }, "value": true,
-                "projection_digest": { "type": "string" }, "precondition_token": { "type": "string" },
-                "effects": { "type": "array", "items": { "type": "string" } }
-              }
-            }
+            "type": { "const": "execution_boundary" },
+            "execution": { "$ref": "#/$defs/executionOutcome" }
           }
         }
       ]
+    },
+    "executionOutcome": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["status", "result"],
+          "properties": { "status": { "const": "completed" }, "result": { "$ref": "#/$defs/executionResult" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["status", "suspension"],
+          "properties": { "status": { "const": "suspended" }, "suspension": { "$ref": "#/$defs/suspensionBoundary" } }
+        }
+      ]
+    },
+    "executionResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "plan_id", "value", "projection_digest", "precondition_token", "effects"],
+      "properties": {
+        "run_id": { "type": "string" }, "plan_id": { "type": "string" }, "value": true,
+        "projection_digest": { "type": "string" }, "precondition_token": { "type": "string" },
+        "effects": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "suspensionBoundary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "plan_id", "definition_id", "invocation_id", "site_id", "wait", "result_bind"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "plan_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "definition_id": { "type": "string", "minLength": 1 },
+        "invocation_id": { "type": "string", "minLength": 1 },
+        "site_id": { "type": "string", "minLength": 1 },
+        "wait": { "$ref": "plan-candidate.schema.json#/$defs/waitSpec" },
+        "result_bind": { "type": ["string", "null"], "minLength": 1 }
+      }
     },
     "failure": {
       "type": "object", "additionalProperties": false,

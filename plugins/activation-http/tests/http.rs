@@ -53,6 +53,7 @@ fn index() -> ParkedWaitIndex {
                 key: "signal:http".to_owned(),
             },
             consume_once: true,
+            result_binding: None,
             state: WaitState::Pending,
             result: None,
         },

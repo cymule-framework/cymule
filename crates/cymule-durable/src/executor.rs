@@ -4,12 +4,12 @@ use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus, DispatchPolicy,
     EffectTransition, Expression, Machine, MutationKind, Operation, PlanCandidate, ROOT_SCOPE_ID,
     ReconciliationMode, ReconciliationResolution, Region, WaitSpec, WorldOutcome, canonical_bytes,
-    content_id, effect_intent_id,
+    content_id, effect_intent_id, seal_plan,
 };
 use cymule_runtime::{
     ContractTarget, ContractValidator, EXECUTION_BINDING_VERSION, ExecutionBinding,
     ExecutionOperationKind, ExecutionResult, PlanContracts, PluginHost, PluginRequest,
-    PluginResponse, seal_plan,
+    PluginResponse,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -17,8 +17,8 @@ use serde_json::Value;
 use crate::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
     DurableResult, DurableStore, EffectDispatch, FrameState, MAX_WAIT_DELIVERY_TARGETS,
-    OutboxState, WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitSourceDriver,
-    WaitState,
+    OutboxState, WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitResultBinding,
+    WaitSourceDriver, WaitState,
 };
 
 /// Result of driving one Run until its next durable boundary.
@@ -657,7 +657,8 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     });
                     self.coordinator.checkpoint(&machine, continuation, None)?;
                 }
-                Operation::Wait { wait } => {
+                Operation::Wait { wait, bind } => {
+                    let step_index = frame.next_step;
                     frame.next_step += 1;
                     yield_attempt(&mut machine, run_id, continuation.epoch)?;
                     let wait_id =
@@ -685,6 +686,14 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                                 ..
                             }
                         ),
+                        result_binding: bind.as_ref().map(|local| WaitResultBinding {
+                            invocation_id: frame.invocation_id.clone(),
+                            definition_id: frame.definition_id.clone(),
+                            site_id: step.id.clone(),
+                            region_path: frame.region_path.clone(),
+                            step_index,
+                            local: local.clone(),
+                        }),
                         state: WaitState::Pending,
                         result: None,
                     };

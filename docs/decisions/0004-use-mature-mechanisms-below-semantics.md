@@ -31,9 +31,16 @@ Build a Cymule implementation only when at least one is true:
 
 Otherwise adopt a maintained mechanism and wrap it with a Cymule interface.
 
-The M2 input controller applies this decision with the maintained Rust
-`jsonschema` compiler outside `cymule-core`. Draft 2020-12 is selected
-explicitly and default filesystem/HTTP resolution features are disabled, so
+Plan admission applies this decision with the maintained Rust `jsonschema`
+compiler inside `cymule-core`. This narrow dependency is required because
+Machine insertion and snapshot restore must reject an invalid executable schema
+under the same authority that computes Plan identity. Draft 2020-12 is selected
+explicitly and external retrieval is denied, so compilation stays pure and
+deterministic. Runtime compilation only materializes value validators; it is not
+a second sealer.
+
+The M2 input controller uses the same maintained compiler for its separately
+owned typed-input contract. Default filesystem/HTTP resolution is disabled, so
 schema enforcement remains deterministic and local to the submitted contract.
 The current resolver library uses a per-registry read/write lock for its
 internal reference cache. Cymule does not share that registry across turns and

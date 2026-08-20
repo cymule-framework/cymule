@@ -13,6 +13,8 @@
 - Every SDK exposes reusable definition declaration and `invoke` authoring with
   the same explicit local definition ID, input expression, site ID, and result
   binding. Linking logical latest-compatible references remains Rust authority.
+- Every SDK preserves optional `wait.bind` and the closed Embedded
+  completed-or-suspended outcome. Suspension has no client-side Continuation.
 - SDKs must not compute authoritative Plan/Event IDs or implement a reducer.
 - Every SDK exposes the same closed `cymule.evolution-control/2` command union
   and transport interface. SDKs construct commands only; Rust resolves module

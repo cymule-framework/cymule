@@ -8,7 +8,7 @@ use std::rc::Rc;
 use cymule_core::{
     Definition, DispatchPolicy, EffectContract, EffectProfile, Expression, MutationKind, Operation,
     PlanCandidate, ROOT_SCOPE_ID, ReconciliationMode, ReconciliationResolution, Region, Step,
-    WaitSpec, WorldOutcome, artifact_ref, canonical_bytes, content_id, effect_intent_id,
+    WaitSpec, WorldOutcome, artifact_ref, canonical_bytes, content_id, effect_intent_id, seal_plan,
 };
 use cymule_durable::{
     ContinuationStatus, DURABLE_CONTROL_VERSION, DurableBoundary, DurableCommand, DurableError,
@@ -17,7 +17,7 @@ use cymule_durable::{
 };
 use cymule_runtime::{
     ExecutionBinding, ExecutionResult, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest,
-    PluginRequest, PluginResponse, RuntimeError, RuntimeResult, seal_plan,
+    PluginRequest, PluginResponse, RuntimeError, RuntimeResult,
 };
 use cymule_test_world::{
     FailureFingerprint, FaultAction, FaultPlan, FaultSchedule, FaultStep, ReplaySpec, SeededRandom,
@@ -888,6 +888,7 @@ fn signal_candidate() -> PlanCandidate {
                     key: SIGNAL_KEY.to_owned(),
                     consume_once: false,
                 },
+                bind: None,
             },
         }],
     )

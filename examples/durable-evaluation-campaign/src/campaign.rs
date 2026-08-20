@@ -717,11 +717,13 @@ fn execute_claim(
     let graph = RuntimeCompositionGraph::build(providers)?;
     let binding = ExecutionBinding::admit(&graph, &manifest)?;
     let mut runtime = EmbeddedRuntime::new(executor, binding)?;
-    let execution = runtime.execute(
-        linked.plan.clone(),
-        &serde_json::to_value(case)?,
-        format!("{}/{}", options.run_id, claim.occurrence_id),
-    );
+    let execution = runtime
+        .execute(
+            linked.plan.clone(),
+            &serde_json::to_value(case)?,
+            format!("{}/{}", options.run_id, claim.occurrence_id),
+        )
+        .and_then(cymule_runtime::ExecutionOutcome::into_completed);
     let now = logical_now(options)?;
     let resolution = match execution {
         Ok(result) => {

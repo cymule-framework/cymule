@@ -59,6 +59,42 @@ class EngineError(RuntimeError):
         super().__init__(f"{failure['code']}: {failure['message']}")
 
 
+class ExecutionResult(TypedDict):
+    """Terminal Embedded execution result."""
+
+    run_id: str
+    plan_id: str
+    value: Json
+    projection_digest: str
+    precondition_token: str
+    effects: list[str]
+
+
+class SuspensionBoundary(TypedDict):
+    """Typed wait boundary without a resumable Embedded continuation."""
+
+    run_id: str
+    plan_id: str
+    definition_id: str
+    invocation_id: str
+    site_id: str
+    wait: dict[str, Json]
+    result_bind: str | None
+
+
+class CompletedExecution(TypedDict):
+    status: Literal["completed"]
+    result: ExecutionResult
+
+
+class SuspendedExecution(TypedDict):
+    status: Literal["suspended"]
+    suspension: SuspensionBoundary
+
+
+ExecutionOutcome = CompletedExecution | SuspendedExecution
+
+
 class RolloutDecision(TypedDict):
     """One immutable future-selection decision."""
 
@@ -568,9 +604,12 @@ class FlowBuilder:
         )
         return self
 
-    def wait(self, site: str, wait: dict[str, Json]) -> FlowBuilder:
-        """Append a durable suspension boundary."""
-        self._steps().append({"id": site, "op": "wait", "wait": wait})
+    def wait(self, site: str, wait: dict[str, Json], bind: str | None = None) -> FlowBuilder:
+        """Append a durable suspension boundary with its result binding."""
+        step: dict[str, Any] = {"id": site, "op": "wait", "wait": wait}
+        if bind is not None:
+            step["bind"] = bind
+        self._steps().append(step)
         return self
 
     def scope(
@@ -1338,7 +1377,7 @@ class CliEngine:
         input_value: Json,
         plugin: str | Path,
         run_id: str,
-    ) -> dict[str, Any]:
+    ) -> ExecutionOutcome:
         response = self._request(
             {
                 "type": "run",
@@ -1348,9 +1387,9 @@ class CliEngine:
                 "run_id": run_id,
             }
         )
-        if response.get("type") != "executed":
-            raise _unexpected_response("executed", response)
-        return response["result"]
+        if response.get("type") != "execution_boundary":
+            raise _unexpected_response("execution_boundary", response)
+        return response["execution"]
 
     def _request(self, request: dict[str, Any]) -> dict[str, Any]:
         try:

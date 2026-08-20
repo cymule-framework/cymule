@@ -79,7 +79,9 @@ fn rust_candidate_seals_and_executes_through_the_cli() {
     let input = json!({"message": "hello from Rust"});
     let result = engine
         .run(&plan, &input, plugin_path.as_ref(), "run:rust-e2e")
-        .expect("plan executes");
+        .expect("plan executes")
+        .into_completed()
+        .expect("plan completes");
     assert_eq!(result.value, input);
     assert_eq!(result.effects.len(), 1);
 }

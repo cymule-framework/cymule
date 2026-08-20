@@ -1392,6 +1392,24 @@ type ExecutionResult struct {
 	Effects           []string `json:"effects"`
 }
 
+// SuspensionBoundary is a typed wait boundary without a resumable Embedded continuation.
+type SuspensionBoundary struct {
+	RunID        string         `json:"run_id"`
+	PlanID       string         `json:"plan_id"`
+	DefinitionID string         `json:"definition_id"`
+	InvocationID string         `json:"invocation_id"`
+	SiteID       string         `json:"site_id"`
+	Wait         map[string]any `json:"wait"`
+	ResultBind   *string        `json:"result_bind"`
+}
+
+// ExecutionOutcome is the closed Embedded terminal-or-suspended boundary.
+type ExecutionOutcome struct {
+	Status     string              `json:"status"`
+	Result     *ExecutionResult    `json:"result,omitempty"`
+	Suspension *SuspensionBoundary `json:"suspension,omitempty"`
+}
+
 // FlowBuilder builds one-definition Plan Candidates.
 type FlowBuilder struct {
 	candidate PlanCandidate
@@ -1465,11 +1483,13 @@ func (builder *FlowBuilder) Effect(site, effect string, input Expression, occurr
 }
 
 // Wait appends a durable suspension boundary.
-func (builder *FlowBuilder) Wait(site string, wait map[string]any) *FlowBuilder {
+func (builder *FlowBuilder) Wait(site string, wait map[string]any, bind ...string) *FlowBuilder {
 	entry := &builder.candidate.Definitions[0]
-	entry.Body.Steps = append(entry.Body.Steps, Step{
-		"id": site, "op": "wait", "wait": wait,
-	})
+	step := Step{"id": site, "op": "wait", "wait": wait}
+	if len(bind) > 0 {
+		step["bind"] = bind[0]
+	}
+	entry.Body.Steps = append(entry.Body.Steps, step)
 	return builder
 }
 
@@ -1582,18 +1602,18 @@ func (engine CliEngine) VerifyLiveEvolutionCommand(
 }
 
 // Run executes a sealed plan through one plugin realization.
-func (engine CliEngine) Run(plan SealedPlan, input any, plugin, runID string) (ExecutionResult, error) {
+func (engine CliEngine) Run(plan SealedPlan, input any, plugin, runID string) (ExecutionOutcome, error) {
 	var response struct {
-		Type   string          `json:"type"`
-		Result ExecutionResult `json:"result"`
+		Type      string           `json:"type"`
+		Execution ExecutionOutcome `json:"execution"`
 	}
 	err := engine.request(map[string]any{
 		"type": "run", "plan": plan, "input": input, "plugin": plugin, "run_id": runID,
 	}, &response)
-	if err == nil && response.Type != "executed" {
-		err = unexpectedEngineResponse("executed", response.Type)
+	if err == nil && response.Type != "execution_boundary" {
+		err = unexpectedEngineResponse("execution_boundary", response.Type)
 	}
-	return response.Result, err
+	return response.Execution, err
 }
 
 func (engine CliEngine) request(request any, response any) error {

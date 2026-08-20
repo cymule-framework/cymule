@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use cymule_core::seal_plan;
 use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, Definition, Expression, Machine, PlanCandidate,
     Region, sha256_bytes,
@@ -461,25 +462,25 @@ fn chunked_store_interface_keeps_provider_details_out_of_resource_identity() {
 
 fn machine_with_runs() -> Machine {
     let mut machine = Machine::new();
-    let plan = machine
-        .seal_plan(PlanCandidate {
-            ir_version: cymule_core::IR_VERSION.to_owned(),
-            name: "resource_handoff".to_owned(),
-            entry: "main".to_owned(),
-            components: Vec::new(),
-            effects: Vec::new(),
-            definitions: vec![Definition {
-                id: "main".to_owned(),
-                input_schema: json!({}),
-                output_schema: json!({}),
-                body: Region {
-                    steps: Vec::new(),
-                    result: Expression::Literal { value: json!(null) },
-                },
-            }],
-            metadata: BTreeMap::new(),
-        })
-        .expect("Plan seals");
+    let plan = seal_plan(PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "resource_handoff".to_owned(),
+        entry: "main".to_owned(),
+        components: Vec::new(),
+        effects: Vec::new(),
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: Vec::new(),
+                result: Expression::Literal { value: json!(null) },
+            },
+        }],
+        metadata: BTreeMap::new(),
+    })
+    .expect("Plan seals");
+    machine.insert_plan(plan.clone()).expect("Plan inserts");
     for run_id in ["run:producer", "run:consumer"] {
         machine
             .submit(CommandEnvelope {
@@ -582,6 +583,7 @@ fn resource_handoff_atomically_activates_matching_input_wait() {
                 schema: json!({}),
             },
             consume_once: true,
+            result_binding: None,
             state: WaitState::Pending,
             result: None,
         })

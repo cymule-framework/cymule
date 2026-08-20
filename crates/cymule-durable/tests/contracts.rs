@@ -208,6 +208,7 @@ fn wait_candidate() -> PlanCandidate {
                     "additionalProperties": false
                 }),
             },
+            bind: Some("approval".to_owned()),
         },
     });
     candidate

@@ -87,6 +87,7 @@ fn candidate() -> PlanCandidate {
                         wait: WaitSpec::Timer {
                             timer_id: TIMER_ID.to_owned(),
                         },
+                        bind: None,
                     },
                 }],
                 result: Expression::Input,

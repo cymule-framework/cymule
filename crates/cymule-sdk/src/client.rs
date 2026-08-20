@@ -8,7 +8,7 @@ use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{
     EngineFailure, EngineFailureCategory, EnginePhase, EngineRequestEnvelope,
-    EngineResponseEnvelope, EngineResult, ExecutionResult,
+    EngineResponseEnvelope, EngineResult, ExecutionOutcome,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -40,7 +40,7 @@ pub trait Engine {
         input: &Value,
         plugin: &Path,
         run_id: &str,
-    ) -> EngineResult<ExecutionResult>;
+    ) -> EngineResult<ExecutionOutcome>;
 }
 
 /// CLI-backed Engine transport used for cross-language parity.
@@ -193,15 +193,15 @@ impl Engine for CliEngine {
         input: &Value,
         plugin: &Path,
         run_id: &str,
-    ) -> EngineResult<ExecutionResult> {
+    ) -> EngineResult<ExecutionOutcome> {
         match self.request(&EngineRequest::Run {
             plan: plan.clone(),
             input: input.clone(),
             plugin: plugin.display().to_string(),
             run_id: run_id.to_owned(),
         })? {
-            EngineResponse::Executed { result } => Ok(result),
-            response => Err(unexpected_response("executed", &response)),
+            EngineResponse::ExecutionBoundary { execution } => Ok(execution),
+            response => Err(unexpected_response("execution_boundary", &response)),
         }
     }
 }
@@ -244,7 +244,7 @@ enum EngineResponse {
     VerifiedDurableCommand { command: DurableCommand },
     VerifiedEvolutionCommand { command: EvolutionCommand },
     VerifiedLiveEvolutionCommand { command: LiveEvolutionCommand },
-    Executed { result: ExecutionResult },
+    ExecutionBoundary { execution: ExecutionOutcome },
     Verified,
 }
 

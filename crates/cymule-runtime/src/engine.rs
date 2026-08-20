@@ -14,14 +14,6 @@ use crate::{
     PluginExpectedFailure, PluginHost, PluginRequest, PluginResponse, RuntimeError, RuntimeResult,
 };
 
-/// Validate every semantic and executable contract, then seal the unchanged
-/// Plan Candidate under its canonical identity.
-pub fn seal_plan(candidate: PlanCandidate) -> PlanAdmissionResult<SealedPlan> {
-    candidate.validate()?;
-    PlanContracts::compile(&candidate)?;
-    candidate.seal().map_err(Into::into)
-}
-
 /// Verify canonical Plan identity and compile every executable contract.
 pub fn verify_plan(plan: &SealedPlan) -> PlanAdmissionResult<PlanContracts> {
     plan.verify()?;
@@ -46,6 +38,52 @@ pub struct ExecutionResult {
     pub effects: Vec<String>,
 }
 
+/// Typed result of driving an Embedded Run to its next semantic boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionOutcome {
+    /// The Run reached its terminal typed result.
+    Completed {
+        /// Terminal execution result.
+        result: ExecutionResult,
+    },
+    /// The Run reached a durable wait that the Embedded profile cannot resume.
+    Suspended {
+        /// Typed suspension contract for a durable runtime.
+        suspension: SuspensionBoundary,
+    },
+}
+
+impl ExecutionOutcome {
+    /// Return a terminal result or the typed non-resumable Embedded boundary.
+    pub fn into_completed(self) -> RuntimeResult<ExecutionResult> {
+        match self {
+            Self::Completed { result } => Ok(result),
+            Self::Suspended { suspension } => Err(RuntimeError::Suspended(suspension)),
+        }
+    }
+}
+
+/// A typed Embedded suspension boundary without a resumable Continuation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuspensionBoundary {
+    /// Run identity that reached the boundary.
+    pub run_id: String,
+    /// Immutable Plan identity.
+    pub plan_id: String,
+    /// Definition containing the wait site.
+    pub definition_id: String,
+    /// Structural invocation containing the wait site.
+    pub invocation_id: String,
+    /// Stable wait operation site.
+    pub site_id: String,
+    /// Provider-neutral wait contract.
+    pub wait: cymule_core::WaitSpec,
+    /// Optional local binding for a future durable completion result.
+    pub result_bind: Option<String>,
+}
+
 #[derive(Debug)]
 struct PendingEffect {
     intent_id: String,
@@ -56,9 +94,12 @@ struct PendingEffect {
 }
 
 #[derive(Debug)]
-struct RegionOutcome {
-    value: Value,
-    pending: Vec<PendingEffect>,
+enum RegionOutcome {
+    Completed {
+        value: Value,
+        pending: Vec<PendingEffect>,
+    },
+    Suspended(SuspensionBoundary),
 }
 
 /// Synchronous reference runtime over the trusted in-memory Machine.
@@ -94,7 +135,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
 
     /// Seal a language-neutral candidate using the trusted Rust kernel.
     pub fn seal(&mut self, candidate: PlanCandidate) -> RuntimeResult<SealedPlan> {
-        let plan = seal_plan(candidate)?;
+        let plan = cymule_core::seal_plan(candidate)?;
         self.machine.insert_plan(plan.clone())?;
         Ok(plan)
     }
@@ -105,7 +146,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
         plan: SealedPlan,
         input: &Value,
         run_id: impl Into<String>,
-    ) -> RuntimeResult<ExecutionResult> {
+    ) -> RuntimeResult<ExecutionOutcome> {
         let contracts = verify_plan(&plan)?;
         let definition = plan
             .candidate
@@ -155,9 +196,26 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             input,
             ROOT_SCOPE_ID,
             &definition.id,
+            &definition.id,
             Some(&definition.id),
             &mut environment,
         )?;
+        let (value, pending) = match outcome {
+            RegionOutcome::Completed { value, pending } => (value, pending),
+            RegionOutcome::Suspended(mut suspension) => {
+                suspension.run_id = run_id.clone();
+                suspension.plan_id = plan.plan_id.clone();
+                self.submit(
+                    &run_id,
+                    Command::YieldAttempt {
+                        attempt_id: "attempt:root/1".to_owned(),
+                        epoch: 0,
+                    },
+                )?;
+                self.machine.verify_replay()?;
+                return Ok(ExecutionOutcome::Suspended { suspension });
+            }
+        };
 
         self.submit(
             &run_id,
@@ -166,7 +224,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             },
         )?;
         let mut explicit: Vec<String> = self
-            .dispatch_pending(&run_id, &contracts, outcome.pending, &mut environment)?
+            .dispatch_pending(&run_id, &contracts, pending, &mut environment)?
             .into_iter()
             .map(|effect| effect.intent_id)
             .collect();
@@ -185,7 +243,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             },
         )?;
 
-        let result_bytes = canonical_bytes(&outcome.value)?;
+        let result_bytes = canonical_bytes(&value)?;
         let result_ref = self.machine.put_artifact("cymule.result/1", result_bytes)?;
         self.submit(
             &run_id,
@@ -200,13 +258,15 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             .runs
             .get(&run_id)
             .ok_or_else(|| RuntimeError::plugin_defect("Run projection is missing"))?;
-        Ok(ExecutionResult {
-            run_id,
-            plan_id: plan.plan_id,
-            value: outcome.value,
-            projection_digest: self.machine.projection().digest()?,
-            precondition_token: run.precondition_token(),
-            effects: run.effects.keys().cloned().collect(),
+        Ok(ExecutionOutcome::Completed {
+            result: ExecutionResult {
+                run_id,
+                plan_id: plan.plan_id,
+                value,
+                projection_digest: self.machine.projection().digest()?,
+                precondition_token: run.precondition_token(),
+                effects: run.effects.keys().cloned().collect(),
+            },
         })
     }
 
@@ -220,6 +280,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
         input: &Value,
         scope_id: &str,
         invocation_id: &str,
+        definition_id: &str,
         result_definition: Option<&str>,
         environment: &mut BTreeMap<String, Value>,
     ) -> RuntimeResult<RegionOutcome> {
@@ -281,16 +342,32 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         &value,
                         scope_id,
                         &child_invocation,
+                        definition,
                         Some(definition),
                         &mut child_environment,
                     )?;
-                    pending.extend(child.pending);
+                    let RegionOutcome::Completed {
+                        value: child_value,
+                        pending: child_pending,
+                    } = child
+                    else {
+                        return Ok(child);
+                    };
+                    pending.extend(child_pending);
                     if let Some(binding) = bind {
-                        environment.insert(binding.clone(), child.value);
+                        environment.insert(binding.clone(), child_value);
                     }
                 }
-                Operation::Wait { wait } => {
-                    return Err(RuntimeError::Suspended(format!("waiting for {wait:?}")));
+                Operation::Wait { wait, bind } => {
+                    return Ok(RegionOutcome::Suspended(SuspensionBoundary {
+                        run_id: String::new(),
+                        plan_id: String::new(),
+                        definition_id: definition_id.to_owned(),
+                        invocation_id: invocation_id.to_owned(),
+                        site_id: step.id.clone(),
+                        wait: wait.clone(),
+                        result_bind: bind.clone(),
+                    }));
                 }
                 Operation::Effect {
                     effect,
@@ -403,9 +480,17 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         input,
                         &child_scope,
                         invocation_id,
+                        definition_id,
                         None,
                         &mut child_environment,
                     )?;
+                    let RegionOutcome::Completed {
+                        value: child_value,
+                        pending: child_pending,
+                    } = child
+                    else {
+                        return Ok(child);
+                    };
                     self.submit(
                         run_id,
                         Command::CommitScope {
@@ -415,11 +500,11 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                     pending.extend(self.dispatch_pending(
                         run_id,
                         contracts,
-                        child.pending,
+                        child_pending,
                         &mut child_environment,
                     )?);
                     if let Some(binding) = bind {
-                        environment.insert(binding.clone(), child.value);
+                        environment.insert(binding.clone(), child_value);
                     }
                 }
             }
@@ -428,7 +513,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
         if let Some(definition) = result_definition {
             contracts.validate_definition_output(definition, &value)?;
         }
-        Ok(RegionOutcome { value, pending })
+        Ok(RegionOutcome::Completed { value, pending })
     }
 
     fn dispatch_pending(

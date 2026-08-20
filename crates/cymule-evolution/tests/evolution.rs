@@ -96,7 +96,7 @@ fn embedded_runtime_with_properties<P: PluginHost>(
 }
 
 fn plan(version: &str) -> cymule_core::SealedPlan {
-    PlanCandidate {
+    cymule_core::seal_plan(PlanCandidate {
         ir_version: cymule_core::IR_VERSION.to_owned(),
         name: format!("evolution_{version}"),
         entry: "main".to_owned(),
@@ -114,8 +114,7 @@ fn plan(version: &str) -> cymule_core::SealedPlan {
             },
         }],
         metadata: BTreeMap::from([("version".to_owned(), version.to_owned())]),
-    }
-    .seal()
+    })
     .expect("plan seals")
 }
 
@@ -1335,6 +1334,8 @@ fn automatic_relink_blocks_new_effect_surface_and_later_safe_head_advances() {
         )
         .execute(advanced[0].plan.clone(), &json!({}), "run:safe-head")
         .expect("safe head executes")
+        .into_completed()
+        .expect("safe head completes")
         .value,
         json!({"version": "3"})
     );
@@ -1351,7 +1352,7 @@ fn relink_analysis_treats_new_component_requirements_as_capability_widening() {
             ("authority".to_owned(), "workspace-read".to_owned()),
         ]),
     };
-    let base = PlanCandidate {
+    let base = cymule_core::seal_plan(PlanCandidate {
         ir_version: cymule_core::IR_VERSION.to_owned(),
         name: "surface_base".to_owned(),
         entry: "main".to_owned(),
@@ -1367,10 +1368,9 @@ fn relink_analysis_treats_new_component_requirements_as_capability_widening() {
             },
         }],
         metadata: BTreeMap::new(),
-    }
-    .seal()
+    })
     .expect("base seals");
-    let widened = PlanCandidate {
+    let widened = cymule_core::seal_plan(PlanCandidate {
         name: "surface_widened".to_owned(),
         definitions: vec![Definition {
             id: "main".to_owned(),
@@ -1391,8 +1391,7 @@ fn relink_analysis_treats_new_component_requirements_as_capability_widening() {
             },
         }],
         ..base.candidate.clone()
-    }
-    .seal()
+    })
     .expect("widened Plan seals");
     let report = analyze_relink(&base, &widened).expect("surface analyzes");
     assert!(!report.is_compatible());
@@ -1408,9 +1407,8 @@ fn relink_analysis_treats_new_component_requirements_as_capability_widening() {
     changed_component_candidate.components[0]
         .requirements
         .insert("capability".to_owned(), "network".to_owned());
-    let changed_component = changed_component_candidate
-        .seal()
-        .expect("changed component Plan seals");
+    let changed_component =
+        cymule_core::seal_plan(changed_component_candidate).expect("changed component Plan seals");
     let report = analyze_relink(&widened, &changed_component).expect("component contract analyzes");
     assert!(
         report
@@ -1433,7 +1431,7 @@ fn relink_analysis_treats_new_component_requirements_as_capability_widening() {
         },
         requirements: BTreeMap::from([("authority".to_owned(), "workspace-write".to_owned())]),
     };
-    let effect_base = PlanCandidate {
+    let effect_base = cymule_core::seal_plan(PlanCandidate {
         ir_version: cymule_core::IR_VERSION.to_owned(),
         name: "surface_effect".to_owned(),
         entry: "main".to_owned(),
@@ -1457,16 +1455,14 @@ fn relink_analysis_treats_new_component_requirements_as_capability_widening() {
             },
         }],
         metadata: BTreeMap::new(),
-    }
-    .seal()
+    })
     .expect("effect Plan seals");
     let mut changed_effect_candidate = effect_base.candidate.clone();
     changed_effect_candidate.effects[0]
         .requirements
         .insert("authority".to_owned(), "organization-write".to_owned());
-    let changed_effect = changed_effect_candidate
-        .seal()
-        .expect("changed effect Plan seals");
+    let changed_effect =
+        cymule_core::seal_plan(changed_effect_candidate).expect("changed effect Plan seals");
     let report = analyze_relink(&effect_base, &changed_effect).expect("effect contract analyzes");
     assert!(
         report
@@ -1480,7 +1476,7 @@ fn relink_analysis_treats_new_component_requirements_as_capability_widening() {
         key: "signal:new-work".to_owned(),
         consume_once: true,
     };
-    let waiting = PlanCandidate {
+    let waiting = cymule_core::seal_plan(PlanCandidate {
         name: "surface_waiting".to_owned(),
         definitions: vec![Definition {
             id: "main".to_owned(),
@@ -1489,14 +1485,16 @@ fn relink_analysis_treats_new_component_requirements_as_capability_widening() {
             body: Region {
                 steps: vec![cymule_core::Step {
                     id: "wait.new-work".to_owned(),
-                    operation: cymule_core::Operation::Wait { wait: wait.clone() },
+                    operation: cymule_core::Operation::Wait {
+                        wait: wait.clone(),
+                        bind: Some("wait_result".to_owned()),
+                    },
                 }],
                 result: Expression::Literal { value: json!(null) },
             },
         }],
         ..base.candidate.clone()
-    }
-    .seal()
+    })
     .expect("waiting Plan seals");
     let report = analyze_relink(&base, &waiting).expect("wait surface analyzes");
     assert!(report.violations.contains(&RelinkViolation::WaitAdded {
@@ -1533,6 +1531,8 @@ fn transitive_latest_compatible_module_relinks_and_executes_new_leaf() {
         embedded_runtime(EmptyPlugin)
             .execute(initial.plan.clone(), &json!({}), "run:transitive:1")
             .expect("initial module executes")
+            .into_completed()
+            .expect("initial module completes")
             .value,
         json!({"version": "1"})
     );
@@ -1554,6 +1554,8 @@ fn transitive_latest_compatible_module_relinks_and_executes_new_leaf() {
         embedded_runtime(EmptyPlugin)
             .execute(relinked[0].plan.clone(), &json!({}), "run:transitive:2")
             .expect("relinked module executes")
+            .into_completed()
+            .expect("relinked module completes")
             .value,
         json!({"version": "2"})
     );
@@ -2396,6 +2398,8 @@ fn shadow_gate_promotes_and_failure_gate_rolls_back_future_only() {
         embedded_runtime(EmptyPlugin)
             .execute(pinned_plan, &json!({}), "run:mixed:target")
             .expect("target Plan executes")
+            .into_completed()
+            .expect("target Plan completes")
             .value,
         json!({"version": "2"})
     );
@@ -2403,6 +2407,8 @@ fn shadow_gate_promotes_and_failure_gate_rolls_back_future_only() {
         embedded_runtime(EmptyPlugin)
             .execute(fallback_plan, &json!({}), "run:mixed:fallback")
             .expect("fallback Plan executes")
+            .into_completed()
+            .expect("fallback Plan completes")
             .value,
         json!({"version": "1"})
     );

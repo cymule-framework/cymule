@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
-use cymule_core::{PlanCandidate, SealedPlan, decode_json};
+use cymule_core::{PlanCandidate, SealedPlan, decode_json, seal_plan};
 use cymule_durable::{DurableCommand, WaitActivation};
 use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand};
 use cymule_executor_process::{ProcessExecutor, ProcessExecutorConfig};
@@ -13,7 +13,7 @@ use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{
     ENGINE_PROTOCOL_VERSION, EmbeddedRuntime, EngineContractSide, EngineFailure,
     EngineFailureCategory, EngineIssue, EnginePhase, EngineRequestEnvelope, EngineResponseEnvelope,
-    EngineRetryDisposition, ExecutionBinding, ExecutionResult, PluginHost, seal_plan, verify_plan,
+    EngineRetryDisposition, ExecutionBinding, ExecutionOutcome, PluginHost, verify_plan,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -59,7 +59,7 @@ enum EngineResponse {
     VerifiedDurableCommand { command: DurableCommand },
     VerifiedEvolutionCommand { command: EvolutionCommand },
     VerifiedLiveEvolutionCommand { command: LiveEvolutionCommand },
-    Executed { result: ExecutionResult },
+    ExecutionBoundary { execution: ExecutionOutcome },
     Verified,
 }
 
@@ -217,8 +217,8 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
         } => {
             let mut runtime = local_process_runtime(&plugin)
                 .map_err(|error| EngineFailure::from_runtime(error, EnginePhase::ExecutePlan))?;
-            EngineResponse::Executed {
-                result: runtime.execute(plan, &input, run_id).map_err(|error| {
+            EngineResponse::ExecutionBoundary {
+                execution: runtime.execute(plan, &input, run_id).map_err(|error| {
                     EngineFailure::from_runtime(error, EnginePhase::ExecutePlan)
                 })?,
             }
