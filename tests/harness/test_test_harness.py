@@ -132,6 +132,11 @@ class ChangeRoutingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown suites"):
             HARNESS.validate_manifest(manifest)
 
+    def test_invalid_leaf_command_is_rejected_before_execution(self) -> None:
+        manifest = self._run_manifest([])
+        with self.assertRaisesRegex(ValueError, "invalid command"):
+            HARNESS.validate_manifest(manifest)
+
     def test_cargo_source_change_reports_owner_and_direct_consumers(self) -> None:
         affected = HARNESS.cargo_affected_packages(
             ["crates/cymule-evolution/src/control.rs"]

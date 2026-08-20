@@ -113,6 +113,13 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"abstract suite {name} has no requirements")
         elif not suite.get("commands"):
             raise ValueError(f"suite {name} has no commands")
+        for command in suite.get("commands", []):
+            if (
+                not isinstance(command, list)
+                or not command
+                or not all(isinstance(value, str) and value for value in command)
+            ):
+                raise ValueError(f"suite {name} has an invalid command")
         if "allow_skip" in suite and not isinstance(suite["allow_skip"], bool):
             raise ValueError(f"suite {name} has invalid allow_skip")
     execution_classes = manifest.get("execution_classes")
@@ -455,6 +462,7 @@ def main(argv: list[str] | None = None) -> int:
             "schema_version": 1,
             "revisions": revisions,
             "paths": paths,
+            "cargo_affected_packages": cargo_affected_packages(paths),
             "selected_suites": names,
             "expanded_suites": expand_suites(names, manifest) if names else [],
             "evidence": evidence,
