@@ -859,86 +859,6 @@ impl<S: DurableStore> DurableCoordinator<S> {
         })
     }
 
-    /// Enqueue an effect dispatch exactly once by structural intent ID.
-    pub fn enqueue_effect(&mut self, dispatch: EffectDispatch) -> DurableResult<String> {
-        self.mutate_checked(|state| match state.outbox.get(&dispatch.intent_id) {
-            Some(existing) if existing == &dispatch => Ok(()),
-            Some(_) => Err(DurableError::IllegalTransition(format!(
-                "effect {} already has a different outbox entry",
-                dispatch.intent_id
-            ))),
-            None => {
-                state.outbox.insert(dispatch.intent_id.clone(), dispatch);
-                Ok(())
-            }
-        })
-    }
-
-    /// Claim one pending dispatch under a fenced lease epoch.
-    pub fn claim_effect(
-        &mut self,
-        intent_id: &str,
-        owner: &str,
-        lease_epoch: u64,
-    ) -> DurableResult<String> {
-        self.mutate_checked(|state| {
-            let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
-                DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
-            })?;
-            if dispatch.state != OutboxState::Pending {
-                return Err(DurableError::IllegalTransition(format!(
-                    "effect {intent_id} is not pending"
-                )));
-            }
-            dispatch.state = OutboxState::Claimed;
-            dispatch.claim_owner = Some(owner.to_owned());
-            dispatch.claim_epoch = lease_epoch;
-            Ok(())
-        })
-    }
-
-    /// Record an authoritative dispatch observation under the original claim.
-    pub fn settle_effect(
-        &mut self,
-        intent_id: &str,
-        owner: &str,
-        lease_epoch: u64,
-        outcome: OutboxState,
-        result: Option<cymule_core::ArtifactRef>,
-    ) -> DurableResult<String> {
-        self.mutate_checked(|state| {
-            if !matches!(
-                outcome,
-                OutboxState::Applied | OutboxState::NotApplied | OutboxState::Unknown
-            ) {
-                return Err(DurableError::Validation(
-                    "settlement must be applied, not_applied, or unknown".to_owned(),
-                ));
-            }
-            let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
-                DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
-            })?;
-            if dispatch.state == outcome && dispatch.result == result {
-                return Ok(());
-            }
-            if !matches!(dispatch.state, OutboxState::Claimed | OutboxState::Unknown)
-                || dispatch.claim_owner.as_deref() != Some(owner)
-                || dispatch.claim_epoch != lease_epoch
-            {
-                return Err(DurableError::Conflict {
-                    expected: Some(format!("{owner}:{lease_epoch}")),
-                    current: dispatch
-                        .claim_owner
-                        .as_ref()
-                        .map(|current| format!("{current}:{}", dispatch.claim_epoch)),
-                });
-            }
-            dispatch.state = outcome;
-            dispatch.result = result;
-            Ok(())
-        })
-    }
-
     /// Record one component result exactly once for execution replay.
     pub fn record_component(&mut self, occurrence: ComponentOccurrence) -> DurableResult<String> {
         self.mutate_checked(|state| {
@@ -1424,7 +1344,7 @@ fn ensure_run_start_machine(
     let run_matches = started.run_id == continuation.run_id
         && matches!(
             &started.payload,
-            EventPayload::RunStarted { plan_id, binding_context }
+            EventPayload::RunStarted { plan_id, binding_context, .. }
                 if plan_id == &continuation.plan_id
                     && binding_context == &continuation.binding_context
         );

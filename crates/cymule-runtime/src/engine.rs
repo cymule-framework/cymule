@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus, DispatchPolicy,
-    EffectTransition, Expression, Machine, MutationKind, Operation, PlanCandidate, ROOT_SCOPE_ID,
-    ReconciliationMode, ReconciliationResolution, Region, SealedPlan, WorldOutcome,
-    canonical_bytes, effect_intent_id,
+    EffectTransition, Expression, InvocationPathSegment, Machine, MutationKind, Operation,
+    PlanCandidate, ROOT_SCOPE_ID, ReconciliationMode, ReconciliationResolution, Region, SealedPlan,
+    WorldOutcome, canonical_bytes, effect_intent_id, plan_invocation_id, plan_scope_id,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -52,6 +52,16 @@ pub enum ExecutionOutcome {
         /// Typed suspension contract for a durable runtime.
         suspension: SuspensionBoundary,
     },
+    /// Prepared explicit effects require caller-owned durable release.
+    ReleaseRequired {
+        /// Exact release boundary.
+        release: EffectReleaseBoundary,
+    },
+    /// An ambiguous effect requires reconciliation under its original intent.
+    ReconciliationRequired {
+        /// Exact reconciliation boundary.
+        reconciliation: EffectReconciliationBoundary,
+    },
 }
 
 impl ExecutionOutcome {
@@ -60,6 +70,16 @@ impl ExecutionOutcome {
         match self {
             Self::Completed { result } => Ok(result),
             Self::Suspended { suspension } => Err(RuntimeError::Suspended(suspension)),
+            Self::ReleaseRequired { release } => Err(RuntimeError::ReleaseRequired {
+                intent_ids: release.intent_ids,
+            }),
+            Self::ReconciliationRequired { reconciliation } => Err(RuntimeError::unknown_world(
+                "effect_reconciliation_required",
+                format!(
+                    "effect {} requires reconciliation",
+                    reconciliation.intent_id
+                ),
+            )),
         }
     }
 }
@@ -84,6 +104,30 @@ pub struct SuspensionBoundary {
     pub result_bind: Option<String>,
 }
 
+/// Typed Embedded boundary for explicit effects that remain prepared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectReleaseBoundary {
+    /// Run identity that owns the intents.
+    pub run_id: String,
+    /// Immutable Plan identity.
+    pub plan_id: String,
+    /// Exact stable intent identities requiring caller release.
+    pub intent_ids: Vec<String>,
+}
+
+/// Typed Embedded boundary for one ambiguous effect intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectReconciliationBoundary {
+    /// Run identity that owns the intent.
+    pub run_id: String,
+    /// Immutable Plan identity.
+    pub plan_id: String,
+    /// Original structural intent identity.
+    pub intent_id: String,
+}
+
 #[derive(Debug)]
 struct PendingEffect {
     intent_id: String,
@@ -100,6 +144,19 @@ enum RegionOutcome {
         pending: Vec<PendingEffect>,
     },
     Suspended(SuspensionBoundary),
+    ReconciliationRequired {
+        intent_id: String,
+    },
+}
+
+enum EffectDispatchOutcome {
+    Settled(Option<Value>),
+    ReconciliationRequired { intent_id: String },
+}
+
+enum PendingDispatchOutcome {
+    Settled(Vec<PendingEffect>),
+    ReconciliationRequired { intent_id: String },
 }
 
 /// Synchronous reference runtime over the trusted in-memory Machine.
@@ -108,8 +165,6 @@ pub struct EmbeddedRuntime<P: PluginHost> {
     plugin: P,
     binding: ExecutionBinding,
     command_sequence: u64,
-    scope_sequence: u64,
-    invocation_sequence: u64,
 }
 
 impl<P: PluginHost> EmbeddedRuntime<P> {
@@ -123,8 +178,6 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             plugin,
             binding,
             command_sequence: 0,
-            scope_sequence: 0,
-            invocation_sequence: 0,
         })
     }
 
@@ -196,7 +249,9 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             input,
             ROOT_SCOPE_ID,
             &definition.id,
+            &[],
             &definition.id,
+            &[],
             Some(&definition.id),
             &mut environment,
         )?;
@@ -215,6 +270,17 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 self.machine.verify_replay()?;
                 return Ok(ExecutionOutcome::Suspended { suspension });
             }
+            RegionOutcome::ReconciliationRequired { intent_id } => {
+                self.yield_root_attempt(&run_id)?;
+                self.machine.verify_replay()?;
+                return Ok(ExecutionOutcome::ReconciliationRequired {
+                    reconciliation: EffectReconciliationBoundary {
+                        run_id,
+                        plan_id: plan.plan_id,
+                        intent_id,
+                    },
+                });
+            }
         };
 
         self.submit(
@@ -223,25 +289,36 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 scope_id: ROOT_SCOPE_ID.to_owned(),
             },
         )?;
-        let mut explicit: Vec<String> = self
-            .dispatch_pending(&run_id, &contracts, pending, &mut environment)?
-            .into_iter()
-            .map(|effect| effect.intent_id)
-            .collect();
+        let pending = match self.dispatch_pending(&run_id, &contracts, pending, &mut environment)? {
+            PendingDispatchOutcome::Settled(pending) => pending,
+            PendingDispatchOutcome::ReconciliationRequired { intent_id } => {
+                self.yield_root_attempt(&run_id)?;
+                self.machine.verify_replay()?;
+                return Ok(ExecutionOutcome::ReconciliationRequired {
+                    reconciliation: EffectReconciliationBoundary {
+                        run_id,
+                        plan_id: plan.plan_id,
+                        intent_id,
+                    },
+                });
+            }
+        };
+        let mut explicit: Vec<String> =
+            pending.into_iter().map(|effect| effect.intent_id).collect();
         if !explicit.is_empty() {
             explicit.sort();
             explicit.dedup();
-            return Err(RuntimeError::ReleaseRequired {
-                intent_ids: explicit,
+            self.yield_root_attempt(&run_id)?;
+            self.machine.verify_replay()?;
+            return Ok(ExecutionOutcome::ReleaseRequired {
+                release: EffectReleaseBoundary {
+                    run_id,
+                    plan_id: plan.plan_id,
+                    intent_ids: explicit,
+                },
             });
         }
-        self.submit(
-            &run_id,
-            Command::YieldAttempt {
-                attempt_id: "attempt:root/1".to_owned(),
-                epoch: 0,
-            },
-        )?;
+        self.yield_root_attempt(&run_id)?;
 
         let result_bytes = canonical_bytes(&value)?;
         let result_ref = self.machine.put_artifact("cymule.result/1", result_bytes)?;
@@ -280,12 +357,14 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
         input: &Value,
         scope_id: &str,
         invocation_id: &str,
+        invocation_path: &[InvocationPathSegment],
         definition_id: &str,
+        region_path: &[usize],
         result_definition: Option<&str>,
         environment: &mut BTreeMap<String, Value>,
     ) -> RuntimeResult<RegionOutcome> {
         let mut pending = Vec::new();
-        for step in &region.steps {
+        for (step_index, step) in region.steps.iter().enumerate() {
             match &step.operation {
                 Operation::Call {
                     component,
@@ -330,9 +409,19 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         .find(|candidate| candidate.id == *definition)
                         .expect("plan validation guarantees invoked definition");
                     contracts.validate_definition_input(definition, &value)?;
-                    self.invocation_sequence += 1;
-                    let child_invocation =
-                        format!("{invocation_id}/{}:{}", step.id, self.invocation_sequence);
+                    let mut child_invocation_path = invocation_path.to_vec();
+                    child_invocation_path.push(InvocationPathSegment {
+                        site_id: step.id.clone(),
+                        region_path: region_path.to_vec(),
+                        scope_id: scope_id.to_owned(),
+                    });
+                    let child_invocation = plan_invocation_id(
+                        run_id,
+                        &plan.plan_id,
+                        &plan.candidate.entry,
+                        &child_invocation_path,
+                        self.current_epoch(run_id)?,
+                    )?;
                     let mut child_environment = BTreeMap::new();
                     let child = self.execute_region(
                         run_id,
@@ -342,7 +431,9 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         &value,
                         scope_id,
                         &child_invocation,
+                        &child_invocation_path,
                         definition,
+                        &[],
                         Some(definition),
                         &mut child_environment,
                     )?;
@@ -399,6 +490,9 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         Command::ProposeEffect {
                             scope_id: scope_id.to_owned(),
                             invocation_id: invocation_id.to_owned(),
+                            invocation_path: invocation_path.to_vec(),
+                            definition_id: definition_id.to_owned(),
+                            region_path: region_path.to_vec(),
                             site_id: step.id.clone(),
                             occurrence: occurrence.clone(),
                             operation: effect.clone(),
@@ -441,10 +535,15 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                     if contract.profile.mutation == MutationKind::Observational
                         && contract.profile.dispatch == DispatchPolicy::Eager
                     {
-                        let result =
-                            self.dispatch_effect(run_id, contracts, effect, intent_id, value)?;
-                        if let (Some(binding), Some(result)) = (bind, result) {
-                            environment.insert(binding.clone(), result);
+                        match self.dispatch_effect(run_id, contracts, effect, intent_id, value)? {
+                            EffectDispatchOutcome::Settled(result) => {
+                                if let (Some(binding), Some(result)) = (bind, result) {
+                                    environment.insert(binding.clone(), result);
+                                }
+                            }
+                            EffectDispatchOutcome::ReconciliationRequired { intent_id } => {
+                                return Ok(RegionOutcome::ReconciliationRequired { intent_id });
+                            }
                         }
                     } else {
                         if bind.is_some() {
@@ -462,13 +561,26 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                     }
                 }
                 Operation::Scope { body, bind, .. } => {
-                    self.scope_sequence += 1;
-                    let child_scope = format!("scope:{}:{}", step.id, self.scope_sequence);
+                    let mut child_region_path = region_path.to_vec();
+                    child_region_path.push(step_index);
+                    let child_scope = plan_scope_id(
+                        run_id,
+                        &plan.plan_id,
+                        invocation_id,
+                        definition_id,
+                        &child_region_path,
+                        self.current_epoch(run_id)?,
+                    )?;
                     self.submit(
                         run_id,
                         Command::OpenScope {
                             scope_id: child_scope.clone(),
                             parent_scope: scope_id.to_owned(),
+                            invocation_id: invocation_id.to_owned(),
+                            invocation_path: invocation_path.to_vec(),
+                            definition_id: definition_id.to_owned(),
+                            region_path: region_path.to_vec(),
+                            site_id: step.id.clone(),
                         },
                     )?;
                     let mut child_environment = environment.clone();
@@ -480,7 +592,9 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         input,
                         &child_scope,
                         invocation_id,
+                        invocation_path,
                         definition_id,
+                        &child_region_path,
                         None,
                         &mut child_environment,
                     )?;
@@ -497,12 +611,19 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                             scope_id: child_scope,
                         },
                     )?;
-                    pending.extend(self.dispatch_pending(
+                    match self.dispatch_pending(
                         run_id,
                         contracts,
                         child_pending,
                         &mut child_environment,
-                    )?);
+                    )? {
+                        PendingDispatchOutcome::Settled(child_pending) => {
+                            pending.extend(child_pending);
+                        }
+                        PendingDispatchOutcome::ReconciliationRequired { intent_id } => {
+                            return Ok(RegionOutcome::ReconciliationRequired { intent_id });
+                        }
+                    }
                     if let Some(binding) = bind {
                         environment.insert(binding.clone(), child_value);
                     }
@@ -522,7 +643,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
         contracts: &PlanContracts,
         pending: Vec<PendingEffect>,
         environment: &mut BTreeMap<String, Value>,
-    ) -> RuntimeResult<Vec<PendingEffect>> {
+    ) -> RuntimeResult<PendingDispatchOutcome> {
         let mut explicit = Vec::new();
         for effect in pending {
             if effect.dispatch == DispatchPolicy::Explicit {
@@ -536,11 +657,18 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 effect.intent_id,
                 effect.input,
             )?;
-            if let (Some(binding), Some(result)) = (effect.bind, result) {
-                environment.insert(binding, result);
+            match result {
+                EffectDispatchOutcome::Settled(result) => {
+                    if let (Some(binding), Some(result)) = (effect.bind, result) {
+                        environment.insert(binding, result);
+                    }
+                }
+                EffectDispatchOutcome::ReconciliationRequired { intent_id } => {
+                    return Ok(PendingDispatchOutcome::ReconciliationRequired { intent_id });
+                }
             }
         }
-        Ok(explicit)
+        Ok(PendingDispatchOutcome::Settled(explicit))
     }
 
     fn dispatch_effect(
@@ -550,7 +678,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
         operation: &str,
         intent_id: String,
         input: Value,
-    ) -> RuntimeResult<Option<Value>> {
+    ) -> RuntimeResult<EffectDispatchOutcome> {
         contracts.validate_effect_input(operation, &input)?;
         self.submit(
             run_id,
@@ -572,24 +700,15 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             input: input.clone(),
         }) else {
             self.observe_unknown(run_id, &intent_id)?;
-            return Err(RuntimeError::unknown_world(
-                "effect_dispatch_response_lost",
-                "effect dispatch started but no authoritative outcome was received",
-            ));
+            return Ok(EffectDispatchOutcome::ReconciliationRequired { intent_id });
         };
         let PluginResponse::EffectResult { outcome, mut value } = response else {
             self.observe_unknown(run_id, &intent_id)?;
-            return Err(RuntimeError::unknown_world(
-                "effect_dispatch_response_invalid",
-                "effect dispatch started but returned no authoritative world outcome",
-            ));
+            return Ok(EffectDispatchOutcome::ReconciliationRequired { intent_id });
         };
         if validate_optional_effect_output(contracts, operation, outcome, value.as_ref()).is_err() {
             self.observe_unknown(run_id, &intent_id)?;
-            return Err(RuntimeError::unknown_world(
-                "effect_dispatch_output_invalid",
-                "effect dispatch started but its output violated the declared schema",
-            ));
+            return Ok(EffectDispatchOutcome::ReconciliationRequired { intent_id });
         }
         self.submit(
             run_id,
@@ -608,33 +727,24 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 .map(|effect| effect.profile.reconciliation)
                 .ok_or_else(|| RuntimeError::plugin_defect("effect projection is missing"))?;
             if reconciliation_mode != ReconciliationMode::Queryable {
-                return Err(RuntimeError::unknown_world(
-                    "effect_reconciliation_required",
-                    "effect outcome is unknown and requires its declared reconciliation authority",
-                ));
+                return Ok(EffectDispatchOutcome::ReconciliationRequired { intent_id });
             }
-            let response = self
-                .plugin
-                .invoke(PluginRequest::ReconcileEffect {
-                    operation: operation.to_owned(),
-                    intent_id: intent_id.clone(),
-                    input,
-                })
-                .map_err(|_| {
-                    RuntimeError::unknown_world(
-                        "effect_reconciliation_response_lost",
-                        "effect outcome remains unknown because reconciliation returned no authoritative result",
-                    )
-                })?;
+            let response = match self.plugin.invoke(PluginRequest::ReconcileEffect {
+                operation: operation.to_owned(),
+                intent_id: intent_id.clone(),
+                input,
+            }) {
+                Ok(response) => response,
+                Err(_) => {
+                    return Ok(EffectDispatchOutcome::ReconciliationRequired { intent_id });
+                }
+            };
             let PluginResponse::ReconciliationResult {
                 resolution,
                 value: reconciled_value,
             } = response
             else {
-                return Err(RuntimeError::unknown_world(
-                    "effect_reconciliation_response_invalid",
-                    "effect outcome remains unknown because reconciliation returned an invalid response",
-                ));
+                return Ok(EffectDispatchOutcome::ReconciliationRequired { intent_id });
             };
             if validate_optional_reconciliation_output(
                 contracts,
@@ -644,10 +754,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             )
             .is_err()
             {
-                return Err(RuntimeError::unknown_world(
-                    "effect_reconciliation_output_invalid",
-                    "effect outcome remains unknown because reconciliation output violated the declared schema",
-                ));
+                return Ok(EffectDispatchOutcome::ReconciliationRequired { intent_id });
             }
             self.submit(
                 run_id,
@@ -664,7 +771,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 value = reconciled_value.or(value);
             }
         }
-        Ok(value)
+        Ok(EffectDispatchOutcome::Settled(value))
     }
 
     fn observe_unknown(&mut self, run_id: &str, intent_id: &str) -> RuntimeResult<()> {
@@ -714,6 +821,16 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
             .get(run_id)
             .map(|run| run.epoch)
             .ok_or_else(|| RuntimeError::plugin_defect(format!("Run {run_id} is missing")))
+    }
+
+    fn yield_root_attempt(&mut self, run_id: &str) -> RuntimeResult<()> {
+        self.submit(
+            run_id,
+            Command::YieldAttempt {
+                attempt_id: "attempt:root/1".to_owned(),
+                epoch: 0,
+            },
+        )
     }
 }
 

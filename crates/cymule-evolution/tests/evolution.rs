@@ -159,6 +159,7 @@ fn continuation(plan_id: &str) -> Continuation {
         frames: vec![FrameState {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
+            invocation_path: Vec::new(),
             input: cymule_core::artifact_ref("test/input", b"evolution test input")
                 .expect("test input reference derives"),
             region_path: Vec::new(),

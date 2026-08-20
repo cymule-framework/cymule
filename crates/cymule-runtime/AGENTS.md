@@ -60,3 +60,6 @@
 - Missing, invalid-variant, or schema-invalid dispatch and reconciliation
   outputs retain the original intent as `Unknown`. Embedded execution never
   auto-releases an `Explicit` effect.
+- Embedded completion, wait, explicit release, and reconciliation are closed
+  success-side `ExecutionOutcome` variants. Never flatten release or
+  reconciliation-required state into an Engine failure string.

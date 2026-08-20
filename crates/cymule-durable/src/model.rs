@@ -625,6 +625,8 @@ pub struct FrameState {
     pub definition_id: String,
     /// Structural materialized invocation identity.
     pub invocation_id: String,
+    /// Entry-rooted invoke path proving the dynamic invocation.
+    pub invocation_path: Vec<cymule_core::InvocationPathSegment>,
     /// Typed invocation input Artifact.
     pub input: ArtifactRef,
     /// Nested region indices from the definition root.

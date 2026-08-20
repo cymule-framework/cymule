@@ -503,6 +503,7 @@ fn durable_machine_with_wait() -> (Machine, Continuation, WaitCondition) {
         frames: vec![FrameState {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
+            invocation_path: Vec::new(),
             input,
             region_path: Vec::new(),
             next_step: 1,

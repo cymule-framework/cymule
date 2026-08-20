@@ -307,6 +307,14 @@ fn effect_admission_requires_an_exact_entry_reachable_site_tuple() {
             bind: None,
         },
     });
+    candidate.definitions[0].body.steps.push(Step {
+        id: "invoke.unreachable".to_owned(),
+        operation: Operation::Invoke {
+            definition: "unreachable".to_owned(),
+            input: Expression::Input,
+            bind: None,
+        },
+    });
     candidate.definitions.push(Definition {
         id: "unreachable".to_owned(),
         input_schema: json!({}),
@@ -346,6 +354,9 @@ fn effect_admission_requires_an_exact_entry_reachable_site_tuple() {
         Command::ProposeEffect {
             scope_id: scope_id.to_owned(),
             invocation_id: invocation_id.to_owned(),
+            invocation_path: Vec::new(),
+            definition_id: "main".to_owned(),
+            region_path: Vec::new(),
             site_id: site_id.to_owned(),
             occurrence: occurrence.to_owned(),
             operation: "test.capture".to_owned(),
@@ -368,6 +379,39 @@ fn effect_admission_requires_an_exact_entry_reachable_site_tuple() {
         )),
         Err(CoreError::NotFound(_))
     ));
+    let invocation_path = vec![cymule_core::InvocationPathSegment {
+        site_id: "invoke.unreachable".to_owned(),
+        region_path: Vec::new(),
+        scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+    }];
+    let run = &machine.projection().runs[run_id];
+    let invoked_id = cymule_core::plan_invocation_id(
+        run_id,
+        &run.current_plan,
+        "main",
+        &invocation_path,
+        run.epoch,
+    )
+    .expect("invocation hashes");
+    machine
+        .submit(envelope(
+            &machine,
+            51,
+            run_id,
+            Command::ProposeEffect {
+                scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+                invocation_id: invoked_id,
+                invocation_path,
+                definition_id: "unreachable".to_owned(),
+                region_path: Vec::new(),
+                site_id: "effect.unreachable".to_owned(),
+                occurrence: "unreachable".to_owned(),
+                operation: "test.capture".to_owned(),
+                args: args.clone(),
+                occurrence_binding: "binding:effect/v1".to_owned(),
+            },
+        ))
+        .expect("invoked site admits only with its exact dynamic invocation path");
     assert!(matches!(
         machine.submit(envelope(
             &machine,
@@ -437,6 +481,9 @@ fn effect_admission_requires_an_exact_entry_reachable_site_tuple() {
             intent_id,
             scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
             invocation_id: "main".to_owned(),
+            invocation_path: Vec::new(),
+            definition_id: "main".to_owned(),
+            region_path: Vec::new(),
             site_id: "effect.reachable".to_owned(),
             occurrence: "reachable".to_owned(),
             scope_epoch: run.epoch,
@@ -469,7 +516,7 @@ fn effect_admission_requires_an_exact_entry_reachable_site_tuple() {
     let effect = machine.projection().runs[run_id]
         .effects
         .values()
-        .next()
+        .find(|effect| effect.site_id == "effect.reachable")
         .expect("effect exists");
     assert_eq!(effect.invocation_id, "main");
     assert_eq!(effect.site_id, "effect.reachable");
@@ -572,6 +619,9 @@ fn effect_profiles_gate_release_and_reconciliation_independently() {
                 Command::ProposeEffect {
                     scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
                     invocation_id: "main".to_owned(),
+                    invocation_path: Vec::new(),
+                    definition_id: "main".to_owned(),
+                    region_path: Vec::new(),
                     site_id: site.to_owned(),
                     occurrence: occurrence.to_owned(),
                     operation: operation.to_owned(),
@@ -672,8 +722,8 @@ fn effect_profiles_gate_release_and_reconciliation_independently() {
             },
         ))
         .expect("human authority may settle an ambiguous effect");
-    assert!(matches!(
-        machine.submit(envelope(
+    machine
+        .submit(envelope(
             &machine,
             42,
             run_id,
@@ -683,9 +733,8 @@ fn effect_profiles_gate_release_and_reconciliation_independently() {
                     ReconciliationResolution::ResolvedNotApplied,
                 ),
             },
-        )),
-        Err(CoreError::IllegalTransition(_))
-    ));
+        ))
+        .expect("governance may close an impossible reconciliation obligation");
 
     machine
         .submit(envelope(
@@ -898,7 +947,21 @@ fn command_idempotency_and_stale_action_are_explicit() {
 
 #[test]
 fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
-    let sealed = seal_for_kernel(candidate()).expect("Plan seals");
+    let mut scope_candidate = candidate();
+    for site_id in ["scope.child", "scope.sibling"] {
+        scope_candidate.definitions[0].body.steps.push(Step {
+            id: site_id.to_owned(),
+            operation: Operation::Scope {
+                mode: cymule_core::ScopeMode::Transactional,
+                body: Box::new(Region {
+                    steps: Vec::new(),
+                    result: Expression::Input,
+                }),
+                bind: None,
+            },
+        });
+    }
+    let sealed = seal_for_kernel(scope_candidate).expect("Plan seals");
     let invalid = [
         CommandEnvelope {
             command_version: "cymule.command/invalid".to_owned(),
@@ -1088,14 +1151,37 @@ fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
         )),
         Err(CoreError::IllegalTransition(_))
     ));
+    let child_scope = cymule_core::plan_scope_id(
+        run_id,
+        &machine.projection().runs[run_id].current_plan,
+        "main",
+        "main",
+        &[1],
+        0,
+    )
+    .expect("child scope hashes");
+    let sibling_scope = cymule_core::plan_scope_id(
+        run_id,
+        &machine.projection().runs[run_id].current_plan,
+        "main",
+        "main",
+        &[2],
+        0,
+    )
+    .expect("sibling scope hashes");
     machine
         .submit(envelope(
             &machine,
             8,
             run_id,
             Command::OpenScope {
-                scope_id: "scope:child".to_owned(),
+                scope_id: child_scope.clone(),
                 parent_scope: cymule_core::ROOT_SCOPE_ID.to_owned(),
+                invocation_id: "main".to_owned(),
+                invocation_path: Vec::new(),
+                definition_id: "main".to_owned(),
+                region_path: Vec::new(),
+                site_id: "scope.child".to_owned(),
             },
         ))
         .expect("child scope opens");
@@ -1136,8 +1222,13 @@ fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
             9,
             run_id,
             Command::OpenScope {
-                scope_id: "scope:sibling".to_owned(),
+                scope_id: sibling_scope.clone(),
                 parent_scope: cymule_core::ROOT_SCOPE_ID.to_owned(),
+                invocation_id: "main".to_owned(),
+                invocation_path: Vec::new(),
+                definition_id: "main".to_owned(),
+                region_path: Vec::new(),
+                site_id: "scope.sibling".to_owned(),
             },
         ))
         .expect("sibling scope opens on the ordered Run frontier");
@@ -1158,7 +1249,7 @@ fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
             11,
             run_id,
             Command::CommitScope {
-                scope_id: "scope:child".to_owned(),
+                scope_id: child_scope.clone(),
             },
         ))
         .expect("child scope commits");
@@ -1188,7 +1279,7 @@ fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
             13,
             run_id,
             Command::AbortScope {
-                scope_id: "scope:sibling".to_owned(),
+                scope_id: sibling_scope.clone(),
             },
         ))
         .expect("sibling scope aborts");
@@ -1209,7 +1300,12 @@ fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
             run_id,
             Command::OpenScope {
                 scope_id: "scope:grandchild".to_owned(),
-                parent_scope: "scope:child".to_owned(),
+                parent_scope: child_scope.clone(),
+                invocation_id: "main".to_owned(),
+                invocation_path: Vec::new(),
+                definition_id: "main".to_owned(),
+                region_path: Vec::new(),
+                site_id: "scope.child".to_owned(),
             },
         )),
         Err(CoreError::IllegalTransition(_))
@@ -1220,7 +1316,7 @@ fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
             16,
             run_id,
             Command::AbortScope {
-                scope_id: "scope:child".to_owned(),
+                scope_id: child_scope,
             },
         )),
         Err(CoreError::IllegalTransition(_))
@@ -1653,6 +1749,9 @@ fn binding_is_pinned_and_unknown_effect_must_reconcile() {
             Command::ProposeEffect {
                 scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
                 invocation_id: "main".to_owned(),
+                invocation_path: Vec::new(),
+                definition_id: "main".to_owned(),
+                region_path: Vec::new(),
                 site_id: "effect.capture".to_owned(),
                 occurrence: "primary".to_owned(),
                 operation: "test.capture".to_owned(),
@@ -1877,6 +1976,20 @@ fn binding_is_pinned_and_unknown_effect_must_reconcile() {
             Err(CoreError::IllegalTransition(_))
         ));
     }
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            72,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::Reconcile(
+                    ReconciliationResolution::GovernanceRequired,
+                ),
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
     let run = machine.projection().runs.get(run_id).expect("run exists");
     let effect = run.effects.get(&intent_id).expect("effect exists");
     assert_eq!(effect.occurrence_binding, "binding:adapter/v1");

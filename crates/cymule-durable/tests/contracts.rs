@@ -243,6 +243,19 @@ fn effect_candidate() -> PlanCandidate {
     candidate
 }
 
+fn governance_effect_candidate() -> PlanCandidate {
+    let mut candidate = effect_candidate();
+    candidate.effects[0].profile.mutation = MutationKind::Mutating;
+    candidate.effects[0].profile.dispatch = DispatchPolicy::OnScopeCommit;
+    candidate.effects[0].profile.reconciliation = ReconciliationMode::Impossible;
+    let Operation::Effect { bind, .. } = &mut candidate.definitions[0].body.steps[0].operation
+    else {
+        panic!("fixture contains one effect")
+    };
+    *bind = None;
+    candidate
+}
+
 fn invocation_candidate() -> PlanCandidate {
     let mut candidate = base_candidate();
     candidate.definitions.push(Definition {
@@ -460,6 +473,56 @@ fn invalid_reconciliation_output_keeps_unknown_and_retries_reconciliation() {
     let dispatch = state.outbox.values().next().expect("outbox exists");
     assert_eq!(dispatch.state, OutboxState::Applied);
     assert!(dispatch.result.is_some());
+}
+
+#[test]
+fn governance_resolution_closes_the_original_effect_obligation() {
+    let counts = Arc::new(Counts::default());
+    let mut plugin = RetryReconciliationPlugin {
+        counts: counts.clone(),
+    };
+    let manifest = plugin.describe().expect("test plugin describes");
+    let binding = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    )
+    .expect("test binding is admitted");
+    let mut runtime =
+        ResumableRuntime::open(MemoryStore::new(), plugin, binding).expect("runtime opens");
+    let DriveOutcome::ReconciliationRequired { intent_id } = runtime
+        .start(
+            governance_effect_candidate(),
+            &json!({"request": "run"}),
+            "run:governance-resolution",
+        )
+        .expect("ambiguous impossible effect requires governance")
+    else {
+        panic!("Run must require governance resolution")
+    };
+    assert_eq!(counts.dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.reconciliations.load(Ordering::SeqCst), 0);
+
+    let DriveOutcome::Completed(_) = runtime
+        .resolve_effect(
+            &intent_id,
+            cymule_core::ReconciliationResolution::ResolvedApplied,
+            Some(&json!("governed")),
+        )
+        .expect("provider-neutral governance settles the original intent")
+    else {
+        panic!("resolved obligation should complete the Run")
+    };
+    let machine = runtime
+        .coordinator()
+        .restore_machine()
+        .expect("Machine restores");
+    assert!(
+        machine.projection().runs["run:governance-resolution"]
+            .obligations
+            .values()
+            .all(|obligation| obligation.resolved)
+    );
+    assert_eq!(counts.dispatches.load(Ordering::SeqCst), 1);
 }
 
 #[test]

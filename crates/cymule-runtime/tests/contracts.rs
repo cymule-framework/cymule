@@ -639,17 +639,16 @@ fn output_failures_never_bind_or_record_terminal_results() {
     let effect_plan = effect_only_candidate(json!({"type": "integer"}), json!({"type": "string"}));
     let effect_counts = Arc::new(PluginCounts::default());
     let mut effect_runtime = runtime(effect_counts.clone(), json!(42), json!(42));
-    let error = effect_runtime
+    let outcome = effect_runtime
         .execute(
             seal_plan(effect_plan).expect("Plan admits"),
             &json!({"request": "run"}),
             "run:effect-output",
         )
-        .expect_err("effect output must fail");
+        .expect("effect output ambiguity is a typed execution boundary");
     assert!(matches!(
-        error,
-        RuntimeError::UnknownWorld { ref code, .. }
-            if code == "effect_dispatch_output_invalid"
+        outcome,
+        cymule_runtime::ExecutionOutcome::ReconciliationRequired { .. }
     ));
     assert_eq!(effect_counts.dispatch.load(Ordering::SeqCst), 1);
     let effect = effect_runtime.machine().projection().runs["run:effect-output"]
@@ -677,16 +676,17 @@ fn embedded_explicit_effect_stays_prepared_for_caller_release() {
 
     let counts = Arc::new(PluginCounts::default());
     let mut runtime = runtime(counts.clone(), json!(42), json!(42));
-    let error = runtime
+    let outcome = runtime
         .execute(
             seal_plan(plan).expect("Plan admits"),
             &json!({"request": "run"}),
             "run:explicit-effect",
         )
-        .expect_err("Embedded cannot release an explicit effect implicitly");
-    let RuntimeError::ReleaseRequired { intent_ids } = error else {
-        panic!("explicit effect must return the closed release boundary: {error:?}")
+        .expect("explicit release is a typed execution boundary");
+    let cymule_runtime::ExecutionOutcome::ReleaseRequired { release } = outcome else {
+        panic!("explicit effect must return the closed release boundary: {outcome:?}")
     };
+    let intent_ids = release.intent_ids;
     assert_eq!(intent_ids.len(), 1);
     assert_eq!(counts.prepare.load(Ordering::SeqCst), 1);
     assert_eq!(counts.dispatch.load(Ordering::SeqCst), 0);
@@ -719,7 +719,7 @@ fn embedded_invalid_reconciliation_output_preserves_unknown() {
         binding,
     )
     .expect("runtime opens");
-    let error = runtime
+    let outcome = runtime
         .execute(
             seal_plan(effect_only_candidate(
                 json!({"type": "integer"}),
@@ -729,11 +729,10 @@ fn embedded_invalid_reconciliation_output_preserves_unknown() {
             &json!({"request": "run"}),
             "run:invalid-reconciliation-output",
         )
-        .expect_err("schema-invalid reconciliation cannot settle the effect");
+        .expect("schema-invalid reconciliation is a typed execution boundary");
     assert!(matches!(
-        error,
-        RuntimeError::UnknownWorld { ref code, .. }
-            if code == "effect_reconciliation_output_invalid"
+        outcome,
+        cymule_runtime::ExecutionOutcome::ReconciliationRequired { .. }
     ));
     assert_eq!(counts.dispatch.load(Ordering::SeqCst), 1);
     assert_eq!(counts.reconcile.load(Ordering::SeqCst), 1);

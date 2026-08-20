@@ -387,6 +387,18 @@ fn stage_commit<H: AgentHost, S: DurableStore>(
         binding.clone(),
     )?;
     let intent_id = workspace_intent_id(&machine, coordinator, request)?;
+    let continuation = continuation(coordinator, request)?;
+    let frame = continuation
+        .frames
+        .iter()
+        .rev()
+        .find(|frame| frame.invocation_id == request.invocation_id)
+        .ok_or_else(|| {
+            AgentError::IllegalTransition(format!(
+                "workspace invocation {} is not active",
+                request.invocation_id
+            ))
+        })?;
     submit(
         &mut machine,
         &request.run_id,
@@ -394,6 +406,9 @@ fn stage_commit<H: AgentHost, S: DurableStore>(
         Command::ProposeEffect {
             scope_id: request.scope_id.clone(),
             invocation_id: request.invocation_id.clone(),
+            invocation_path: frame.invocation_path.clone(),
+            definition_id: frame.definition_id.clone(),
+            region_path: frame.region_path.clone(),
             site_id: request.site_id.clone(),
             occurrence: request.occurrence_key.clone(),
             operation: request.operation.clone(),

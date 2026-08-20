@@ -92,6 +92,10 @@
   the exact appended Machine Events, command receipts, and allowed Artifacts
   against the proposed outbox transition. Never use a generic Machine write for
   `Unknown`; its observation Event and outbox state share one CAS.
+- No public coordinator method may mutate outbox state without its exact
+  canonical Machine delta. External attestation or governance resolves only the
+  original unknown intent through the provider-neutral resolution control and
+  the same settlement CAS.
 - Exact Machine-delta checkpoints preserve the current compacted base. Effect,
   wait, journal, and Run-creation transitions must not carry an unrelated base,
   Plan, Event, command, or Artifact change.

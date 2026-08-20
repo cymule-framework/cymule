@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus, DispatchPolicy,
-    EffectTransition, Expression, Machine, MutationKind, Operation, PlanCandidate, ROOT_SCOPE_ID,
-    ReconciliationMode, ReconciliationResolution, Region, WaitSpec, WorldOutcome, canonical_bytes,
-    content_id, effect_intent_id, seal_plan,
+    EffectTransition, Expression, InvocationPathSegment, Machine, MutationKind, Operation,
+    PlanCandidate, ROOT_SCOPE_ID, ReconciliationMode, ReconciliationResolution, Region, WaitSpec,
+    WorldOutcome, canonical_bytes, content_id, effect_intent_id, plan_invocation_id, plan_scope_id,
+    seal_plan,
 };
 use cymule_runtime::{
     ContractTarget, ContractValidator, EXECUTION_BINDING_VERSION, ExecutionBinding,
@@ -159,6 +160,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
             frames: vec![FrameState {
                 definition_id: plan.candidate.entry.clone(),
                 invocation_id: plan.candidate.entry,
+                invocation_path: Vec::new(),
                 input: input_ref.clone(),
                 region_path: Vec::new(),
                 next_step: 0,
@@ -373,6 +375,102 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
         if let Some(outcome) = self.dispatch_outbox(&run_id, Some(intent_id))? {
             return Ok(outcome);
         }
+        self.drive(&run_id)
+    }
+
+    /// Resolve one ambiguous effect through an external provider-neutral authority.
+    ///
+    /// This control never invokes or redispatches the provider. It validates the
+    /// declared output contract, advances the original core intent, and settles
+    /// the outbox under its retained claim in one exact Machine-delta CAS.
+    pub fn resolve_effect(
+        &mut self,
+        intent_id: &str,
+        resolution: ReconciliationResolution,
+        value: Option<&Value>,
+    ) -> DurableResult<DriveOutcome> {
+        if !matches!(
+            resolution,
+            ReconciliationResolution::ResolvedApplied
+                | ReconciliationResolution::ResolvedNotApplied
+        ) {
+            return Err(DurableError::Validation(
+                "external effect resolution must be resolved_applied or resolved_not_applied"
+                    .to_owned(),
+            ));
+        }
+        let mut machine = self.coordinator.restore_machine()?;
+        let state = self.coordinator.state()?;
+        let dispatch = state
+            .outbox
+            .get(intent_id)
+            .cloned()
+            .ok_or_else(|| DurableError::NotFound(format!("effect {intent_id} is missing")))?;
+        let run_id = dispatch.run_id.clone();
+        let run = machine
+            .projection()
+            .runs
+            .get(&run_id)
+            .ok_or_else(|| DurableError::NotFound(format!("Run {run_id} is missing")))?;
+        let effect = run
+            .effects
+            .get(intent_id)
+            .ok_or_else(|| DurableError::NotFound(format!("effect {intent_id} is missing")))?;
+        if matches!(
+            effect.outcome,
+            WorldOutcome::Applied | WorldOutcome::NotApplied
+        ) {
+            return self.drive(&run_id);
+        }
+        if dispatch.state != OutboxState::Unknown {
+            return Err(DurableError::IllegalTransition(format!(
+                "effect {intent_id} is not awaiting reconciliation"
+            )));
+        }
+        let owner = dispatch.claim_owner.as_deref().ok_or_else(|| {
+            DurableError::Validation("unknown effect has no retained claim owner".to_owned())
+        })?;
+        let plan = machine.plan(&run.current_plan).ok_or_else(|| {
+            DurableError::NotFound(format!("Plan {} is missing", run.current_plan))
+        })?;
+        let contracts = PlanContracts::compile(&plan.candidate)?;
+        validate_optional_reconciliation_output(
+            &contracts,
+            &dispatch.operation,
+            resolution,
+            value,
+        )?;
+        submit(
+            &mut machine,
+            &run_id,
+            format!(
+                "{run_id}:effect-external-reconcile:{intent_id}:{}",
+                reconciliation_suffix(resolution)
+            ),
+            Command::TransitionEffect {
+                intent_id: intent_id.to_owned(),
+                transition: EffectTransition::Reconcile(resolution),
+            },
+        )?;
+        let result = value
+            .map(|value| {
+                let bytes = canonical_bytes(value)?;
+                machine.put_artifact("cymule.effect-result/1", bytes)
+            })
+            .transpose()?;
+        let settled = if resolution == ReconciliationResolution::ResolvedApplied {
+            OutboxState::Applied
+        } else {
+            OutboxState::NotApplied
+        };
+        self.coordinator.checkpoint_effect_settlement(
+            &machine,
+            intent_id,
+            owner,
+            dispatch.claim_epoch,
+            settled,
+            result,
+        )?;
         self.drive(&run_id)
     }
 
@@ -630,12 +728,18 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     contracts.validate_definition_input(definition, &value)?;
                     let input_ref = machine
                         .put_artifact("cymule.invocation-input/1", canonical_bytes(&value)?)?;
-                    let invocation_id = durable_invocation_id(
+                    let mut invocation_path = frame.invocation_path.clone();
+                    invocation_path.push(InvocationPathSegment {
+                        site_id: step.id.clone(),
+                        region_path: frame.region_path.clone(),
+                        scope_id: current_scope.clone(),
+                    });
+                    let invocation_id = plan_invocation_id(
                         run_id,
-                        &frame.invocation_id,
-                        &step.id,
+                        &plan.plan_id,
+                        &plan.candidate.entry,
+                        &invocation_path,
                         continuation.epoch,
-                        &input_ref,
                     )?;
                     let target = plan
                         .candidate
@@ -650,6 +754,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     continuation.frames.push(FrameState {
                         definition_id: target.id.clone(),
                         invocation_id,
+                        invocation_path,
                         input: input_ref,
                         region_path: Vec::new(),
                         next_step: 0,
@@ -780,6 +885,9 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         Command::ProposeEffect {
                             scope_id: current_scope.clone(),
                             invocation_id: frame.invocation_id.clone(),
+                            invocation_path: frame.invocation_path.clone(),
+                            definition_id: frame.definition_id.clone(),
+                            region_path: frame.region_path.clone(),
                             site_id: step.id.clone(),
                             occurrence: occurrence.clone(),
                             operation: effect.clone(),
@@ -834,11 +942,12 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 Operation::Scope { .. } => {
                     let mut child_path = frame.region_path.clone();
                     child_path.push(frame.next_step);
-                    let child_scope = durable_scope_id(
+                    let child_scope = plan_scope_id(
                         run_id,
+                        &plan.plan_id,
                         &frame.invocation_id,
+                        &frame.definition_id,
                         &child_path,
-                        &step.id,
                         continuation.epoch,
                     )?;
                     submit(
@@ -848,16 +957,23 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         Command::OpenScope {
                             scope_id: child_scope.clone(),
                             parent_scope: current_scope,
+                            invocation_id: frame.invocation_id.clone(),
+                            invocation_path: frame.invocation_path.clone(),
+                            definition_id: frame.definition_id.clone(),
+                            region_path: frame.region_path.clone(),
+                            site_id: step.id.clone(),
                         },
                     )?;
                     let child_locals = frame.locals.clone();
                     let invocation_id = frame.invocation_id.clone();
+                    let invocation_path = frame.invocation_path.clone();
                     let definition_id = frame.definition_id.clone();
                     let frame_input = frame.input.clone();
                     continuation.scope_stack.push(child_scope);
                     continuation.frames.push(FrameState {
                         definition_id,
                         invocation_id,
+                        invocation_path,
                         input: frame_input,
                         region_path: child_path,
                         next_step: 0,
@@ -1278,20 +1394,6 @@ fn region_at_path<'a>(root: &'a Region, path: &[usize]) -> DurableResult<&'a Reg
     Ok(region)
 }
 
-fn durable_scope_id(
-    run_id: &str,
-    invocation_id: &str,
-    region_path: &[usize],
-    step_id: &str,
-    epoch: u64,
-) -> DurableResult<String> {
-    content_id(
-        "cymule.durable-scope/1",
-        &(run_id, invocation_id, region_path, step_id, epoch),
-    )
-    .map_err(Into::into)
-}
-
 fn effect_contract<'a>(
     machine: &'a Machine,
     run: &cymule_core::RunProjection,
@@ -1461,20 +1563,6 @@ fn evaluate(
 
 fn wait_id(run_id: &str, invocation_id: &str, site_id: &str, epoch: u64) -> DurableResult<String> {
     content_id("cymule.wait/1", &(run_id, invocation_id, site_id, epoch)).map_err(Into::into)
-}
-
-fn durable_invocation_id(
-    run_id: &str,
-    parent_invocation_id: &str,
-    site_id: &str,
-    epoch: u64,
-    input: &cymule_core::ArtifactRef,
-) -> DurableResult<String> {
-    content_id(
-        "cymule.invocation/1",
-        &(run_id, parent_invocation_id, site_id, epoch, input),
-    )
-    .map_err(Into::into)
 }
 
 fn component_occurrence_id(

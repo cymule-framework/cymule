@@ -4,9 +4,9 @@ use crate::ir::{EffectContract, MutationKind, Operation, PlanCandidate, Region};
 use crate::model::{effect_intent_id, effect_obligation_id};
 use crate::{
     ArtifactRecord, ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, CommandReceipt,
-    CommandReceiptStatus, CoreError, Event, EventPayload, ObligationProjection, Projection,
-    ReplayAvailability, Result, SealedPlan, WorldOutcome, artifact_ref, canonical_digest,
-    content_id,
+    CommandReceiptStatus, CoreError, Event, EventPayload, InvocationPathSegment,
+    ObligationProjection, Projection, ReplayAvailability, Result, RunProjection, SealedPlan,
+    WorldOutcome, artifact_ref, canonical_digest, content_id, plan_invocation_id, plan_scope_id,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -526,6 +526,7 @@ impl Machine {
                 }
             }
         }
+        self.validate_scope_open(&event)?;
         self.validate_effect_proposal(&event)?;
         let mut next = self.projection.clone();
         next.apply_event(&event)?;
@@ -649,13 +650,13 @@ impl Machine {
                         envelope.run_id
                     )));
                 }
-                if !self.plans.contains_key(plan_id) {
-                    return Err(CoreError::NotFound(format!(
-                        "plan {plan_id} does not exist"
-                    )));
-                }
+                let plan = self
+                    .plans
+                    .get(plan_id)
+                    .ok_or_else(|| CoreError::NotFound(format!("plan {plan_id} does not exist")))?;
                 Ok(EventPayload::RunStarted {
                     plan_id: plan_id.clone(),
+                    entry_definition: plan.candidate.entry.clone(),
                     binding_context: binding_context.clone(),
                 })
             }
@@ -683,13 +684,64 @@ impl Machine {
             Command::OpenScope {
                 scope_id,
                 parent_scope,
-            } => Ok(EventPayload::ScopeOpened {
-                scope_id: scope_id.clone(),
-                parent_scope: parent_scope.clone(),
-            }),
+                invocation_id,
+                invocation_path,
+                definition_id,
+                region_path,
+                site_id,
+            } => {
+                let run = self.run(&envelope.run_id)?;
+                let plan = self.plans.get(&run.current_plan).ok_or_else(|| {
+                    CoreError::NotFound(format!("plan {} does not exist", run.current_plan))
+                })?;
+                validate_execution_location(
+                    &plan.candidate,
+                    run,
+                    invocation_id,
+                    invocation_path,
+                    definition_id,
+                    region_path,
+                    parent_scope,
+                )?;
+                let (_, step_index) =
+                    locate_step(&plan.candidate, definition_id, region_path, site_id)?;
+                let step = step_at(&plan.candidate, definition_id, region_path, step_index)?;
+                if !matches!(step.operation, Operation::Scope { .. }) {
+                    return Err(CoreError::Validation(format!(
+                        "site {site_id} is not a scope operation"
+                    )));
+                }
+                let mut body_path = region_path.clone();
+                body_path.push(step_index);
+                let expected_scope_id = plan_scope_id(
+                    &envelope.run_id,
+                    &run.current_plan,
+                    invocation_id,
+                    definition_id,
+                    &body_path,
+                    run.epoch,
+                )?;
+                if *scope_id != expected_scope_id {
+                    return Err(CoreError::Validation(format!(
+                        "scope identity {scope_id} does not match {expected_scope_id}"
+                    )));
+                }
+                Ok(EventPayload::ScopeOpened {
+                    scope_id: scope_id.clone(),
+                    parent_scope: parent_scope.clone(),
+                    invocation_id: invocation_id.clone(),
+                    invocation_path: invocation_path.clone(),
+                    definition_id: definition_id.clone(),
+                    region_path: body_path,
+                    site_id: site_id.clone(),
+                })
+            }
             Command::ProposeEffect {
                 scope_id,
                 invocation_id,
+                invocation_path,
+                definition_id,
+                region_path,
                 site_id,
                 occurrence,
                 operation,
@@ -714,18 +766,26 @@ impl Machine {
                         "scope {scope_id} is not open"
                     )));
                 }
-                if invocation_id.is_empty() || invocation_id.len() > 200 {
-                    return Err(CoreError::Validation(
-                        "effect invocation ID must contain 1..=200 characters".to_owned(),
-                    ));
-                }
-                let (declared_operation, declared_occurrence) =
-                    reachable_effect_site(&plan.candidate, site_id).ok_or_else(|| {
-                        CoreError::NotFound(format!(
-                            "effect site {site_id} is not reachable from Plan entry {}",
-                            plan.candidate.entry
-                        ))
-                    })?;
+                validate_execution_location(
+                    &plan.candidate,
+                    run,
+                    invocation_id,
+                    invocation_path,
+                    definition_id,
+                    region_path,
+                    scope_id,
+                )?;
+                let (step, _) = locate_step(&plan.candidate, definition_id, region_path, site_id)?;
+                let Operation::Effect {
+                    effect: declared_operation,
+                    occurrence: declared_occurrence,
+                    ..
+                } = &step.operation
+                else {
+                    return Err(CoreError::Validation(format!(
+                        "site {site_id} is not an effect operation"
+                    )));
+                };
                 if declared_operation != operation || declared_occurrence != occurrence {
                     return Err(CoreError::Validation(format!(
                         "effect site {site_id} declares operation {declared_operation} and occurrence {declared_occurrence}, not {operation} and {occurrence}"
@@ -746,6 +806,9 @@ impl Machine {
                     intent_id,
                     scope_id: scope_id.clone(),
                     invocation_id: invocation_id.clone(),
+                    invocation_path: invocation_path.clone(),
+                    definition_id: definition_id.clone(),
+                    region_path: region_path.clone(),
                     site_id: site_id.clone(),
                     occurrence: occurrence.clone(),
                     scope_epoch: run.epoch,
@@ -846,6 +909,11 @@ impl Machine {
 
     fn validate_effect_proposal(&self, event: &Event) -> Result<()> {
         let EventPayload::EffectProposed {
+            scope_id,
+            invocation_id,
+            invocation_path,
+            definition_id,
+            region_path,
             site_id,
             occurrence,
             operation,
@@ -859,13 +927,26 @@ impl Machine {
         let plan = self.plans.get(&run.current_plan).ok_or_else(|| {
             CoreError::NotFound(format!("plan {} does not exist", run.current_plan))
         })?;
-        let (declared_operation, declared_occurrence) =
-            reachable_effect_site(&plan.candidate, site_id).ok_or_else(|| {
-                CoreError::NotFound(format!(
-                    "effect site {site_id} is not reachable from Plan entry {}",
-                    plan.candidate.entry
-                ))
-            })?;
+        validate_execution_location(
+            &plan.candidate,
+            run,
+            invocation_id,
+            invocation_path,
+            definition_id,
+            region_path,
+            scope_id,
+        )?;
+        let (step, _) = locate_step(&plan.candidate, definition_id, region_path, site_id)?;
+        let Operation::Effect {
+            effect: declared_operation,
+            occurrence: declared_occurrence,
+            ..
+        } = &step.operation
+        else {
+            return Err(CoreError::Validation(format!(
+                "site {site_id} is not an effect operation"
+            )));
+        };
         if declared_operation != operation || declared_occurrence != occurrence {
             return Err(CoreError::Validation(format!(
                 "effect site {site_id} does not match its declared operation and occurrence"
@@ -879,54 +960,231 @@ impl Machine {
         }
         Ok(())
     }
+
+    fn validate_scope_open(&self, event: &Event) -> Result<()> {
+        let EventPayload::ScopeOpened {
+            scope_id,
+            parent_scope,
+            invocation_id,
+            invocation_path,
+            definition_id,
+            region_path,
+            site_id,
+            ..
+        } = &event.payload
+        else {
+            return Ok(());
+        };
+        let run = self.run(&event.run_id)?;
+        let plan = self.plans.get(&run.current_plan).ok_or_else(|| {
+            CoreError::NotFound(format!("plan {} does not exist", run.current_plan))
+        })?;
+        let (&step_index, parent_region_path) = region_path.split_last().ok_or_else(|| {
+            CoreError::Validation("opened scope body must have a non-empty Region path".to_owned())
+        })?;
+        validate_execution_location(
+            &plan.candidate,
+            run,
+            invocation_id,
+            invocation_path,
+            definition_id,
+            parent_region_path,
+            parent_scope,
+        )?;
+        let step = step_at(
+            &plan.candidate,
+            definition_id,
+            parent_region_path,
+            step_index,
+        )?;
+        if step.id != *site_id || !matches!(step.operation, Operation::Scope { .. }) {
+            return Err(CoreError::Validation(format!(
+                "scope site {site_id} does not match its exact lexical path"
+            )));
+        }
+        let expected_scope_id = plan_scope_id(
+            &event.run_id,
+            &run.current_plan,
+            invocation_id,
+            definition_id,
+            region_path,
+            run.epoch,
+        )?;
+        if *scope_id != expected_scope_id {
+            return Err(CoreError::Validation(format!(
+                "scope identity {scope_id} does not match {expected_scope_id}"
+            )));
+        }
+        Ok(())
+    }
 }
 
-fn reachable_effect_site<'a>(
+fn validate_execution_location(
+    candidate: &PlanCandidate,
+    run: &RunProjection,
+    invocation_id: &str,
+    invocation_path: &[InvocationPathSegment],
+    definition_id: &str,
+    region_path: &[usize],
+    scope_id: &str,
+) -> Result<()> {
+    let resolved_definition = resolve_invocation(candidate, run, invocation_path)?;
+    let expected_invocation = plan_invocation_id(
+        &run.run_id,
+        &run.current_plan,
+        &candidate.entry,
+        invocation_path,
+        run.epoch,
+    )?;
+    if resolved_definition != definition_id || expected_invocation != invocation_id {
+        return Err(CoreError::Validation(
+            "execution location does not match its entry-rooted invocation path".to_owned(),
+        ));
+    }
+    let scope = run
+        .scopes
+        .get(scope_id)
+        .ok_or_else(|| CoreError::NotFound(format!("scope {scope_id} does not exist")))?;
+    if scope.status != crate::ScopeStatus::Open {
+        return Err(CoreError::IllegalTransition(format!(
+            "scope {scope_id} is not open"
+        )));
+    }
+    if !region_path.is_empty()
+        && (scope.invocation_id != invocation_id
+            || scope.definition_id != definition_id
+            || scope.region_path != region_path)
+    {
+        return Err(CoreError::Validation(
+            "lexically nested execution location does not match its owning scope".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_invocation<'a>(
     candidate: &'a PlanCandidate,
+    run: &RunProjection,
+    path: &[InvocationPathSegment],
+) -> Result<&'a str> {
+    let mut definition_id = candidate.entry.as_str();
+    let mut prefix = Vec::new();
+    for segment in path {
+        let invocation_id = plan_invocation_id(
+            &run.run_id,
+            &run.current_plan,
+            &candidate.entry,
+            &prefix,
+            run.epoch,
+        )?;
+        validate_execution_location_scope_only(
+            run,
+            &invocation_id,
+            definition_id,
+            &segment.region_path,
+            &segment.scope_id,
+        )?;
+        let (step, _) = locate_step(
+            candidate,
+            definition_id,
+            &segment.region_path,
+            &segment.site_id,
+        )?;
+        let Operation::Invoke { definition, .. } = &step.operation else {
+            return Err(CoreError::Validation(format!(
+                "invocation path site {} is not an invoke operation",
+                segment.site_id
+            )));
+        };
+        definition_id = definition;
+        prefix.push(segment.clone());
+    }
+    Ok(definition_id)
+}
+
+fn validate_execution_location_scope_only(
+    run: &RunProjection,
+    invocation_id: &str,
+    definition_id: &str,
+    region_path: &[usize],
+    scope_id: &str,
+) -> Result<()> {
+    let scope = run
+        .scopes
+        .get(scope_id)
+        .ok_or_else(|| CoreError::NotFound(format!("scope {scope_id} does not exist")))?;
+    if scope.status != crate::ScopeStatus::Open {
+        return Err(CoreError::IllegalTransition(format!(
+            "scope {scope_id} is not open"
+        )));
+    }
+    if !region_path.is_empty()
+        && (scope.invocation_id != invocation_id
+            || scope.definition_id != definition_id
+            || scope.region_path != region_path)
+    {
+        return Err(CoreError::Validation(
+            "invocation path leaves its exact lexical scope".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn locate_step<'a>(
+    candidate: &'a PlanCandidate,
+    definition_id: &str,
+    region_path: &[usize],
     site_id: &str,
-) -> Option<(&'a str, &'a str)> {
-    let definitions: BTreeMap<&str, &crate::Definition> = candidate
+) -> Result<(&'a crate::Step, usize)> {
+    let region = region_at_path(candidate, definition_id, region_path)?;
+    region
+        .steps
+        .iter()
+        .enumerate()
+        .find(|(_, step)| step.id == site_id)
+        .map(|(index, step)| (step, index))
+        .ok_or_else(|| {
+            CoreError::NotFound(format!(
+                "site {site_id} does not exist at the exact lexical Region path"
+            ))
+        })
+}
+
+fn step_at<'a>(
+    candidate: &'a PlanCandidate,
+    definition_id: &str,
+    region_path: &[usize],
+    step_index: usize,
+) -> Result<&'a crate::Step> {
+    region_at_path(candidate, definition_id, region_path)?
+        .steps
+        .get(step_index)
+        .ok_or_else(|| CoreError::NotFound(format!("step index {step_index} does not exist")))
+}
+
+fn region_at_path<'a>(
+    candidate: &'a PlanCandidate,
+    definition_id: &str,
+    path: &[usize],
+) -> Result<&'a Region> {
+    let definition = candidate
         .definitions
         .iter()
-        .map(|definition| (definition.id.as_str(), definition))
-        .collect();
-    let mut pending = vec![candidate.entry.as_str()];
-    let mut visited = BTreeSet::new();
-    while let Some(definition_id) = pending.pop() {
-        if !visited.insert(definition_id) {
-            continue;
-        }
-        let definition = definitions.get(definition_id)?;
-        if let Some(found) = reachable_effect_in_region(&definition.body, site_id, &mut pending) {
-            return Some(found);
-        }
+        .find(|definition| definition.id == definition_id)
+        .ok_or_else(|| CoreError::NotFound(format!("definition {definition_id} does not exist")))?;
+    let mut region = &definition.body;
+    for step_index in path {
+        let step = region.steps.get(*step_index).ok_or_else(|| {
+            CoreError::NotFound(format!("Region path step {step_index} does not exist"))
+        })?;
+        let Operation::Scope { body, .. } = &step.operation else {
+            return Err(CoreError::Validation(format!(
+                "Region path step {step_index} is not a scope"
+            )));
+        };
+        region = body;
     }
-    None
-}
-
-fn reachable_effect_in_region<'a>(
-    region: &'a Region,
-    site_id: &str,
-    invoked_definitions: &mut Vec<&'a str>,
-) -> Option<(&'a str, &'a str)> {
-    for step in &region.steps {
-        match &step.operation {
-            Operation::Effect {
-                effect, occurrence, ..
-            } if step.id == site_id => return Some((effect, occurrence)),
-            Operation::Invoke { definition, .. } => {
-                invoked_definitions.push(definition);
-            }
-            Operation::Scope { body, .. } => {
-                if let Some(found) = reachable_effect_in_region(body, site_id, invoked_definitions)
-                {
-                    return Some(found);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    Ok(region)
 }
 
 fn verify_command_event_closure(
@@ -1128,6 +1386,7 @@ fn footprints(
         EventPayload::ScopeOpened {
             scope_id,
             parent_scope,
+            ..
         } => {
             reads.insert(run_key);
             let parent_key = format!("scope:{run_id}:{parent_scope}");

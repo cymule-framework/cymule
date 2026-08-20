@@ -25,7 +25,8 @@
   require a new IR version rather than widening this frozen schema in place.
 - The existing `wait` operation has an optional `bind`; omission intentionally
   ignores the result. Engine success distinguishes completion from typed
-  Embedded suspension without publishing a fake Continuation.
+  Embedded suspension, explicit release, and reconciliation boundaries without
+  publishing a fake Continuation or string failure.
 - Keep semantic validation in the Rust kernel. JSON Schema validates wire shape;
   it does not replace transition or authority rules.
 - `execution-binding.schema.json` freezes `cymule.execution-binding/1`. Rust

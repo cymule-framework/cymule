@@ -101,6 +101,14 @@
         {
           "type": "object", "additionalProperties": false, "required": ["status", "suspension"],
           "properties": { "status": { "const": "suspended" }, "suspension": { "$ref": "#/$defs/suspensionBoundary" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["status", "release"],
+          "properties": { "status": { "const": "release_required" }, "release": { "$ref": "#/$defs/effectReleaseBoundary" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["status", "reconciliation"],
+          "properties": { "status": { "const": "reconciliation_required" }, "reconciliation": { "$ref": "#/$defs/effectReconciliationBoundary" } }
         }
       ]
     },
@@ -124,6 +132,27 @@
         "site_id": { "type": "string", "minLength": 1 },
         "wait": { "$ref": "plan-candidate.schema.json#/$defs/waitSpec" },
         "result_bind": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "effectReleaseBoundary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "plan_id", "intent_ids"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "plan_id": { "type": "string", "minLength": 1 },
+        "intent_ids": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "effectReconciliationBoundary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "plan_id", "intent_id"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "plan_id": { "type": "string", "minLength": 1 },
+        "intent_id": { "type": "string", "minLength": 1 }
       }
     },
     "failure": {

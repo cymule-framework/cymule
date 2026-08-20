@@ -29,14 +29,14 @@ The following domains evolve independently:
 
 | Domain | Current version | Compatibility rule |
 | --- | --- | --- |
-| Semantic specification | `cymule.semantic/3` | exact effect-site and profile transition meaning is frozen |
+| Semantic specification | `cymule.semantic/4` | exact invocation-path and lexical effect admission is frozen |
 | Canonical IR | `cymule.ir/2` | unknown operations are rejected |
 | Canonical encoding | `cymule.jcs/1` | RFC 8785 JSON, SHA-256 IDs |
 | Artifact identity | `cymule.artifact/2` | closed kind and explicit length-prefixed bytes |
 | Artifact type contract | `cymule.artifact-type-contract/1` | exact contract is pinned in typed references |
-| Machine snapshot | `cymule.machine-snapshot/5` | authenticated compacted command/Event evidence is required |
-| Event schema | `cymule.event/3` | readers reject incomplete or unknown semantic events |
-| Command protocol | `cymule.command/2` | typed envelope and stable error codes |
+| Machine snapshot | `cymule.machine-snapshot/5` | authenticated compacted evidence, invocation paths, and lexical scope origins are required |
+| Event schema | `cymule.event/4` | readers reject incomplete or unknown semantic events |
+| Command protocol | `cymule.command/3` | execution-location proof is required for scope/effect admission |
 | Engine protocol | `cymule.engine/1` | one versioned request and success-or-failure response envelope |
 | Plugin protocol | `cymule.plugin/2` | capability negotiation and expected failure are explicit |
 | Resource descriptor | `cymule.resource/1` | identity excludes realization locations |
@@ -538,8 +538,11 @@ run | invocation | stable site | scope epoch | occurrence key
 normalized arguments | effect schema version
 ```
 
-Core admission resolves the stable site only through the entry-reachable
-definition closure and requires the site's exact operation and occurrence key.
+Core admission resolves every entry-rooted invoke edge and requires the derived
+dynamic invocation ID, definition, lexical Region path, active scope, stable
+site, operation, and occurrence key to agree. A nested site cannot attach to the
+root scope, and a site in an invoked definition cannot claim the entry
+invocation.
 The canonical Event and rebuildable projection retain the complete structural
 preimage, immutable occurrence binding, and Plan-declared Effect profile. Replay
 recomputes the intent identity and applies policy without consulting a provider
@@ -562,9 +565,10 @@ claim, reconciliation, settlement, or completed Result.
 
 An `unknown` queryable or externally-attested effect enters `pending`. An
 `unknown` human or impossible effect enters `governance-required`. Queryable and
-externally-attested modes may resolve, remain unknown, or escalate to
-governance. Human authority may resolve a governance-required outcome.
-Impossible mode admits no reconciliation transition.
+externally-attested modes may resolve or remain unknown but cannot enter a
+terminal governance dead-end. Human and impossible modes settle only through an
+explicit provider-neutral applied/not-applied resolution of the original intent;
+the same exact Machine/outbox CAS closes its obligation without redispatch.
 
 After dispatch ambiguity, the original intent becomes `unknown`. It MUST keep
 its original occurrence binding and reconciler. It MUST NOT become a fresh
@@ -587,6 +591,11 @@ schema-invalid required output MUST first record `Unknown`. A missing, invalid,
 or schema-invalid reconciliation output leaves the original intent `Unknown`
 and eligible for another reconciliation attempt; neither case is safe for
 provider redispatch.
+
+Embedded execution reports `completed`, `suspended`, `release_required`, and
+`reconciliation_required` as closed success-side boundaries. Release carries
+the exact sorted intent set; reconciliation carries the original intent. These
+states are never flattened into a string failure.
 
 `PrepareEffect` response loss may repeat preparation only with the same
 structural intent ID, immutable binding, and input. Adapters MUST make this
