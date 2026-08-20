@@ -1516,8 +1516,10 @@ func (outcome *ExecutionOutcome) UnmarshalJSON(input []byte) error {
 		return fmt.Errorf("execution outcome status is missing")
 	}
 	expected, ok := map[string][]string{
-		"completed": {"status", "result"},
-		"suspended": {"status", "suspension"},
+		"completed":               {"status", "result"},
+		"suspended":               {"status", "suspension"},
+		"release_required":        {"status", "release"},
+		"reconciliation_required": {"status", "reconciliation"},
 	}[status]
 	if !ok {
 		return fmt.Errorf("unsupported execution outcome %q", status)
@@ -1529,6 +1531,13 @@ func (outcome *ExecutionOutcome) UnmarshalJSON(input []byte) error {
 	var decoded wire
 	if err := decodeClosedValue(value, &decoded); err != nil {
 		return err
+	}
+	validPayload := (status == "completed" && decoded.Result != nil) ||
+		(status == "suspended" && decoded.Suspension != nil) ||
+		(status == "release_required" && decoded.Release != nil) ||
+		(status == "reconciliation_required" && decoded.Reconciliation != nil)
+	if !validPayload {
+		return fmt.Errorf("execution outcome payload is null")
 	}
 	*outcome = ExecutionOutcome(decoded)
 	return nil

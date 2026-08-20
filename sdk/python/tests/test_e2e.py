@@ -63,6 +63,32 @@ class EndToEndTest(unittest.TestCase):
                 with self.assertRaises(EngineError):
                     _validate_engine_envelope(response)
 
+        for execution in (
+            {
+                "status": "release_required",
+                "release": {
+                    "run_id": "run:test",
+                    "plan_id": "sha256:test",
+                    "intent_ids": ["intent:test"],
+                },
+            },
+            {
+                "status": "reconciliation_required",
+                "reconciliation": {
+                    "run_id": "run:test",
+                    "plan_id": "sha256:test",
+                    "intent_id": "intent:test",
+                },
+            },
+        ):
+            _validate_engine_envelope(
+                {
+                    "engine_protocol": "cymule.engine/1",
+                    "outcome": "success",
+                    "response": {"type": "execution_boundary", "execution": execution},
+                }
+            )
+
     def test_python_preserves_structured_engine_failures(self) -> None:
         engine_path = os.environ.get("CYMULE_BIN")
         plugin_path = os.environ.get("CYMULE_TEST_PLUGIN")

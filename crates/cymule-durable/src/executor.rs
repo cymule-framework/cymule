@@ -161,6 +161,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 definition_id: plan.candidate.entry.clone(),
                 invocation_id: plan.candidate.entry,
                 invocation_path: Vec::new(),
+                scope_id: ROOT_SCOPE_ID.to_owned(),
                 input: input_ref.clone(),
                 region_path: Vec::new(),
                 next_step: 0,
@@ -733,6 +734,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         site_id: step.id.clone(),
                         region_path: frame.region_path.clone(),
                         scope_id: current_scope.clone(),
+                        epoch: continuation.epoch,
                     });
                     let invocation_id = plan_invocation_id(
                         run_id,
@@ -755,6 +757,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         definition_id: target.id.clone(),
                         invocation_id,
                         invocation_path,
+                        scope_id: current_scope,
                         input: input_ref,
                         region_path: Vec::new(),
                         next_step: 0,
@@ -969,11 +972,12 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     let invocation_path = frame.invocation_path.clone();
                     let definition_id = frame.definition_id.clone();
                     let frame_input = frame.input.clone();
-                    continuation.scope_stack.push(child_scope);
+                    continuation.scope_stack.push(child_scope.clone());
                     continuation.frames.push(FrameState {
                         definition_id,
                         invocation_id,
                         invocation_path,
+                        scope_id: child_scope,
                         input: frame_input,
                         region_path: child_path,
                         next_step: 0,

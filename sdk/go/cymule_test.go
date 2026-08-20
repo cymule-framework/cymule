@@ -126,10 +126,21 @@ func TestEvolutionAndExecutionResponseUnionsAreClosed(t *testing.T) {
 	for _, input := range []string{
 		`{"status":"future"}`,
 		`{"status":"completed","result":{},"suspension":{}}`,
+		`{"status":"release_required","release":null}`,
+		`{"status":"reconciliation_required","reconciliation":null}`,
 	} {
 		var outcome ExecutionOutcome
 		if err := decodeClosedJSON([]byte(input), &outcome); err == nil {
 			t.Fatalf("expected closed execution rejection for %s", input)
+		}
+	}
+	for _, input := range []string{
+		`{"status":"release_required","release":{"run_id":"run:test","plan_id":"sha256:test","intent_ids":["intent:test"]}}`,
+		`{"status":"reconciliation_required","reconciliation":{"run_id":"run:test","plan_id":"sha256:test","intent_id":"intent:test"}}`,
+	} {
+		var outcome ExecutionOutcome
+		if err := decodeClosedJSON([]byte(input), &outcome); err != nil {
+			t.Fatalf("expected closed execution boundary to decode for %s: %v", input, err)
 		}
 	}
 }

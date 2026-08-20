@@ -414,6 +414,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                         site_id: step.id.clone(),
                         region_path: region_path.to_vec(),
                         scope_id: scope_id.to_owned(),
+                        epoch: self.current_epoch(run_id)?,
                     });
                     let child_invocation = plan_invocation_id(
                         run_id,

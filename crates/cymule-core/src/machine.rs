@@ -5,8 +5,9 @@ use crate::model::{effect_intent_id, effect_obligation_id};
 use crate::{
     ArtifactRecord, ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, CommandReceipt,
     CommandReceiptStatus, CoreError, Event, EventPayload, InvocationPathSegment,
-    ObligationProjection, Projection, ReplayAvailability, Result, RunProjection, SealedPlan,
-    WorldOutcome, artifact_ref, canonical_digest, content_id, plan_invocation_id, plan_scope_id,
+    ObligationProjection, Projection, ROOT_SCOPE_ID, ReplayAvailability, Result, RunProjection,
+    SealedPlan, WorldOutcome, artifact_ref, canonical_digest, content_id, plan_invocation_id,
+    plan_scope_id,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -100,6 +101,12 @@ impl MachineBaseSnapshot {
             }
         }
         Ok(())
+    }
+
+    /// Verify and content-address the authenticated compacted prefix.
+    pub fn identity(&self) -> Result<String> {
+        self.verify()?;
+        content_id("cymule.machine-base/2", self)
     }
 
     fn event_ids(&self) -> BTreeSet<String> {
@@ -313,7 +320,7 @@ impl Machine {
             projection_digest: projection_digest.clone(),
         };
         base.verify()?;
-        let base_id = content_id("cymule.machine-base/2", &base)?;
+        let base_id = base.identity()?;
         for event_id in &prefix_ids {
             self.events.remove(event_id);
         }
@@ -540,6 +547,63 @@ impl Machine {
     /// Current rebuildable projection.
     pub const fn projection(&self) -> &Projection {
         &self.projection
+    }
+
+    /// Re-resolve one durable interpreter frame from the immutable Plan.
+    ///
+    /// Returns the unique open lexical scope that owns the frame. Durable
+    /// profiles use this pure check before accepting a persisted Continuation;
+    /// callers cannot make a self-consistent but unreachable frame authoritative.
+    pub fn validate_execution_frame(
+        &self,
+        run_id: &str,
+        invocation_id: &str,
+        invocation_path: &[InvocationPathSegment],
+        definition_id: &str,
+        region_path: &[usize],
+        scope_id: &str,
+        next_step: usize,
+    ) -> Result<String> {
+        let run = self.run(run_id)?;
+        let plan = self.plans.get(&run.current_plan).ok_or_else(|| {
+            CoreError::NotFound(format!("plan {} does not exist", run.current_plan))
+        })?;
+        let (resolved_definition, expected_invocation) =
+            resolve_invocation(&plan.candidate, run, invocation_path, false)?;
+        if resolved_definition != definition_id || expected_invocation != invocation_id {
+            return Err(CoreError::Validation(
+                "persisted frame does not match its entry-rooted invocation path".to_owned(),
+            ));
+        }
+        let scope = run
+            .scopes
+            .get(scope_id)
+            .ok_or_else(|| CoreError::NotFound(format!("scope {scope_id} does not exist")))?;
+        if region_path.is_empty() {
+            let enclosing_scope = invocation_path
+                .last()
+                .map_or(ROOT_SCOPE_ID, |segment| segment.scope_id.as_str());
+            if scope_id != enclosing_scope {
+                return Err(CoreError::Validation(
+                    "persisted top-level frame left its lexical scope".to_owned(),
+                ));
+            }
+        } else if scope.invocation_id != invocation_id
+            || scope.definition_id != definition_id
+            || scope.region_path != region_path
+        {
+            return Err(CoreError::Validation(
+                "persisted nested frame does not match its lexical scope".to_owned(),
+            ));
+        }
+        let region = region_at_path(&plan.candidate, definition_id, region_path)?;
+        if next_step > region.steps.len() {
+            return Err(CoreError::Validation(format!(
+                "execution frame next step {next_step} exceeds Region length {}",
+                region.steps.len()
+            )));
+        }
+        Ok(scope_id.to_owned())
     }
 
     /// Events in admission order.
@@ -1028,14 +1092,8 @@ fn validate_execution_location(
     region_path: &[usize],
     scope_id: &str,
 ) -> Result<()> {
-    let resolved_definition = resolve_invocation(candidate, run, invocation_path)?;
-    let expected_invocation = plan_invocation_id(
-        &run.run_id,
-        &run.current_plan,
-        &candidate.entry,
-        invocation_path,
-        run.epoch,
-    )?;
+    let (resolved_definition, expected_invocation) =
+        resolve_invocation(candidate, run, invocation_path, true)?;
     if resolved_definition != definition_id || expected_invocation != invocation_id {
         return Err(CoreError::Validation(
             "execution location does not match its entry-rooted invocation path".to_owned(),
@@ -1050,10 +1108,18 @@ fn validate_execution_location(
             "scope {scope_id} is not open"
         )));
     }
-    if !region_path.is_empty()
-        && (scope.invocation_id != invocation_id
-            || scope.definition_id != definition_id
-            || scope.region_path != region_path)
+    let enclosing_scope = invocation_path
+        .last()
+        .map_or(ROOT_SCOPE_ID, |segment| segment.scope_id.as_str());
+    if region_path.is_empty() {
+        if scope_id != enclosing_scope {
+            return Err(CoreError::Validation(
+                "top-level execution location left its lexical scope".to_owned(),
+            ));
+        }
+    } else if scope.invocation_id != invocation_id
+        || scope.definition_id != definition_id
+        || scope.region_path != region_path
     {
         return Err(CoreError::Validation(
             "lexically nested execution location does not match its owning scope".to_owned(),
@@ -1066,23 +1132,20 @@ fn resolve_invocation<'a>(
     candidate: &'a PlanCandidate,
     run: &RunProjection,
     path: &[InvocationPathSegment],
-) -> Result<&'a str> {
+    require_open: bool,
+) -> Result<(&'a str, String)> {
     let mut definition_id = candidate.entry.as_str();
+    let mut invocation_id = candidate.entry.clone();
     let mut prefix = Vec::new();
     for segment in path {
-        let invocation_id = plan_invocation_id(
-            &run.run_id,
-            &run.current_plan,
-            &candidate.entry,
-            &prefix,
-            run.epoch,
-        )?;
         validate_execution_location_scope_only(
             run,
             &invocation_id,
+            &prefix,
             definition_id,
             &segment.region_path,
             &segment.scope_id,
+            require_open,
         )?;
         let (step, _) = locate_step(
             candidate,
@@ -1098,30 +1161,47 @@ fn resolve_invocation<'a>(
         };
         definition_id = definition;
         prefix.push(segment.clone());
+        invocation_id = plan_invocation_id(
+            &run.run_id,
+            &run.current_plan,
+            &candidate.entry,
+            &prefix,
+            segment.epoch,
+        )?;
     }
-    Ok(definition_id)
+    Ok((definition_id, invocation_id))
 }
 
 fn validate_execution_location_scope_only(
     run: &RunProjection,
     invocation_id: &str,
+    invocation_path: &[InvocationPathSegment],
     definition_id: &str,
     region_path: &[usize],
     scope_id: &str,
+    require_open: bool,
 ) -> Result<()> {
     let scope = run
         .scopes
         .get(scope_id)
         .ok_or_else(|| CoreError::NotFound(format!("scope {scope_id} does not exist")))?;
-    if scope.status != crate::ScopeStatus::Open {
+    if require_open && scope.status != crate::ScopeStatus::Open {
         return Err(CoreError::IllegalTransition(format!(
             "scope {scope_id} is not open"
         )));
     }
-    if !region_path.is_empty()
-        && (scope.invocation_id != invocation_id
-            || scope.definition_id != definition_id
-            || scope.region_path != region_path)
+    let enclosing_scope = invocation_path
+        .last()
+        .map_or(ROOT_SCOPE_ID, |segment| segment.scope_id.as_str());
+    if region_path.is_empty() {
+        if scope_id != enclosing_scope {
+            return Err(CoreError::Validation(
+                "top-level invocation path left its lexical scope".to_owned(),
+            ));
+        }
+    } else if scope.invocation_id != invocation_id
+        || scope.definition_id != definition_id
+        || scope.region_path != region_path
     {
         return Err(CoreError::Validation(
             "invocation path leaves its exact lexical scope".to_owned(),

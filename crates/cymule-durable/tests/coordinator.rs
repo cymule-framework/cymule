@@ -219,10 +219,13 @@ fn prepared_effect_transition() -> (Machine, Machine, Continuation, EffectDispat
             transition: EffectTransition::Prepare,
         },
     );
+    let mut effect_continuation = continuation(plan.plan_id);
+    effect_continuation.run_id = "run:effect-delta".to_owned();
+    effect_continuation.binding_context = "binding:test".to_owned();
     (
         base,
         machine,
-        continuation(plan.plan_id),
+        effect_continuation,
         EffectDispatch {
             intent_id,
             run_id: "run:effect-delta".to_owned(),
@@ -246,6 +249,7 @@ fn continuation(plan_id: String) -> Continuation {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
             invocation_path: Vec::new(),
+            scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
             input: cymule_core::artifact_ref("test/input", b"durable input")
                 .expect("Continuation input reference derives"),
             region_path: Vec::new(),
@@ -319,6 +323,7 @@ fn direct_run(candidate: PlanCandidate, binding: &ExecutionBinding) -> (Machine,
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
             invocation_path: Vec::new(),
+            scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
             input: input.clone(),
             region_path: Vec::new(),
             next_step: 0,
@@ -428,6 +433,24 @@ fn public_coordinator_rejects_every_dangling_or_legacy_artifact_reference() {
             ));
             assert_eq!(coordinator.revision(), Some(initial_revision.as_str()));
         }
+    }
+
+    let mut wrong_invocation = valid.clone();
+    wrong_invocation.frames[0].invocation_id = "invocation:forged".to_owned();
+    let mut wrong_epoch = valid.clone();
+    wrong_epoch.epoch = 1;
+    let mut wrong_scope = valid.clone();
+    wrong_scope.scope_stack = vec!["scope:forged".to_owned()];
+    let mut wrong_plan = valid.clone();
+    wrong_plan.plan_id = "sha256:forged-plan".to_owned();
+    for (case, proposed) in [
+        ("invocation", wrong_invocation),
+        ("epoch", wrong_epoch),
+        ("scope", wrong_scope),
+        ("plan", wrong_plan),
+    ] {
+        coordinator.put_continuation(proposed).expect_err(case);
+        assert_eq!(coordinator.revision(), Some(initial_revision.as_str()));
     }
 
     coordinator
@@ -920,10 +943,10 @@ fn stale_coordinator_and_lease_owner_fail_closed() {
         .expect("store initializes");
     let mut stale = DurableCoordinator::open(store.clone()).expect("second view opens");
     current
-        .put_continuation(continuation(plan_id))
+        .put_continuation(continuation(plan_id.clone()))
         .expect("current writer commits");
     assert!(matches!(
-        stale.persist_machine(&machine),
+        stale.put_continuation(continuation(plan_id)),
         Err(DurableError::Conflict { .. })
     ));
 
@@ -1035,6 +1058,12 @@ fn effect_outbox_stages_reject_unrelated_canonical_machine_changes() {
             .snapshot(),
         base.snapshot()
     );
+    assert!(matches!(
+        coordinator.checkpoint(&prepared, continuation.clone(), None),
+        Err(DurableError::Validation(message))
+            if message.contains("outside its atomic outbox boundary")
+    ));
+    assert!(coordinator.state().expect("state").outbox.is_empty());
 
     coordinator
         .checkpoint_effect_enqueue(&prepared, continuation.clone(), dispatch.clone())
@@ -1287,7 +1316,7 @@ fn higher_profile_journal_is_cas_committed_and_replayed_in_order() {
 
 #[test]
 fn machine_history_compaction_reopens_and_replays_after_lost_receipt() {
-    let (mut machine, _) = machine_with_run();
+    let (mut machine, plan_id) = machine_with_run();
     submit(
         &mut machine,
         "run:durable",
@@ -1367,6 +1396,12 @@ fn machine_history_compaction_reopens_and_replays_after_lost_receipt() {
         })
         .expect("compacted command receipt replays");
     assert_eq!(restored.events().count(), events_before);
+    let mut resumed = continuation(plan_id);
+    resumed.epoch = 1;
+    resumed.status = ContinuationStatus::Running;
+    reopened
+        .put_continuation(resumed.clone())
+        .expect("resumed Continuation persists");
     submit(
         &mut restored,
         "run:durable",
@@ -1379,7 +1414,7 @@ fn machine_history_compaction_reopens_and_replays_after_lost_receipt() {
         },
     );
     reopened
-        .persist_machine(&restored)
+        .checkpoint(&restored, resumed, None)
         .expect("new suffix Event persists");
     let second = reopened
         .compact_history("compaction:events:2", 1)

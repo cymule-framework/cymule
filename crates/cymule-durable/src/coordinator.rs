@@ -146,11 +146,6 @@ impl<S: DurableStore> DurableCoordinator<S> {
         Machine::restore(self.state()?.machine.clone()).map_err(Into::into)
     }
 
-    /// Persist the current semantic Machine snapshot.
-    pub fn persist_machine(&mut self, machine: &Machine) -> DurableResult<String> {
-        self.mutate(|state| state.machine = machine.snapshot())
-    }
-
     /// Compact one causal Event prefix and atomically publish its M1 receipt.
     pub fn compact_history(
         &mut self,
@@ -223,8 +218,32 @@ impl<S: DurableStore> DurableCoordinator<S> {
         continuation: Continuation,
         occurrence: Option<ComponentOccurrence>,
     ) -> DurableResult<String> {
+        let machine_snapshot = machine.snapshot();
         self.mutate_checked(|state| {
-            state.machine = machine.snapshot();
+            let artifacts = machine_snapshot
+                .artifacts
+                .iter()
+                .map(|record| record.reference.clone())
+                .collect();
+            let events = ensure_canonical_machine_delta(
+                &state.machine,
+                &machine_snapshot,
+                &artifacts,
+                "semantic checkpoint",
+            )?;
+            if events.iter().any(|event| {
+                matches!(
+                    event.payload,
+                    EventPayload::EffectProposed { .. }
+                        | EventPayload::EffectTransitioned { .. }
+                )
+            }) {
+                return Err(DurableError::Validation(
+                    "semantic checkpoint cannot persist an Effect transition outside its atomic outbox boundary"
+                        .to_owned(),
+                ));
+            }
+            state.machine = machine_snapshot.clone();
             if let Some(occurrence) = occurrence {
                 match state.component_occurrences.get(&occurrence.occurrence_id) {
                     Some(existing) if existing == &occurrence => {}

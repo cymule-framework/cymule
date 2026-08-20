@@ -94,6 +94,51 @@ printf '%s' '${JSON.stringify({
   }
 });
 
+test("TypeScript accepts typed Effect execution boundaries", () => {
+  const executions = [
+    {
+      status: "release_required",
+      release: {
+        run_id: "run:test",
+        plan_id: "sha256:test",
+        intent_ids: ["intent:test"],
+      },
+    },
+    {
+      status: "reconciliation_required",
+      reconciliation: {
+        run_id: "run:test",
+        plan_id: "sha256:test",
+        intent_id: "intent:test",
+      },
+    },
+  ];
+  for (const [index, execution] of executions.entries()) {
+    const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-"));
+    const executable = join(directory, `effect-boundary-${index}`);
+    writeFileSync(
+      executable,
+      `#!/bin/sh
+cat >/dev/null
+printf '%s' '${JSON.stringify({
+        engine_protocol: "cymule.engine/1",
+        outcome: "success",
+        response: { type: "execution_boundary", execution },
+      })}'
+`,
+    );
+    chmodSync(executable, 0o700);
+    try {
+      assert.equal(
+        new CliEngine(executable).run({} as never, null, "plugin", "run:test").status,
+        execution.status,
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
 test("TypeScript candidate seals and executes through the Rust engine", () => {
   const enginePath = process.env.CYMULE_BIN;
   const pluginPath = process.env.CYMULE_TEST_PLUGIN;

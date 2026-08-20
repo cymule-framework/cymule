@@ -1563,15 +1563,28 @@ def _validate_execution_outcome(value: object) -> None:
     expected = {
         "completed": {"status", "result"},
         "suspended": {"status", "suspension"},
+        "release_required": {"status", "release"},
+        "reconciliation_required": {"status", "reconciliation"},
     }.get(value.get("status"))
     if expected is None or set(value) != expected:
         raise _transport_error("invalid_engine_response", "execution outcome is not closed")
-    nested = value["result"] if value["status"] == "completed" else value["suspension"]
-    nested_fields = (
-        {"run_id", "plan_id", "value", "projection_digest", "precondition_token", "effects"}
-        if value["status"] == "completed"
-        else {"run_id", "plan_id", "definition_id", "invocation_id", "site_id", "wait", "result_bind"}
-    )
+    status = value["status"]
+    nested_key, nested_fields = {
+        "completed": (
+            "result",
+            {"run_id", "plan_id", "value", "projection_digest", "precondition_token", "effects"},
+        ),
+        "suspended": (
+            "suspension",
+            {"run_id", "plan_id", "definition_id", "invocation_id", "site_id", "wait", "result_bind"},
+        ),
+        "release_required": ("release", {"run_id", "plan_id", "intent_ids"}),
+        "reconciliation_required": (
+            "reconciliation",
+            {"run_id", "plan_id", "intent_id"},
+        ),
+    }[status]
+    nested = value[nested_key]
     if not isinstance(nested, dict) or set(nested) != nested_fields:
         raise _transport_error("invalid_engine_response", "execution payload fields are not closed")
 

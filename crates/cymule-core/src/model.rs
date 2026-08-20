@@ -658,6 +658,8 @@ pub struct InvocationPathSegment {
     pub region_path: Vec<usize>,
     /// Dynamic scope active when the invoke occurred.
     pub scope_id: String,
+    /// Run epoch in which this invocation edge was materialized.
+    pub epoch: u64,
 }
 
 /// Effect control phase.
@@ -1412,6 +1414,11 @@ pub fn plan_invocation_id(
 ) -> Result<String> {
     if invocation_path.is_empty() {
         return Ok(entry_definition.to_owned());
+    }
+    if invocation_path.last().map(|segment| segment.epoch) != Some(epoch) {
+        return Err(CoreError::Validation(
+            "invocation identity epoch does not match its final path segment".to_owned(),
+        ));
     }
     content_id(
         "cymule.invocation/1",

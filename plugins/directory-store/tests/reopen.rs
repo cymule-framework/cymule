@@ -95,6 +95,7 @@ fn continuation(plan_id: String, input: cymule_core::ArtifactRef) -> Continuatio
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
             invocation_path: Vec::new(),
+            scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
             input,
             region_path: Vec::new(),
             next_step: 0,
@@ -123,10 +124,10 @@ fn committed_state_reopens_and_stale_writer_is_rejected() {
     let mut stale = DurableCoordinator::open(DirectoryStore::open(&directory).expect("opens"))
         .expect("second coordinator opens");
     current
-        .put_continuation(continuation(plan_id, input))
+        .put_continuation(continuation(plan_id.clone(), input.clone()))
         .expect("continuation commits");
     assert!(matches!(
-        stale.persist_machine(&machine),
+        stale.put_continuation(continuation(plan_id, input)),
         Err(DurableError::Conflict { .. })
     ));
 

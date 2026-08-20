@@ -315,6 +315,17 @@ fn effect_admission_requires_an_exact_entry_reachable_site_tuple() {
             bind: None,
         },
     });
+    candidate.definitions[0].body.steps.push(Step {
+        id: "scope.other".to_owned(),
+        operation: Operation::Scope {
+            mode: cymule_core::ScopeMode::Transactional,
+            body: Box::new(Region {
+                steps: Vec::new(),
+                result: Expression::Input,
+            }),
+            bind: None,
+        },
+    });
     candidate.definitions.push(Definition {
         id: "unreachable".to_owned(),
         input_schema: json!({}),
@@ -383,6 +394,7 @@ fn effect_admission_requires_an_exact_entry_reachable_site_tuple() {
         site_id: "invoke.unreachable".to_owned(),
         region_path: Vec::new(),
         scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+        epoch: 0,
     }];
     let run = &machine.projection().runs[run_id];
     let invoked_id = cymule_core::plan_invocation_id(
@@ -412,6 +424,35 @@ fn effect_admission_requires_an_exact_entry_reachable_site_tuple() {
             },
         ))
         .expect("invoked site admits only with its exact dynamic invocation path");
+    let run = &machine.projection().runs[run_id];
+    let unrelated_scope =
+        cymule_core::plan_scope_id(run_id, &run.current_plan, "main", "main", &[3], run.epoch)
+            .expect("scope identity derives");
+    machine
+        .submit(envelope(
+            &machine,
+            52,
+            run_id,
+            Command::OpenScope {
+                scope_id: unrelated_scope.clone(),
+                parent_scope: cymule_core::ROOT_SCOPE_ID.to_owned(),
+                invocation_id: "main".to_owned(),
+                invocation_path: Vec::new(),
+                definition_id: "main".to_owned(),
+                region_path: Vec::new(),
+                site_id: "scope.other".to_owned(),
+            },
+        ))
+        .expect("unrelated lexical scope opens");
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            53,
+            run_id,
+            propose(&unrelated_scope, "main", "effect.reachable", "reachable"),
+        )),
+        Err(CoreError::Validation(message)) if message.contains("lexical scope")
+    ));
     assert!(matches!(
         machine.submit(envelope(
             &machine,

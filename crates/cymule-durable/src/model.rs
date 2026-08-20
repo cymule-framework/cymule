@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cymule_core::{
     ArtifactRef, Machine, MachineCompaction, MachineSnapshot, Operation, Region, canonical_digest,
-    content_id,
 };
 use serde::{Deserialize, Serialize};
 
@@ -241,7 +240,7 @@ impl DurableState {
                     "history compaction exists without a Machine base snapshot".to_owned(),
                 )
             })?;
-            let base_id = content_id("cymule.machine-base/1", base)?;
+            let base_id = base.identity()?;
             let compacted_events = u64::try_from(base.compacted_events.len())
                 .map_err(|error| DurableError::Validation(error.to_string()))?;
             let retained_events = u64::try_from(self.machine.events.len())
@@ -276,6 +275,39 @@ fn validate_continuation_artifacts(
         | ContinuationStatus::Running
         | ContinuationStatus::Completed => {}
     }
+    let run = machine
+        .projection()
+        .runs
+        .get(&continuation.run_id)
+        .ok_or_else(|| {
+            DurableError::Validation(format!(
+                "Continuation {} references a missing Machine Run",
+                continuation.run_id
+            ))
+        })?;
+    if continuation.plan_id != run.current_plan
+        || continuation.binding_context != run.current_binding_context
+        || continuation.epoch != run.epoch
+    {
+        return Err(DurableError::Validation(format!(
+            "Continuation {} Plan, binding, or epoch does not match its Machine Run",
+            continuation.run_id
+        )));
+    }
+    if (continuation.status == ContinuationStatus::Completed)
+        != (run.status == cymule_core::RunStatus::Completed)
+    {
+        return Err(DurableError::Validation(format!(
+            "Continuation {} terminal status does not match its Machine Run",
+            continuation.run_id
+        )));
+    }
+    if continuation.status != ContinuationStatus::Completed && continuation.frames.is_empty() {
+        return Err(DurableError::Validation(format!(
+            "active Continuation {} requires an execution frame",
+            continuation.run_id
+        )));
+    }
     if let Some(state) = &continuation.state {
         require_artifact(
             machine,
@@ -283,6 +315,7 @@ fn validate_continuation_artifacts(
             &format!("Continuation {} state", continuation.run_id),
         )?;
     }
+    let mut frame_scope = None;
     for (index, frame) in continuation.frames.iter().enumerate() {
         require_artifact(
             machine,
@@ -299,6 +332,68 @@ fn validate_continuation_artifacts(
                 ),
             )?;
         }
+        let scope_id = machine.validate_execution_frame(
+            &continuation.run_id,
+            &frame.invocation_id,
+            &frame.invocation_path,
+            &frame.definition_id,
+            &frame.region_path,
+            &frame.scope_id,
+            frame.next_step,
+        )?;
+        if index == 0 && !frame.invocation_path.is_empty() {
+            return Err(DurableError::Validation(format!(
+                "Continuation {} first frame is not the entry invocation",
+                continuation.run_id
+            )));
+        }
+        if let Some(parent) = index
+            .checked_sub(1)
+            .and_then(|parent| continuation.frames.get(parent))
+        {
+            let same_invocation = frame.invocation_path == parent.invocation_path
+                && frame.invocation_id == parent.invocation_id
+                && frame.definition_id == parent.definition_id
+                && frame.region_path.len() == parent.region_path.len() + 1
+                && frame.region_path.starts_with(&parent.region_path);
+            let invoked_child = frame.invocation_path.len() == parent.invocation_path.len() + 1
+                && frame.invocation_path.starts_with(&parent.invocation_path);
+            if !same_invocation && !invoked_child {
+                return Err(DurableError::Validation(format!(
+                    "Continuation {} frame {index} is not reachable from its parent frame",
+                    continuation.run_id
+                )));
+            }
+        }
+        frame_scope = Some(scope_id);
+    }
+    if continuation.scope_stack.first().map(String::as_str) != Some(cymule_core::ROOT_SCOPE_ID) {
+        return Err(DurableError::Validation(format!(
+            "Continuation {} scope stack must begin at root",
+            continuation.run_id
+        )));
+    }
+    for (index, scope_id) in continuation.scope_stack.iter().enumerate() {
+        let scope = run.scopes.get(scope_id).ok_or_else(|| {
+            DurableError::Validation(format!(
+                "Continuation {} scope stack references missing scope {scope_id}",
+                continuation.run_id
+            ))
+        })?;
+        if index > 0 && scope.parent_scope.as_ref() != continuation.scope_stack.get(index - 1) {
+            return Err(DurableError::Validation(format!(
+                "Continuation {} scope stack is not a parent-child lineage",
+                continuation.run_id
+            )));
+        }
+    }
+    if let Some(frame_scope) = frame_scope
+        && continuation.scope_stack.last() != Some(&frame_scope)
+    {
+        return Err(DurableError::Validation(format!(
+            "Continuation {} active frame is outside its scope stack",
+            continuation.run_id
+        )));
     }
     Ok(())
 }
@@ -627,6 +722,8 @@ pub struct FrameState {
     pub invocation_id: String,
     /// Entry-rooted invoke path proving the dynamic invocation.
     pub invocation_path: Vec<cymule_core::InvocationPathSegment>,
+    /// Exact lexical scope owning this frame.
+    pub scope_id: String,
     /// Typed invocation input Artifact.
     pub input: ArtifactRef,
     /// Nested region indices from the definition root.

@@ -1691,14 +1691,30 @@ function validateExecutionOutcome(value: unknown): void {
   }
   const expected = value.status === "completed"
     ? "result,status"
-    : value.status === "suspended" ? "status,suspension" : undefined;
+    : value.status === "suspended"
+    ? "status,suspension"
+    : value.status === "release_required"
+    ? "release,status"
+    : value.status === "reconciliation_required"
+    ? "reconciliation,status"
+    : undefined;
   if (expected === undefined || Object.keys(value).sort().join(",") !== expected) {
     throw transportError("invalid_engine_response", "execution outcome is not closed");
   }
-  const nested = value.status === "completed" ? value.result : value.suspension;
+  const nested = value.status === "completed"
+    ? value.result
+    : value.status === "suspended"
+    ? value.suspension
+    : value.status === "release_required"
+    ? value.release
+    : value.reconciliation;
   const nestedFields = value.status === "completed"
     ? "effects,plan_id,precondition_token,projection_digest,run_id,value"
-    : "definition_id,invocation_id,plan_id,result_bind,run_id,site_id,wait";
+    : value.status === "suspended"
+    ? "definition_id,invocation_id,plan_id,result_bind,run_id,site_id,wait"
+    : value.status === "release_required"
+    ? "intent_ids,plan_id,run_id"
+    : "intent_id,plan_id,run_id";
   if (!isRecord(nested) || Object.keys(nested).sort().join(",") !== nestedFields) {
     throw transportError("invalid_engine_response", "execution payload fields are not closed");
   }

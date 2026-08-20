@@ -307,6 +307,7 @@ fn agent_continuation(run_id: &str) -> Continuation {
             definition_id: "agent-turn".to_owned(),
             invocation_id: "agent-turn".to_owned(),
             invocation_path: Vec::new(),
+            scope_id: ROOT_SCOPE_ID.to_owned(),
             input: cymule_core::artifact_ref("test/input", b"agent test input")
                 .expect("test input reference derives"),
             region_path: Vec::new(),

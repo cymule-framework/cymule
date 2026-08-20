@@ -31,6 +31,10 @@
   wait/activation results, outbox inputs/results, and component occurrence
   inputs/outputs. Public coordinator methods never accept dangling or legacy
   references.
+- Every persisted Continuation re-resolves its Plan, binding, epoch, frame
+  invocation path, nested Region, next step, and lexical scope against the
+  canonical Machine. A Wait owner is evidence only after that frame is
+  authenticated; self-consistent unreachable frames fail before CAS.
 - Compile the admitted Plan through `cymule-runtime` and validate Run,
   invocation, component, effect, typed-wait, definition-result, and terminal
   Result values at their exact boundary. Invalid input may not create its
@@ -92,6 +96,10 @@
   the exact appended Machine Events, command receipts, and allowed Artifacts
   against the proposed outbox transition. Never use a generic Machine write for
   `Unknown`; its observation Event and outbox state share one CAS.
+- There is no public raw Machine replacement. Generic semantic checkpoints
+  accept only canonical non-Effect Event suffixes and Artifacts referenced by
+  the exact Continuation/component occurrence; every Effect transition uses
+  its dedicated Machine-plus-outbox atomic checkpoint.
 - No public coordinator method may mutate outbox state without its exact
   canonical Machine delta. External attestation or governance resolves only the
   original unknown intent through the provider-neutral resolution control and

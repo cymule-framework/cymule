@@ -21,7 +21,8 @@ use cymule_core::{
 };
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
-    DurableState, DurableStore, FrameState, MemoryStore, StoreCommit, StoredState,
+    DurableState, DurableStore, FrameState, JournalBatch, JournalRecord, MemoryStore, StoreCommit,
+    StoredState,
 };
 use cymule_evolution::{
     DefinitionRegistry, DurableDefinitionRegistry, DurableEvolutionController,
@@ -134,8 +135,21 @@ fn retain_artifact<S: DurableStore>(
     let reference = machine
         .put_artifact("evolution/evidence", value.as_bytes().to_vec())
         .expect("evolution Artifact stores");
+    let record = JournalRecord::new(
+        reference.artifact_id.clone(),
+        "test.evolution-evidence/1",
+        json!({"artifact": reference.clone()}),
+    )
+    .expect("evolution evidence record constructs");
     coordinator
-        .persist_machine(&machine)
+        .checkpoint_artifact_journals(
+            &machine,
+            &BTreeSet::from([reference.clone()]),
+            &[JournalBatch {
+                journal_id: "test:evolution-evidence".to_owned(),
+                records: vec![record],
+            }],
+        )
         .expect("evolution Artifact persists");
     reference
 }
@@ -160,6 +174,7 @@ fn continuation(plan_id: &str) -> Continuation {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
             invocation_path: Vec::new(),
+            scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
             input: cymule_core::artifact_ref("test/input", b"evolution test input")
                 .expect("test input reference derives"),
             region_path: Vec::new(),

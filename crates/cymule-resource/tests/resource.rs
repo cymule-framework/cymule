@@ -577,6 +577,8 @@ fn resource_handoff_atomically_activates_matching_input_wait() {
             frames: vec![FrameState {
                 definition_id: "main".to_owned(),
                 invocation_id: "main".to_owned(),
+                invocation_path: Vec::new(),
+                scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
                 input: cymule_core::artifact_ref("test/input", b"resource input")
                     .expect("input reference derives"),
                 region_path: Vec::new(),

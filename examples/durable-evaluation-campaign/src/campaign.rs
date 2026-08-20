@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cymule_core::{Machine, canonical_bytes, content_id, sha256_bytes};
-use cymule_durable::DurableCoordinator;
+use cymule_durable::{DurableCoordinator, JournalBatch, JournalRecord};
 use cymule_evolution::{
     DurableLiveEvolutionController, LiveEvolutionController, LivePublicationCommand,
     LiveVirtualClaimCommand, RolloutMode,
@@ -42,6 +42,7 @@ use crate::source::{CURSOR_VERSION, CaseSource, case_reference, parse_suite};
 
 const VIRTUAL_JOURNAL: &str = "example:virtual-work";
 const LIVE_EVOLUTION_JOURNAL: &str = "example:live-evolution";
+const CAMPAIGN_METADATA_JOURNAL: &str = "example:campaign-metadata";
 const REGION_ID: &str = "region:evaluation-suite";
 const RESOURCE_BINDING: &str = "example.fs-resources@1";
 const DEFAULT_LEASE_TTL: u64 = 60_000;
@@ -446,8 +447,21 @@ fn load_or_initialize_suite(
         suite,
         case_count: cases.len(),
     };
-    machine.put_artifact(SUITE_ARTIFACT_KIND, canonical_bytes(&metadata)?)?;
-    coordinator.persist_machine(machine)?;
+    let metadata_artifact =
+        machine.put_artifact(SUITE_ARTIFACT_KIND, canonical_bytes(&metadata)?)?;
+    let record = JournalRecord::new(
+        "campaign:metadata",
+        "example.evaluation-campaign-metadata/1",
+        serde_json::to_value(&metadata)?,
+    )?;
+    coordinator.checkpoint_artifact_journals(
+        machine,
+        &BTreeSet::from([metadata_artifact]),
+        &[JournalBatch {
+            journal_id: CAMPAIGN_METADATA_JOURNAL.to_owned(),
+            records: vec![record],
+        }],
+    )?;
     Ok((metadata, cases))
 }
 

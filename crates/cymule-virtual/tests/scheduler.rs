@@ -504,6 +504,7 @@ fn durable_machine_with_wait() -> (Machine, Continuation, WaitCondition) {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
             invocation_path: Vec::new(),
+            scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
             input,
             region_path: Vec::new(),
             next_step: 1,
