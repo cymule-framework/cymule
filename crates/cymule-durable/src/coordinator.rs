@@ -1237,7 +1237,7 @@ fn complete_wait_state(
     result: &cymule_core::ArtifactRef,
     require_input: bool,
 ) -> DurableResult<()> {
-    let (run_id, result_binding) = {
+    let (run_id, owner) = {
         let wait = state
             .waits
             .get_mut(wait_id)
@@ -1255,43 +1255,36 @@ fn complete_wait_state(
         }
         wait.state = WaitState::Completed;
         wait.result = Some(result.clone());
-        (wait.run_id.clone(), wait.result_binding.clone())
+        (wait.run_id.clone(), wait.owner.clone())
     };
     let continuation = state
         .continuations
         .get_mut(&run_id)
         .ok_or_else(|| DurableError::NotFound(format!("continuation {run_id} does not exist")))?;
-    if let Some(binding) = result_binding {
-        let frame = continuation
-            .frames
-            .iter_mut()
-            .find(|frame| {
-                frame.invocation_id == binding.invocation_id
-                    && frame.definition_id == binding.definition_id
-                    && frame.region_path == binding.region_path
-            })
-            .ok_or_else(|| {
-                DurableError::Validation(format!(
-                    "wait {wait_id} owning frame {} is missing",
-                    binding.invocation_id
-                ))
-            })?;
-        if frame.definition_id != binding.definition_id || frame.region_path != binding.region_path
-        {
-            return Err(DurableError::Validation(format!(
-                "wait {wait_id} result binding does not match its owning frame"
-            )));
-        }
-        match frame.locals.get(&binding.local) {
+    let frame = continuation
+        .frames
+        .iter_mut()
+        .find(|frame| {
+            frame.invocation_id == owner.invocation_id
+                && frame.definition_id == owner.definition_id
+                && frame.region_path == owner.region_path
+        })
+        .ok_or_else(|| {
+            DurableError::Validation(format!(
+                "wait {wait_id} owning frame {} is missing",
+                owner.invocation_id
+            ))
+        })?;
+    if let Some(bind) = owner.bind {
+        match frame.locals.get(&bind) {
             Some(existing) if existing == result => {}
             Some(_) => {
                 return Err(DurableError::IllegalTransition(format!(
-                    "wait {wait_id} result binding {} already has a different Artifact",
-                    binding.local
+                    "wait {wait_id} owner bind {bind} already has a different Artifact"
                 )));
             }
             None => {
-                frame.locals.insert(binding.local, result.clone());
+                frame.locals.insert(bind, result.clone());
             }
         }
     }

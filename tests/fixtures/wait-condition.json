@@ -1,0 +1,19 @@
+{
+  "wait_id": "wait:fixture",
+  "run_id": "run:fixture",
+  "kind": {
+    "kind": "signal",
+    "key": "signal:fixture"
+  },
+  "consume_once": false,
+  "owner": {
+    "invocation_id": "main",
+    "definition_id": "main",
+    "site_id": "wait.fixture",
+    "region_path": [],
+    "step_index": 0,
+    "bind": null
+  },
+  "state": "pending",
+  "result": null
+}

@@ -14,7 +14,7 @@ use cymule_durable::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
     DurableResult, DurableState, DurableStore, EffectDispatch, FrameState, JournalBatch,
     JournalRecord, MemoryStore, OutboxState, StoreCommit, StoredState, WaitActivation,
-    WaitActivationSource, WaitCondition, WaitKind, WaitState,
+    WaitActivationSource, WaitCondition, WaitKind, WaitOwner, WaitState,
 };
 use cymule_runtime::{
     EXECUTION_BINDING_VERSION, ExecutionBinding, PLUGIN_VERSION, PluginManifest, PluginOperation,
@@ -70,7 +70,16 @@ fn machine_with_run() -> (Machine, String) {
                 input_schema: json!({}),
                 output_schema: json!({}),
                 body: Region {
-                    steps: Vec::new(),
+                    steps: vec![Step {
+                        id: "wait.test".to_owned(),
+                        operation: Operation::Wait {
+                            wait: cymule_core::WaitSpec::Input {
+                                correlation: "test".to_owned(),
+                                schema: json!({}),
+                            },
+                            bind: None,
+                        },
+                    }],
                     result: Expression::Literal { value: json!(null) },
                 },
             }],
@@ -236,7 +245,7 @@ fn continuation(plan_id: String) -> Continuation {
             input: cymule_core::artifact_ref("test/input", b"durable input")
                 .expect("Continuation input reference derives"),
             region_path: Vec::new(),
-            next_step: 0,
+            next_step: 1,
             locals: BTreeMap::new(),
         }],
         state: None,
@@ -248,6 +257,17 @@ fn continuation(plan_id: String) -> Continuation {
         causal_frontier: BTreeSet::new(),
         epoch: 0,
         status: ContinuationStatus::Ready,
+    }
+}
+
+fn wait_owner() -> WaitOwner {
+    WaitOwner {
+        invocation_id: "main".to_owned(),
+        definition_id: "main".to_owned(),
+        site_id: "wait.test".to_owned(),
+        region_path: Vec::new(),
+        step_index: 0,
+        bind: None,
     }
 }
 
@@ -418,7 +438,7 @@ fn public_coordinator_rejects_every_dangling_or_legacy_artifact_reference() {
                 schema: json!({}),
             },
             consume_once: true,
-            result_binding: None,
+            owner: wait_owner(),
             state: WaitState::Pending,
             result: None,
         })
@@ -479,6 +499,20 @@ fn frozen_wait_activation_fixture_matches_the_rust_contract() {
 }
 
 #[test]
+fn frozen_wait_condition_requires_owner_when_bind_is_absent() {
+    let fixture = include_str!("../../../tests/fixtures/wait-condition.json");
+    let wait: WaitCondition = serde_json::from_str(fixture).expect("wait fixture deserializes");
+    assert!(wait.owner.bind.is_none());
+    let mut missing_owner: serde_json::Value =
+        serde_json::from_str(fixture).expect("wait fixture parses");
+    missing_owner
+        .as_object_mut()
+        .expect("wait fixture is an object")
+        .remove("owner");
+    assert!(serde_json::from_value::<WaitCondition>(missing_owner).is_err());
+}
+
+#[test]
 fn wait_completion_survives_reopen_and_readies_the_continuation() {
     let (mut machine, plan_id) = machine_with_run();
     let result = machine
@@ -492,6 +526,25 @@ fn wait_completion_survives_reopen_and_readies_the_continuation() {
     coordinator
         .put_continuation(continuation(plan_id))
         .expect("continuation persists");
+    let revision = coordinator.revision().expect("revision").to_owned();
+    let mut wrong_owner = wait_owner();
+    wrong_owner.site_id = "wait.wrong".to_owned();
+    assert!(matches!(
+        coordinator.register_wait(WaitCondition {
+            wait_id: "wait:wrong-owner".to_owned(),
+            run_id: "run:durable".to_owned(),
+            kind: WaitKind::Input {
+                correlation: "approval".to_owned(),
+                schema: json!({"type": "string"}),
+            },
+            consume_once: true,
+            owner: wrong_owner,
+            state: WaitState::Pending,
+            result: None,
+        }),
+        Err(DurableError::Validation(_))
+    ));
+    assert_eq!(coordinator.revision(), Some(revision.as_str()));
     coordinator
         .register_wait(WaitCondition {
             wait_id: "wait:approval".to_owned(),
@@ -501,7 +554,7 @@ fn wait_completion_survives_reopen_and_readies_the_continuation() {
                 schema: json!({"type": "string"}),
             },
             consume_once: true,
-            result_binding: None,
+            owner: wait_owner(),
             state: WaitState::Pending,
             result: None,
         })
@@ -521,6 +574,11 @@ fn wait_completion_survives_reopen_and_readies_the_continuation() {
         ContinuationStatus::Ready
     );
     assert!(state.continuations["run:durable"].wait_set.is_empty());
+    assert!(
+        state.continuations["run:durable"].frames[0]
+            .locals
+            .is_empty()
+    );
 }
 
 #[test]
@@ -547,7 +605,7 @@ fn identified_signal_activation_is_atomic_idempotent_and_reopenable() {
                     key: "signal:approved".to_owned(),
                 },
                 consume_once,
-                result_binding: None,
+                owner: wait_owner(),
                 state: WaitState::Pending,
                 result: None,
             })
@@ -660,7 +718,7 @@ fn signal_activation_rejects_wrong_or_multiple_consume_once_targets_atomically()
                     key: "signal:exclusive".to_owned(),
                 },
                 consume_once: true,
-                result_binding: None,
+                owner: wait_owner(),
                 state: WaitState::Pending,
                 result: None,
             })
@@ -753,7 +811,7 @@ fn timer_activation_is_exactly_identified_and_stale_writers_fail_closed() {
                 timer_id: "timer:deadline".to_owned(),
             },
             consume_once: false,
-            result_binding: None,
+            owner: wait_owner(),
             state: WaitState::Pending,
             result: None,
         })
@@ -803,7 +861,7 @@ fn conflicting_projection_checkpoint_rejects_wait_activation_atomically() {
                 key: "signal:atomic-projection".to_owned(),
             },
             consume_once: true,
-            result_binding: None,
+            owner: wait_owner(),
             state: WaitState::Pending,
             result: None,
         })

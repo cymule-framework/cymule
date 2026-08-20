@@ -9,7 +9,7 @@ use std::sync::{
 use cymule_core::seal_plan;
 use cymule_core::{
     ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, Definition, Expression, Machine,
-    PlanCandidate, Region,
+    Operation, PlanCandidate, Region, Step, WaitSpec,
 };
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
@@ -463,7 +463,16 @@ fn durable_machine_with_wait() -> (Machine, Continuation, WaitCondition) {
             input_schema: json!({}),
             output_schema: json!({}),
             body: Region {
-                steps: Vec::new(),
+                steps: vec![Step {
+                    id: "wait.approval".to_owned(),
+                    operation: Operation::Wait {
+                        wait: WaitSpec::Signal {
+                            key: "signal:approval".to_owned(),
+                            consume_once: true,
+                        },
+                        bind: None,
+                    },
+                }],
                 result: Expression::Literal { value: json!(null) },
             },
         }],
@@ -496,7 +505,7 @@ fn durable_machine_with_wait() -> (Machine, Continuation, WaitCondition) {
             invocation_id: "main".to_owned(),
             input,
             region_path: Vec::new(),
-            next_step: 0,
+            next_step: 1,
             locals: BTreeMap::new(),
         }],
         state: None,
@@ -516,7 +525,14 @@ fn durable_machine_with_wait() -> (Machine, Continuation, WaitCondition) {
             key: "signal:approval".to_owned(),
         },
         consume_once: true,
-        result_binding: None,
+        owner: cymule_durable::WaitOwner {
+            invocation_id: "main".to_owned(),
+            definition_id: "main".to_owned(),
+            site_id: "wait.approval".to_owned(),
+            region_path: Vec::new(),
+            step_index: 0,
+            bind: None,
+        },
         state: WaitState::Pending,
         result: None,
     };

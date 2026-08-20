@@ -52,9 +52,10 @@
   its result and ready every selected Continuation, and allow one signal token
   to consume at most one consume-once wait. Stable activation redelivery is
   idempotent; conflicting ID reuse and stale writers fail closed.
-- A Plan wait pins any result local to its exact frame, definition, Region path,
-  site, and step. Completion writes that local in the same CAS that completes
-  the wait and readies the Continuation; an omitted bind discards the result.
+- Every wait pins an exact owner: frame invocation, definition, Region path,
+  site, and step. Only `owner.bind` is optional. Registration, parking,
+  completion, activation, and state restore verify that owner; completion writes
+  a local only when the bind is present.
 - `ParkedWaitIndex` is derived from pending waits and Continuation wait sets; it
   is never a second durable authority. Source drivers may poll or receive by
   any transport, but must return exact indexed targets within the framework

@@ -20,7 +20,7 @@ pub use model::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableState,
     EffectDispatch, FrameState, HISTORY_COMPACTION_VERSION, HistoryCompactionReceipt, JournalBatch,
     JournalRecord, OutboxState, SnapshotRecord, StoredState, WAIT_ACTIVATION_VERSION,
-    WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitResultBinding, WaitState,
+    WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitOwner, WaitState,
 };
 pub use retry::{
     CLOCK_OBSERVATION_VERSION, ClockObservation, FailureClass, FailureOperation,

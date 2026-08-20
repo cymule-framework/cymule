@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
     DurableResult, DurableStore, EffectDispatch, FrameState, MAX_WAIT_DELIVERY_TARGETS,
-    OutboxState, WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitResultBinding,
+    OutboxState, WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitOwner,
     WaitSourceDriver, WaitState,
 };
 
@@ -686,14 +686,14 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                                 ..
                             }
                         ),
-                        result_binding: bind.as_ref().map(|local| WaitResultBinding {
+                        owner: WaitOwner {
                             invocation_id: frame.invocation_id.clone(),
                             definition_id: frame.definition_id.clone(),
                             site_id: step.id.clone(),
                             region_path: frame.region_path.clone(),
                             step_index,
-                            local: local.clone(),
-                        }),
+                            bind: bind.clone(),
+                        },
                         state: WaitState::Pending,
                         result: None,
                     };

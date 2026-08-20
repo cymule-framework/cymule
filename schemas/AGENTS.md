@@ -38,6 +38,9 @@
   `cymule.wait-activation/1` delivery record. Source, targets, and result must
   stay closed and pass Rust plus four-SDK fixture conformance; concrete clock,
   signal, queue, and transport fields never enter this schema.
+- `wait-condition.schema.json` freezes the public M1 wait projection. Every
+  wait owns an exact definition, invocation, Region path, site, and step;
+  `bind` alone is nullable and remains nested inside that mandatory owner.
 - `durable-control.schema.json` owns the closed
   `cymule.durable-control/1` mutation/query union. SDKs may construct start,
   resume, wait-activation, effect-release, and read-only query commands, but

@@ -335,69 +335,69 @@ fn validate_wait_artifacts(
     if let Some(result) = &wait.result {
         require_artifact(machine, result, &format!("wait {} result", wait.wait_id))?;
     }
-    if let Some(binding) = &wait.result_binding {
-        if binding.invocation_id.is_empty()
-            || binding.definition_id.is_empty()
-            || binding.site_id.is_empty()
-            || binding.local.is_empty()
-        {
-            return Err(DurableError::Validation(format!(
-                "wait {} result binding is incomplete",
-                wait.wait_id
-            )));
-        }
-        let frame = continuation.frames.iter().find(|frame| {
-            frame.invocation_id == binding.invocation_id
-                && frame.definition_id == binding.definition_id
-                && frame.region_path == binding.region_path
-        });
-        let plan = machine.plan(&continuation.plan_id).ok_or_else(|| {
+    let owner = &wait.owner;
+    if owner.invocation_id.is_empty()
+        || owner.definition_id.is_empty()
+        || owner.site_id.is_empty()
+        || owner.bind.as_ref().is_some_and(String::is_empty)
+    {
+        return Err(DurableError::Validation(format!(
+            "wait {} owner is incomplete",
+            wait.wait_id
+        )));
+    }
+    let frame = continuation.frames.iter().find(|frame| {
+        frame.invocation_id == owner.invocation_id
+            && frame.definition_id == owner.definition_id
+            && frame.region_path == owner.region_path
+    });
+    let plan = machine.plan(&continuation.plan_id).ok_or_else(|| {
+        DurableError::Validation(format!(
+            "wait {} owning Plan {} is missing",
+            wait.wait_id, continuation.plan_id
+        ))
+    })?;
+    let definition = plan
+        .candidate
+        .definitions
+        .iter()
+        .find(|definition| definition.id == owner.definition_id)
+        .ok_or_else(|| {
             DurableError::Validation(format!(
-                "wait {} owning Plan {} is missing",
-                wait.wait_id, continuation.plan_id
+                "wait {} owning definition {} is missing",
+                wait.wait_id, owner.definition_id
             ))
         })?;
-        let definition = plan
-            .candidate
-            .definitions
-            .iter()
-            .find(|definition| definition.id == binding.definition_id)
-            .ok_or_else(|| {
-                DurableError::Validation(format!(
-                    "wait {} owning definition {} is missing",
-                    wait.wait_id, binding.definition_id
-                ))
-            })?;
-        let region = region_at_path(&definition.body, &binding.region_path)?;
-        let step = region.steps.get(binding.step_index).ok_or_else(|| {
-            DurableError::Validation(format!("wait {} owning step is missing", wait.wait_id))
-        })?;
-        if step.id != binding.site_id
-            || !matches!(&step.operation, Operation::Wait { bind, .. } if bind.as_deref() == Some(binding.local.as_str()))
-        {
+    let region = region_at_path(&definition.body, &owner.region_path)?;
+    let step = region.steps.get(owner.step_index).ok_or_else(|| {
+        DurableError::Validation(format!("wait {} owning step is missing", wait.wait_id))
+    })?;
+    if step.id != owner.site_id
+        || !matches!(&step.operation, Operation::Wait { bind, .. } if bind == &owner.bind)
+    {
+        return Err(DurableError::Validation(format!(
+            "wait {} owner does not match its Plan site",
+            wait.wait_id
+        )));
+    }
+    match (wait.state, wait.result.as_ref(), frame, owner.bind.as_ref()) {
+        (WaitState::Pending, None, Some(frame), bind)
+            if frame.next_step == owner.step_index + 1
+                && bind.is_none_or(|bind| !frame.locals.contains_key(bind)) => {}
+        (WaitState::Completed, Some(result), Some(frame), Some(bind))
+            if frame.next_step > owner.step_index && frame.locals.get(bind) == Some(result) => {}
+        (WaitState::Completed, Some(_), Some(frame), None)
+            if frame.next_step > owner.step_index => {}
+        (WaitState::Completed, Some(_), None, _) => {}
+        (WaitState::Cancelled, None, Some(frame), bind)
+            if frame.next_step > owner.step_index
+                && bind.is_none_or(|bind| !frame.locals.contains_key(bind)) => {}
+        (WaitState::Cancelled, None, None, _) => {}
+        _ => {
             return Err(DurableError::Validation(format!(
-                "wait {} result binding does not match its Plan site",
+                "wait {} owner is not reflected by its frame",
                 wait.wait_id
             )));
-        }
-        match (wait.state, wait.result.as_ref(), frame) {
-            (WaitState::Pending, None, Some(frame))
-                if frame.definition_id == binding.definition_id
-                    && frame.region_path == binding.region_path
-                    && frame.next_step == binding.step_index + 1
-                    && !frame.locals.contains_key(&binding.local) => {}
-            (WaitState::Completed, Some(result), Some(frame))
-                if frame.definition_id == binding.definition_id
-                    && frame.region_path == binding.region_path
-                    && frame.next_step > binding.step_index
-                    && frame.locals.get(&binding.local) == Some(result) => {}
-            (WaitState::Completed, Some(_), None) => {}
-            _ => {
-                return Err(DurableError::Validation(format!(
-                    "wait {} result binding is not reflected by its owning frame",
-                    wait.wait_id
-                )));
-            }
         }
     }
     Ok(())
@@ -661,19 +661,18 @@ pub struct WaitCondition {
     pub kind: WaitKind,
     /// Whether only one completion may win.
     pub consume_once: bool,
-    /// Owning semantic frame local for a Plan-declared wait, when applicable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_binding: Option<WaitResultBinding>,
+    /// Exact Plan frame and site that owns this wait.
+    pub owner: WaitOwner,
     /// Wait lifecycle.
     pub state: WaitState,
     /// Completion artifact when resolved.
     pub result: Option<ArtifactRef>,
 }
 
-/// Exact frame-local destination for one Plan-declared wait result.
+/// Exact Plan frame and site that owns one durable wait.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WaitResultBinding {
+pub struct WaitOwner {
     /// Structural invocation that owns the local.
     pub invocation_id: String,
     /// Definition containing the wait operation.
@@ -684,8 +683,8 @@ pub struct WaitResultBinding {
     pub region_path: Vec<usize>,
     /// Wait step index within that Region.
     pub step_index: usize,
-    /// Required local binding name declared by the wait operation.
-    pub local: String,
+    /// Optional local binding name declared by the wait operation.
+    pub bind: Option<String>,
 }
 
 /// Provider-neutral wait kinds.

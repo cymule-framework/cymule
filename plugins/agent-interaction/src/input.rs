@@ -1,5 +1,7 @@
 use cymule_core::{ArtifactRef, canonical_digest};
-use cymule_durable::{DurableCoordinator, DurableStore, WaitCondition, WaitKind, WaitState};
+use cymule_durable::{
+    DurableCoordinator, DurableStore, WaitCondition, WaitKind, WaitOwner, WaitState,
+};
 
 use crate::{
     AgentError, AgentJournal, AgentResult, AgentSession, AgentState, AgentUpdate,
@@ -26,6 +28,7 @@ impl AgentInputController {
         coordinator: &mut DurableCoordinator<S>,
         session_id: &str,
         run_id: &str,
+        owner: WaitOwner,
         request: ElicitationRequest,
     ) -> AgentResult<AgentInputCheckpoint> {
         if session_id.is_empty() || run_id.is_empty() || request.request_id.is_empty() {
@@ -73,7 +76,7 @@ impl AgentInputController {
                         schema: request.schema,
                     },
                     consume_once: true,
-                    result_binding: None,
+                    owner,
                     state: WaitState::Pending,
                     result: None,
                 },
