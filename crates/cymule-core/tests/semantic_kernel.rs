@@ -265,6 +265,431 @@ fn public_validation_errors_and_effect_policy_boundaries_are_stable() {
 }
 
 #[test]
+fn effect_admission_requires_an_exact_entry_reachable_site_tuple() {
+    let mut candidate = candidate();
+    candidate.definitions[0].body.steps.push(Step {
+        id: "effect.reachable".to_owned(),
+        operation: Operation::Effect {
+            effect: "test.capture".to_owned(),
+            input: Expression::Input,
+            occurrence: "reachable".to_owned(),
+            bind: None,
+        },
+    });
+    candidate.definitions.push(Definition {
+        id: "unreachable".to_owned(),
+        input_schema: json!({}),
+        output_schema: json!({}),
+        body: Region {
+            steps: vec![Step {
+                id: "effect.unreachable".to_owned(),
+                operation: Operation::Effect {
+                    effect: "test.capture".to_owned(),
+                    input: Expression::Input,
+                    occurrence: "unreachable".to_owned(),
+                    bind: None,
+                },
+            }],
+            result: Expression::Input,
+        },
+    });
+
+    let mut machine = Machine::new();
+    let plan = machine.seal_plan(candidate).expect("Plan seals");
+    let run_id = "run:effect-site";
+    machine
+        .submit(envelope(
+            &machine,
+            1,
+            run_id,
+            Command::StartRun {
+                plan_id: plan.plan_id,
+                binding_context: "binding:v1".to_owned(),
+            },
+        ))
+        .expect("Run starts");
+    let args = machine
+        .put_artifact("cymule.effect-args/1", b"{}".to_vec())
+        .expect("arguments store");
+    let propose = |scope_id: &str, invocation_id: &str, site_id: &str, occurrence: &str| {
+        Command::ProposeEffect {
+            scope_id: scope_id.to_owned(),
+            invocation_id: invocation_id.to_owned(),
+            site_id: site_id.to_owned(),
+            occurrence: occurrence.to_owned(),
+            operation: "test.capture".to_owned(),
+            args: args.clone(),
+            occurrence_binding: "binding:effect/v1".to_owned(),
+        }
+    };
+
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            2,
+            run_id,
+            propose(
+                cymule_core::ROOT_SCOPE_ID,
+                "main",
+                "effect.unreachable",
+                "unreachable",
+            ),
+        )),
+        Err(CoreError::NotFound(_))
+    ));
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            3,
+            run_id,
+            propose(
+                cymule_core::ROOT_SCOPE_ID,
+                "main",
+                "effect.reachable",
+                "wrong",
+            ),
+        )),
+        Err(CoreError::Validation(_))
+    ));
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            4,
+            run_id,
+            propose(
+                cymule_core::ROOT_SCOPE_ID,
+                "",
+                "effect.reachable",
+                "reachable",
+            ),
+        )),
+        Err(CoreError::Validation(_))
+    ));
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            5,
+            run_id,
+            propose("scope:missing", "main", "effect.reachable", "reachable",),
+        )),
+        Err(CoreError::NotFound(_))
+    ));
+    let run = &machine.projection().runs[run_id];
+    let mut wrong_profile = machine
+        .plan(&run.current_plan)
+        .expect("Plan exists")
+        .candidate
+        .effects[0]
+        .profile
+        .clone();
+    wrong_profile.irreversible = true;
+    let intent_id = effect_intent_id(
+        run_id,
+        "main",
+        "effect.reachable",
+        cymule_core::ROOT_SCOPE_ID,
+        run.epoch,
+        "reachable",
+        &args,
+        "cymule.effect-schema/1",
+    )
+    .expect("intent hashes");
+    let wrong_profile_event = Event::new(
+        "command:wrong-effect-profile".to_owned(),
+        "hash:wrong-effect-profile".to_owned(),
+        run_id.to_owned(),
+        vec![run.last_event.clone()],
+        BTreeSet::new(),
+        BTreeSet::new(),
+        None,
+        EventPayload::EffectProposed {
+            intent_id,
+            scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            invocation_id: "main".to_owned(),
+            site_id: "effect.reachable".to_owned(),
+            occurrence: "reachable".to_owned(),
+            scope_epoch: run.epoch,
+            effect_schema_version: "cymule.effect-schema/1".to_owned(),
+            operation: "test.capture".to_owned(),
+            profile: wrong_profile,
+            args: args.clone(),
+            occurrence_binding: "binding:effect/v1".to_owned(),
+        },
+    )
+    .expect("event hashes");
+    assert!(matches!(
+        machine.append_event(wrong_profile_event),
+        Err(CoreError::Validation(message)) if message.contains("Plan-declared profile")
+    ));
+    machine
+        .submit(envelope(
+            &machine,
+            6,
+            run_id,
+            propose(
+                cymule_core::ROOT_SCOPE_ID,
+                "main",
+                "effect.reachable",
+                "reachable",
+            ),
+        ))
+        .expect("exact reachable effect tuple admits");
+
+    let effect = machine.projection().runs[run_id]
+        .effects
+        .values()
+        .next()
+        .expect("effect exists");
+    assert_eq!(effect.invocation_id, "main");
+    assert_eq!(effect.site_id, "effect.reachable");
+    assert_eq!(effect.occurrence, "reachable");
+    assert_eq!(effect.profile.dispatch, DispatchPolicy::OnScopeCommit);
+    assert_eq!(effect.profile.reconciliation, ReconciliationMode::Queryable);
+    machine
+        .verify_replay()
+        .expect("profile rules replay exactly");
+}
+
+#[test]
+fn effect_profiles_gate_release_and_reconciliation_independently() {
+    let mut candidate = candidate();
+    candidate.effects = vec![
+        EffectContract {
+            id: "test.human".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            profile: EffectProfile {
+                mutation: MutationKind::Observational,
+                dispatch: DispatchPolicy::Eager,
+                reconciliation: ReconciliationMode::Human,
+                keyed_idempotency: false,
+                irreversible: false,
+            },
+            requirements: BTreeMap::new(),
+        },
+        EffectContract {
+            id: "test.impossible".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            profile: EffectProfile {
+                mutation: MutationKind::Observational,
+                dispatch: DispatchPolicy::Eager,
+                reconciliation: ReconciliationMode::Impossible,
+                keyed_idempotency: false,
+                irreversible: false,
+            },
+            requirements: BTreeMap::new(),
+        },
+        EffectContract {
+            id: "test.explicit".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            profile: EffectProfile {
+                mutation: MutationKind::Mutating,
+                dispatch: DispatchPolicy::Explicit,
+                reconciliation: ReconciliationMode::Queryable,
+                keyed_idempotency: true,
+                irreversible: false,
+            },
+            requirements: BTreeMap::new(),
+        },
+    ];
+    for (site, operation, occurrence) in [
+        ("effect.human", "test.human", "human"),
+        ("effect.impossible", "test.impossible", "impossible"),
+        ("effect.explicit", "test.explicit", "explicit"),
+    ] {
+        candidate.definitions[0].body.steps.push(Step {
+            id: site.to_owned(),
+            operation: Operation::Effect {
+                effect: operation.to_owned(),
+                input: Expression::Input,
+                occurrence: occurrence.to_owned(),
+                bind: None,
+            },
+        });
+    }
+
+    let mut machine = Machine::new();
+    let plan = machine.seal_plan(candidate).expect("Plan seals");
+    let run_id = "run:effect-profiles";
+    machine
+        .submit(envelope(
+            &machine,
+            1,
+            run_id,
+            Command::StartRun {
+                plan_id: plan.plan_id,
+                binding_context: "binding:v1".to_owned(),
+            },
+        ))
+        .expect("Run starts");
+    let args = machine
+        .put_artifact("cymule.effect-args/1", b"{}".to_vec())
+        .expect("arguments store");
+
+    for (sequence, site, operation, occurrence) in [
+        (2, "effect.human", "test.human", "human"),
+        (3, "effect.impossible", "test.impossible", "impossible"),
+        (4, "effect.explicit", "test.explicit", "explicit"),
+    ] {
+        machine
+            .submit(envelope(
+                &machine,
+                sequence,
+                run_id,
+                Command::ProposeEffect {
+                    scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+                    invocation_id: "main".to_owned(),
+                    site_id: site.to_owned(),
+                    occurrence: occurrence.to_owned(),
+                    operation: operation.to_owned(),
+                    args: args.clone(),
+                    occurrence_binding: format!("binding:{occurrence}/v1"),
+                },
+            ))
+            .expect("effect admits");
+    }
+    let intents: BTreeMap<String, String> = machine.projection().runs[run_id]
+        .effects
+        .values()
+        .map(|effect| (effect.site_id.clone(), effect.intent_id.clone()))
+        .collect();
+
+    for (offset, site) in ["effect.human", "effect.impossible", "effect.explicit"]
+        .into_iter()
+        .enumerate()
+    {
+        machine
+            .submit(envelope(
+                &machine,
+                10 + offset as u64,
+                run_id,
+                Command::TransitionEffect {
+                    intent_id: intents[site].clone(),
+                    transition: EffectTransition::Prepare,
+                },
+            ))
+            .expect("effect prepares");
+    }
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            20,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intents["effect.explicit"].clone(),
+                transition: EffectTransition::AuthorizeRelease,
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+
+    for (offset, site) in ["effect.human", "effect.impossible"]
+        .into_iter()
+        .enumerate()
+    {
+        for transition in [
+            EffectTransition::AuthorizeRelease,
+            EffectTransition::StartDispatch,
+            EffectTransition::Observe(WorldOutcome::Unknown),
+        ] {
+            machine
+                .submit(envelope(
+                    &machine,
+                    30 + (offset as u64 * 3) + transition_index(&transition),
+                    run_id,
+                    Command::TransitionEffect {
+                        intent_id: intents[site].clone(),
+                        transition,
+                    },
+                ))
+                .expect("eager observation advances while the scope is open");
+        }
+    }
+    let run = &machine.projection().runs[run_id];
+    assert_eq!(
+        run.effects[&intents["effect.human"]].reconciliation,
+        ReconciliationState::GovernanceRequired
+    );
+    assert_eq!(
+        run.effects[&intents["effect.impossible"]].reconciliation,
+        ReconciliationState::GovernanceRequired
+    );
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            40,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intents["effect.human"].clone(),
+                transition: EffectTransition::Reconcile(ReconciliationResolution::StillUnknown),
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+    machine
+        .submit(envelope(
+            &machine,
+            41,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intents["effect.human"].clone(),
+                transition: EffectTransition::Reconcile(
+                    ReconciliationResolution::ResolvedNotApplied,
+                ),
+            },
+        ))
+        .expect("human authority may settle an ambiguous effect");
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            42,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intents["effect.impossible"].clone(),
+                transition: EffectTransition::Reconcile(
+                    ReconciliationResolution::ResolvedNotApplied,
+                ),
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+
+    machine
+        .submit(envelope(
+            &machine,
+            50,
+            run_id,
+            Command::CommitScope {
+                scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            },
+        ))
+        .expect("scope commits with the exact explicit obligation");
+    machine
+        .submit(envelope(
+            &machine,
+            51,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intents["effect.explicit"].clone(),
+                transition: EffectTransition::AuthorizeRelease,
+            },
+        ))
+        .expect("explicit effect may release only after commit");
+    machine.verify_replay().expect("profile transitions replay");
+}
+
+const fn transition_index(transition: &EffectTransition) -> u64 {
+    match transition {
+        EffectTransition::AuthorizeRelease => 0,
+        EffectTransition::StartDispatch => 1,
+        EffectTransition::Observe(_) => 2,
+        EffectTransition::Prepare | EffectTransition::Reconcile(_) => 3,
+    }
+}
+
+#[test]
 fn command_idempotency_and_stale_action_are_explicit() {
     let mut machine = Machine::new();
     let plan = machine.seal_plan(candidate()).expect("plan seals");
@@ -536,6 +961,26 @@ fn envelopes_footprints_facts_attempts_and_scope_parents_fail_closed() {
             .contains("scope:run:invariants:scope:root")
     );
     assert!(scope_open.writes.contains("scope-tree:run:invariants"));
+    for (sequence, command) in [
+        (
+            80,
+            Command::CommitScope {
+                scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            },
+        ),
+        (
+            81,
+            Command::AbortScope {
+                scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            },
+        ),
+    ] {
+        assert!(matches!(
+            machine.submit(envelope(&machine, sequence, run_id, command)),
+            Err(CoreError::IllegalTransition(message))
+                if message.contains("open child scope")
+        ));
+    }
     machine
         .submit(envelope(
             &machine,
@@ -806,7 +1251,11 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
         .events()
         .map(|event| event.event_id.clone())
         .collect();
-    for old_version in ["cymule.machine-snapshot/1", "cymule.machine-snapshot/2"] {
+    for old_version in [
+        "cymule.machine-snapshot/1",
+        "cymule.machine-snapshot/2",
+        "cymule.machine-snapshot/3",
+    ] {
         let mut old_snapshot = machine.snapshot();
         old_snapshot.snapshot_version = old_version.to_owned();
         assert!(matches!(
@@ -965,7 +1414,17 @@ fn structural_effect_identifiers_are_content_sensitive() {
 #[test]
 fn binding_is_pinned_and_unknown_effect_must_reconcile() {
     let mut machine = Machine::new();
-    let plan = machine.seal_plan(candidate()).expect("plan seals");
+    let mut effect_plan = candidate();
+    effect_plan.definitions[0].body.steps.push(Step {
+        id: "effect.capture".to_owned(),
+        operation: Operation::Effect {
+            effect: "test.capture".to_owned(),
+            input: Expression::Input,
+            occurrence: "primary".to_owned(),
+            bind: None,
+        },
+    });
+    let plan = machine.seal_plan(effect_plan).expect("plan seals");
     let run_id = "run:effect";
     machine
         .submit(envelope(
@@ -1089,6 +1548,47 @@ fn binding_is_pinned_and_unknown_effect_must_reconcile() {
         )),
         Err(CoreError::IllegalTransition(_))
     ));
+    assert!(matches!(
+        machine.submit(envelope(
+            &machine,
+            46,
+            run_id,
+            Command::TransitionEffect {
+                intent_id: intent_id.clone(),
+                transition: EffectTransition::AuthorizeRelease,
+            },
+        )),
+        Err(CoreError::IllegalTransition(_))
+    ));
+    let inexact_commit = Event::new(
+        "command:inexact-obligations".to_owned(),
+        "hash:inexact-obligations".to_owned(),
+        run_id.to_owned(),
+        vec![machine.projection().runs[run_id].last_event.clone()],
+        BTreeSet::new(),
+        BTreeSet::new(),
+        None,
+        EventPayload::ScopeCommitted {
+            scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            obligations: Vec::new(),
+        },
+    )
+    .expect("inexact event hashes");
+    assert!(matches!(
+        machine.append_event(inexact_commit),
+        Err(CoreError::IllegalTransition(message))
+            if message.contains("inexact effect obligation set")
+    ));
+    machine
+        .submit(envelope(
+            &machine,
+            8,
+            run_id,
+            Command::CommitScope {
+                scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            },
+        ))
+        .expect("scope commits and transfers the unresolved obligation");
     machine
         .submit(envelope(
             &machine,
@@ -1172,17 +1672,6 @@ fn binding_is_pinned_and_unknown_effect_must_reconcile() {
             Err(CoreError::IllegalTransition(_))
         ));
     }
-    machine
-        .submit(envelope(
-            &machine,
-            8,
-            run_id,
-            Command::CommitScope {
-                scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
-            },
-        ))
-        .expect("scope commits independently of world settlement");
-
     let run = machine.projection().runs.get(run_id).expect("run exists");
     let effect = run.effects.get(&intent_id).expect("effect exists");
     assert_eq!(effect.occurrence_binding, "binding:adapter/v1");

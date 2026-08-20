@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus, DispatchPolicy,
     EffectTransition, Expression, Machine, MutationKind, Operation, PlanCandidate, ROOT_SCOPE_ID,
-    ReconciliationResolution, Region, WaitSpec, WorldOutcome, canonical_bytes, content_id,
-    effect_intent_id,
+    ReconciliationMode, ReconciliationResolution, Region, WaitSpec, WorldOutcome, canonical_bytes,
+    content_id, effect_intent_id,
 };
 use cymule_runtime::{
     ContractTarget, ContractValidator, EXECUTION_BINDING_VERSION, ExecutionBinding,
@@ -1006,12 +1006,26 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         intent_id: entry.intent_id,
                     }));
                 };
-                validate_optional_effect_output(
+                if validate_optional_effect_output(
                     &contracts,
                     &entry.operation,
                     outcome,
                     value.as_ref(),
-                )?;
+                )
+                .is_err()
+                {
+                    record_unknown_dispatch(
+                        &mut self.coordinator,
+                        &mut machine,
+                        run_id,
+                        &entry.intent_id,
+                        owner,
+                        lease.epoch,
+                    )?;
+                    return Ok(Some(DriveOutcome::ReconciliationRequired {
+                        intent_id: entry.intent_id,
+                    }));
+                }
                 if outcome != WorldOutcome::Unknown {
                     submit(
                         &mut machine,
@@ -1087,6 +1101,15 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 (owner, entry.claim_epoch)
             };
 
+            let reconciliation_mode = machine.projection().runs[run_id].effects[&entry.intent_id]
+                .profile
+                .reconciliation;
+            if reconciliation_mode != ReconciliationMode::Queryable {
+                return Ok(Some(DriveOutcome::ReconciliationRequired {
+                    intent_id: entry.intent_id,
+                }));
+            }
+
             let Ok(response) = self.plugin.invoke(PluginRequest::ReconcileEffect {
                 operation: entry.operation.clone(),
                 intent_id: entry.intent_id.clone(),
@@ -1101,12 +1124,18 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     intent_id: entry.intent_id,
                 }));
             };
-            validate_optional_reconciliation_output(
+            if validate_optional_reconciliation_output(
                 &contracts,
                 &entry.operation,
                 resolution,
                 value.as_ref(),
-            )?;
+            )
+            .is_err()
+            {
+                return Ok(Some(DriveOutcome::ReconciliationRequired {
+                    intent_id: entry.intent_id,
+                }));
+            }
             submit(
                 &mut machine,
                 run_id,

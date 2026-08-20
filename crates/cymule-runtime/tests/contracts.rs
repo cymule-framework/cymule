@@ -146,12 +146,17 @@ struct PluginCounts {
     call: AtomicUsize,
     prepare: AtomicUsize,
     dispatch: AtomicUsize,
+    reconcile: AtomicUsize,
 }
 
 struct ContractPlugin {
     counts: Arc<PluginCounts>,
     component_output: Value,
     effect_output: Value,
+}
+
+struct InvalidReconciliationOutputPlugin {
+    counts: Arc<PluginCounts>,
 }
 
 fn plugin_manifest() -> PluginManifest {
@@ -203,6 +208,35 @@ impl PluginHost for ContractPlugin {
             PluginRequest::ReconcileEffect { .. } => {
                 panic!("test effects do not become ambiguous")
             }
+        }
+    }
+}
+
+impl PluginHost for InvalidReconciliationOutputPlugin {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        match request {
+            PluginRequest::Describe => Ok(PluginResponse::Manifest {
+                manifest: plugin_manifest(),
+            }),
+            PluginRequest::PrepareEffect { .. } => {
+                self.counts.prepare.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::Prepared)
+            }
+            PluginRequest::DispatchEffect { .. } => {
+                self.counts.dispatch.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::EffectResult {
+                    outcome: cymule_core::WorldOutcome::Unknown,
+                    value: None,
+                })
+            }
+            PluginRequest::ReconcileEffect { .. } => {
+                self.counts.reconcile.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::ReconciliationResult {
+                    resolution: cymule_core::ReconciliationResolution::ResolvedApplied,
+                    value: Some(json!(42)),
+                })
+            }
+            PluginRequest::Call { .. } => panic!("effect-only fixture does not call components"),
         }
     }
 }
@@ -587,14 +621,107 @@ fn output_failures_never_bind_or_record_terminal_results() {
             "run:effect-output",
         )
         .expect_err("effect output must fail");
-    assert!(matches!(error, RuntimeError::Contract(_)));
+    assert!(matches!(
+        error,
+        RuntimeError::UnknownWorld { ref code, .. }
+            if code == "effect_dispatch_output_invalid"
+    ));
     assert_eq!(effect_counts.dispatch.load(Ordering::SeqCst), 1);
     let effect = effect_runtime.machine().projection().runs["run:effect-output"]
         .effects
         .values()
         .next()
         .expect("effect intent exists");
-    assert_eq!(effect.outcome, cymule_core::WorldOutcome::Applied);
+    assert_eq!(effect.outcome, cymule_core::WorldOutcome::Unknown);
+    assert_eq!(
+        effect.reconciliation,
+        cymule_core::ReconciliationState::Pending
+    );
+}
+
+#[test]
+fn embedded_explicit_effect_stays_prepared_for_caller_release() {
+    let mut plan = effect_only_candidate(json!({}), json!({}));
+    plan.effects[0].profile.mutation = MutationKind::Mutating;
+    plan.effects[0].profile.dispatch = DispatchPolicy::Explicit;
+    let Operation::Effect { bind, .. } = &mut plan.definitions[0].body.steps[0].operation else {
+        panic!("fixture contains one effect")
+    };
+    *bind = None;
+    plan.definitions[0].body.result = Expression::Literal { value: json!(true) };
+
+    let counts = Arc::new(PluginCounts::default());
+    let mut runtime = runtime(counts.clone(), json!(42), json!(42));
+    let error = runtime
+        .execute(
+            seal_plan(plan).expect("Plan admits"),
+            &json!({"request": "run"}),
+            "run:explicit-effect",
+        )
+        .expect_err("Embedded cannot release an explicit effect implicitly");
+    let RuntimeError::ReleaseRequired { intent_ids } = error else {
+        panic!("explicit effect must return the closed release boundary: {error:?}")
+    };
+    assert_eq!(intent_ids.len(), 1);
+    assert_eq!(counts.prepare.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.dispatch.load(Ordering::SeqCst), 0);
+    let run = &runtime.machine().projection().runs["run:explicit-effect"];
+    let effect = &run.effects[&intent_ids[0]];
+    assert_eq!(effect.phase, cymule_core::EffectPhase::Prepared);
+    assert_eq!(
+        run.scopes[cymule_core::ROOT_SCOPE_ID].status,
+        cymule_core::ScopeStatus::ClosedCommitted
+    );
+    assert!(
+        run.obligations
+            .values()
+            .any(|obligation| !obligation.resolved)
+    );
+}
+
+#[test]
+fn embedded_invalid_reconciliation_output_preserves_unknown() {
+    let counts = Arc::new(PluginCounts::default());
+    let binding = ExecutionBinding::for_local_process(
+        &plugin_manifest(),
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    )
+    .expect("test binding is admitted");
+    let mut runtime = EmbeddedRuntime::new(
+        InvalidReconciliationOutputPlugin {
+            counts: counts.clone(),
+        },
+        binding,
+    )
+    .expect("runtime opens");
+    let error = runtime
+        .execute(
+            seal_plan(effect_only_candidate(
+                json!({"type": "integer"}),
+                json!({"type": "string"}),
+            ))
+            .expect("Plan admits"),
+            &json!({"request": "run"}),
+            "run:invalid-reconciliation-output",
+        )
+        .expect_err("schema-invalid reconciliation cannot settle the effect");
+    assert!(matches!(
+        error,
+        RuntimeError::UnknownWorld { ref code, .. }
+            if code == "effect_reconciliation_output_invalid"
+    ));
+    assert_eq!(counts.dispatch.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.reconcile.load(Ordering::SeqCst), 1);
+    let effect = runtime.machine().projection().runs["run:invalid-reconciliation-output"]
+        .effects
+        .values()
+        .next()
+        .expect("effect exists");
+    assert_eq!(effect.outcome, cymule_core::WorldOutcome::Unknown);
+    assert_eq!(
+        effect.reconciliation,
+        cymule_core::ReconciliationState::Pending
+    );
 }
 
 #[test]

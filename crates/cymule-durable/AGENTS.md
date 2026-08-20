@@ -69,6 +69,9 @@
 - After `StartDispatch` is claimed, a missing, malformed, timed-out, or defective
   plugin response commits `Unknown` with the outbox settlement before returning
   `ReconciliationRequired`; it never reports same-request retry.
+- A schema-invalid dispatch output commits the same `Unknown` settlement. A
+  schema-invalid reconciliation output leaves that settlement unchanged so a
+  later resume retries reconciliation and never provider dispatch.
 - Retry policy is a content-addressed, provider-neutral algebra, not a
   scheduler. `RetryStream` is only its serializable pure reducer state: it
   retains the complete canonical Policy, consumes a closed failure class, the

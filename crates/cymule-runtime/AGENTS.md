@@ -53,3 +53,6 @@
   termination, and malformed responses remain defects. Once Effect dispatch
   starts, every missing or unusable outcome first records `Unknown` and projects
   reconciliation, never same-request retry.
+- Missing, invalid-variant, or schema-invalid dispatch and reconciliation
+  outputs retain the original intent as `Unknown`. Embedded execution never
+  auto-releases an `Explicit` effect.

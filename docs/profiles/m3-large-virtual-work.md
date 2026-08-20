@@ -99,7 +99,7 @@ generated range, but those technologies never enter M3 semantic state.
 Version decision: durable scheduler integration introduces the independent
 `cymule.virtual-checkpoint/1` journal payload. `VirtualSnapshot` adds a derived
 parked-reason index that restore always rebuilds from parked work. Neither change
-alters `cymule.semantic/2`, the Plan IR, or M1's generic application-journal
+alters `cymule.semantic/3`, the Plan IR, or M1's generic application-journal
 envelope. Work lifecycle adds independent `cymule.virtual-work-occurrence/1`
 and `cymule.virtual-work-control/1` domains; SDKs expose their closed wire types
 and transport interfaces but do not reduce scheduler state. Additive scheduling

@@ -348,6 +348,19 @@ impl EngineFailure {
                 failure.retry_disposition = Some(EngineRetryDisposition::Never);
                 failure
             }
+            RuntimeError::ReleaseRequired { intent_ids } => {
+                let mut failure = Self::new(
+                    EngineFailureCategory::AdmissionDenied,
+                    phase,
+                    "effect_release_required",
+                    format!(
+                        "prepared explicit effects require durable caller release: {}",
+                        intent_ids.join(",")
+                    ),
+                );
+                failure.retry_disposition = Some(EngineRetryDisposition::Never);
+                failure
+            }
             RuntimeError::Substrate { code, message } => {
                 let mut failure = Self::new(
                     EngineFailureCategory::SubstrateFailure,

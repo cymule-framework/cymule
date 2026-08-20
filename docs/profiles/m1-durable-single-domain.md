@@ -4,8 +4,9 @@ Status: implemented for one production single-domain authority.
 
 ## Implemented profile
 
-- portable `cymule.machine-snapshot/3` with deterministic projection rebuild,
-  restored command deduplication, and legacy v1 read compatibility;
+- portable `cymule.machine-snapshot/4` with deterministic projection rebuild,
+  restored command deduplication, full Effect preimages/profiles, and strict
+  rejection of earlier snapshot versions;
 - cumulative causally closed Event-prefix compaction into an authenticated base
   projection plus exact full suffix, with M1 receipts, stale-CAS rejection,
   repeated compaction lineage, old-command replay, tamper rejection, and
@@ -113,6 +114,6 @@ Version decision: Resources introduce independent `cymule.resource/1` and
 the independent `cymule.wait-activation/1` record inside M1 durable state. The
 additive activation map defaults empty when older M1 state is read. The
 `cymule.durable-control/1` domain is additive and delegates all reduction to
-Rust. These additions do not further alter `cymule.semantic/2`, `cymule-core`,
+Rust. These additions do not further alter `cymule.semantic/3`, `cymule-core`,
 `ArtifactRef`, Event, or Continuation wire shapes; they implement the existing
 resource, durable-wait, consume-once, and epoch-fencing laws.

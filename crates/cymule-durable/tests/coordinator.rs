@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, ComponentContract, Definition, DispatchPolicy,
-    EffectContract, EffectProfile, EffectTransition, Expression, Machine, MutationKind,
-    PlanCandidate, ROOT_SCOPE_ID, ReconciliationMode, Region, WorldOutcome, effect_intent_id,
+    EffectContract, EffectProfile, EffectTransition, Expression, Machine, MutationKind, Operation,
+    PlanCandidate, ROOT_SCOPE_ID, ReconciliationMode, Region, Step, WorldOutcome, effect_intent_id,
 };
 use cymule_durable::{
     ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
@@ -126,7 +126,15 @@ fn prepared_effect_transition() -> (Machine, Machine, Continuation, EffectDispat
                 input_schema: json!({}),
                 output_schema: json!({}),
                 body: Region {
-                    steps: Vec::new(),
+                    steps: vec![Step {
+                        id: "effect.site".to_owned(),
+                        operation: Operation::Effect {
+                            effect: "example.effect".to_owned(),
+                            input: Expression::Input,
+                            occurrence: "primary".to_owned(),
+                            bind: None,
+                        },
+                    }],
                     result: Expression::Literal { value: json!(null) },
                 },
             }],

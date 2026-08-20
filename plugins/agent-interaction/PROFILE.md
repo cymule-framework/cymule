@@ -90,4 +90,4 @@ workspace member, and is not a dependency of the framework CLI or SDK crates.
 
 Streaming uses the plugin-owned `cymule.agent-stream/1` version domain. Changes
 to Session, occurrence, or stream semantics require a plugin version decision;
-they do not change `cymule.semantic/2` unless the generic framework laws change.
+they do not change `cymule.semantic/3` unless the generic framework laws change.

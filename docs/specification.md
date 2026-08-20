@@ -29,13 +29,13 @@ The following domains evolve independently:
 
 | Domain | Current version | Compatibility rule |
 | --- | --- | --- |
-| Semantic specification | `cymule.semantic/2` | Artifact v2 transition meaning is frozen |
+| Semantic specification | `cymule.semantic/3` | exact effect-site and profile transition meaning is frozen |
 | Canonical IR | `cymule.ir/2` | unknown operations are rejected |
 | Canonical encoding | `cymule.jcs/1` | RFC 8785 JSON, SHA-256 IDs |
 | Artifact identity | `cymule.artifact/2` | closed kind and explicit length-prefixed bytes |
 | Artifact type contract | `cymule.artifact-type-contract/1` | exact contract is pinned in typed references |
-| Machine snapshot | `cymule.machine-snapshot/3` | only Artifact v2 references are accepted |
-| Event schema | `cymule.event/2` | readers reject unknown semantic events |
+| Machine snapshot | `cymule.machine-snapshot/4` | full effect preimages and profiles are required |
+| Event schema | `cymule.event/3` | readers reject incomplete or unknown semantic events |
 | Command protocol | `cymule.command/2` | typed envelope and stable error codes |
 | Engine protocol | `cymule.engine/1` | one versioned request and success-or-failure response envelope |
 | Plugin protocol | `cymule.plugin/2` | capability negotiation and expected failure are explicit |
@@ -499,6 +499,12 @@ world-effect requirements into an `EffectObligationSet`. Scope closure does not
 claim that a provider action is applied. Run completion policy decides whether
 unresolved obligations block the Result.
 
+A scope MUST NOT commit or abort while any descendant scope remains open. A
+commit Event MUST declare exactly one blocking obligation for every mutating
+intent owned by that scope, no obligation for an observational intent, and the
+reducer-derived resolution bit. Missing, duplicate, extra, or caller-authored
+obligation state is invalid.
+
 A plugin-mediated resource or workspace mutation MUST still enter through a
 Plan-declared Effect. A domain controller cannot treat an external commit as an
 internal state update, close a scope around an ambiguous result, or bypass the
@@ -513,6 +519,13 @@ Effect identity is structural:
 run | invocation | stable site | scope epoch | occurrence key
 normalized arguments | effect schema version
 ```
+
+Core admission resolves the stable site only through the entry-reachable
+definition closure and requires the site's exact operation and occurrence key.
+The canonical Event and rebuildable projection retain the complete structural
+preimage, immutable occurrence binding, and Plan-declared Effect profile. Replay
+recomputes the intent identity and applies policy without consulting a provider
+or a mutable Plan lookup.
 
 Phase, world outcome, and reconciliation are orthogonal:
 
@@ -529,6 +542,12 @@ legal only for observational effects and may claim while the scope is open.
 intent; repeating release after receipt loss MUST converge on the recorded
 claim, reconciliation, settlement, or completed Result.
 
+An `unknown` queryable or externally-attested effect enters `pending`. An
+`unknown` human or impossible effect enters `governance-required`. Queryable and
+externally-attested modes may resolve, remain unknown, or escalate to
+governance. Human authority may resolve a governance-required outcome.
+Impossible mode admits no reconciliation transition.
+
 After dispatch ambiguity, the original intent becomes `unknown`. It MUST keep
 its original occurrence binding and reconciler. It MUST NOT become a fresh
 intent. An `unknown` outbox entry remains eligible for reconciliation under its
@@ -544,6 +563,12 @@ admits only `AuthorizeRelease` and
 Event plus its declared result Artifact. Plans, existing command receipts,
 unrelated Artifacts, and unrelated Events MUST remain byte-identical.
 `Unknown` observation and the outbox `unknown` state MUST share one CAS.
+
+After `StartDispatch`, a missing response, wrong response variant, or missing or
+schema-invalid required output MUST first record `Unknown`. A missing, invalid,
+or schema-invalid reconciliation output leaves the original intent `Unknown`
+and eligible for another reconciliation attempt; neither case is safe for
+provider redispatch.
 
 `PrepareEffect` response loss may repeat preparation only with the same
 structural intent ID, immutable binding, and input. Adapters MUST make this
@@ -709,7 +734,7 @@ binding, or required authority MUST downgrade the claim. The runtime MUST NOT
 silently regenerate missing data. M0 verifies exact canonical state replay; its
 one-shot component calls are not an exact execution-replay implementation.
 
-`cymule.machine-snapshot/3` MAY replace a causally closed Event prefix with an
+`cymule.machine-snapshot/4` MAY replace a causally closed Event prefix with an
 authenticated base projection, cumulative prefix digest, and exact compacted
 Event identities. Every remaining Event stays in full and MUST have all parents
 in either the base or retained suffix. Restore verifies the base projection,
