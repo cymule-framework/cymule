@@ -23,6 +23,11 @@ pub enum RuntimeError {
     },
     /// IR execution reached a durable wait unsupported by one-shot execution.
     Suspended(String),
+    /// Prepared explicit effects require a caller-owned durable release control.
+    ReleaseRequired {
+        /// Exact prepared intent identities that remain unreleased.
+        intent_ids: Vec<String>,
+    },
     /// A concrete process or I/O substrate failed.
     Substrate {
         /// Stable substrate failure code.
@@ -98,6 +103,11 @@ impl Display for RuntimeError {
                 write!(formatter, "plugin_defect: {code}: {message}")
             }
             Self::Suspended(message) => write!(formatter, "run_suspended: {message}"),
+            Self::ReleaseRequired { intent_ids } => write!(
+                formatter,
+                "effect_release_required: {}",
+                intent_ids.join(",")
+            ),
             Self::Substrate { code, message } => {
                 write!(formatter, "substrate_failed: {code}: {message}")
             }

@@ -1367,9 +1367,9 @@ fn ensure_effect_enqueue_machine(
             intent_id,
             scope_id,
             operation,
-            mutating: _,
             args,
             occurrence_binding,
+            ..
         } if proposed.run_id == dispatch.run_id
             && intent_id == &dispatch.intent_id
             && operation == &dispatch.operation

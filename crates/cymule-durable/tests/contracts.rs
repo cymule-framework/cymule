@@ -23,12 +23,17 @@ struct Counts {
     calls: AtomicUsize,
     prepares: AtomicUsize,
     dispatches: AtomicUsize,
+    reconciliations: AtomicUsize,
 }
 
 struct Plugin {
     counts: Arc<Counts>,
     component_output: Value,
     effect_output: Value,
+}
+
+struct RetryReconciliationPlugin {
+    counts: Arc<Counts>,
 }
 
 impl PluginHost for Plugin {
@@ -73,6 +78,50 @@ impl PluginHost for Plugin {
             PluginRequest::ReconcileEffect { .. } => {
                 panic!("test effect never becomes ambiguous")
             }
+        }
+    }
+}
+
+impl PluginHost for RetryReconciliationPlugin {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        match request {
+            PluginRequest::Describe => Ok(PluginResponse::Manifest {
+                manifest: PluginManifest {
+                    plugin_version: PLUGIN_VERSION.to_owned(),
+                    implementation_id: "durable-reconciliation-plugin@1".to_owned(),
+                    components: BTreeMap::new(),
+                    effects: BTreeMap::from([(
+                        "example.effect".to_owned(),
+                        PluginEffect {
+                            implementation_revision: "1".to_owned(),
+                            can_reconcile: true,
+                        },
+                    )]),
+                },
+            }),
+            PluginRequest::PrepareEffect { .. } => {
+                self.counts.prepares.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::Prepared)
+            }
+            PluginRequest::DispatchEffect { .. } => {
+                self.counts.dispatches.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::EffectResult {
+                    outcome: WorldOutcome::Unknown,
+                    value: None,
+                })
+            }
+            PluginRequest::ReconcileEffect { .. } => {
+                let attempt = self.counts.reconciliations.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::ReconciliationResult {
+                    resolution: cymule_core::ReconciliationResolution::ResolvedApplied,
+                    value: Some(if attempt == 0 {
+                        json!(7)
+                    } else {
+                        json!("settled")
+                    }),
+                })
+            }
+            PluginRequest::Call { .. } => panic!("effect-only fixture does not call components"),
         }
     }
 }
@@ -333,20 +382,83 @@ fn invalid_wait_completion_does_not_advance_revision_or_write_result() {
 fn invalid_effect_output_is_never_settled_or_recorded() {
     let counts = Arc::new(Counts::default());
     let mut runtime = runtime(MemoryStore::new(), counts.clone(), json!("ok"), json!(7));
-    let error = runtime
+    let outcome = runtime
         .start(
             effect_candidate(),
             &json!({"request": "run"}),
             "run:effect-output",
         )
-        .expect_err("effect output must fail");
-    assert!(matches!(error, DurableError::Contract(_)));
+        .expect("invalid post-dispatch output is classified durably");
+    assert!(matches!(
+        outcome,
+        DriveOutcome::ReconciliationRequired { .. }
+    ));
     assert_eq!(counts.prepares.load(Ordering::SeqCst), 1);
     assert_eq!(counts.dispatches.load(Ordering::SeqCst), 1);
     let state = runtime.coordinator().state().expect("state loads");
     let dispatch = state.outbox.values().next().expect("outbox claim exists");
-    assert_eq!(dispatch.state, OutboxState::Claimed);
+    assert_eq!(dispatch.state, OutboxState::Unknown);
     assert!(dispatch.result.is_none());
+    let machine = runtime
+        .coordinator()
+        .restore_machine()
+        .expect("Machine restores");
+    let effect = machine.projection().runs["run:effect-output"]
+        .effects
+        .values()
+        .next()
+        .expect("effect exists");
+    assert_eq!(effect.outcome, WorldOutcome::Unknown);
+    assert_eq!(
+        effect.reconciliation,
+        cymule_core::ReconciliationState::Pending
+    );
+}
+
+#[test]
+fn invalid_reconciliation_output_keeps_unknown_and_retries_reconciliation() {
+    let counts = Arc::new(Counts::default());
+    let mut plugin = RetryReconciliationPlugin {
+        counts: counts.clone(),
+    };
+    let manifest = plugin.describe().expect("test plugin describes");
+    let binding = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    )
+    .expect("test binding is admitted");
+    let mut runtime =
+        ResumableRuntime::open(MemoryStore::new(), plugin, binding).expect("runtime opens");
+
+    assert!(matches!(
+        runtime
+            .start(
+                effect_candidate(),
+                &json!({"request": "run"}),
+                "run:reconciliation-output",
+            )
+            .expect("invalid reconciliation output is classified durably"),
+        DriveOutcome::ReconciliationRequired { .. }
+    ));
+    let state = runtime.coordinator().state().expect("state loads");
+    let dispatch = state.outbox.values().next().expect("outbox exists");
+    assert_eq!(dispatch.state, OutboxState::Unknown);
+    assert!(dispatch.result.is_none());
+    assert_eq!(counts.dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.reconciliations.load(Ordering::SeqCst), 1);
+
+    let DriveOutcome::Completed(_) = runtime
+        .resume("run:reconciliation-output")
+        .expect("later reconciliation retries the original intent")
+    else {
+        panic!("second reconciliation should complete the Run")
+    };
+    assert_eq!(counts.dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.reconciliations.load(Ordering::SeqCst), 2);
+    let state = runtime.coordinator().state().expect("state loads");
+    let dispatch = state.outbox.values().next().expect("outbox exists");
+    assert_eq!(dispatch.state, OutboxState::Applied);
+    assert!(dispatch.result.is_some());
 }
 
 #[test]

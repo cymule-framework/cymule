@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ir::{EffectContract, MutationKind};
+use crate::ir::{EffectContract, MutationKind, Operation, Region};
 use crate::model::{effect_intent_id, effect_obligation_id};
 use crate::{
     ArtifactRecord, ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, CommandReceipt,
@@ -97,7 +97,7 @@ pub struct MachineSnapshot {
 
 impl MachineSnapshot {
     /// Current snapshot schema version.
-    pub const VERSION: &'static str = "cymule.machine-snapshot/3";
+    pub const VERSION: &'static str = "cymule.machine-snapshot/4";
 
     /// Content digest used by conditional durable-store writes.
     pub fn digest(&self) -> Result<String> {
@@ -440,6 +440,7 @@ impl Machine {
                 )));
             }
         }
+        self.validate_effect_proposal(&event)?;
         let mut next = self.projection.clone();
         next.apply_event(&event)?;
         self.projection = next;
@@ -614,7 +615,35 @@ impl Machine {
                     )));
                 }
                 let run = self.run(&envelope.run_id)?;
-                let contract = self.effect_contract(&run.current_plan, operation)?;
+                let plan = self.plans.get(&run.current_plan).ok_or_else(|| {
+                    CoreError::NotFound(format!("plan {} does not exist", run.current_plan))
+                })?;
+                let scope = run.scopes.get(scope_id).ok_or_else(|| {
+                    CoreError::NotFound(format!("scope {scope_id} does not exist"))
+                })?;
+                if scope.status != crate::ScopeStatus::Open {
+                    return Err(CoreError::IllegalTransition(format!(
+                        "scope {scope_id} is not open"
+                    )));
+                }
+                if invocation_id.is_empty() || invocation_id.len() > 200 {
+                    return Err(CoreError::Validation(
+                        "effect invocation ID must contain 1..=200 characters".to_owned(),
+                    ));
+                }
+                let (declared_operation, declared_occurrence) =
+                    reachable_effect_site(&plan.candidate, site_id).ok_or_else(|| {
+                        CoreError::NotFound(format!(
+                            "effect site {site_id} is not reachable from Plan entry {}",
+                            plan.candidate.entry
+                        ))
+                    })?;
+                if declared_operation != operation || declared_occurrence != occurrence {
+                    return Err(CoreError::Validation(format!(
+                        "effect site {site_id} declares operation {declared_operation} and occurrence {declared_occurrence}, not {operation} and {occurrence}"
+                    )));
+                }
+                let contract = self.effect_contract(&run.current_plan, declared_operation)?;
                 let intent_id = effect_intent_id(
                     &envelope.run_id,
                     invocation_id,
@@ -628,8 +657,13 @@ impl Machine {
                 Ok(EventPayload::EffectProposed {
                     intent_id,
                     scope_id: scope_id.clone(),
+                    invocation_id: invocation_id.clone(),
+                    site_id: site_id.clone(),
+                    occurrence: occurrence.clone(),
+                    scope_epoch: run.epoch,
+                    effect_schema_version: "cymule.effect-schema/1".to_owned(),
                     operation: operation.clone(),
-                    mutating: contract.profile.mutation == MutationKind::Mutating,
+                    profile: contract.profile.clone(),
                     args: args.clone(),
                     occurrence_binding: occurrence_binding.clone(),
                 })
@@ -651,7 +685,7 @@ impl Machine {
                     let effect = run.effects.get(intent_id).ok_or_else(|| {
                         CoreError::NotFound(format!("effect {intent_id} does not exist"))
                     })?;
-                    if effect.mutating {
+                    if effect.profile.mutation == MutationKind::Mutating {
                         obligations.push(ObligationProjection {
                             obligation_id: effect_obligation_id(intent_id)?,
                             intent_id: intent_id.clone(),
@@ -721,6 +755,90 @@ impl Machine {
                 ))
             })
     }
+
+    fn validate_effect_proposal(&self, event: &Event) -> Result<()> {
+        let EventPayload::EffectProposed {
+            site_id,
+            occurrence,
+            operation,
+            profile,
+            ..
+        } = &event.payload
+        else {
+            return Ok(());
+        };
+        let run = self.run(&event.run_id)?;
+        let plan = self.plans.get(&run.current_plan).ok_or_else(|| {
+            CoreError::NotFound(format!("plan {} does not exist", run.current_plan))
+        })?;
+        let (declared_operation, declared_occurrence) =
+            reachable_effect_site(&plan.candidate, site_id).ok_or_else(|| {
+                CoreError::NotFound(format!(
+                    "effect site {site_id} is not reachable from Plan entry {}",
+                    plan.candidate.entry
+                ))
+            })?;
+        if declared_operation != operation || declared_occurrence != occurrence {
+            return Err(CoreError::Validation(format!(
+                "effect site {site_id} does not match its declared operation and occurrence"
+            )));
+        }
+        let contract = self.effect_contract(&run.current_plan, operation)?;
+        if &contract.profile != profile {
+            return Err(CoreError::Validation(format!(
+                "effect site {site_id} does not match its Plan-declared profile"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn reachable_effect_site<'a>(
+    candidate: &'a PlanCandidate,
+    site_id: &str,
+) -> Option<(&'a str, &'a str)> {
+    let definitions: BTreeMap<&str, &crate::Definition> = candidate
+        .definitions
+        .iter()
+        .map(|definition| (definition.id.as_str(), definition))
+        .collect();
+    let mut pending = vec![candidate.entry.as_str()];
+    let mut visited = BTreeSet::new();
+    while let Some(definition_id) = pending.pop() {
+        if !visited.insert(definition_id) {
+            continue;
+        }
+        let definition = definitions.get(definition_id)?;
+        if let Some(found) = reachable_effect_in_region(&definition.body, site_id, &mut pending) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn reachable_effect_in_region<'a>(
+    region: &'a Region,
+    site_id: &str,
+    invoked_definitions: &mut Vec<&'a str>,
+) -> Option<(&'a str, &'a str)> {
+    for step in &region.steps {
+        match &step.operation {
+            Operation::Effect {
+                effect, occurrence, ..
+            } if step.id == site_id => return Some((effect, occurrence)),
+            Operation::Invoke { definition, .. } => {
+                invoked_definitions.push(definition);
+            }
+            Operation::Scope { body, .. } => {
+                if let Some(found) = reachable_effect_in_region(body, site_id, invoked_definitions)
+                {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn validate_envelope(envelope: &CommandEnvelope) -> Result<()> {

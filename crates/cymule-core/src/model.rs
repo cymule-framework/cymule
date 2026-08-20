@@ -2,13 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ir::{DispatchPolicy, EffectProfile, MutationKind, ReconciliationMode};
 use crate::sha256_bytes;
 use crate::{CoreError, Result, canonical_digest, content_id};
 
 /// Semantic specification version.
-pub const SEMANTIC_VERSION: &str = "cymule.semantic/2";
+pub const SEMANTIC_VERSION: &str = "cymule.semantic/3";
 /// Canonical event version.
-pub const EVENT_VERSION: &str = "cymule.event/2";
+pub const EVENT_VERSION: &str = "cymule.event/3";
 /// Public command version.
 pub const COMMAND_VERSION: &str = "cymule.command/2";
 /// Canonical Artifact reference identity version.
@@ -404,10 +405,20 @@ pub enum EventPayload {
         intent_id: String,
         /// Owning scope.
         scope_id: String,
+        /// Exact dynamic invocation identity.
+        invocation_id: String,
+        /// Stable reachable IR effect site.
+        site_id: String,
+        /// Intentional occurrence key declared at the site.
+        occurrence: String,
+        /// Fenced scope epoch included in structural identity.
+        scope_epoch: u64,
+        /// Effect identity schema version.
+        effect_schema_version: String,
         /// Abstract operation ID.
         operation: String,
-        /// Whether it mutates the world.
-        mutating: bool,
+        /// Complete Plan-declared safety and recovery profile.
+        profile: EffectProfile,
         /// Canonical argument artifact.
         args: ArtifactRef,
         /// Pinned occurrence binding.
@@ -645,10 +656,20 @@ pub struct EffectProjection {
     pub intent_id: String,
     /// Owning scope.
     pub scope_id: String,
+    /// Exact dynamic invocation identity.
+    pub invocation_id: String,
+    /// Stable reachable IR effect site.
+    pub site_id: String,
+    /// Intentional occurrence key declared at the site.
+    pub occurrence: String,
+    /// Fenced scope epoch included in structural identity.
+    pub scope_epoch: u64,
+    /// Effect identity schema version.
+    pub effect_schema_version: String,
     /// Abstract operation.
     pub operation: String,
-    /// External mutation flag.
-    pub mutating: bool,
+    /// Complete Plan-declared safety and recovery profile.
+    pub profile: EffectProfile,
     /// Canonical arguments.
     pub args: ArtifactRef,
     /// Immutable historical realization.
@@ -879,8 +900,13 @@ impl Projection {
             EventPayload::EffectProposed {
                 intent_id,
                 scope_id,
+                invocation_id,
+                site_id,
+                occurrence,
+                scope_epoch,
+                effect_schema_version,
                 operation,
-                mutating,
+                profile,
                 args,
                 occurrence_binding,
             } => {
@@ -897,14 +923,34 @@ impl Projection {
                         "scope {scope_id} is not open"
                     )));
                 }
+                let expected_intent_id = effect_intent_id(
+                    &event.run_id,
+                    invocation_id,
+                    site_id,
+                    scope_id,
+                    *scope_epoch,
+                    occurrence,
+                    args,
+                    effect_schema_version,
+                )?;
+                if *scope_epoch != run.epoch || *intent_id != expected_intent_id {
+                    return Err(CoreError::IdentityMismatch(format!(
+                        "effect intent {intent_id} does not match {expected_intent_id}"
+                    )));
+                }
                 scope.intents.insert(intent_id.clone());
                 run.effects.insert(
                     intent_id.clone(),
                     EffectProjection {
                         intent_id: intent_id.clone(),
                         scope_id: scope_id.clone(),
+                        invocation_id: invocation_id.clone(),
+                        site_id: site_id.clone(),
+                        occurrence: occurrence.clone(),
+                        scope_epoch: *scope_epoch,
+                        effect_schema_version: effect_schema_version.clone(),
                         operation: operation.clone(),
-                        mutating: *mutating,
+                        profile: profile.clone(),
                         args: args.clone(),
                         occurrence_binding: occurrence_binding.clone(),
                         phase: EffectPhase::Admitted,
@@ -917,17 +963,28 @@ impl Projection {
                 intent_id,
                 transition,
             } => {
+                let scope_status = {
+                    let effect = run.effects.get(intent_id).ok_or_else(|| {
+                        CoreError::NotFound(format!("effect {intent_id} does not exist"))
+                    })?;
+                    run.scopes
+                        .get(&effect.scope_id)
+                        .ok_or_else(|| {
+                            CoreError::NotFound(format!("scope {} does not exist", effect.scope_id))
+                        })?
+                        .status
+                };
                 let effect = run.effects.get_mut(intent_id).ok_or_else(|| {
                     CoreError::NotFound(format!("effect {intent_id} does not exist"))
                 })?;
-                apply_effect_transition(effect, transition)?;
+                apply_effect_transition(effect, scope_status, transition)?;
                 update_obligation(run, intent_id);
             }
             EventPayload::ScopeCommitted {
                 scope_id,
                 obligations,
             } => {
-                let scope = run.scopes.get_mut(scope_id).ok_or_else(|| {
+                let scope = run.scopes.get(scope_id).ok_or_else(|| {
                     CoreError::NotFound(format!("scope {scope_id} does not exist"))
                 })?;
                 if scope.status != ScopeStatus::Open {
@@ -935,9 +992,50 @@ impl Projection {
                         "scope {scope_id} is not open"
                     )));
                 }
+                let scope_intents = scope.intents.clone();
+                if has_open_descendant(&run.scopes, scope_id) {
+                    return Err(CoreError::IllegalTransition(format!(
+                        "scope {scope_id} has an open child scope"
+                    )));
+                }
+                let mut expected = BTreeMap::new();
+                for intent_id in &scope_intents {
+                    let effect = run.effects.get(intent_id).ok_or_else(|| {
+                        CoreError::NotFound(format!("effect {intent_id} does not exist"))
+                    })?;
+                    if effect.profile.mutation == MutationKind::Mutating {
+                        let obligation_id = effect_obligation_id(intent_id)?;
+                        expected.insert(
+                            obligation_id.clone(),
+                            ObligationProjection {
+                                obligation_id,
+                                intent_id: intent_id.clone(),
+                                blocking: true,
+                                resolved: matches!(
+                                    effect.outcome,
+                                    WorldOutcome::Applied | WorldOutcome::NotApplied
+                                ),
+                            },
+                        );
+                    }
+                }
+                let declared: BTreeMap<String, ObligationProjection> = obligations
+                    .iter()
+                    .cloned()
+                    .map(|obligation| (obligation.obligation_id.clone(), obligation))
+                    .collect();
+                if declared.len() != obligations.len() || declared != expected {
+                    return Err(CoreError::IllegalTransition(format!(
+                        "scope {scope_id} declared an inexact effect obligation set"
+                    )));
+                }
+                let scope = run
+                    .scopes
+                    .get_mut(scope_id)
+                    .expect("scope existence was validated above");
                 scope.status = ScopeStatus::ClosedCommitted;
                 for obligation in obligations {
-                    if !scope.intents.contains(&obligation.intent_id) {
+                    if !scope_intents.contains(&obligation.intent_id) {
                         return Err(CoreError::IllegalTransition(format!(
                             "obligation {} does not belong to scope {scope_id}",
                             obligation.obligation_id
@@ -956,7 +1054,7 @@ impl Projection {
                 }
             }
             EventPayload::ScopeAborted { scope_id } => {
-                let scope = run.scopes.get_mut(scope_id).ok_or_else(|| {
+                let scope = run.scopes.get(scope_id).ok_or_else(|| {
                     CoreError::NotFound(format!("scope {scope_id} does not exist"))
                 })?;
                 if scope.status != ScopeStatus::Open {
@@ -964,21 +1062,34 @@ impl Projection {
                         "scope {scope_id} is not open"
                     )));
                 }
-                for intent_id in &scope.intents {
+                let scope_intents = scope.intents.clone();
+                if has_open_descendant(&run.scopes, scope_id) {
+                    return Err(CoreError::IllegalTransition(format!(
+                        "scope {scope_id} has an open child scope"
+                    )));
+                }
+                for intent_id in &scope_intents {
                     let effect = run.effects.get_mut(intent_id).ok_or_else(|| {
                         CoreError::NotFound(format!("effect {intent_id} does not exist"))
                     })?;
-                    if matches!(
-                        effect.phase,
-                        EffectPhase::ReleaseAuthorized | EffectPhase::DispatchStarted
-                    ) {
+                    if effect.profile.mutation == MutationKind::Mutating
+                        && matches!(
+                            effect.phase,
+                            EffectPhase::ReleaseAuthorized | EffectPhase::DispatchStarted
+                        )
+                    {
                         return Err(CoreError::IllegalTransition(format!(
                             "scope {scope_id} cannot abort after effect release"
                         )));
                     }
-                    effect.phase = EffectPhase::CancelledBeforeRelease;
+                    if matches!(effect.phase, EffectPhase::Admitted | EffectPhase::Prepared) {
+                        effect.phase = EffectPhase::CancelledBeforeRelease;
+                    }
                 }
-                scope.status = ScopeStatus::ClosedAborted;
+                run.scopes
+                    .get_mut(scope_id)
+                    .expect("scope existence was validated above")
+                    .status = ScopeStatus::ClosedAborted;
             }
             EventPayload::BindingUpdated { previous, current } => {
                 if &run.current_binding_context != previous {
@@ -1023,13 +1134,22 @@ impl Projection {
 
 fn apply_effect_transition(
     effect: &mut EffectProjection,
+    scope_status: ScopeStatus,
     transition: &EffectTransition,
 ) -> Result<()> {
     match transition {
         EffectTransition::Prepare if effect.phase == EffectPhase::Admitted => {
             effect.phase = EffectPhase::Prepared;
         }
-        EffectTransition::AuthorizeRelease if effect.phase == EffectPhase::Prepared => {
+        EffectTransition::AuthorizeRelease
+            if effect.phase == EffectPhase::Prepared
+                && match effect.profile.dispatch {
+                    DispatchPolicy::Eager => scope_status != ScopeStatus::ClosedAborted,
+                    DispatchPolicy::OnScopeCommit | DispatchPolicy::Explicit => {
+                        scope_status == ScopeStatus::ClosedCommitted
+                    }
+                } =>
+        {
             effect.phase = EffectPhase::ReleaseAuthorized;
         }
         EffectTransition::StartDispatch if effect.phase == EffectPhase::ReleaseAuthorized => {
@@ -1042,14 +1162,26 @@ fn apply_effect_transition(
         {
             effect.outcome = *outcome;
             effect.reconciliation = if *outcome == WorldOutcome::Unknown {
-                ReconciliationState::Pending
+                match effect.profile.reconciliation {
+                    ReconciliationMode::Queryable | ReconciliationMode::ExternallyAttested => {
+                        ReconciliationState::Pending
+                    }
+                    ReconciliationMode::Human | ReconciliationMode::Impossible => {
+                        ReconciliationState::GovernanceRequired
+                    }
+                }
             } else {
                 ReconciliationState::NotRequired
             };
         }
         EffectTransition::Reconcile(resolution)
             if effect.phase == EffectPhase::DispatchStarted
-                && effect.outcome == WorldOutcome::Unknown =>
+                && effect.outcome == WorldOutcome::Unknown
+                && reconciliation_transition_allowed(
+                    effect.profile.reconciliation,
+                    effect.reconciliation,
+                    *resolution,
+                ) =>
         {
             match resolution {
                 ReconciliationResolution::ResolvedApplied => {
@@ -1076,6 +1208,45 @@ fn apply_effect_transition(
         }
     }
     Ok(())
+}
+
+fn has_open_descendant(scopes: &BTreeMap<String, ScopeProjection>, scope_id: &str) -> bool {
+    scopes.values().any(|candidate| {
+        if candidate.status != ScopeStatus::Open || candidate.scope_id == scope_id {
+            return false;
+        }
+        let mut parent = candidate.parent_scope.as_deref();
+        while let Some(parent_id) = parent {
+            if parent_id == scope_id {
+                return true;
+            }
+            parent = scopes
+                .get(parent_id)
+                .and_then(|ancestor| ancestor.parent_scope.as_deref());
+        }
+        false
+    })
+}
+
+fn reconciliation_transition_allowed(
+    mode: ReconciliationMode,
+    state: ReconciliationState,
+    resolution: ReconciliationResolution,
+) -> bool {
+    match mode {
+        ReconciliationMode::Queryable | ReconciliationMode::ExternallyAttested => {
+            state == ReconciliationState::Pending
+        }
+        ReconciliationMode::Human => {
+            state == ReconciliationState::GovernanceRequired
+                && matches!(
+                    resolution,
+                    ReconciliationResolution::ResolvedApplied
+                        | ReconciliationResolution::ResolvedNotApplied
+                )
+        }
+        ReconciliationMode::Impossible => false,
+    }
 }
 
 fn update_obligation(run: &mut RunProjection, intent_id: &str) {

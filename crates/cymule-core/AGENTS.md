@@ -8,11 +8,17 @@
 - `artifact_ref` is the sole authority for the collision-free,
   length-prefixed `cymule.artifact/2` identity preimage. Artifact references pin
   this identity version; higher layers must call the helper rather than copy its
-  framing. Snapshot v3 is the only accepted snapshot wire version.
+  framing. Snapshot v4 is the only accepted snapshot wire version.
 - Reducers are pure over prior projection plus event. Do not hide mutations in
   caches or global state.
 - Preserve closed effect, scope, attempt, and Run state machines. Illegal jumps
   fail closed.
+- Effect admission resolves the exact entry-reachable Plan site and retains its
+  complete structural identity preimage and Effect profile in canonical state
+  so replay enforces dispatch and reconciliation without a provider.
+- Scope closure rejects every open descendant and requires the exact
+  reducer-derived obligation set; callers never author obligation membership or
+  resolution.
 - `Operation::Invoke` targets a definition in the same sealed Plan. Keep
   definition lookup semantic and immutable; logical registries and future-head
   selection belong in `cymule-evolution`.

@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use cymule_core::{
     COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus, DispatchPolicy,
     EffectTransition, Expression, Machine, MutationKind, Operation, PlanCandidate, ROOT_SCOPE_ID,
-    ReconciliationResolution, Region, SealedPlan, WorldOutcome, canonical_bytes, effect_intent_id,
+    ReconciliationMode, ReconciliationResolution, Region, SealedPlan, WorldOutcome,
+    canonical_bytes, effect_intent_id,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,6 +52,7 @@ struct PendingEffect {
     operation: String,
     input: Value,
     bind: Option<String>,
+    dispatch: DispatchPolicy,
 }
 
 #[derive(Debug)]
@@ -163,7 +165,18 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 scope_id: ROOT_SCOPE_ID.to_owned(),
             },
         )?;
-        self.dispatch_pending(&run_id, &contracts, outcome.pending, &mut environment)?;
+        let mut explicit: Vec<String> = self
+            .dispatch_pending(&run_id, &contracts, outcome.pending, &mut environment)?
+            .into_iter()
+            .map(|effect| effect.intent_id)
+            .collect();
+        if !explicit.is_empty() {
+            explicit.sort();
+            explicit.dedup();
+            return Err(RuntimeError::ReleaseRequired {
+                intent_ids: explicit,
+            });
+        }
         self.submit(
             &run_id,
             Command::YieldAttempt {
@@ -367,6 +380,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                             operation: effect.clone(),
                             input: value,
                             bind: bind.clone(),
+                            dispatch: contract.profile.dispatch,
                         });
                     }
                 }
@@ -398,12 +412,12 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                             scope_id: child_scope,
                         },
                     )?;
-                    self.dispatch_pending(
+                    pending.extend(self.dispatch_pending(
                         run_id,
                         contracts,
                         child.pending,
                         &mut child_environment,
-                    )?;
+                    )?);
                     if let Some(binding) = bind {
                         environment.insert(binding.clone(), child.value);
                     }
@@ -423,8 +437,13 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
         contracts: &PlanContracts,
         pending: Vec<PendingEffect>,
         environment: &mut BTreeMap<String, Value>,
-    ) -> RuntimeResult<()> {
+    ) -> RuntimeResult<Vec<PendingEffect>> {
+        let mut explicit = Vec::new();
         for effect in pending {
+            if effect.dispatch == DispatchPolicy::Explicit {
+                explicit.push(effect);
+                continue;
+            }
             let result = self.dispatch_effect(
                 run_id,
                 contracts,
@@ -436,7 +455,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 environment.insert(binding, result);
             }
         }
-        Ok(())
+        Ok(explicit)
     }
 
     fn dispatch_effect(
@@ -480,6 +499,13 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 "effect dispatch started but returned no authoritative world outcome",
             ));
         };
+        if validate_optional_effect_output(contracts, operation, outcome, value.as_ref()).is_err() {
+            self.observe_unknown(run_id, &intent_id)?;
+            return Err(RuntimeError::unknown_world(
+                "effect_dispatch_output_invalid",
+                "effect dispatch started but its output violated the declared schema",
+            ));
+        }
         self.submit(
             run_id,
             Command::TransitionEffect {
@@ -487,8 +513,21 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                 transition: EffectTransition::Observe(outcome),
             },
         )?;
-        validate_optional_effect_output(contracts, operation, outcome, value.as_ref())?;
         if outcome == WorldOutcome::Unknown {
+            let reconciliation_mode = self
+                .machine
+                .projection()
+                .runs
+                .get(run_id)
+                .and_then(|run| run.effects.get(&intent_id))
+                .map(|effect| effect.profile.reconciliation)
+                .ok_or_else(|| RuntimeError::plugin_defect("effect projection is missing"))?;
+            if reconciliation_mode != ReconciliationMode::Queryable {
+                return Err(RuntimeError::unknown_world(
+                    "effect_reconciliation_required",
+                    "effect outcome is unknown and requires its declared reconciliation authority",
+                ));
+            }
             let response = self
                 .plugin
                 .invoke(PluginRequest::ReconcileEffect {
@@ -512,12 +551,19 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
                     "effect outcome remains unknown because reconciliation returned an invalid response",
                 ));
             };
-            validate_optional_reconciliation_output(
+            if validate_optional_reconciliation_output(
                 contracts,
                 operation,
                 resolution,
                 reconciled_value.as_ref(),
-            )?;
+            )
+            .is_err()
+            {
+                return Err(RuntimeError::unknown_world(
+                    "effect_reconciliation_output_invalid",
+                    "effect outcome remains unknown because reconciliation output violated the declared schema",
+                ));
+            }
             self.submit(
                 run_id,
                 Command::TransitionEffect {
