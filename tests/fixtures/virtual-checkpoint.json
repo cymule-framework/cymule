@@ -1,52 +1,47 @@
 {
-  "checkpoint_version": "cymule.virtual-checkpoint/1",
+  "checkpoint_version": "cymule.virtual-checkpoint/2",
   "checkpoint_id": "virtual:fixture:1",
   "parent_checkpoint": null,
-  "snapshot": {
-    "scheduling_policy": {
-      "base_quantum": 1,
-      "aging_interval": 1
-    },
+  "parent_state_digest": "859cb62a92f8ac71514c45d9a5778b25e0c050c4a6fd789705e76995ec7236ab",
+  "state_digest": "627cc4460cda3e70dfaa80f9f089eac8b2784ac33a350dcf4ca39bcfc03ad755",
+  "delta_digest": "22e38c25491b53bfd1f4852f67b7c0f1147969be303b9196832639b0f8fec4eb",
+  "delta": {
+    "scheduling_policy": { "base_quantum": 1, "aging_interval": 1 },
     "regions": {
-      "region:fixture": {
-        "region_id": "region:fixture",
-        "run_id": "run:fixture",
-        "source": "fixture.range",
-        "cursor": {
-          "version": "fixture/1",
-          "position": "0",
-          "exhausted": false
-        },
-        "estimated_total": 1000000
-      }
+      "upsert": {
+        "region:fixture": {
+          "region_id": "region:fixture",
+          "run_id": "run:fixture",
+          "source": "fixture.range",
+          "cursor": { "version": "fixture/1", "position": "0", "exhausted": false },
+          "estimated_total": 1000000
+        }
+      },
+      "remove": []
     },
-    "ready": {},
-    "active": {},
-    "parked": {},
-    "known": [],
+    "ready": { "upsert": {}, "remove": [] },
+    "active": { "upsert": {}, "remove": [] },
+    "parked": { "upsert": {}, "remove": [] },
+    "known": { "add": [], "remove": [] },
     "last_run": null,
     "last_region": null,
-    "claim_epochs": {},
-    "occurrences": {},
-    "run_weights": {
-      "run:fixture": 1
-    },
-    "run_deficits": {
-      "run:fixture": 0
-    },
+    "claim_epochs": { "upsert": {}, "remove": [] },
+    "occurrences": { "upsert": {}, "remove": [] },
+    "run_weights": { "upsert": { "run:fixture": 1 }, "remove": [] },
+    "run_deficits": { "upsert": { "run:fixture": 0 }, "remove": [] },
     "dispatch_sequence": 0,
-    "ready_since": {},
-    "retired_regions": {},
-    "migrations": {},
-    "compactions": {},
-    "compaction_receipts": {},
-    "compacted_work": {},
-    "compacted_regions": {},
-    "rehydration_receipts": {},
-    "claim_receipts": {},
-    "lease_renewal_receipts": {},
-    "recovery_receipts": {},
-    "run_weight_receipts": {}
+    "ready_since": { "upsert": {}, "remove": [] },
+    "retired_regions": { "upsert": {}, "remove": [] },
+    "migrations": { "upsert": {}, "remove": [] },
+    "compactions": { "upsert": {}, "remove": [] },
+    "compaction_receipts": { "upsert": {}, "remove": [] },
+    "compacted_work": { "upsert": {}, "remove": [] },
+    "compacted_regions": { "upsert": {}, "remove": [] },
+    "rehydration_receipts": { "upsert": {}, "remove": [] },
+    "claim_receipts": { "upsert": {}, "remove": [] },
+    "lease_renewal_receipts": { "upsert": {}, "remove": [] },
+    "recovery_receipts": { "upsert": {}, "remove": [] },
+    "run_weight_receipts": { "upsert": {}, "remove": [] }
   },
   "control": null,
   "receipt_occurrence_id": null,

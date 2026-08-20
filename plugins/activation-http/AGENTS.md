@@ -8,6 +8,10 @@
   for commit acknowledgement.
 - Duplicate IDs with identical source/value replay the original acceptance.
   Reuse with different semantics returns conflict and never reaches M1.
+- Durable matching first redelivers retained target selections, then pages the
+  provider-neutral parked signal-key index with a fair cursor and queries the
+  spool through `(acknowledged, signal_key, activation_id)`. Never scan a fixed
+  activation-ID prefix; unrelated ingress cannot starve a later active source.
 - Authorization is an injected header/request policy. Never store credentials
   in deliveries, values, logs, or Cymule state.
 - This plugin owns signal ingress only. Typed input completion remains with its

@@ -37,8 +37,14 @@ Status: implemented.
   known-set coverage, claim fencing, and global/per-Run active limits;
 - a rebuildable exact `ParkReason -> work IDs` index, with M1 wait IDs used as
   activation keys and no parked-population scan on wake;
-- versioned `cymule.virtual-checkpoint/1` records that persist opaque source
-  cursors and the complete bounded frontier through an M1 application journal;
+- versioned `cymule.virtual-checkpoint/2` records that persist opaque source
+  cursors and complete bounded frontier mutations as content-addressed deltas
+  through an M1 application journal, without repeating full snapshots;
+- a 4 MiB hard bound on each canonical delta plus authenticated parent and
+  resulting transition heads, with linear-history and exact-reopen regressions;
+- an in-process exact durable-anchor cache that constructs the next delta from
+  the last committed projection without replaying prior journal history, and
+  advances only after the owning M1 CAS succeeds;
 - checkpoint parent lineage, idempotent retry, conflicting-ID rejection,
   reopen, and in-process rollback after stale CAS;
 - atomic M1 wait activation plus M3 indexed wake checkpoints, including a stale
@@ -96,15 +102,18 @@ are not M3 claims.
 `RegionSource` implementations may enumerate a database, object store, API, or
 generated range, but those technologies never enter M3 semantic state.
 
-Version decision: durable scheduler integration introduces the independent
-`cymule.virtual-checkpoint/1` journal payload. `VirtualSnapshot` adds a derived
-parked-reason index that restore always rebuilds from parked work. Neither change
-alters `cymule.semantic/4`, the Plan IR, or M1's generic application-journal
-envelope. Work lifecycle adds independent `cymule.virtual-work-occurrence/1`
+Version decision: `cymule.virtual-checkpoint/2` replaces the v1 whole-snapshot
+journal payload. V2 carries only a content-addressed delta, its authenticated
+parent/result transition heads, and the exact control receipt. There is no v1
+fallback because journal lineages are version-homogeneous. `VirtualSnapshot`
+keeps a derived parked-reason index that restore always rebuilds from parked
+work. This does not alter `cymule.semantic/4`, the Plan IR, or M1's generic
+application-journal envelope. Work lifecycle adds independent
+`cymule.virtual-work-occurrence/1`
 and `cymule.virtual-work-control/1` domains; SDKs expose their closed wire types
 and transport interfaces but do not reduce scheduler state. Additive scheduling
 policy, integer weight/deficit, dispatch-sequence, and ready-age fields remain
-inside the `cymule.virtual-checkpoint/1` domain. Region topology adds
+inside the `cymule.virtual-checkpoint/2` domain. Region topology adds
 independent `cymule.virtual-region-migration/1` and
 `cymule.virtual-region-migration-control/1` domains; receipts and retired lineage
 remain in the same M3 checkpoint.
@@ -113,7 +122,7 @@ Cold history adds independent `cymule.virtual-archive-manifest/1`,
 `cymule.virtual-compaction-control/1`, and
 `cymule.virtual-rehydration-control/1` domains. Their receipts, bounded summary,
 and terminal fence index remain in the additive
-`cymule.virtual-checkpoint/1` payload; exact occurrence bytes remain a cold
+`cymule.virtual-checkpoint/2` payload; exact occurrence bytes remain a cold
 content-addressed Resource behind `VirtualArchive` and never re-enter hot
 Machine Artifacts.
 Certificate `/2` is the terminal pre-release replacement for `/1`; no dual
@@ -123,5 +132,5 @@ Multi-worker control adds independent `cymule.virtual-claim-control/1`,
 `cymule.virtual-lease-renewal-control/1`,
 `cymule.virtual-recovery-control/1`, and
 `cymule.virtual-run-weight-control/1` domains. Their receipts and active lease
-fences remain additive fields in `cymule.virtual-checkpoint/1`; Clock and worker
+fences remain additive fields in `cymule.virtual-checkpoint/2`; Clock and worker
 substrates supply proposals but never mutate scheduler state directly.

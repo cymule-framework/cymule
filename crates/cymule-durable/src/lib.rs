@@ -34,5 +34,6 @@ pub use store::{
     StateSegment, StoreBatch, StoreCommit, StoreHead, StoreStats, restore,
 };
 pub use wait_source::{
-    MAX_WAIT_DELIVERY_TARGETS, ParkedWaitIndex, WaitDelivery, WaitSelection, WaitSourceDriver,
+    MAX_WAIT_DELIVERY_TARGETS, ParkedWaitIndex, SignalKeyPage, WaitDelivery, WaitSelection,
+    WaitSourceDriver,
 };

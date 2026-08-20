@@ -8,7 +8,7 @@ use cymule_durable::{
     DurableError, DurableResult, ParkedWaitIndex, WaitActivationSource, WaitDelivery,
     WaitSourceDriver,
 };
-use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde_json::Value;
 
 /// SQLite-backed durable timer source.
@@ -207,29 +207,40 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
 
     fn acknowledge(&mut self, activation_id: &str) -> DurableResult<()> {
         validate_identity("activation", activation_id)?;
-        self.connection
-            .execute(
-                "UPDATE cymule_timers SET acknowledged = 1
-                 WHERE activation_id = ?1 AND acknowledged = 0",
-                [activation_id],
-            )
-            .map_err(contention)?;
-        let acknowledged = self
+        let transaction = self
             .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(contention)?;
+        let existing: Option<(bool, Option<Vec<u8>>)> = transaction
             .query_row(
-                "SELECT acknowledged FROM cymule_timers WHERE activation_id = ?1",
+                "SELECT acknowledged, selected_wait_ids
+                 FROM cymule_timers WHERE activation_id = ?1",
                 [activation_id],
-                |row| row.get::<_, bool>(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(sqlite_error)?;
-        if acknowledged == Some(true) {
-            Ok(())
-        } else {
-            Err(DurableError::NotFound(format!(
+        let Some((acknowledged, selected)) = existing else {
+            return Err(DurableError::NotFound(format!(
                 "timer activation {activation_id} is missing"
-            )))
+            )));
+        };
+        if selected.is_none() {
+            return Err(DurableError::Validation(format!(
+                "timer activation {activation_id} has not selected durable targets"
+            )));
         }
+        if !acknowledged {
+            transaction
+                .execute(
+                    "UPDATE cymule_timers SET acknowledged = 1
+                     WHERE activation_id = ?1 AND acknowledged = 0
+                       AND selected_wait_ids IS NOT NULL",
+                    [activation_id],
+                )
+                .map_err(sqlite_error)?;
+        }
+        transaction.commit().map_err(sqlite_error)
     }
 }
 

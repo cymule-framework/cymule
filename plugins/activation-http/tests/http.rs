@@ -10,10 +10,15 @@ use cymule_durable::{
     Continuation, ContinuationStatus, DurableState, FrameState, ParkedWaitIndex, WaitCondition,
     WaitKind, WaitSourceDriver, WaitState,
 };
+use rusqlite::{Connection, params};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
 fn index() -> ParkedWaitIndex {
+    index_for_signal("signal:http")
+}
+
+fn index_for_signal(signal_key: &str) -> ParkedWaitIndex {
     let mut state = DurableState::new(Machine::new().snapshot());
     state.continuations.insert(
         "run:http".to_owned(),
@@ -52,7 +57,7 @@ fn index() -> ParkedWaitIndex {
             wait_id: "wait:http".to_owned(),
             run_id: "run:http".to_owned(),
             kind: WaitKind::Signal {
-                key: "signal:http".to_owned(),
+                key: signal_key.to_owned(),
             },
             consume_once: true,
             owner: cymule_durable::WaitOwner {
@@ -188,6 +193,7 @@ async fn durable_ingress_reopens_with_the_exact_selected_delivery() {
     };
     assert!(!first_response.is_finished());
     first_response.abort();
+    let _ = first_response.await;
     drop(driver);
 
     let empty = ParkedWaitIndex::rebuild(&DurableState::new(Machine::new().snapshot()))
@@ -227,4 +233,59 @@ async fn durable_ingress_reopens_with_the_exact_selected_delivery() {
         .await
         .expect("router responds");
     assert_eq!(replay.status(), StatusCode::ACCEPTED);
+}
+
+#[test]
+fn durable_ingress_matches_beyond_an_unrelated_1024_record_prefix() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("http.sqlite");
+    let (_router, mut driver) =
+        durable_signal_router(&database, 4, AllowAll).expect("durable router builds");
+    let connection = Connection::open(&database).expect("spool opens for fixture insertion");
+    let transaction = connection
+        .unchecked_transaction()
+        .expect("fixture transaction begins");
+    for index in 0..1_024 {
+        transaction
+            .execute(
+                "INSERT INTO cymule_http_signals(
+                    activation_id, signal_key, value_json, request_digest,
+                    selected_wait_ids, acknowledged
+                 ) VALUES (?1, ?2, ?3, ?4, NULL, 0)",
+                params![
+                    format!("activation:prefix:{index:04}"),
+                    "signal:unmatched",
+                    br#"{"prefix":true}"#,
+                    format!("digest:{index:04}"),
+                ],
+            )
+            .expect("unmatched fixture inserts");
+    }
+    transaction
+        .execute(
+            "INSERT INTO cymule_http_signals(
+                activation_id, signal_key, value_json, request_digest,
+                selected_wait_ids, acknowledged
+             ) VALUES (?1, ?2, ?3, ?4, NULL, 0)",
+            params![
+                "activation:target",
+                "signal:target",
+                br#"{"matched":true}"#,
+                "digest:target",
+            ],
+        )
+        .expect("matching fixture inserts");
+    transaction.commit().expect("fixture transaction commits");
+
+    let delivery = driver
+        .receive(&index_for_signal("signal:target"), 1)
+        .expect("driver scans indexed signal keys")
+        .expect("matching delivery is not prefix-starved");
+    assert_eq!(delivery.activation_id, "activation:target");
+    assert_eq!(
+        delivery.source,
+        cymule_durable::WaitActivationSource::Signal {
+            key: "signal:target".to_owned()
+        }
+    );
 }

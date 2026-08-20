@@ -557,7 +557,7 @@ def main() -> int:
 
     virtual_checkpoint = load(root / "tests/fixtures/virtual-checkpoint.json")
     virtual_validator = Draft202012Validator(
-        by_title["Cymule Virtual Checkpoint cymule.virtual-checkpoint/1"],
+        by_title["Cymule Virtual Checkpoint cymule.virtual-checkpoint/2"],
         registry=registry,
     )
     virtual_validator.validate(virtual_checkpoint)

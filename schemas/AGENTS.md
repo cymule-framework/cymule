@@ -52,9 +52,11 @@
   recursive delta, checkpoint envelope, and GC receipt. Rust additionally
   verifies every content identity, segment lineage, semantic revision, and the
   checkpoint-plus-suffix replay bound.
-- `virtual-checkpoint.schema.json` owns `cymule.virtual-checkpoint/1` cursor and
-  bounded-frontier journal payloads. The derived parked-reason index is omitted
-  from wire state and rebuilt from the closed parked-work map on restore.
+- `virtual-checkpoint.schema.json` owns `cymule.virtual-checkpoint/2`
+  content-addressed cursor and bounded-frontier delta payloads. Each record
+  authenticates its parent and resulting transition head and never repeats a
+  full `VirtualSnapshot`. The derived parked-reason index is omitted from wire
+  state and rebuilt from the closed parked-work map on restore.
   Its owned definitions also freeze `cymule.virtual-work-occurrence/1` and
   `cymule.virtual-work-control/1`; disposition variants are closed and preserve
   owner, work epoch, lease epoch, logical observation time, and binding

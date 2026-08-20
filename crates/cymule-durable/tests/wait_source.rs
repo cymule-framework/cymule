@@ -272,6 +272,48 @@ fn parked_index_selects_bounded_signal_and_exact_timer_candidates() {
 }
 
 #[test]
+fn signal_key_cursor_eventually_pages_beyond_1024_active_sources() {
+    let mut state = DurableState::new(cymule_core::Machine::new().snapshot());
+    let wait_ids: BTreeSet<String> = (0..1_025)
+        .map(|index| format!("wait:cursor:{index:04}"))
+        .collect();
+    let mut indexed_continuation = continuation(&[]);
+    indexed_continuation.wait_set.clone_from(&wait_ids);
+    state
+        .continuations
+        .insert("run:index".to_owned(), indexed_continuation);
+    for index in 0..1_025 {
+        let wait_id = format!("wait:cursor:{index:04}");
+        state.waits.insert(
+            wait_id.clone(),
+            WaitCondition {
+                wait_id,
+                run_id: "run:index".to_owned(),
+                kind: WaitKind::Signal {
+                    key: format!("signal:cursor:{index:04}"),
+                },
+                consume_once: true,
+                owner: wait_owner(),
+                state: WaitState::Pending,
+                result: None,
+            },
+        );
+    }
+
+    let index = ParkedWaitIndex::rebuild(&state).expect("index rebuilds");
+    let first = index
+        .signal_key_page(None, 1_024)
+        .expect("first source page reads");
+    assert_eq!(first.keys.len(), 1_024);
+    assert_eq!(first.remaining, 1);
+    assert!(!first.keys.contains(&"signal:cursor:1024".to_owned()));
+    let second = index
+        .signal_key_page(first.next_cursor.as_deref(), 1_024)
+        .expect("cursor advances");
+    assert!(second.keys.contains(&"signal:cursor:1024".to_owned()));
+}
+
+#[test]
 fn wait_source_ack_loss_redelivers_one_committed_activation_after_reopen() {
     let run_id = "run:wait-source";
     let mut runtime = open_runtime(MemoryStore::new(), EmptyPlugin).expect("runtime opens");

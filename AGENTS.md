@@ -83,12 +83,17 @@ Use this precedence order when guidance conflicts:
   the base projection digest. Restore recomputes this evidence; a shape-valid
   digest string is never authentication.
 - Signal and timer transport belongs behind `WaitSourceDriver`. Drivers select
-  only from the rebuildable parked-wait index, obey the hard target bound, and
-  acknowledge only after the activation CAS; lost acknowledgement redelivers
-  the identical activation identity and targets.
+  only from the rebuildable parked-wait index, page indexed source identities
+  fairly instead of scanning a fixed transport prefix, obey the hard target
+  bound, and acknowledge only after durable target selection and the activation
+  CAS; lost acknowledgement redelivers the identical activation identity and
+  targets.
 - Virtual-work cursors and bounded scheduler frontiers checkpoint through the M1
-  application-journal CAS. Exact parked-wait indexes are rebuildable projections;
-  activation and the corresponding indexed wake checkpoint commit atomically.
+  application-journal CAS as content-addressed incremental deltas. Each delta
+  has a hard encoded-size bound and authenticates its parent and resulting
+  transition head; never repeat a full `VirtualSnapshot` in every record. Exact
+  parked-wait indexes are rebuildable projections; activation and the
+  corresponding indexed wake checkpoint commit atomically.
 - Every virtual-work claim creates a binding-pinned, epoch-fenced occurrence
   before execution. Success, retry, park, failure, and cancellation are closed
   dispositions; a retry creates a later occurrence and never rewrites history.

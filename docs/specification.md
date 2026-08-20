@@ -47,7 +47,7 @@ The following domains evolve independently:
 | Resource lifecycle receipts | `cymule.resource-*-receipt/1` | pin/release/GC/delete/cleanup operations replay exactly |
 | Wait activation | `cymule.wait-activation/1` | external delivery ID fixes source, targets, and result |
 | Durable control | `cymule.durable-control/1` | closed mutations and queries delegate all admission to Rust |
-| Virtual checkpoint | `cymule.virtual-checkpoint/1` | cursor and bounded frontier advance together |
+| Virtual checkpoint | `cymule.virtual-checkpoint/2` | content-addressed cursor/frontier delta advances one authenticated head |
 | Virtual work occurrence | `cymule.virtual-work-occurrence/1` | one immutable binding per claim epoch |
 | Virtual work control | `cymule.virtual-work-control/1` | stable command ID plus owner/work/lease/time precondition |
 | Virtual region migration | `cymule.virtual-region-migration/1` | opaque cursor coverage and retirement lineage |
@@ -340,9 +340,12 @@ Attempt before interpretation. The yielded Attempt that parked the wait MUST
 NOT be reused.
 
 M3 virtual materialization MUST checkpoint each source-owned successor cursor
-with the complete bounded ready, active, and parked frontier that it produced.
-The checkpoint is a typed M1 application-journal record with a stable ID and an
-explicit parent checkpoint. Reusing the ID with different state MUST fail. A
+with the complete bounded ready, active, and parked frontier mutation that it
+produced. The typed `cymule.virtual-checkpoint/2` M1 application-journal record
+contains only the incremental delta, a content digest, a hard 4 MiB canonical
+delta bound, and authenticated parent/result transition heads; it MUST NOT
+repeat a full `VirtualSnapshot`. The record has a stable ID and an explicit
+parent checkpoint. Reusing the ID with different state MUST fail. A
 failed or stale CAS MUST leave the in-process scheduler at its prior snapshot;
 after an unknown acknowledgement the caller reopens and reads the durable
 checkpoint before retrying the same immutable source cursor.

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound::{Excluded, Included, Unbounded};
 
 use serde_json::Value;
 
@@ -26,6 +27,17 @@ pub struct WaitSelection {
     /// Exact wait identities selected from the parked index.
     pub wait_ids: BTreeSet<String>,
     /// Number of matching waits not represented by this page.
+    pub remaining: usize,
+}
+
+/// One bounded round-robin page of signal keys currently parked in M1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalKeyPage {
+    /// Signal keys after the supplied cursor, wrapping in stable key order.
+    pub keys: Vec<String>,
+    /// Cursor to supply on the next page request.
+    pub next_cursor: Option<String>,
+    /// Number of indexed signal keys outside this page.
     pub remaining: usize,
 }
 
@@ -155,6 +167,41 @@ impl ParkedWaitIndex {
                 })
             }
         }
+    }
+
+    /// Return a bounded provider-neutral round-robin page of active signal keys.
+    ///
+    /// Source plugins use this index page instead of scanning an arbitrary
+    /// transport prefix. Reusing the returned cursor eventually visits every
+    /// key even when earlier transport records have no parked match.
+    pub fn signal_key_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> DurableResult<SignalKeyPage> {
+        validate_limit(limit)?;
+        if self.signals.is_empty() {
+            return Ok(SignalKeyPage {
+                keys: Vec::new(),
+                next_cursor: None,
+                remaining: 0,
+            });
+        }
+        let keys: Vec<String> = match after {
+            Some(cursor) => self
+                .signals
+                .range((Excluded(cursor.to_owned()), Unbounded))
+                .chain(self.signals.range((Unbounded, Included(cursor.to_owned()))))
+                .map(|(key, _)| key.clone())
+                .take(limit)
+                .collect(),
+            None => self.signals.keys().take(limit).cloned().collect(),
+        };
+        Ok(SignalKeyPage {
+            next_cursor: keys.last().cloned(),
+            remaining: self.signals.len().saturating_sub(keys.len()),
+            keys,
+        })
     }
 
     /// Verify that every delivery target is currently parked under its source.

@@ -52,6 +52,14 @@ pub trait RegionMigrator {
 pub struct VirtualScheduler {
     limits: FrontierLimits,
     snapshot: VirtualSnapshot,
+    checkpoint_anchor: Option<VirtualCheckpointAnchor>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VirtualCheckpointAnchor {
+    pub checkpoint_id: String,
+    pub state_digest: String,
+    pub snapshot: Box<VirtualSnapshot>,
 }
 
 impl VirtualScheduler {
@@ -105,6 +113,7 @@ impl VirtualScheduler {
                 recovery_receipts: BTreeMap::new(),
                 run_weight_receipts: BTreeMap::new(),
             },
+            checkpoint_anchor: None,
         })
     }
 
@@ -122,7 +131,11 @@ impl VirtualScheduler {
                 .entry(item.work_id.clone())
                 .or_insert(0);
         }
-        let scheduler = Self { limits, snapshot };
+        let scheduler = Self {
+            limits,
+            snapshot,
+            checkpoint_anchor: None,
+        };
         scheduler.validate_bounds()?;
         Ok(scheduler)
     }
@@ -1080,6 +1093,23 @@ impl VirtualScheduler {
     /// Portable snapshot.
     pub fn snapshot(&self) -> VirtualSnapshot {
         self.snapshot.clone()
+    }
+
+    /// Explicit bounds used to validate and restore this scheduler.
+    pub fn limits(&self) -> FrontierLimits {
+        self.limits
+    }
+
+    pub(crate) fn checkpoint_anchor(&self) -> Option<&VirtualCheckpointAnchor> {
+        self.checkpoint_anchor.as_ref()
+    }
+
+    pub(crate) fn mark_checkpoint(&mut self, checkpoint_id: String, state_digest: String) {
+        self.checkpoint_anchor = Some(VirtualCheckpointAnchor {
+            checkpoint_id,
+            state_digest,
+            snapshot: Box::new(self.snapshot()),
+        });
     }
 
     /// Query one binding-pinned attempt occurrence by stable identity.

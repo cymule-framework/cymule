@@ -9,7 +9,10 @@ mod scheduler;
 pub use archive::{
     VIRTUAL_ARCHIVE_MANIFEST_KIND, VirtualArchive, VirtualArchiveObject, virtual_archive_record,
 };
-pub use durable::{DurableVirtualController, VIRTUAL_CHECKPOINT_SCHEMA, VirtualCheckpoint};
+pub use durable::{
+    DurableVirtualController, MAX_VIRTUAL_CHECKPOINT_DELTA_BYTES, MapDelta, SetDelta,
+    VIRTUAL_CHECKPOINT_SCHEMA, VirtualCheckpoint, VirtualDelta,
+};
 pub use error::{VirtualError, VirtualResult};
 pub use model::{
     ArchivedWorkIndex, ClaimedWork, CompactedWorkIndex, FrontierLimits, MaterializedPage,

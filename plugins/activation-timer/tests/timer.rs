@@ -128,6 +128,27 @@ fn timer_before_due_or_without_a_wait_stays_pending() {
 }
 
 #[test]
+fn timer_cannot_acknowledge_before_target_selection() {
+    let mut driver =
+        SqliteTimerDriver::in_memory_with_clock(ManualClock(100)).expect("driver opens");
+    driver
+        .schedule("activation:unselected", "timer:one", 100, &json!(null))
+        .expect("timer schedules");
+    assert!(matches!(
+        driver.acknowledge("activation:unselected"),
+        Err(cymule_durable::DurableError::Validation(_))
+    ));
+    assert_eq!(
+        driver
+            .receive(&index(), 1)
+            .expect("unacknowledged timer receives")
+            .expect("delivery exists")
+            .activation_id,
+        "activation:unselected"
+    );
+}
+
+#[test]
 fn selected_delivery_survives_reopen_after_the_wait_leaves_the_index() {
     let directory = tempdir().expect("temporary directory creates");
     let database = directory.path().join("timer.sqlite");

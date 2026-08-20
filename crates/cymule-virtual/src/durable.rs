@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use cymule_core::Machine;
 use cymule_durable::{
@@ -7,22 +7,102 @@ use cymule_durable::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ClaimedWork, FrontierLimits, RegionMigrationCommand, RegionMigrationReceipt, RegionMigrator,
-    RegionSource, VIRTUAL_CLAIM_CONTROL_VERSION, VIRTUAL_COMPACTION_CONTROL_VERSION,
+    ClaimedWork, CompactedWorkIndex, FrontierLimits, ParkedWork, RegionMigrationCommand,
+    RegionMigrationReceipt, RegionMigrator, RegionSource, SchedulingPolicy,
+    VIRTUAL_CLAIM_CONTROL_VERSION, VIRTUAL_COMPACTION_CONTROL_VERSION,
     VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION, VIRTUAL_RECOVERY_CONTROL_VERSION,
     VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_REHYDRATION_CONTROL_VERSION,
     VIRTUAL_RUN_WEIGHT_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive,
-    VirtualClaimCommand, VirtualClaimLease, VirtualClaimReceipt, VirtualCompactionCommand,
-    VirtualCompactionReceipt, VirtualError, VirtualLeaseRenewalCommand, VirtualLeaseRenewalReceipt,
-    VirtualRecoveryCommand, VirtualRecoveryReceipt, VirtualRehydrationCommand,
-    VirtualRehydrationReceipt, VirtualResult, VirtualRunWeightCommand, VirtualRunWeightReceipt,
-    VirtualScheduler, VirtualSnapshot, WorkOccurrence, WorkResolution, WorkResolutionCommand,
+    VirtualClaimCommand, VirtualClaimLease, VirtualClaimReceipt, VirtualCompactionCertificate,
+    VirtualCompactionCommand, VirtualCompactionReceipt, VirtualError, VirtualLeaseRenewalCommand,
+    VirtualLeaseRenewalReceipt, VirtualRecoveryCommand, VirtualRecoveryReceipt, VirtualRegion,
+    VirtualRehydrationCommand, VirtualRehydrationReceipt, VirtualResult, VirtualRunWeightCommand,
+    VirtualRunWeightReceipt, VirtualScheduler, VirtualSnapshot, WorkItem, WorkOccurrence,
+    WorkResolution, WorkResolutionCommand,
 };
 
 /// Versioned M3 scheduler checkpoint stored in an M1 application journal.
-pub const VIRTUAL_CHECKPOINT_SCHEMA: &str = "cymule.virtual-checkpoint/1";
+pub const VIRTUAL_CHECKPOINT_SCHEMA: &str = "cymule.virtual-checkpoint/2";
+/// Hard encoded-size bound for one authenticated M3 journal delta.
+pub const MAX_VIRTUAL_CHECKPOINT_DELTA_BYTES: usize = 4 * 1024 * 1024;
 
-/// One full bounded scheduler checkpoint with explicit journal lineage.
+/// Incremental changes to one string-keyed scheduler map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MapDelta<T> {
+    /// New or changed values keyed by canonical scheduler identity.
+    pub upsert: BTreeMap<String, T>,
+    /// Existing identities removed by this transition.
+    pub remove: BTreeSet<String>,
+}
+
+/// Incremental changes to one scheduler identity set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetDelta {
+    /// Identities added by this transition.
+    pub add: BTreeSet<String>,
+    /// Existing identities removed by this transition.
+    pub remove: BTreeSet<String>,
+}
+
+/// One bounded scheduler transition encoded without repeating prior state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualDelta {
+    /// Resulting frozen scheduling policy.
+    pub scheduling_policy: SchedulingPolicy,
+    /// Region mutations.
+    pub regions: MapDelta<VirtualRegion>,
+    /// Per-Run ready-frontier mutations.
+    pub ready: MapDelta<VecDeque<WorkItem>>,
+    /// Active-claim mutations.
+    pub active: MapDelta<ClaimedWork>,
+    /// Parked-work mutations.
+    pub parked: MapDelta<ParkedWork>,
+    /// Materialized-identity mutations.
+    pub known: SetDelta,
+    /// Resulting Run fairness cursor.
+    pub last_run: Option<String>,
+    /// Resulting region visibility cursor.
+    pub last_region: Option<String>,
+    /// Work claim-epoch mutations.
+    pub claim_epochs: MapDelta<u64>,
+    /// Occurrence mutations.
+    pub occurrences: MapDelta<WorkOccurrence>,
+    /// Run weight mutations.
+    pub run_weights: MapDelta<u32>,
+    /// Run deficit mutations.
+    pub run_deficits: MapDelta<u64>,
+    /// Resulting successful dispatch sequence.
+    pub dispatch_sequence: u64,
+    /// Ready-age mutations.
+    pub ready_since: MapDelta<u64>,
+    /// Retired-region mutations.
+    pub retired_regions: MapDelta<String>,
+    /// Migration-receipt mutations.
+    pub migrations: MapDelta<RegionMigrationReceipt>,
+    /// Cold-history certificate mutations.
+    pub compactions: MapDelta<VirtualCompactionCertificate>,
+    /// Compaction-receipt mutations.
+    pub compaction_receipts: MapDelta<VirtualCompactionReceipt>,
+    /// Terminal compacted-work index mutations.
+    pub compacted_work: MapDelta<CompactedWorkIndex>,
+    /// Region-to-certificate mutations.
+    pub compacted_regions: MapDelta<String>,
+    /// Rehydration-receipt mutations.
+    pub rehydration_receipts: MapDelta<VirtualRehydrationReceipt>,
+    /// Claim-receipt mutations.
+    pub claim_receipts: MapDelta<VirtualClaimReceipt>,
+    /// Lease-renewal-receipt mutations.
+    pub lease_renewal_receipts: MapDelta<VirtualLeaseRenewalReceipt>,
+    /// Recovery-receipt mutations.
+    pub recovery_receipts: MapDelta<VirtualRecoveryReceipt>,
+    /// Run-weight-receipt mutations.
+    pub run_weight_receipts: MapDelta<VirtualRunWeightReceipt>,
+}
+
+/// One content-addressed bounded scheduler delta with explicit journal lineage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VirtualCheckpoint {
@@ -32,8 +112,14 @@ pub struct VirtualCheckpoint {
     pub checkpoint_id: String,
     /// Previous checkpoint record in this exact journal.
     pub parent_checkpoint: Option<String>,
-    /// Portable bounded scheduler state, including every region cursor.
-    pub snapshot: VirtualSnapshot,
+    /// Authenticated transition head to which `delta` applies.
+    pub parent_state_digest: String,
+    /// Authenticated transition head after `delta` is applied.
+    pub state_digest: String,
+    /// Content identity of the exact incremental delta.
+    pub delta_digest: String,
+    /// Incremental scheduler mutation; prior snapshots are never repeated.
+    pub delta: VirtualDelta,
     /// Control command committed by this checkpoint, when any.
     #[serde(default)]
     pub control: Option<WorkResolutionCommand>,
@@ -84,6 +170,202 @@ pub struct VirtualCheckpoint {
     pub receipt_run_weight_id: Option<String>,
 }
 
+impl VirtualDelta {
+    fn between(before: &VirtualSnapshot, after: &VirtualSnapshot) -> Self {
+        Self {
+            scheduling_policy: after.scheduling_policy,
+            regions: map_delta(&before.regions, &after.regions),
+            ready: map_delta(&before.ready, &after.ready),
+            active: map_delta(&before.active, &after.active),
+            parked: map_delta(&before.parked, &after.parked),
+            known: set_delta(&before.known, &after.known),
+            last_run: after.last_run.clone(),
+            last_region: after.last_region.clone(),
+            claim_epochs: map_delta(&before.claim_epochs, &after.claim_epochs),
+            occurrences: map_delta(&before.occurrences, &after.occurrences),
+            run_weights: map_delta(&before.run_weights, &after.run_weights),
+            run_deficits: map_delta(&before.run_deficits, &after.run_deficits),
+            dispatch_sequence: after.dispatch_sequence,
+            ready_since: map_delta(&before.ready_since, &after.ready_since),
+            retired_regions: map_delta(&before.retired_regions, &after.retired_regions),
+            migrations: map_delta(&before.migrations, &after.migrations),
+            compactions: map_delta(&before.compactions, &after.compactions),
+            compaction_receipts: map_delta(&before.compaction_receipts, &after.compaction_receipts),
+            compacted_work: map_delta(&before.compacted_work, &after.compacted_work),
+            compacted_regions: map_delta(&before.compacted_regions, &after.compacted_regions),
+            rehydration_receipts: map_delta(
+                &before.rehydration_receipts,
+                &after.rehydration_receipts,
+            ),
+            claim_receipts: map_delta(&before.claim_receipts, &after.claim_receipts),
+            lease_renewal_receipts: map_delta(
+                &before.lease_renewal_receipts,
+                &after.lease_renewal_receipts,
+            ),
+            recovery_receipts: map_delta(&before.recovery_receipts, &after.recovery_receipts),
+            run_weight_receipts: map_delta(&before.run_weight_receipts, &after.run_weight_receipts),
+        }
+    }
+
+    fn apply(&self, snapshot: &mut VirtualSnapshot) -> VirtualResult<()> {
+        snapshot.scheduling_policy = self.scheduling_policy;
+        apply_map_delta(&mut snapshot.regions, &self.regions, "regions")?;
+        apply_map_delta(&mut snapshot.ready, &self.ready, "ready")?;
+        apply_map_delta(&mut snapshot.active, &self.active, "active")?;
+        apply_map_delta(&mut snapshot.parked, &self.parked, "parked")?;
+        apply_set_delta(&mut snapshot.known, &self.known, "known")?;
+        snapshot.last_run.clone_from(&self.last_run);
+        snapshot.last_region.clone_from(&self.last_region);
+        apply_map_delta(
+            &mut snapshot.claim_epochs,
+            &self.claim_epochs,
+            "claim_epochs",
+        )?;
+        apply_map_delta(&mut snapshot.occurrences, &self.occurrences, "occurrences")?;
+        apply_map_delta(&mut snapshot.run_weights, &self.run_weights, "run_weights")?;
+        apply_map_delta(
+            &mut snapshot.run_deficits,
+            &self.run_deficits,
+            "run_deficits",
+        )?;
+        snapshot.dispatch_sequence = self.dispatch_sequence;
+        apply_map_delta(&mut snapshot.ready_since, &self.ready_since, "ready_since")?;
+        apply_map_delta(
+            &mut snapshot.retired_regions,
+            &self.retired_regions,
+            "retired_regions",
+        )?;
+        apply_map_delta(&mut snapshot.migrations, &self.migrations, "migrations")?;
+        apply_map_delta(&mut snapshot.compactions, &self.compactions, "compactions")?;
+        apply_map_delta(
+            &mut snapshot.compaction_receipts,
+            &self.compaction_receipts,
+            "compaction_receipts",
+        )?;
+        apply_map_delta(
+            &mut snapshot.compacted_work,
+            &self.compacted_work,
+            "compacted_work",
+        )?;
+        apply_map_delta(
+            &mut snapshot.compacted_regions,
+            &self.compacted_regions,
+            "compacted_regions",
+        )?;
+        apply_map_delta(
+            &mut snapshot.rehydration_receipts,
+            &self.rehydration_receipts,
+            "rehydration_receipts",
+        )?;
+        apply_map_delta(
+            &mut snapshot.claim_receipts,
+            &self.claim_receipts,
+            "claim_receipts",
+        )?;
+        apply_map_delta(
+            &mut snapshot.lease_renewal_receipts,
+            &self.lease_renewal_receipts,
+            "lease_renewal_receipts",
+        )?;
+        apply_map_delta(
+            &mut snapshot.recovery_receipts,
+            &self.recovery_receipts,
+            "recovery_receipts",
+        )?;
+        apply_map_delta(
+            &mut snapshot.run_weight_receipts,
+            &self.run_weight_receipts,
+            "run_weight_receipts",
+        )?;
+        snapshot.parked_index.clear();
+        Ok(())
+    }
+}
+
+fn map_delta<T: Clone + PartialEq>(
+    before: &BTreeMap<String, T>,
+    after: &BTreeMap<String, T>,
+) -> MapDelta<T> {
+    MapDelta {
+        upsert: after
+            .iter()
+            .filter(|(key, value)| before.get(*key) != Some(*value))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        remove: before
+            .keys()
+            .filter(|key| !after.contains_key(*key))
+            .cloned()
+            .collect(),
+    }
+}
+
+fn set_delta(before: &BTreeSet<String>, after: &BTreeSet<String>) -> SetDelta {
+    SetDelta {
+        add: after.difference(before).cloned().collect(),
+        remove: before.difference(after).cloned().collect(),
+    }
+}
+
+fn apply_map_delta<T: Clone + PartialEq>(
+    target: &mut BTreeMap<String, T>,
+    delta: &MapDelta<T>,
+    field: &str,
+) -> VirtualResult<()> {
+    if delta
+        .upsert
+        .keys()
+        .any(|identity| delta.remove.contains(identity))
+    {
+        return Err(VirtualError::Validation(format!(
+            "virtual delta {field} upserts and removes the same identity"
+        )));
+    }
+    for identity in &delta.remove {
+        if target.remove(identity).is_none() {
+            return Err(VirtualError::Validation(format!(
+                "virtual delta {field} removes missing identity {identity}"
+            )));
+        }
+    }
+    for (identity, value) in &delta.upsert {
+        if target.get(identity) == Some(value) {
+            return Err(VirtualError::Validation(format!(
+                "virtual delta {field} redundantly upserts identity {identity}"
+            )));
+        }
+        target.insert(identity.clone(), value.clone());
+    }
+    Ok(())
+}
+
+fn apply_set_delta(
+    target: &mut BTreeSet<String>,
+    delta: &SetDelta,
+    field: &str,
+) -> VirtualResult<()> {
+    if !delta.add.is_disjoint(&delta.remove) {
+        return Err(VirtualError::Validation(format!(
+            "virtual delta {field} adds and removes the same identity"
+        )));
+    }
+    for identity in &delta.remove {
+        if !target.remove(identity) {
+            return Err(VirtualError::Validation(format!(
+                "virtual delta {field} removes missing identity {identity}"
+            )));
+        }
+    }
+    for identity in &delta.add {
+        if !target.insert(identity.clone()) {
+            return Err(VirtualError::Validation(format!(
+                "virtual delta {field} redundantly adds identity {identity}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// M1 journal integration for the M3 virtual scheduler.
 pub struct DurableVirtualController;
 
@@ -101,7 +383,8 @@ impl DurableVirtualController {
             return VirtualScheduler::new(limits);
         }
         let mut parent = None;
-        let mut restored = None;
+        let mut state_digest = virtual_genesis_digest()?;
+        let mut snapshot = VirtualScheduler::new(limits)?.snapshot();
         for record in records {
             let checkpoint = decode_checkpoint(record)?;
             if checkpoint.parent_checkpoint != parent {
@@ -110,25 +393,39 @@ impl DurableVirtualController {
                     checkpoint.checkpoint_id
                 )));
             }
-            restored = Some(VirtualScheduler::restore(limits, checkpoint.snapshot)?);
+            if checkpoint.parent_state_digest != state_digest {
+                return Err(VirtualError::Validation(format!(
+                    "virtual checkpoint {} has a discontinuous authenticated state parent",
+                    checkpoint.checkpoint_id
+                )));
+            }
+            checkpoint.delta.apply(&mut snapshot)?;
+            validate_checkpoint_receipt(&checkpoint, &snapshot)?;
+            state_digest.clone_from(&checkpoint.state_digest);
             parent = Some(checkpoint.checkpoint_id);
         }
-        restored.ok_or_else(|| {
-            VirtualError::Validation("virtual checkpoint journal did not restore".to_owned())
-        })
+        let mut restored = VirtualScheduler::restore(limits, snapshot)?;
+        restored.mark_checkpoint(
+            parent.expect("non-empty virtual journal has a checkpoint head"),
+            state_digest,
+        );
+        Ok(restored)
     }
 
     /// Persist the current scheduler snapshot under one idempotent checkpoint.
     pub fn checkpoint<S: DurableStore>(
         coordinator: &mut DurableCoordinator<S>,
-        scheduler: &VirtualScheduler,
+        scheduler: &mut VirtualScheduler,
         journal_id: &str,
         checkpoint_id: &str,
     ) -> VirtualResult<String> {
         let record = checkpoint_record(coordinator, scheduler, journal_id, checkpoint_id)?;
-        coordinator
+        let head = checkpoint_head(&record)?;
+        let revision = coordinator
             .append_journal_record(journal_id, record)
-            .map_err(durable_error)
+            .map_err(durable_error)?;
+        scheduler.mark_checkpoint(head.0, head.1);
+        Ok(revision)
     }
 
     /// Materialize one bounded source page and commit its cursor plus frontier
@@ -260,6 +557,7 @@ impl DurableVirtualController {
             *scheduler = before;
             return Err(durable_error(error));
         }
+        mark_current_checkpoint(coordinator, scheduler, journal_id)?;
         Ok(receipt)
     }
 
@@ -322,6 +620,7 @@ impl DurableVirtualController {
             *scheduler = before;
             return Err(durable_error(error));
         }
+        mark_current_checkpoint(coordinator, scheduler, journal_id)?;
         Ok(receipt)
     }
 
@@ -381,6 +680,7 @@ impl DurableVirtualController {
             *scheduler = before;
             return Err(durable_error(error));
         }
+        mark_current_checkpoint(coordinator, scheduler, journal_id)?;
         Ok(receipt)
     }
 
@@ -411,6 +711,7 @@ impl DurableVirtualController {
             *scheduler = before;
             return Err(durable_error(error));
         }
+        mark_current_checkpoint(coordinator, scheduler, journal_id)?;
         Ok(receipt)
     }
 
@@ -472,6 +773,7 @@ impl DurableVirtualController {
             *scheduler = before;
             return Err(durable_error(error));
         }
+        mark_current_checkpoint(coordinator, scheduler, journal_id)?;
         Ok(occurrence)
     }
 
@@ -520,6 +822,7 @@ impl DurableVirtualController {
             *scheduler = before;
             return Err(durable_error(error));
         }
+        mark_current_checkpoint(coordinator, scheduler, journal_id)?;
         Ok(receipt)
     }
 
@@ -602,6 +905,7 @@ impl DurableVirtualController {
             *scheduler = scheduler_before;
             return Err(durable_error(error));
         }
+        mark_current_checkpoint(coordinator, scheduler, journal_id)?;
         Ok(receipt)
     }
 
@@ -633,6 +937,7 @@ impl DurableVirtualController {
             *scheduler = before;
             return Err(durable_error(error));
         }
+        mark_current_checkpoint(coordinator, scheduler, journal_id)?;
         Ok(receipt)
     }
 
@@ -665,6 +970,7 @@ impl DurableVirtualController {
             *scheduler = before;
             return Err(durable_error(error));
         }
+        mark_current_checkpoint(coordinator, scheduler, journal_id)?;
         Ok(woken)
     }
 }
@@ -701,6 +1007,146 @@ fn ensure_journal_batches_retained<S: DurableStore>(
     Ok(())
 }
 
+fn new_checkpoint(
+    records: &[JournalRecord],
+    before: &VirtualScheduler,
+    after: &VirtualScheduler,
+    checkpoint_id: &str,
+) -> VirtualResult<VirtualCheckpoint> {
+    let parent_checkpoint = records.last().map(|record| record.record_id.clone());
+    let parent_state_digest = match records.last() {
+        Some(record) => decode_checkpoint(record)?.state_digest,
+        None => virtual_genesis_digest()?,
+    };
+    let before_snapshot = before.snapshot();
+    let after_snapshot = after.snapshot();
+    let delta = VirtualDelta::between(&before_snapshot, &after_snapshot);
+    let mut applied = before_snapshot;
+    delta.apply(&mut applied)?;
+    if serde_json::to_value(&applied).map_err(validation_error)?
+        != serde_json::to_value(&after_snapshot).map_err(validation_error)?
+    {
+        return Err(VirtualError::Validation(
+            "virtual delta does not reproduce the proposed scheduler state".to_owned(),
+        ));
+    }
+    let delta_bytes = cymule_core::canonical_bytes(&delta).map_err(validation_error)?;
+    if delta_bytes.len() > MAX_VIRTUAL_CHECKPOINT_DELTA_BYTES {
+        return Err(VirtualError::Validation(format!(
+            "virtual checkpoint delta is {} bytes, above the {} byte bound",
+            delta_bytes.len(),
+            MAX_VIRTUAL_CHECKPOINT_DELTA_BYTES
+        )));
+    }
+    let delta_digest = cymule_core::canonical_digest(&delta).map_err(validation_error)?;
+    let state_digest = cymule_core::canonical_digest(&(
+        VIRTUAL_CHECKPOINT_SCHEMA,
+        parent_state_digest.as_str(),
+        delta_digest.as_str(),
+    ))
+    .map_err(validation_error)?;
+    Ok(VirtualCheckpoint {
+        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
+        checkpoint_id: checkpoint_id.to_owned(),
+        parent_checkpoint,
+        parent_state_digest,
+        state_digest,
+        delta_digest,
+        delta,
+        control: None,
+        receipt_occurrence_id: None,
+        migration_control: None,
+        receipt_migration_id: None,
+        compaction_control: None,
+        receipt_compaction_id: None,
+        rehydration_control: None,
+        receipt_rehydration_id: None,
+        claim_control: None,
+        receipt_claim_id: None,
+        lease_renewal_control: None,
+        receipt_lease_renewal_id: None,
+        recovery_control: None,
+        receipt_recovery_id: None,
+        run_weight_control: None,
+        receipt_run_weight_id: None,
+    })
+}
+
+fn new_checkpoint_for_scheduler<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    records: &[JournalRecord],
+    scheduler: &VirtualScheduler,
+    journal_id: &str,
+    checkpoint_id: &str,
+) -> VirtualResult<VirtualCheckpoint> {
+    let before = if let Some(anchor) = scheduler.checkpoint_anchor() {
+        let current = records.last().ok_or_else(|| {
+            VirtualError::Conflict(
+                "virtual scheduler checkpoint anchor has no durable journal head".to_owned(),
+            )
+        })?;
+        let current_checkpoint = decode_checkpoint(current)?;
+        if current.record_id != anchor.checkpoint_id
+            || current_checkpoint.state_digest != anchor.state_digest
+        {
+            return Err(VirtualError::Conflict(
+                "virtual scheduler checkpoint anchor is stale".to_owned(),
+            ));
+        }
+        VirtualScheduler::restore(scheduler.limits(), (*anchor.snapshot).clone())?
+    } else if records.is_empty() {
+        VirtualScheduler::new(scheduler.limits())?
+    } else {
+        DurableVirtualController::load(coordinator, journal_id, scheduler.limits()).map_err(
+            |_| {
+                VirtualError::Conflict(
+                    "virtual scheduler with durable history must be loaded through its journal"
+                        .to_owned(),
+                )
+            },
+        )?
+    };
+    new_checkpoint(records, &before, scheduler, checkpoint_id)
+}
+
+fn encode_checkpoint(checkpoint: VirtualCheckpoint) -> VirtualResult<JournalRecord> {
+    let checkpoint_id = checkpoint.checkpoint_id.clone();
+    let payload = serde_json::to_value(checkpoint).map_err(validation_error)?;
+    JournalRecord::new(checkpoint_id, VIRTUAL_CHECKPOINT_SCHEMA, payload).map_err(durable_error)
+}
+
+fn checkpoint_head(record: &JournalRecord) -> VirtualResult<(String, String)> {
+    let checkpoint = decode_checkpoint(record)?;
+    Ok((checkpoint.checkpoint_id, checkpoint.state_digest))
+}
+
+fn mark_current_checkpoint<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    scheduler: &mut VirtualScheduler,
+    journal_id: &str,
+) -> VirtualResult<()> {
+    let record = coordinator
+        .journal_records(journal_id)
+        .map_err(durable_error)?
+        .last()
+        .ok_or_else(|| {
+            VirtualError::Validation(
+                "committed virtual transition has no journal checkpoint".to_owned(),
+            )
+        })?;
+    let head = checkpoint_head(record)?;
+    scheduler.mark_checkpoint(head.0, head.1);
+    Ok(())
+}
+
+fn virtual_genesis_digest() -> VirtualResult<String> {
+    cymule_core::canonical_digest(&(VIRTUAL_CHECKPOINT_SCHEMA, "genesis")).map_err(validation_error)
+}
+
+fn validation_error(error: impl std::fmt::Display) -> VirtualError {
+    VirtualError::Validation(error.to_string())
+}
+
 fn checkpoint_record<S: DurableStore>(
     coordinator: &DurableCoordinator<S>,
     scheduler: &VirtualScheduler,
@@ -733,7 +1179,9 @@ fn checkpoint_record<S: DurableStore>(
             || checkpoint.lease_renewal_control.is_some()
             || checkpoint.recovery_control.is_some()
             || checkpoint.run_weight_control.is_some()
-            || checkpoint.snapshot != scheduler.snapshot()
+            || DurableVirtualController::load(coordinator, journal_id, scheduler.limits())?
+                .snapshot()
+                != scheduler.snapshot()
         {
             return Err(VirtualError::Conflict(format!(
                 "virtual checkpoint {checkpoint_id} already has different state"
@@ -741,31 +1189,13 @@ fn checkpoint_record<S: DurableStore>(
         }
         return Ok(existing.clone());
     }
-    let checkpoint = VirtualCheckpoint {
-        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
-        checkpoint_id: checkpoint_id.to_owned(),
-        parent_checkpoint: records.last().map(|record| record.record_id.clone()),
-        snapshot: scheduler.snapshot(),
-        control: None,
-        receipt_occurrence_id: None,
-        migration_control: None,
-        receipt_migration_id: None,
-        compaction_control: None,
-        receipt_compaction_id: None,
-        rehydration_control: None,
-        receipt_rehydration_id: None,
-        claim_control: None,
-        receipt_claim_id: None,
-        lease_renewal_control: None,
-        receipt_lease_renewal_id: None,
-        recovery_control: None,
-        receipt_recovery_id: None,
-        run_weight_control: None,
-        receipt_run_weight_id: None,
-    };
-    let payload = serde_json::to_value(checkpoint)
-        .map_err(|error| VirtualError::Validation(error.to_string()))?;
-    JournalRecord::new(checkpoint_id, VIRTUAL_CHECKPOINT_SCHEMA, payload).map_err(durable_error)
+    encode_checkpoint(new_checkpoint_for_scheduler(
+        coordinator,
+        records,
+        scheduler,
+        journal_id,
+        checkpoint_id,
+    )?)
 }
 
 fn control_checkpoint_record<S: DurableStore>(
@@ -787,32 +1217,16 @@ fn control_checkpoint_record<S: DurableStore>(
             command.command_id
         )));
     }
-    let checkpoint = VirtualCheckpoint {
-        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
-        checkpoint_id: command.command_id.clone(),
-        parent_checkpoint: records.last().map(|record| record.record_id.clone()),
-        snapshot: scheduler.snapshot(),
-        control: Some(command.clone()),
-        receipt_occurrence_id: Some(occurrence_id.to_owned()),
-        migration_control: None,
-        receipt_migration_id: None,
-        compaction_control: None,
-        receipt_compaction_id: None,
-        rehydration_control: None,
-        receipt_rehydration_id: None,
-        claim_control: None,
-        receipt_claim_id: None,
-        lease_renewal_control: None,
-        receipt_lease_renewal_id: None,
-        recovery_control: None,
-        receipt_recovery_id: None,
-        run_weight_control: None,
-        receipt_run_weight_id: None,
-    };
-    let payload = serde_json::to_value(checkpoint)
-        .map_err(|error| VirtualError::Validation(error.to_string()))?;
-    JournalRecord::new(&command.command_id, VIRTUAL_CHECKPOINT_SCHEMA, payload)
-        .map_err(durable_error)
+    let mut checkpoint = new_checkpoint_for_scheduler(
+        coordinator,
+        records,
+        scheduler,
+        journal_id,
+        &command.command_id,
+    )?;
+    checkpoint.control = Some(command.clone());
+    checkpoint.receipt_occurrence_id = Some(occurrence_id.to_owned());
+    encode_checkpoint(checkpoint)
 }
 
 fn replay_control_receipt<S: DurableStore>(
@@ -870,32 +1284,16 @@ fn migration_checkpoint_record<S: DurableStore>(
             command.command_id
         )));
     }
-    let checkpoint = VirtualCheckpoint {
-        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
-        checkpoint_id: command.command_id.clone(),
-        parent_checkpoint: records.last().map(|record| record.record_id.clone()),
-        snapshot: scheduler.snapshot(),
-        control: None,
-        receipt_occurrence_id: None,
-        migration_control: Some(command.clone()),
-        receipt_migration_id: Some(command.plan.migration_id.clone()),
-        compaction_control: None,
-        receipt_compaction_id: None,
-        rehydration_control: None,
-        receipt_rehydration_id: None,
-        claim_control: None,
-        receipt_claim_id: None,
-        lease_renewal_control: None,
-        receipt_lease_renewal_id: None,
-        recovery_control: None,
-        receipt_recovery_id: None,
-        run_weight_control: None,
-        receipt_run_weight_id: None,
-    };
-    let payload = serde_json::to_value(checkpoint)
-        .map_err(|error| VirtualError::Validation(error.to_string()))?;
-    JournalRecord::new(&command.command_id, VIRTUAL_CHECKPOINT_SCHEMA, payload)
-        .map_err(durable_error)
+    let mut checkpoint = new_checkpoint_for_scheduler(
+        coordinator,
+        records,
+        scheduler,
+        journal_id,
+        &command.command_id,
+    )?;
+    checkpoint.migration_control = Some(command.clone());
+    checkpoint.receipt_migration_id = Some(command.plan.migration_id.clone());
+    encode_checkpoint(checkpoint)
 }
 
 fn replay_migration_receipt<S: DurableStore>(
@@ -954,32 +1352,16 @@ fn compaction_checkpoint_record<S: DurableStore>(
             command.command_id
         )));
     }
-    let checkpoint = VirtualCheckpoint {
-        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
-        checkpoint_id: command.command_id.clone(),
-        parent_checkpoint: records.last().map(|record| record.record_id.clone()),
-        snapshot: scheduler.snapshot(),
-        control: None,
-        receipt_occurrence_id: None,
-        migration_control: None,
-        receipt_migration_id: None,
-        compaction_control: Some(command.clone()),
-        receipt_compaction_id: Some(certificate_id.to_owned()),
-        rehydration_control: None,
-        receipt_rehydration_id: None,
-        claim_control: None,
-        receipt_claim_id: None,
-        lease_renewal_control: None,
-        receipt_lease_renewal_id: None,
-        recovery_control: None,
-        receipt_recovery_id: None,
-        run_weight_control: None,
-        receipt_run_weight_id: None,
-    };
-    let payload = serde_json::to_value(checkpoint)
-        .map_err(|error| VirtualError::Validation(error.to_string()))?;
-    JournalRecord::new(&command.command_id, VIRTUAL_CHECKPOINT_SCHEMA, payload)
-        .map_err(durable_error)
+    let mut checkpoint = new_checkpoint_for_scheduler(
+        coordinator,
+        records,
+        scheduler,
+        journal_id,
+        &command.command_id,
+    )?;
+    checkpoint.compaction_control = Some(command.clone());
+    checkpoint.receipt_compaction_id = Some(certificate_id.to_owned());
+    encode_checkpoint(checkpoint)
 }
 
 fn replay_compaction_receipt<S: DurableStore>(
@@ -1043,32 +1425,16 @@ fn rehydration_checkpoint_record<S: DurableStore>(
             command.command_id
         )));
     }
-    let checkpoint = VirtualCheckpoint {
-        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
-        checkpoint_id: command.command_id.clone(),
-        parent_checkpoint: records.last().map(|record| record.record_id.clone()),
-        snapshot: scheduler.snapshot(),
-        control: None,
-        receipt_occurrence_id: None,
-        migration_control: None,
-        receipt_migration_id: None,
-        compaction_control: None,
-        receipt_compaction_id: None,
-        rehydration_control: Some(command.clone()),
-        receipt_rehydration_id: Some(command.command_id.clone()),
-        claim_control: None,
-        receipt_claim_id: None,
-        lease_renewal_control: None,
-        receipt_lease_renewal_id: None,
-        recovery_control: None,
-        receipt_recovery_id: None,
-        run_weight_control: None,
-        receipt_run_weight_id: None,
-    };
-    let payload = serde_json::to_value(checkpoint)
-        .map_err(|error| VirtualError::Validation(error.to_string()))?;
-    JournalRecord::new(&command.command_id, VIRTUAL_CHECKPOINT_SCHEMA, payload)
-        .map_err(durable_error)
+    let mut checkpoint = new_checkpoint_for_scheduler(
+        coordinator,
+        records,
+        scheduler,
+        journal_id,
+        &command.command_id,
+    )?;
+    checkpoint.rehydration_control = Some(command.clone());
+    checkpoint.receipt_rehydration_id = Some(command.command_id.clone());
+    encode_checkpoint(checkpoint)
 }
 
 fn replay_rehydration_receipt<S: DurableStore>(
@@ -1120,12 +1486,16 @@ fn claim_checkpoint_record<S: DurableStore>(
         .map_err(durable_error)?;
     reject_existing_control_record(records, &command.command_id, "virtual claim")?;
     scheduling_checkpoint_record(
-        records.last().map(|record| record.record_id.clone()),
+        coordinator,
+        records,
         scheduler,
+        journal_id,
         &command.command_id,
-        Some(command.clone()),
-        None,
-        None,
+        SchedulingControls {
+            claim: Some(command.clone()),
+            lease_renewal: None,
+            recovery: None,
+        },
     )
 }
 
@@ -1178,12 +1548,16 @@ fn lease_renewal_checkpoint_record<S: DurableStore>(
         .map_err(durable_error)?;
     reject_existing_control_record(records, &command.command_id, "virtual lease renewal")?;
     scheduling_checkpoint_record(
-        records.last().map(|record| record.record_id.clone()),
+        coordinator,
+        records,
         scheduler,
+        journal_id,
         &command.command_id,
-        None,
-        Some(command.clone()),
-        None,
+        SchedulingControls {
+            claim: None,
+            lease_renewal: Some(command.clone()),
+            recovery: None,
+        },
     )
 }
 
@@ -1236,12 +1610,16 @@ fn recovery_checkpoint_record<S: DurableStore>(
         .map_err(durable_error)?;
     reject_existing_control_record(records, &command.command_id, "virtual recovery")?;
     scheduling_checkpoint_record(
-        records.last().map(|record| record.record_id.clone()),
+        coordinator,
+        records,
         scheduler,
+        journal_id,
         &command.command_id,
-        None,
-        None,
-        Some(command.clone()),
+        SchedulingControls {
+            claim: None,
+            lease_renewal: None,
+            recovery: Some(command.clone()),
+        },
     )
 }
 
@@ -1293,32 +1671,16 @@ fn run_weight_checkpoint_record<S: DurableStore>(
         .journal_records(journal_id)
         .map_err(durable_error)?;
     reject_existing_control_record(records, &command.command_id, "virtual Run weight")?;
-    let checkpoint = VirtualCheckpoint {
-        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
-        checkpoint_id: command.command_id.clone(),
-        parent_checkpoint: records.last().map(|record| record.record_id.clone()),
-        snapshot: scheduler.snapshot(),
-        control: None,
-        receipt_occurrence_id: None,
-        migration_control: None,
-        receipt_migration_id: None,
-        compaction_control: None,
-        receipt_compaction_id: None,
-        rehydration_control: None,
-        receipt_rehydration_id: None,
-        claim_control: None,
-        receipt_claim_id: None,
-        lease_renewal_control: None,
-        receipt_lease_renewal_id: None,
-        recovery_control: None,
-        receipt_recovery_id: None,
-        run_weight_control: Some(command.clone()),
-        receipt_run_weight_id: Some(command.command_id.clone()),
-    };
-    let payload = serde_json::to_value(checkpoint)
-        .map_err(|error| VirtualError::Validation(error.to_string()))?;
-    JournalRecord::new(&command.command_id, VIRTUAL_CHECKPOINT_SCHEMA, payload)
-        .map_err(durable_error)
+    let mut checkpoint = new_checkpoint_for_scheduler(
+        coordinator,
+        records,
+        scheduler,
+        journal_id,
+        &command.command_id,
+    )?;
+    checkpoint.run_weight_control = Some(command.clone());
+    checkpoint.receipt_run_weight_id = Some(command.command_id.clone());
+    encode_checkpoint(checkpoint)
 }
 
 fn replay_run_weight_receipt<S: DurableStore>(
@@ -1359,41 +1721,32 @@ fn replay_run_weight_receipt<S: DurableStore>(
     Ok(Some(receipt))
 }
 
-fn scheduling_checkpoint_record(
-    parent_checkpoint: Option<String>,
+struct SchedulingControls {
+    claim: Option<VirtualClaimCommand>,
+    lease_renewal: Option<VirtualLeaseRenewalCommand>,
+    recovery: Option<VirtualRecoveryCommand>,
+}
+
+fn scheduling_checkpoint_record<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    records: &[JournalRecord],
     scheduler: &VirtualScheduler,
+    journal_id: &str,
     command_id: &str,
-    claim_control: Option<VirtualClaimCommand>,
-    lease_renewal_control: Option<VirtualLeaseRenewalCommand>,
-    recovery_control: Option<VirtualRecoveryCommand>,
+    controls: SchedulingControls,
 ) -> VirtualResult<JournalRecord> {
-    let checkpoint = VirtualCheckpoint {
-        checkpoint_version: VIRTUAL_CHECKPOINT_SCHEMA.to_owned(),
-        checkpoint_id: command_id.to_owned(),
-        parent_checkpoint,
-        snapshot: scheduler.snapshot(),
-        control: None,
-        receipt_occurrence_id: None,
-        migration_control: None,
-        receipt_migration_id: None,
-        compaction_control: None,
-        receipt_compaction_id: None,
-        rehydration_control: None,
-        receipt_rehydration_id: None,
-        receipt_claim_id: claim_control.as_ref().map(|_| command_id.to_owned()),
-        claim_control,
-        receipt_lease_renewal_id: lease_renewal_control
-            .as_ref()
-            .map(|_| command_id.to_owned()),
-        lease_renewal_control,
-        receipt_recovery_id: recovery_control.as_ref().map(|_| command_id.to_owned()),
-        recovery_control,
-        run_weight_control: None,
-        receipt_run_weight_id: None,
-    };
-    let payload = serde_json::to_value(checkpoint)
-        .map_err(|error| VirtualError::Validation(error.to_string()))?;
-    JournalRecord::new(command_id, VIRTUAL_CHECKPOINT_SCHEMA, payload).map_err(durable_error)
+    let mut checkpoint =
+        new_checkpoint_for_scheduler(coordinator, records, scheduler, journal_id, command_id)?;
+    checkpoint.receipt_claim_id = controls.claim.as_ref().map(|_| command_id.to_owned());
+    checkpoint.claim_control = controls.claim;
+    checkpoint.receipt_lease_renewal_id = controls
+        .lease_renewal
+        .as_ref()
+        .map(|_| command_id.to_owned());
+    checkpoint.lease_renewal_control = controls.lease_renewal;
+    checkpoint.receipt_recovery_id = controls.recovery.as_ref().map(|_| command_id.to_owned());
+    checkpoint.recovery_control = controls.recovery;
+    encode_checkpoint(checkpoint)
 }
 
 fn reject_existing_control_record(
@@ -1435,6 +1788,27 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
             record.record_id
         )));
     }
+    let delta_bytes = cymule_core::canonical_bytes(&checkpoint.delta).map_err(validation_error)?;
+    if delta_bytes.len() > MAX_VIRTUAL_CHECKPOINT_DELTA_BYTES {
+        return Err(VirtualError::Validation(format!(
+            "virtual checkpoint {} delta exceeds the encoded size bound",
+            record.record_id
+        )));
+    }
+    let delta_digest =
+        cymule_core::canonical_digest(&checkpoint.delta).map_err(validation_error)?;
+    let state_digest = cymule_core::canonical_digest(&(
+        VIRTUAL_CHECKPOINT_SCHEMA,
+        checkpoint.parent_state_digest.as_str(),
+        delta_digest.as_str(),
+    ))
+    .map_err(validation_error)?;
+    if checkpoint.delta_digest != delta_digest || checkpoint.state_digest != state_digest {
+        return Err(VirtualError::Validation(format!(
+            "virtual checkpoint {} has an invalid delta or authenticated state digest",
+            record.record_id
+        )));
+    }
     let control_count = [
         checkpoint.control.is_some(),
         checkpoint.migration_control.is_some(),
@@ -1454,19 +1828,28 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
             record.record_id
         )));
     }
+    Ok(checkpoint)
+}
+
+fn validate_checkpoint_receipt(
+    checkpoint: &VirtualCheckpoint,
+    snapshot: &VirtualSnapshot,
+) -> VirtualResult<()> {
+    struct RecordIdentity<'a> {
+        record_id: &'a str,
+    }
+    let record = RecordIdentity {
+        record_id: checkpoint.checkpoint_id.as_str(),
+    };
     match (&checkpoint.control, &checkpoint.receipt_occurrence_id) {
         (None, None) => {}
         (Some(command), Some(occurrence_id)) => {
-            let occurrence = checkpoint
-                .snapshot
-                .occurrences
-                .get(occurrence_id)
-                .ok_or_else(|| {
-                    VirtualError::Validation(format!(
-                        "virtual checkpoint {} control receipt is missing",
-                        record.record_id
-                    ))
-                })?;
+            let occurrence = snapshot.occurrences.get(occurrence_id).ok_or_else(|| {
+                VirtualError::Validation(format!(
+                    "virtual checkpoint {} control receipt is missing",
+                    record.record_id
+                ))
+            })?;
             if command.control_version != VIRTUAL_WORK_CONTROL_VERSION
                 || command.command_id != record.record_id
                 || !control_matches_occurrence(command, occurrence)
@@ -1490,16 +1873,12 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
     ) {
         (None, None) => {}
         (Some(command), Some(migration_id)) => {
-            let receipt = checkpoint
-                .snapshot
-                .migrations
-                .get(migration_id)
-                .ok_or_else(|| {
-                    VirtualError::Validation(format!(
-                        "virtual checkpoint {} migration receipt is missing",
-                        record.record_id
-                    ))
-                })?;
+            let receipt = snapshot.migrations.get(migration_id).ok_or_else(|| {
+                VirtualError::Validation(format!(
+                    "virtual checkpoint {} migration receipt is missing",
+                    record.record_id
+                ))
+            })?;
             if command.control_version != VIRTUAL_REGION_MIGRATION_CONTROL_VERSION
                 || command.command_id != record.record_id
                 || command.plan.migration_id != *migration_id
@@ -1524,8 +1903,7 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
     ) {
         (None, None) => {}
         (Some(command), Some(certificate_id)) => {
-            let receipt = checkpoint
-                .snapshot
+            let receipt = snapshot
                 .compaction_receipts
                 .get(&command.command_id)
                 .ok_or_else(|| {
@@ -1558,8 +1936,7 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
     ) {
         (None, None) => {}
         (Some(command), Some(receipt_id)) => {
-            let receipt = checkpoint
-                .snapshot
+            let receipt = snapshot
                 .rehydration_receipts
                 .get(receipt_id)
                 .ok_or_else(|| {
@@ -1589,16 +1966,12 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
     match (&checkpoint.claim_control, &checkpoint.receipt_claim_id) {
         (None, None) => {}
         (Some(command), Some(receipt_id)) => {
-            let receipt = checkpoint
-                .snapshot
-                .claim_receipts
-                .get(receipt_id)
-                .ok_or_else(|| {
-                    VirtualError::Validation(format!(
-                        "virtual checkpoint {} claim receipt is missing",
-                        record.record_id
-                    ))
-                })?;
+            let receipt = snapshot.claim_receipts.get(receipt_id).ok_or_else(|| {
+                VirtualError::Validation(format!(
+                    "virtual checkpoint {} claim receipt is missing",
+                    record.record_id
+                ))
+            })?;
             if command.control_version != VIRTUAL_CLAIM_CONTROL_VERSION
                 || command.command_id != record.record_id
                 || receipt_id != &command.command_id
@@ -1623,8 +1996,7 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
     ) {
         (None, None) => {}
         (Some(command), Some(receipt_id)) => {
-            let receipt = checkpoint
-                .snapshot
+            let receipt = snapshot
                 .lease_renewal_receipts
                 .get(receipt_id)
                 .ok_or_else(|| {
@@ -1657,16 +2029,12 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
     ) {
         (None, None) => {}
         (Some(command), Some(receipt_id)) => {
-            let receipt = checkpoint
-                .snapshot
-                .recovery_receipts
-                .get(receipt_id)
-                .ok_or_else(|| {
-                    VirtualError::Validation(format!(
-                        "virtual checkpoint {} recovery receipt is missing",
-                        record.record_id
-                    ))
-                })?;
+            let receipt = snapshot.recovery_receipts.get(receipt_id).ok_or_else(|| {
+                VirtualError::Validation(format!(
+                    "virtual checkpoint {} recovery receipt is missing",
+                    record.record_id
+                ))
+            })?;
             if command.control_version != VIRTUAL_RECOVERY_CONTROL_VERSION
                 || command.command_id != record.record_id
                 || receipt_id != &command.command_id
@@ -1691,8 +2059,7 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
     ) {
         (None, None) => {}
         (Some(command), Some(receipt_id)) => {
-            let receipt = checkpoint
-                .snapshot
+            let receipt = snapshot
                 .run_weight_receipts
                 .get(receipt_id)
                 .ok_or_else(|| {
@@ -1719,7 +2086,7 @@ fn decode_checkpoint(record: &JournalRecord) -> VirtualResult<VirtualCheckpoint>
             )));
         }
     }
-    Ok(checkpoint)
+    Ok(())
 }
 
 fn durable_error(error: impl std::fmt::Display) -> VirtualError {

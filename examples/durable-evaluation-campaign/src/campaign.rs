@@ -223,7 +223,7 @@ pub fn run(options: &CampaignOptions) -> CampaignResult<CampaignRun> {
         })?;
         DurableVirtualController::checkpoint(
             &mut coordinator,
-            &scheduler,
+            &mut scheduler,
             VIRTUAL_JOURNAL,
             "virtual:register-suite",
         )?;

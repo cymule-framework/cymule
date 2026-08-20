@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
+const HTTP_SIGNAL_KEY_SCAN_LIMIT: usize = 1_024;
+
 /// Frozen HTTP signal request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +93,13 @@ struct DurableIngress {
     response: oneshot::Sender<IngressOutcome>,
 }
 
+struct StoredSignal {
+    activation_id: String,
+    key: String,
+    value: Vec<u8>,
+    selected: Option<Vec<u8>>,
+}
+
 /// SQLite-backed HTTP signal source whose ingress and selected targets survive
 /// process death.
 pub struct SqliteHttpSignalDriver {
@@ -99,6 +108,7 @@ pub struct SqliteHttpSignalDriver {
     waiters: BTreeMap<String, Vec<oneshot::Sender<IngressOutcome>>>,
     waiter_count: usize,
     max_waiters: usize,
+    signal_cursor: Option<String>,
 }
 
 /// Build a signal router and its single-consumer driver.
@@ -163,6 +173,7 @@ pub fn durable_signal_router(
             waiters: BTreeMap::new(),
             waiter_count: 0,
             max_waiters: capacity,
+            signal_cursor: None,
         },
     ))
 }
@@ -394,35 +405,77 @@ impl WaitSourceDriver for SqliteHttpSignalDriver {
         max_targets: usize,
     ) -> DurableResult<Option<WaitDelivery>> {
         self.drain_waiters()?;
-        let rows = {
-            let mut statement = self
-                .connection
-                .prepare(
-                    "SELECT activation_id, signal_key, value_json, selected_wait_ids
-                     FROM cymule_http_signals WHERE acknowledged = 0
-                     ORDER BY activation_id LIMIT 1024",
-                )
-                .map_err(sqlite_error)?;
-            statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        row.get::<_, Option<Vec<u8>>>(3)?,
+        let retained: Option<StoredSignal> = self
+            .connection
+            .query_row(
+                "SELECT activation_id, signal_key, value_json, selected_wait_ids
+                 FROM cymule_http_signals
+                 WHERE acknowledged = 0 AND selected_wait_ids IS NOT NULL
+                 ORDER BY activation_id LIMIT 1",
+                [],
+                |row| {
+                    Ok(StoredSignal {
+                        activation_id: row.get(0)?,
+                        key: row.get(1)?,
+                        value: row.get(2)?,
+                        selected: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+        if let Some(retained) = retained {
+            let source = WaitActivationSource::Signal { key: retained.key };
+            let wait_ids = self
+                .retained_targets(
+                    &retained.activation_id,
+                    retained.selected,
+                    &source,
+                    index,
+                    max_targets,
+                )?
+                .ok_or_else(|| {
+                    DurableError::Validation(format!(
+                        "retained HTTP activation {} lost its selected targets",
+                        retained.activation_id
                     ))
-                })
-                .map_err(sqlite_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(sqlite_error)?
-        };
-        for (activation_id, key, value, selected) in rows {
-            let source = WaitActivationSource::Signal { key };
-            let Some(wait_ids) =
-                self.retained_targets(&activation_id, selected, &source, index, max_targets)?
-            else {
+                })?;
+            return Ok(Some(WaitDelivery {
+                activation_id: retained.activation_id,
+                source,
+                wait_ids,
+                value: serde_json::from_slice(&retained.value)?,
+            }));
+        }
+
+        let page =
+            index.signal_key_page(self.signal_cursor.as_deref(), HTTP_SIGNAL_KEY_SCAN_LIMIT)?;
+        for key in page.keys {
+            self.signal_cursor = Some(key.clone());
+            let row: Option<(String, Vec<u8>)> = self
+                .connection
+                .query_row(
+                    "SELECT activation_id, value_json
+                     FROM cymule_http_signals
+                     WHERE acknowledged = 0 AND selected_wait_ids IS NULL
+                       AND signal_key = ?1
+                     ORDER BY activation_id LIMIT 1",
+                    [&key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(sqlite_error)?;
+            let Some((activation_id, value)) = row else {
                 continue;
             };
+            let source = WaitActivationSource::Signal { key };
+            let wait_ids = self
+                .retained_targets(&activation_id, None, &source, index, max_targets)?
+                .ok_or_else(|| {
+                    DurableError::Validation(format!(
+                        "indexed HTTP activation {activation_id} has no selectable target"
+                    ))
+                })?;
             return Ok(Some(WaitDelivery {
                 activation_id,
                 source,
@@ -534,7 +587,9 @@ fn open_spool(path: &Path, initialize: bool) -> DurableResult<Connection> {
                     acknowledged INTEGER NOT NULL DEFAULT 0
                 ) STRICT;
                 CREATE INDEX IF NOT EXISTS cymule_http_signals_pending
-                    ON cymule_http_signals(acknowledged, activation_id);",
+                    ON cymule_http_signals(acknowledged, activation_id);
+                CREATE INDEX IF NOT EXISTS cymule_http_signals_matching
+                    ON cymule_http_signals(acknowledged, signal_key, activation_id);",
             )
             .map_err(sqlite_error)?;
     }

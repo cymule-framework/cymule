@@ -6,6 +6,14 @@ domains described in `docs/specification.md`.
 
 ## [Unreleased]
 
+- Replace `cymule.virtual-checkpoint/1` whole-snapshot journal records with
+  `cymule.virtual-checkpoint/2` content-addressed incremental deltas, a 4 MiB
+  canonical delta bound, authenticated lineage, linear history, and exact
+  reopen.
+- Make durable HTTP signal selection use fair parked-key cursor pages plus an
+  indexed SQLite match, and reject timer acknowledgement before durable target
+  selection.
+
 ## [0.1.4] - 2026-08-18
 
 - Add day-one SQLite and filesystem/object-store persistence plugins with

@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/virtual-checkpoint.schema.json",
-  "title": "Cymule Virtual Checkpoint cymule.virtual-checkpoint/1",
+  "title": "Cymule Virtual Checkpoint cymule.virtual-checkpoint/2",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "checkpoint_version", "checkpoint_id", "parent_checkpoint", "snapshot",
+    "checkpoint_version", "checkpoint_id", "parent_checkpoint",
+    "parent_state_digest", "state_digest", "delta_digest", "delta",
     "control", "receipt_occurrence_id", "migration_control", "receipt_migration_id",
     "compaction_control", "receipt_compaction_id", "rehydration_control",
     "receipt_rehydration_id", "claim_control", "receipt_claim_id",
@@ -13,12 +14,15 @@
     "receipt_recovery_id", "run_weight_control", "receipt_run_weight_id"
   ],
   "properties": {
-    "checkpoint_version": { "const": "cymule.virtual-checkpoint/1" },
+    "checkpoint_version": { "const": "cymule.virtual-checkpoint/2" },
     "checkpoint_id": { "$ref": "#/$defs/nonEmpty" },
     "parent_checkpoint": {
       "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }]
     },
-    "snapshot": { "$ref": "#/$defs/snapshot" },
+    "parent_state_digest": { "$ref": "#/$defs/digest" },
+    "state_digest": { "$ref": "#/$defs/digest" },
+    "delta_digest": { "$ref": "#/$defs/digest" },
+    "delta": { "$ref": "#/$defs/delta" },
     "control": {
       "oneOf": [{ "$ref": "#/$defs/controlCommand" }, { "type": "null" }]
     },
@@ -70,6 +74,7 @@
   },
   "$defs": {
     "nonEmpty": { "type": "string", "minLength": 1 },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "artifact": {
       "type": "object",
       "additionalProperties": false,
@@ -664,96 +669,128 @@
         "current_weight": { "type": "integer", "minimum": 1 }
       }
     },
-    "snapshot": {
+    "mapDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["upsert", "remove"],
+      "properties": {
+        "upsert": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/nonEmpty" }
+        },
+        "remove": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmpty" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "setDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["add", "remove"],
+      "properties": {
+        "add": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmpty" },
+          "uniqueItems": true
+        },
+        "remove": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmpty" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "delta": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "scheduling_policy", "regions", "ready", "active", "parked", "known", "last_run",
-        "last_region",
-        "claim_epochs", "occurrences", "run_weights", "run_deficits", "dispatch_sequence",
-        "ready_since", "retired_regions", "migrations", "compactions",
-        "compaction_receipts", "compacted_work", "compacted_regions",
-        "rehydration_receipts", "claim_receipts", "lease_renewal_receipts",
-        "recovery_receipts", "run_weight_receipts"
+        "scheduling_policy", "regions", "ready", "active", "parked", "known",
+        "last_run", "last_region", "claim_epochs", "occurrences", "run_weights",
+        "run_deficits", "dispatch_sequence", "ready_since", "retired_regions",
+        "migrations", "compactions", "compaction_receipts", "compacted_work",
+        "compacted_regions", "rehydration_receipts", "claim_receipts",
+        "lease_renewal_receipts", "recovery_receipts", "run_weight_receipts"
       ],
       "properties": {
         "scheduling_policy": { "$ref": "#/$defs/schedulingPolicy" },
-        "regions": { "type": "object", "additionalProperties": { "$ref": "#/$defs/region" } },
-        "ready": {
-          "type": "object",
-          "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/work" } }
-        },
-        "active": { "type": "object", "additionalProperties": { "$ref": "#/$defs/claim" } },
-        "parked": { "type": "object", "additionalProperties": { "$ref": "#/$defs/parked" } },
-        "known": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmpty" } },
+        "regions": { "$ref": "#/$defs/regionMapDelta" },
+        "ready": { "$ref": "#/$defs/readyMapDelta" },
+        "active": { "$ref": "#/$defs/claimMapDelta" },
+        "parked": { "$ref": "#/$defs/parkedMapDelta" },
+        "known": { "$ref": "#/$defs/setDelta" },
         "last_run": { "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }] },
         "last_region": { "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }] },
-        "claim_epochs": {
-          "type": "object",
-          "additionalProperties": { "type": "integer", "minimum": 1 }
-        },
-        "occurrences": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/occurrence" }
-        },
-        "run_weights": {
-          "type": "object",
-          "additionalProperties": { "type": "integer", "minimum": 1 }
-        },
-        "run_deficits": {
-          "type": "object",
-          "additionalProperties": { "type": "integer", "minimum": 0 }
-        },
+        "claim_epochs": { "$ref": "#/$defs/positiveIntegerMapDelta" },
+        "occurrences": { "$ref": "#/$defs/occurrenceMapDelta" },
+        "run_weights": { "$ref": "#/$defs/positiveIntegerMapDelta" },
+        "run_deficits": { "$ref": "#/$defs/nonNegativeIntegerMapDelta" },
         "dispatch_sequence": { "type": "integer", "minimum": 0 },
-        "ready_since": {
-          "type": "object",
-          "additionalProperties": { "type": "integer", "minimum": 0 }
-        },
-        "retired_regions": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/nonEmpty" }
-        },
-        "migrations": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/migrationReceipt" }
-        },
-        "compactions": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/compactionCertificate" }
-        },
-        "compaction_receipts": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/compactionReceipt" }
-        },
-        "compacted_work": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/compactedWorkIndex" }
-        },
-        "compacted_regions": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/nonEmpty" }
-        },
-        "rehydration_receipts": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/rehydrationReceipt" }
-        },
-        "claim_receipts": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/claimReceipt" }
-        },
-        "lease_renewal_receipts": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/leaseRenewalReceipt" }
-        },
-        "recovery_receipts": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/recoveryReceipt" }
-        },
-        "run_weight_receipts": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/runWeightReceipt" }
-        }
+        "ready_since": { "$ref": "#/$defs/nonNegativeIntegerMapDelta" },
+        "retired_regions": { "$ref": "#/$defs/stringMapDelta" },
+        "migrations": { "$ref": "#/$defs/migrationReceiptMapDelta" },
+        "compactions": { "$ref": "#/$defs/compactionCertificateMapDelta" },
+        "compaction_receipts": { "$ref": "#/$defs/compactionReceiptMapDelta" },
+        "compacted_work": { "$ref": "#/$defs/compactedWorkMapDelta" },
+        "compacted_regions": { "$ref": "#/$defs/stringMapDelta" },
+        "rehydration_receipts": { "$ref": "#/$defs/rehydrationReceiptMapDelta" },
+        "claim_receipts": { "$ref": "#/$defs/claimReceiptMapDelta" },
+        "lease_renewal_receipts": { "$ref": "#/$defs/leaseRenewalReceiptMapDelta" },
+        "recovery_receipts": { "$ref": "#/$defs/recoveryReceiptMapDelta" },
+        "run_weight_receipts": { "$ref": "#/$defs/runWeightReceiptMapDelta" }
       }
+    },
+    "regionMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/region" } } } }]
+    },
+    "readyMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/work" } } } } }]
+    },
+    "claimMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/claim" } } } }]
+    },
+    "parkedMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/parked" } } } }]
+    },
+    "positiveIntegerMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "type": "integer", "minimum": 1 } } } }]
+    },
+    "nonNegativeIntegerMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "type": "integer", "minimum": 0 } } } }]
+    },
+    "stringMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/nonEmpty" } } } }]
+    },
+    "occurrenceMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/occurrence" } } } }]
+    },
+    "migrationReceiptMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/migrationReceipt" } } } }]
+    },
+    "compactionCertificateMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/compactionCertificate" } } } }]
+    },
+    "compactionReceiptMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/compactionReceipt" } } } }]
+    },
+    "compactedWorkMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/compactedWorkIndex" } } } }]
+    },
+    "rehydrationReceiptMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/rehydrationReceipt" } } } }]
+    },
+    "claimReceiptMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/claimReceipt" } } } }]
+    },
+    "leaseRenewalReceiptMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/leaseRenewalReceipt" } } } }]
+    },
+    "recoveryReceiptMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/recoveryReceipt" } } } }]
+    },
+    "runWeightReceiptMapDelta": {
+      "allOf": [{ "$ref": "#/$defs/mapDelta" }, { "properties": { "upsert": { "additionalProperties": { "$ref": "#/$defs/runWeightReceipt" } } } }]
     }
   }
 }

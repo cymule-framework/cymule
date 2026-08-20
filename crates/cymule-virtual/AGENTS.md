@@ -28,10 +28,16 @@
   restoring only the requested occurrence IDs.
 - Cursors are immutable logical progress tokens returned by a source and stored
   before more work is requested.
-- `cymule.virtual-checkpoint/1` records persist cursor and complete bounded
-  frontier state through the M1 application journal. Checkpoint IDs form an
-  explicit parent chain; conflicting reuse and stale CAS roll back the
-  in-process scheduler.
+- `cymule.virtual-checkpoint/2` records persist cursor and complete bounded
+  frontier mutations as content-addressed incremental deltas through the M1
+  application journal. Every delta has a hard encoded-size bound and
+  authenticates its parent and resulting transition head; no record repeats a
+  full `VirtualSnapshot`. Checkpoint IDs form an explicit parent chain;
+  conflicting reuse and stale CAS roll back the in-process scheduler.
+- A scheduler loaded from M1 caches its exact durable checkpoint anchor and
+  prior projection only in process. Successful checkpoint APIs mutably advance
+  that cache; they must reject a different journal head and never replay the
+  full delta history merely to construct the next record.
 - A `RegionSource` must return the same page and successor cursor for the same
   immutable region cursor. Receipt loss may cause the page request to be
   repeated after reopen.
@@ -92,6 +98,7 @@
   an old command after later scheduler checkpoints returns that original receipt;
   command ID reuse with different semantics fails.
 - Tests must use logical cardinalities much larger than active frontiers and
-  prove snapshot/restore, fairness, parking, waking, and bounded memory.
+  prove snapshot/restore, fairness, parking, waking, bounded memory, linear
+  journal growth, bounded record size, and exact reopen from delta history.
 - Cross-profile tests must prove M1 wait activation and M3 exact-index wake are
   one CAS transition and that a projection conflict commits neither side.

@@ -79,8 +79,9 @@ The local suite verifies:
   acknowledgement is lost after CAS;
 - a process reopening after wait activation advances the Continuation epoch and
   begins a new fenced Attempt before interpretation;
-- virtual source cursors and bounded frontiers reopen from chained M1 journal
-  checkpoints, stale CAS rolls back the in-process scheduler, exact reason wake
+- virtual source cursors and bounded frontiers reopen from chained,
+  content-addressed M1 journal deltas with bounded record size and linear byte
+  growth; stale CAS rolls back the in-process scheduler, exact reason wake
   avoids a parked scan, and activation plus M3 wake commit atomically;
 - cursor-version changes, stalled cursors, repeated work identities, and partial
   source failures advance neither cursor nor materialized frontier;

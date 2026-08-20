@@ -7,6 +7,8 @@
   from `ParkedWaitIndex`. Missing targets leave the timer pending.
 - Acknowledgement occurs only after the activation CAS. Lost acknowledgement
   must redeliver the identical activation ID, timer ID, target, and value.
+- `acknowledge` must transactionally verify that durable target selection
+  already exists. A scheduled but never selected timer cannot be acknowledged.
 - SQLite contention uses a zero busy timeout and surfaces as a conflict. Tests
   use a manual clock; never depend on sleeps or wall-clock races.
 - The live-process suite kills after schedule persistence, target selection,

@@ -18,17 +18,18 @@ use cymule_durable::{
 };
 use cymule_resource::ResourceHandle;
 use cymule_virtual::{
-    DurableVirtualController, FrontierLimits, MaterializedPage, ParkReason, ParkedWork,
-    RegionMigrationCommand, RegionMigrationKind, RegionMigrationPlan, RegionMigrationRequest,
-    RegionMigrator, RegionSource, SchedulingPolicy, VIRTUAL_CLAIM_CONTROL_VERSION,
-    VIRTUAL_COMPACTION_CONTROL_VERSION, VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION,
-    VIRTUAL_RECOVERY_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_CONTROL_VERSION,
-    VIRTUAL_REGION_MIGRATION_VERSION, VIRTUAL_REHYDRATION_CONTROL_VERSION,
-    VIRTUAL_RUN_WEIGHT_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive,
-    VirtualCheckpoint, VirtualClaimCommand, VirtualCompactionCommand, VirtualCursor, VirtualError,
-    VirtualLeaseRenewalCommand, VirtualRecoveryCommand, VirtualRegion, VirtualRehydrationCommand,
-    VirtualResult, VirtualRunWeightCommand, VirtualScheduler, WorkItem, WorkOccurrenceState,
-    WorkResolution, WorkResolutionCommand,
+    DurableVirtualController, FrontierLimits, MAX_VIRTUAL_CHECKPOINT_DELTA_BYTES, MaterializedPage,
+    ParkReason, ParkedWork, RegionMigrationCommand, RegionMigrationKind, RegionMigrationPlan,
+    RegionMigrationRequest, RegionMigrator, RegionSource, SchedulingPolicy,
+    VIRTUAL_CLAIM_CONTROL_VERSION, VIRTUAL_COMPACTION_CONTROL_VERSION,
+    VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION, VIRTUAL_RECOVERY_CONTROL_VERSION,
+    VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_VERSION,
+    VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_RUN_WEIGHT_CONTROL_VERSION,
+    VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive, VirtualCheckpoint, VirtualClaimCommand,
+    VirtualCompactionCommand, VirtualCursor, VirtualError, VirtualLeaseRenewalCommand,
+    VirtualRecoveryCommand, VirtualRegion, VirtualRehydrationCommand, VirtualResult,
+    VirtualRunWeightCommand, VirtualScheduler, WorkItem, WorkOccurrenceState, WorkResolution,
+    WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -554,9 +555,46 @@ fn frozen_virtual_checkpoint_fixture_matches_the_rust_contract() {
     let fixture = include_str!("../../../tests/fixtures/virtual-checkpoint.json");
     let checkpoint: VirtualCheckpoint =
         serde_json::from_str(fixture).expect("virtual checkpoint deserializes");
-    assert_eq!(checkpoint.checkpoint_version, "cymule.virtual-checkpoint/1");
-    VirtualScheduler::restore(limits(), checkpoint.snapshot.clone())
-        .expect("fixture snapshot restores");
+    assert_eq!(checkpoint.checkpoint_version, "cymule.virtual-checkpoint/2");
+    assert!(
+        checkpoint
+            .delta
+            .regions
+            .upsert
+            .contains_key("region:fixture")
+    );
+    let parent_digest = cymule_core::canonical_digest(&("cymule.virtual-checkpoint/2", "genesis"))
+        .expect("genesis digest computes");
+    let delta_digest =
+        cymule_core::canonical_digest(&checkpoint.delta).expect("delta digest computes");
+    let state_digest = cymule_core::canonical_digest(&(
+        "cymule.virtual-checkpoint/2",
+        parent_digest.as_str(),
+        delta_digest.as_str(),
+    ))
+    .expect("state digest computes");
+    assert_eq!(checkpoint.parent_state_digest, parent_digest);
+    assert_eq!(checkpoint.delta_digest, delta_digest);
+    assert_eq!(checkpoint.state_digest, state_digest);
+    let machine = Machine::new();
+    let mut coordinator = DurableCoordinator::open(MemoryStore::new())
+        .expect("fixture store opens")
+        .initialize(&machine)
+        .expect("fixture store initializes");
+    coordinator
+        .append_journal_record(
+            "journal:fixture",
+            cymule_durable::JournalRecord::new(
+                checkpoint.checkpoint_id.clone(),
+                checkpoint.checkpoint_version.clone(),
+                serde_json::to_value(checkpoint.clone()).expect("fixture checkpoint serializes"),
+            )
+            .expect("fixture journal record builds"),
+        )
+        .expect("fixture journal appends");
+    let restored = DurableVirtualController::load(&coordinator, "journal:fixture", limits())
+        .expect("fixture delta history restores");
+    assert!(restored.snapshot().regions.contains_key("region:fixture"));
     assert_eq!(
         serde_json::to_value(checkpoint).expect("checkpoint serializes"),
         serde_json::from_str::<serde_json::Value>(fixture).expect("fixture parses")
@@ -1007,7 +1045,7 @@ fn durable_region_migration_reopens_and_stale_cas_retires_nothing() {
         .expect("later control updates");
     DurableVirtualController::checkpoint(
         &mut reopened,
-        &restored,
+        &mut restored,
         "journal:virtual",
         "virtual:migration:later-checkpoint",
     )
@@ -1094,7 +1132,7 @@ fn virtual_cursor_and_frontier_checkpoint_reopen_and_stale_cas_rolls_back() {
         .expect("first page checkpoints"),
         4
     );
-    let first_checkpoint_scheduler = scheduler.clone();
+    let mut first_checkpoint_scheduler = scheduler.clone();
     let mut stale = DurableCoordinator::open(store.clone()).expect("stale view opens");
     let mut stale_scheduler = DurableVirtualController::load(&stale, "journal:virtual", limits())
         .expect("stale scheduler restores");
@@ -1112,7 +1150,7 @@ fn virtual_cursor_and_frontier_checkpoint_reopen_and_stale_cas_rolls_back() {
     assert!(matches!(
         DurableVirtualController::checkpoint(
             &mut current,
-            &first_checkpoint_scheduler,
+            &mut first_checkpoint_scheduler,
             "journal:virtual",
             "virtual:checkpoint:1",
         ),
@@ -1387,7 +1425,7 @@ fn parked_reason_index_rebuilds_from_a_durable_checkpoint() {
         .expect("work parks");
     DurableVirtualController::checkpoint(
         &mut coordinator,
-        &scheduler,
+        &mut scheduler,
         "journal:virtual",
         "virtual:parked:1",
     )
@@ -1742,7 +1780,7 @@ fn weighted_fairness_and_aging_accounting_survive_m1_reopen() {
         .expect("claim parks");
     DurableVirtualController::checkpoint(
         &mut coordinator,
-        &scheduler,
+        &mut scheduler,
         "journal:virtual",
         "virtual:fairness:park",
     )
@@ -1750,7 +1788,7 @@ fn weighted_fairness_and_aging_accounting_survive_m1_reopen() {
     assert_eq!(scheduler.wake(&reason), 1);
     DurableVirtualController::checkpoint(
         &mut coordinator,
-        &scheduler,
+        &mut scheduler,
         "journal:virtual",
         "virtual:fairness:wake",
     )
@@ -1790,7 +1828,7 @@ fn durable_run_weight_control_replays_and_stale_cas_changes_nothing() {
         .expect("region registers");
     DurableVirtualController::checkpoint(
         &mut current,
-        &scheduler,
+        &mut scheduler,
         "journal:virtual",
         "virtual:weight-control:initial",
     )
@@ -1851,6 +1889,78 @@ fn durable_run_weight_control_replays_and_stale_cas_changes_nothing() {
     let restored = DurableVirtualController::load(&reopened, "journal:virtual", limits())
         .expect("weighted scheduler restores");
     assert_eq!(restored.snapshot(), scheduler.snapshot());
+}
+
+#[test]
+fn virtual_delta_history_is_linear_bounded_and_exact_after_reopen() {
+    let machine = Machine::new();
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store.clone())
+        .expect("store opens")
+        .initialize(&machine)
+        .expect("store initializes");
+    let mut scheduler = VirtualScheduler::new(limits()).expect("scheduler creates");
+    scheduler
+        .register(region("region:delta-scale", "run:delta-scale"))
+        .expect("region registers");
+    DurableVirtualController::checkpoint(
+        &mut coordinator,
+        &mut scheduler,
+        "journal:delta-scale",
+        "virtual:delta-scale:initial",
+    )
+    .expect("initial delta checkpoints");
+
+    for sequence in 0..12 {
+        DurableVirtualController::set_run_weight_command_and_checkpoint(
+            &mut coordinator,
+            &mut scheduler,
+            &VirtualRunWeightCommand {
+                control_version: VIRTUAL_RUN_WEIGHT_CONTROL_VERSION.to_owned(),
+                command_id: format!("command:delta-scale:{sequence:04}"),
+                run_id: "run:delta-scale".to_owned(),
+                weight: if sequence % 2 == 0 { 2 } else { 1 },
+            },
+            "journal:delta-scale",
+        )
+        .expect("incremental delta checkpoints");
+    }
+
+    let records = coordinator
+        .journal_records("journal:delta-scale")
+        .expect("journal reads");
+    assert_eq!(records.len(), 13);
+    assert!(records.iter().all(|record| {
+        record.payload.get("snapshot").is_none()
+            && record.payload.get("delta").is_some_and(|delta| {
+                serde_json::to_vec(delta).expect("delta encodes").len()
+                    <= MAX_VIRTUAL_CHECKPOINT_DELTA_BYTES
+            })
+    }));
+    let sizes: Vec<usize> = records
+        .iter()
+        .skip(1)
+        .map(|record| {
+            serde_json::to_vec(&record.payload)
+                .expect("record encodes")
+                .len()
+        })
+        .collect();
+    let smallest = *sizes.iter().min().expect("control records exist");
+    let largest = *sizes.iter().max().expect("control records exist");
+    assert!(
+        largest <= smallest + 64,
+        "incremental control records must stay bounded: min={smallest}, max={largest}"
+    );
+    let total: usize = sizes.iter().sum();
+    assert!(total <= sizes.len() * (smallest + 64));
+
+    let expected = scheduler.snapshot();
+    drop(coordinator);
+    let reopened = DurableCoordinator::open(store).expect("store reopens");
+    let restored = DurableVirtualController::load(&reopened, "journal:delta-scale", limits())
+        .expect("delta history reopens");
+    assert_eq!(restored.snapshot(), expected);
 }
 
 fn completed_scheduler() -> (VirtualScheduler, String) {
@@ -2053,7 +2163,7 @@ fn durable_compaction_and_partial_rehydration_reopen_without_stale_partial_commi
     let (mut scheduler, occurrence_id) = completed_scheduler();
     DurableVirtualController::checkpoint(
         &mut current,
-        &scheduler,
+        &mut scheduler,
         "journal:virtual",
         "virtual:completed:result",
     )
