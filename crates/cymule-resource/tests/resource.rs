@@ -6,13 +6,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use cymule_core::seal_plan;
 use cymule_core::{
-    COMMAND_VERSION, Command, CommandEnvelope, Definition, Expression, Machine, PlanCandidate,
-    Region, sha256_bytes,
+    COMMAND_VERSION, Command, CommandEnvelope, Definition, Expression, Machine, Operation,
+    PlanCandidate, Region, Step, WaitSpec, sha256_bytes,
 };
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
-    DurableState, DurableStore, MemoryStore, StoreCommit, StoredState, WaitCondition, WaitKind,
-    WaitState,
+    DurableState, DurableStore, FrameState, MemoryStore, StoreCommit, StoredState, WaitCondition,
+    WaitKind, WaitState,
 };
 use cymule_resource::{
     ArtifactResolver, ArtifactStore, InlineData, ResourceCandidate, ResourceChunk, ResourceClient,
@@ -473,7 +473,16 @@ fn machine_with_runs() -> Machine {
             input_schema: json!({}),
             output_schema: json!({}),
             body: Region {
-                steps: Vec::new(),
+                steps: vec![Step {
+                    id: "wait.resource-input".to_owned(),
+                    operation: Operation::Wait {
+                        wait: WaitSpec::Input {
+                            correlation: "input.dataset".to_owned(),
+                            schema: json!({}),
+                        },
+                        bind: None,
+                    },
+                }],
                 result: Expression::Literal { value: json!(null) },
             },
         }],
@@ -496,6 +505,9 @@ fn machine_with_runs() -> Machine {
             })
             .expect("Run starts");
     }
+    machine
+        .put_artifact("test/input", b"resource input".to_vec())
+        .expect("input stores");
     machine
 }
 
@@ -562,7 +574,15 @@ fn resource_handoff_atomically_activates_matching_input_wait() {
             run_id: "run:consumer".to_owned(),
             plan_id: consumer_plan,
             binding_context: "binding:resource-test/1".to_owned(),
-            frames: Vec::new(),
+            frames: vec![FrameState {
+                definition_id: "main".to_owned(),
+                invocation_id: "main".to_owned(),
+                input: cymule_core::artifact_ref("test/input", b"resource input")
+                    .expect("input reference derives"),
+                region_path: Vec::new(),
+                next_step: 1,
+                locals: BTreeMap::new(),
+            }],
             state: None,
             wait_set: BTreeSet::new(),
             scope_stack: vec![cymule_core::ROOT_SCOPE_ID.to_owned()],
@@ -583,7 +603,14 @@ fn resource_handoff_atomically_activates_matching_input_wait() {
                 schema: json!({}),
             },
             consume_once: true,
-            result_binding: None,
+            owner: cymule_durable::WaitOwner {
+                invocation_id: "main".to_owned(),
+                definition_id: "main".to_owned(),
+                site_id: "wait.resource-input".to_owned(),
+                region_path: Vec::new(),
+                step_index: 0,
+                bind: None,
+            },
             state: WaitState::Pending,
             result: None,
         })

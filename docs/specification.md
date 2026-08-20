@@ -228,11 +228,13 @@ effect obligations | authority leases | budget | causal cut | epoch
 M1 `cymule.durable-state/2` frames separate the resolved definition ID,
 structural invocation ID, immutable input Artifact, nested Region path, next
 step, and local Artifact bindings. An invocation pushes a frame without opening
-a scope. A nested scope retains the same definition, invocation, and input. A
-Plan wait pins its exact owning frame, definition, Region path, site, step, and
-optional local. Activation atomically stores the result Artifact, completes the
-wait, writes the local when present, and readies the Continuation. Resume
-consumes that durable local in later expressions or the terminal return.
+a scope. A nested scope retains the same definition, invocation, and input.
+Every durable wait pins its exact owning definition, invocation, Region path,
+site, and step; only the local bind inside that owner is optional. Registration,
+parking, completion, activation, and restore MUST verify this ownership.
+Activation atomically stores the result Artifact, completes the wait, writes
+the local when present, and readies the Continuation. Resume consumes that
+durable local in later expressions or the terminal return.
 
 Process memory and host-language stacks are not canonical. An Attempt pins an
 immutable occurrence binding and the continuation epoch. Output from a stale

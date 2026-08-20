@@ -260,6 +260,29 @@ def main() -> int:
         else:
             raise AssertionError("wait activation accepted a non-v2 Artifact reference")
 
+    wait_condition = load(root / "tests/fixtures/wait-condition.json")
+    wait_condition_validator = Draft202012Validator(
+        by_title["Cymule Durable Wait Condition"],
+        registry=registry,
+    )
+    wait_condition_validator.validate(wait_condition)
+    for malformed_wait in [
+        {key: value for key, value in wait_condition.items() if key != "owner"},
+        {
+            **wait_condition,
+            "owner": {
+                key: value
+                for key, value in wait_condition["owner"].items()
+                if key != "bind"
+            },
+        },
+    ]:
+        assert_invalid(
+            wait_condition_validator,
+            malformed_wait,
+            "durable wait schema accepted missing ownership",
+        )
+
     artifact_contract_validator = Draft202012Validator(
         by_title[
             "Cymule Artifact Type Contract cymule.artifact-type-contract/1"

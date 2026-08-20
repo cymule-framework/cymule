@@ -102,6 +102,9 @@
   identities. Stateful tests must cover redelivery, conflicting identity,
   source mismatch, consume-once competition, stale CAS, reopen, and epoch
   advance before resume.
+- The durable wait-condition fixture always carries its exact owner even when
+  `owner.bind` is null. Missing owner or missing bind presence must fail the
+  frozen schema instead of restoring the old optional-owner shape.
 - Wait-source tests separate index selection from transport acknowledgement.
   Lose the acknowledgement after the activation CAS, rebuild the index on
   reopen, redeliver the same identity, and prove exactly one activation.

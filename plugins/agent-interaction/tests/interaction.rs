@@ -20,12 +20,13 @@ use cymule_agent::{
 };
 use cymule_core::{
     ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, Definition, DispatchPolicy,
-    EffectContract, EffectProfile, Expression, Machine, MutationKind, PlanCandidate, ROOT_SCOPE_ID,
-    ReconciliationMode, Region, ScopeStatus, WorldOutcome, canonical_digest,
+    EffectContract, EffectProfile, Expression, Machine, MutationKind, Operation, PlanCandidate,
+    ROOT_SCOPE_ID, ReconciliationMode, Region, ScopeStatus, Step, WaitSpec, WorldOutcome,
+    canonical_digest,
 };
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, FrameState, JournalRecord, MemoryStore,
-    OutboxState, WaitState,
+    OutboxState, WaitOwner, WaitState,
 };
 use serde_json::json;
 
@@ -300,7 +301,7 @@ fn usage(used: u64) -> Usage {
 fn agent_continuation(run_id: &str) -> Continuation {
     Continuation {
         run_id: run_id.to_owned(),
-        plan_id: "plan:agent-test".to_owned(),
+        plan_id: agent_wait_plan().plan_id,
         binding_context: "binding:agent-test/1".to_owned(),
         frames: vec![FrameState {
             definition_id: "agent-turn".to_owned(),
@@ -323,7 +324,57 @@ fn agent_continuation(run_id: &str) -> Continuation {
     }
 }
 
+fn agent_input_continuation(run_id: &str) -> Continuation {
+    let mut continuation = agent_continuation(run_id);
+    continuation.frames[0].next_step = 1;
+    continuation
+}
+
+fn agent_wait_plan() -> cymule_core::SealedPlan {
+    cymule_core::seal_plan(PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "agent_input_wait".to_owned(),
+        entry: "agent-turn".to_owned(),
+        components: Vec::new(),
+        effects: Vec::new(),
+        definitions: vec![Definition {
+            id: "agent-turn".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: vec![Step {
+                    id: "wait.agent-input".to_owned(),
+                    operation: Operation::Wait {
+                        wait: WaitSpec::Input {
+                            correlation: "agent-input".to_owned(),
+                            schema: json!({}),
+                        },
+                        bind: None,
+                    },
+                }],
+                result: Expression::Input,
+            },
+        }],
+        metadata: BTreeMap::new(),
+    })
+    .expect("agent input Plan seals")
+}
+
+fn agent_wait_owner() -> WaitOwner {
+    WaitOwner {
+        invocation_id: "agent-turn".to_owned(),
+        definition_id: "agent-turn".to_owned(),
+        site_id: "wait.agent-input".to_owned(),
+        region_path: Vec::new(),
+        step_index: 0,
+        bind: None,
+    }
+}
+
 fn install_agent_input(machine: &mut Machine) {
+    machine
+        .insert_plan(agent_wait_plan())
+        .expect("agent input Plan inserts");
     machine
         .put_artifact("test/input", b"agent test input".to_vec())
         .expect("test input stores");
@@ -921,7 +972,7 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
         .initialize(&machine)
         .expect("store initializes");
     coordinator
-        .put_continuation(agent_continuation("run:agent-input"))
+        .put_continuation(agent_input_continuation("run:agent-input"))
         .expect("continuation persists");
 
     let request = ElicitationRequest {
@@ -941,6 +992,7 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
         &mut coordinator,
         "session:agent-input",
         "run:agent-input",
+        agent_wait_owner(),
         request.clone(),
     )
     .expect("input wait suspends");
@@ -962,6 +1014,7 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
         &mut coordinator,
         "session:agent-input",
         "run:agent-input",
+        agent_wait_owner(),
         request,
     )
     .expect("suspension retry is idempotent");
@@ -970,6 +1023,7 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
         &mut coordinator,
         "session:agent-input",
         "run:agent-input",
+        agent_wait_owner(),
         ElicitationRequest {
             request_id: "elicitation:details".to_owned(),
             schema: json!({"type": "object", "required": ["details"]}),
@@ -1064,7 +1118,7 @@ fn input_schema_and_external_references_fail_before_suspension() {
         .initialize(&machine)
         .expect("store initializes");
     coordinator
-        .put_continuation(agent_continuation("run:invalid-schema"))
+        .put_continuation(agent_input_continuation("run:invalid-schema"))
         .expect("continuation persists");
     let revision = coordinator.revision().expect("revision exists").to_owned();
 
@@ -1080,6 +1134,7 @@ fn input_schema_and_external_references_fail_before_suspension() {
                 &mut coordinator,
                 "session:invalid-schema",
                 "run:invalid-schema",
+                agent_wait_owner(),
                 ElicitationRequest {
                     request_id: request_id.to_owned(),
                     schema,
@@ -1111,12 +1166,13 @@ fn invalid_completed_input_leaves_wait_and_session_pending() {
         .initialize(&machine)
         .expect("store initializes");
     coordinator
-        .put_continuation(agent_continuation("run:invalid-input"))
+        .put_continuation(agent_input_continuation("run:invalid-input"))
         .expect("continuation persists");
     let suspended = AgentInputController::suspend(
         &mut coordinator,
         "session:invalid-input",
         "run:invalid-input",
+        agent_wait_owner(),
         ElicitationRequest {
             request_id: "elicitation:invalid-input".to_owned(),
             schema: json!({
@@ -1195,12 +1251,13 @@ fn declined_input_completes_without_an_instance_value() {
         .initialize(&machine)
         .expect("store initializes");
     coordinator
-        .put_continuation(agent_continuation("run:declined-input"))
+        .put_continuation(agent_input_continuation("run:declined-input"))
         .expect("continuation persists");
     let suspended = AgentInputController::suspend(
         &mut coordinator,
         "session:declined-input",
         "run:declined-input",
+        agent_wait_owner(),
         ElicitationRequest {
             request_id: "elicitation:declined-input".to_owned(),
             schema: json!({"type": "string", "minLength": 1}),
@@ -1243,7 +1300,7 @@ fn stale_input_checkpoint_writes_neither_wait_nor_agent_update() {
         .initialize(&machine)
         .expect("store initializes");
     current
-        .put_continuation(agent_continuation("run:stale-input"))
+        .put_continuation(agent_input_continuation("run:stale-input"))
         .expect("continuation persists");
     let mut stale = DurableCoordinator::open(store.clone()).expect("stale view opens");
     current
@@ -1255,6 +1312,7 @@ fn stale_input_checkpoint_writes_neither_wait_nor_agent_update() {
             &mut stale,
             "session:stale-input",
             "run:stale-input",
+            agent_wait_owner(),
             ElicitationRequest {
                 request_id: "elicitation:stale".to_owned(),
                 schema: json!({"type": "string"}),

@@ -158,11 +158,12 @@ readiness in one CAS. Stable redelivery is safe, a consume-once signal token has
 at most one consuming winner, and a resumed Continuation receives a new fenced
 Attempt epoch.
 
-For a Plan wait, the parked record pins the owning frame, definition, Region
-path, site, step, and optional result local. The activation CAS writes the
-result Artifact into that local before the Continuation becomes ready, so later
-expressions consume durable frame state after reopen. Embedded execution exposes
-the typed boundary but creates no Continuation.
+Every parked wait pins an owner containing definition, invocation, Region path,
+site, step, and an optional result local. The owner itself is never optional.
+The activation CAS writes the result Artifact into that local when present
+before the Continuation becomes ready, so later expressions consume durable
+frame state after reopen. Embedded execution exposes the typed boundary but
+creates no Continuation.
 
 Production HTTP and timer sources persist the exact selected targets before
 delivery, so an acknowledgement lost after M1 admission cannot cause target

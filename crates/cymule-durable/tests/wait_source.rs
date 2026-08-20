@@ -113,7 +113,7 @@ fn signal_candidate() -> PlanCandidate {
                             key: "signal:continue".to_owned(),
                             consume_once: true,
                         },
-                        bind: Some("signal_result".to_owned()),
+                        bind: None,
                     },
                 }],
                 result: Expression::Input,
@@ -155,6 +155,17 @@ fn continuation(wait_ids: &[&str]) -> Continuation {
     }
 }
 
+fn wait_owner() -> cymule_durable::WaitOwner {
+    cymule_durable::WaitOwner {
+        invocation_id: "main".to_owned(),
+        definition_id: "main".to_owned(),
+        site_id: "wait.signal".to_owned(),
+        region_path: Vec::new(),
+        step_index: 0,
+        bind: None,
+    }
+}
+
 #[test]
 fn parked_index_selects_bounded_signal_and_exact_timer_candidates() {
     let wait_ids = [
@@ -184,7 +195,7 @@ fn parked_index_selects_bounded_signal_and_exact_timer_candidates() {
                     key: "signal:batch".to_owned(),
                 },
                 consume_once,
-                result_binding: None,
+                owner: wait_owner(),
                 state: WaitState::Pending,
                 result: None,
             },
@@ -200,7 +211,7 @@ fn parked_index_selects_bounded_signal_and_exact_timer_candidates() {
                     timer_id: "timer:batch".to_owned(),
                 },
                 consume_once: false,
-                result_binding: None,
+                owner: wait_owner(),
                 state: WaitState::Pending,
                 result: None,
             },
@@ -268,6 +279,9 @@ fn wait_source_ack_loss_redelivers_one_committed_activation_after_reopen() {
     else {
         panic!("Run should park");
     };
+    let parked = &runtime.coordinator().state().expect("state").waits[&wait_id];
+    assert_eq!(parked.owner.site_id, "wait.signal");
+    assert!(parked.owner.bind.is_none());
     let mut driver = RedeliveringDriver {
         delivery: WaitDelivery {
             activation_id: "delivery:continue:1".to_owned(),
@@ -300,6 +314,11 @@ fn wait_source_ack_loss_redelivers_one_committed_activation_after_reopen() {
         Some(BTreeSet::from([run_id.to_owned()]))
     );
     assert_eq!(driver.acknowledgements, 1);
+    assert!(
+        reopened.coordinator().state().expect("state").continuations[run_id].frames[0]
+            .locals
+            .is_empty()
+    );
     let DriveOutcome::Completed(result) = reopened.resume(run_id).expect("Run resumes") else {
         panic!("Run should complete");
     };

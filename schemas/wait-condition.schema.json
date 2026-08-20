@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/wait-condition.schema.json",
+  "title": "Cymule Durable Wait Condition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["wait_id", "run_id", "kind", "consume_once", "owner", "state", "result"],
+  "properties": {
+    "wait_id": { "$ref": "#/$defs/identity" },
+    "run_id": { "$ref": "#/$defs/identity" },
+    "kind": { "$ref": "#/$defs/waitKind" },
+    "consume_once": { "type": "boolean" },
+    "owner": { "$ref": "#/$defs/waitOwner" },
+    "state": { "enum": ["pending", "completed", "cancelled"] },
+    "result": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/artifact" }
+      ]
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "string", "minLength": 1, "maxLength": 512,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "waitOwner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invocation_id", "definition_id", "site_id", "region_path", "step_index", "bind"],
+      "properties": {
+        "invocation_id": { "$ref": "#/$defs/identity" },
+        "definition_id": { "$ref": "#/$defs/identity" },
+        "site_id": { "$ref": "#/$defs/identity" },
+        "region_path": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "step_index": { "type": "integer", "minimum": 0 },
+        "bind": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/identity" }
+          ]
+        }
+      }
+    },
+    "waitKind": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "key"],
+          "properties": {
+            "kind": { "const": "signal" },
+            "key": { "$ref": "#/$defs/identity" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "timer_id"],
+          "properties": {
+            "kind": { "const": "timer" },
+            "timer_id": { "$ref": "#/$defs/identity" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "correlation", "schema"],
+          "properties": {
+            "kind": { "const": "input" },
+            "correlation": { "$ref": "#/$defs/identity" },
+            "schema": { "oneOf": [{ "type": "boolean" }, { "type": "object" }] }
+          }
+        }
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity_version", "artifact_id", "kind"],
+      "properties": {
+        "identity_version": { "const": "cymule.artifact/2" },
+        "artifact_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "kind": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]{0,159}$" }
+      }
+    }
+  }
+}

@@ -117,10 +117,11 @@ Use this precedence order when guidance conflicts:
   recursive definition SCC, including invokes nested under scopes, and compiles
   schemas as Draft 2020-12 with external retrieval disabled. Machine insertion
   and restore reverify the same admission.
-- A `wait` may bind its result or intentionally ignore it. Durable activation
-  pins the exact frame and site, then atomically commits the result Artifact,
-  completed wait, optional frame local, and Continuation readiness. Embedded
-  execution returns a typed boundary and never claims a Continuation.
+- Every durable `WaitCondition` pins its exact definition, invocation, Region
+  path, site, and step. Only its nested local bind is optional. Activation
+  atomically commits the result Artifact, completed wait, optional frame local,
+  and Continuation readiness. Embedded execution returns a typed boundary and
+  never claims a Continuation.
 - Reusable modules resolve their complete acyclic dependency closure before
   sealing. Store every exact revision in the linked record, derive reverse
   indexes from registry state, and make transitive compatible updates create a

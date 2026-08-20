@@ -45,6 +45,9 @@
   Session state updates with the owning M1 wait transition. Never expose
   `RequiresAction` without a committed wait or ready a Continuation without the
   matching resolved Session projection.
+- Every durable input request receives the exact Plan wait owner from its
+  caller, including definition, invocation, Region path, site, step, and
+  optional bind. The plugin never invents or omits M1 wait ownership.
 - Compile elicitation schemas as local Draft 2020-12 documents before suspension
   and validate accepted values again from the persisted request before
   completion. External schema retrieval stays disabled; schema or instance

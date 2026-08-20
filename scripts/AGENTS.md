@@ -45,6 +45,8 @@
 - Every SDK submits the shared wait activation fixture to the Rust Engine. This
   proves the closed wire boundary only; stateful source and consume-once cases
   stay in the M1 fault suite.
+- Schema verification also validates the shared durable wait-condition fixture:
+  owner is mandatory and closed even when its nested bind is null.
 - Shared Artifact fixtures always carry `identity_version = cymule.artifact/2`;
   schema validation must reject missing or legacy identity versions in every
   public protocol family.
