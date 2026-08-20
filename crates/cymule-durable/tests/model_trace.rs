@@ -13,8 +13,8 @@ use cymule_runtime::{
     RuntimeError, RuntimeResult,
 };
 use cymule_test_world::{
-    FaultAction, FaultPlan, FaultSchedule, FaultStep, ReplaySpec, SeededRandom, TestWorld,
-    TraceCase, TraceFailure, requested_seeds,
+    FailureFingerprint, FaultAction, FaultPlan, FaultSchedule, FaultStep, ReplaySpec, SeededRandom,
+    TestWorld, TraceCase, TraceFailure, requested_seeds,
 };
 use serde_json::{Value, json};
 
@@ -155,7 +155,12 @@ fn generated_durable_commands_match_the_reference_model() {
     for seed in requested_seeds(32).expect("generated seeds select") {
         let case = generate_case(seed).expect("generated case validates");
         if let Err(cause) = run_case(&case) {
-            let minimized = case.minimize_failure(run_case);
+            let fingerprint =
+                FailureFingerprint::new("model_mismatch", "durable_trace", "reference_model")
+                    .expect("fingerprint validates");
+            let minimized = case.minimize_failure(&fingerprint, |candidate| {
+                run_case(candidate).map_err(|_| fingerprint.clone())
+            });
             let failure = TraceFailure {
                 seed,
                 path: minimized.identity.path.clone(),
@@ -168,6 +173,7 @@ fn generated_durable_commands_match_the_reference_model() {
                 minimized_fixture: minimized
                     .fixture_json()
                     .expect("minimized fixture serializes"),
+                fingerprint,
                 cause,
             };
             panic!("{failure}");
@@ -203,6 +209,7 @@ fn generate_case(seed: u64) -> Result<TraceCase<DurableCommand>, String> {
         if selected.insert(occurrence) {
             steps.push(FaultStep {
                 operation: CAS_OPERATION.to_owned(),
+                path: Vec::new(),
                 occurrence,
                 action: if random.next_u64() & 1 == 0 {
                     FaultAction::ErrorBefore

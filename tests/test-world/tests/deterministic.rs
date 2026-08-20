@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use cymule_test_world::{
-    FaultAction, FaultPlan, FaultStep, ManualClock, RecordingObserver, ReplaySpec, ScriptedClock,
-    SeededRandom, TRACE_VERSION, TestWorld, TraceCase, requested_seeds,
+    FailureFingerprint, FaultAction, FaultPlan, FaultStep, ManualClock, RecordingObserver,
+    ReplaySpec, ScriptedClock, SeededRandom, TRACE_VERSION, TestWorld, TraceCase, requested_seeds,
 };
 use serde_json::json;
 
@@ -33,11 +33,13 @@ fn fault_and_observation_records_are_explicit_owned_values() {
     let plan = FaultPlan::new(vec![
         FaultStep {
             operation: "durable.cas".to_owned(),
+            path: Vec::new(),
             occurrence: 2,
             action: FaultAction::ErrorBefore,
         },
         FaultStep {
             operation: "durable.cas".to_owned(),
+            path: Vec::new(),
             occurrence: 4,
             action: FaultAction::AcknowledgementLostAfter,
         },
@@ -53,6 +55,20 @@ fn fault_and_observation_records_are_explicit_owned_values() {
     assert_eq!(
         world.faults_mut().observe("durable.cas"),
         Some(FaultAction::AcknowledgementLostAfter)
+    );
+
+    let path_plan = FaultPlan::new(vec![FaultStep {
+        operation: "durable.cas".to_owned(),
+        path: vec![7],
+        occurrence: 1,
+        action: FaultAction::ErrorBefore,
+    }])
+    .expect("path fault validates");
+    let mut path_schedule = path_plan.schedule();
+    assert_eq!(path_schedule.observe_path("durable.cas", &[6]), None);
+    assert_eq!(
+        path_schedule.observe_path("durable.cas", &[7]),
+        Some(FaultAction::ErrorBefore)
     );
 
     world.clock_mut().advance(3).expect("clock advances");
@@ -79,23 +95,40 @@ fn generated_failures_minimize_to_language_neutral_fixtures() {
         FaultPlan::default(),
     )
     .expect("trace creates");
-    let minimized = case.minimize_failure(|candidate| {
+    let expected = FailureFingerprint::new("model_mismatch", "command", "break_retained")
+        .expect("fingerprint validates");
+    let unrelated = FailureFingerprint::new("other", "command", "other_failure")
+        .expect("fingerprint validates");
+    let minimized = case.minimize_failure(&expected, |candidate| {
         if candidate
             .commands
             .iter()
             .any(|command| command["type"] == "break")
         {
-            Err(())
+            Err(expected.clone())
+        } else if candidate
+            .commands
+            .iter()
+            .any(|command| command["type"] == "query")
+        {
+            Err(unrelated.clone())
         } else {
             Ok(())
         }
     });
     assert_eq!(minimized.identity.path, [1]);
+    assert_eq!(minimized.expected_failure.as_ref(), Some(&expected));
     assert!(
         minimized
             .fixture_json()
             .expect("fixture encodes")
             .contains(TRACE_VERSION)
+    );
+    assert!(
+        minimized
+            .fixture_json()
+            .expect("fixture encodes")
+            .contains("break_retained")
     );
     let replay = ReplaySpec {
         package: "cymule-durable",

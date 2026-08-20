@@ -17,7 +17,7 @@ use serde_json::Value;
 use tempfile::{Builder, TempDir};
 
 /// Frozen language-neutral generated trace fixture version.
-pub const TRACE_VERSION: &str = "cymule.test-trace/1";
+pub const TRACE_VERSION: &str = "cymule.test-trace/2";
 
 /// Errors raised by deterministic test composition.
 #[derive(Debug)]
@@ -236,6 +236,8 @@ pub enum FaultAction {
 pub struct FaultStep {
     /// Stable operation name owned by the test adapter.
     pub operation: String,
+    /// Stable original command path. An empty path denotes a non-trace operation.
+    pub path: Vec<usize>,
     /// One-based occurrence count for that operation.
     pub occurrence: u64,
     /// Closed fault action.
@@ -264,10 +266,10 @@ impl FaultPlan {
                     "fault operation must be non-empty and occurrence must be positive".to_owned(),
                 ));
             }
-            if !identities.insert((step.operation.clone(), step.occurrence)) {
+            if !identities.insert((step.operation.clone(), step.path.clone(), step.occurrence)) {
                 return Err(TestWorldError::Invalid(format!(
-                    "duplicate fault at {} occurrence {}",
-                    step.operation, step.occurrence
+                    "duplicate fault at {} path {:?} occurrence {}",
+                    step.operation, step.path, step.occurrence
                 )));
             }
         }
@@ -288,14 +290,20 @@ impl FaultPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultSchedule {
     plan: FaultPlan,
-    counts: BTreeMap<String, u64>,
+    counts: BTreeMap<(String, Vec<usize>), u64>,
     consumed: BTreeSet<usize>,
 }
 
 impl FaultSchedule {
     /// Observe one operation and return its selected action at most once.
     pub fn observe(&mut self, operation: &str) -> Option<FaultAction> {
-        let count = self.counts.entry(operation.to_owned()).or_insert(0);
+        self.observe_path(operation, &[])
+    }
+
+    /// Observe one operation at its stable original command path.
+    pub fn observe_path(&mut self, operation: &str, path: &[usize]) -> Option<FaultAction> {
+        let identity = (operation.to_owned(), path.to_vec());
+        let count = self.counts.entry(identity).or_insert(0);
         *count = count.saturating_add(1);
         let occurrence = *count;
         let selected = self
@@ -305,6 +313,7 @@ impl FaultSchedule {
             .enumerate()
             .find_map(|(index, step)| {
                 (step.operation == operation
+                    && step.path == path
                     && step.occurrence == occurrence
                     && !self.consumed.contains(&index))
                 .then_some((index, step.action))
@@ -319,7 +328,26 @@ impl FaultSchedule {
 
     /// Return how often an operation has been observed.
     pub fn observations(&self, operation: &str) -> u64 {
-        self.counts.get(operation).copied().unwrap_or(0)
+        self.observations_at(operation, &[])
+    }
+
+    /// Return how often an operation has been observed at one command path.
+    pub fn observations_at(&self, operation: &str, path: &[usize]) -> u64 {
+        self.counts
+            .get(&(operation.to_owned(), path.to_vec()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Return authored faults that were never reached by this execution.
+    pub fn unconsumed_steps(&self) -> Vec<FaultStep> {
+        self.plan
+            .steps
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !self.consumed.contains(index))
+            .map(|(_, step)| step.clone())
+            .collect()
     }
 }
 
@@ -603,6 +631,49 @@ pub struct TraceIdentity {
     pub path: Vec<usize>,
 }
 
+/// Stable identity of one generated invariant failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailureFingerprint {
+    /// Closed failure category owned by the model test.
+    pub code: String,
+    /// Stable command or lifecycle phase.
+    pub phase: String,
+    /// Exact violated invariant within that phase.
+    pub invariant: String,
+}
+
+impl FailureFingerprint {
+    /// Construct and validate one stable fingerprint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any identity field is empty or contains control characters.
+    pub fn new(
+        code: impl Into<String>,
+        phase: impl Into<String>,
+        invariant: impl Into<String>,
+    ) -> TestWorldResult<Self> {
+        let fingerprint = Self {
+            code: code.into(),
+            phase: phase.into(),
+            invariant: invariant.into(),
+        };
+        for (name, value) in [
+            ("code", &fingerprint.code),
+            ("phase", &fingerprint.phase),
+            ("invariant", &fingerprint.invariant),
+        ] {
+            if value.is_empty() || value.chars().any(char::is_control) {
+                return Err(TestWorldError::Invalid(format!(
+                    "failure fingerprint {name} must be non-empty printable text"
+                )));
+            }
+        }
+        Ok(fingerprint)
+    }
+}
+
 /// One language-neutral generated command and fault trace.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -615,6 +686,8 @@ pub struct TraceCase<C> {
     pub commands: Vec<C>,
     /// Faults applied underneath those commands.
     pub faults: FaultPlan,
+    /// Exact failure that a minimized regression fixture must reproduce.
+    pub expected_failure: Option<FailureFingerprint>,
 }
 
 impl<C> TraceCase<C> {
@@ -633,21 +706,27 @@ impl<C> TraceCase<C> {
             },
             commands,
             faults,
+            expected_failure: None,
         })
     }
 }
 
 impl<C: Clone> TraceCase<C> {
-    /// Delete commands and faults while the caller confirms that failure persists.
+    /// Delete commands and faults while preserving one exact failure fingerprint.
     #[must_use]
-    pub fn minimize_failure<E>(&self, mut run: impl FnMut(&Self) -> Result<(), E>) -> Self {
+    pub fn minimize_failure(
+        &self,
+        expected: &FailureFingerprint,
+        mut run: impl FnMut(&Self) -> Result<(), FailureFingerprint>,
+    ) -> Self {
         let mut minimized = self.clone();
+        minimized.expected_failure = Some(expected.clone());
         let mut index = 0;
         while minimized.commands.len() > 1 && index < minimized.commands.len() {
             let mut candidate = minimized.clone();
             candidate.commands.remove(index);
             candidate.identity.path.remove(index);
-            if run(&candidate).is_err() {
+            if run(&candidate).as_ref().err() == Some(expected) {
                 minimized = candidate;
             } else {
                 index += 1;
@@ -657,7 +736,7 @@ impl<C: Clone> TraceCase<C> {
         while fault_index < minimized.faults.steps.len() {
             let mut candidate = minimized.clone();
             candidate.faults.steps.remove(fault_index);
-            if run(&candidate).is_err() {
+            if run(&candidate).as_ref().err() == Some(expected) {
                 minimized = candidate;
             } else {
                 fault_index += 1;
@@ -712,6 +791,8 @@ pub struct TraceFailure {
     pub replay_command: String,
     /// Minimized fixture ready to check in for every SDK.
     pub minimized_fixture: String,
+    /// Exact failure retained by minimization.
+    pub fingerprint: FailureFingerprint,
     /// Model or implementation failure.
     pub cause: String,
 }
@@ -720,8 +801,15 @@ impl fmt::Display for TraceFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "generated trace failed\nseed: {}\npath: {:?}\nreplay: {}\ncause: {}\nminimized fixture:\n{}",
-            self.seed, self.path, self.replay_command, self.cause, self.minimized_fixture
+            "generated trace failed\nseed: {}\npath: {:?}\nreplay: {}\nfingerprint: {}/{}/{}\ncause: {}\nminimized fixture:\n{}",
+            self.seed,
+            self.path,
+            self.replay_command,
+            self.fingerprint.code,
+            self.fingerprint.phase,
+            self.fingerprint.invariant,
+            self.cause,
+            self.minimized_fixture
         )
     }
 }
