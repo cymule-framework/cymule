@@ -21,6 +21,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 cymule-store-sqlite = { path = "../store-sqlite" }
+cymule-test-world = { path = "../../tests/test-world" }
 rusqlite.workspace = true
 tempfile = "3.27.0"
 

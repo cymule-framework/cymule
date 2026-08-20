@@ -386,6 +386,7 @@ dependencies = [
  "cymule-durable",
  "cymule-resource",
  "cymule-store-sqlite",
+ "cymule-test-world",
  "jsonschema",
  "rusqlite",
  "serde",
@@ -454,6 +455,7 @@ version = "0.1.4"
 dependencies = [
  "cymule-core",
  "cymule-runtime",
+ "cymule-test-world",
  "serde",
  "serde_json",
 ]
@@ -580,6 +582,7 @@ dependencies = [
  "cymule-core",
  "cymule-durable",
  "cymule-runtime",
+ "cymule-test-world",
  "rusqlite",
  "serde_json",
  "tempfile",
@@ -592,6 +595,16 @@ dependencies = [
  "cymule-core",
  "cymule-runtime",
  "serde_json",
+]
+
+[[package]]
+name = "cymule-test-world"
+version = "0.1.4"
+dependencies = [
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

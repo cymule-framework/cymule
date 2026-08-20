@@ -62,3 +62,6 @@
   journal windows in `process_kill.rs`, stream atomicity in `streaming.rs`, and
   ordinary controller semantics in `interaction.rs`; do not collapse these
   independent witnesses into one slow test file.
+- The process-death suite reuses the workspace-private `TestWorld` temporary
+  domain and `ManagedChild` barrier/reap lifecycle. Agent semantics never own a
+  hidden crash switch, test clock, or global child registry.

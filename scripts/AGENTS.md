@@ -3,6 +3,9 @@
 - `tests/harness/suites.toml` is the suite inventory. Keep leaf commands
   independently runnable and let `scripts/test_harness.py` own dependency
   expansion, risk routing, lane grouping, and machine-readable reports.
+- Every leaf suite belongs to exactly one execution class: `deterministic`,
+  `live_process`, or `live_provider`. The harness validates full coverage,
+  includes the class in list/matrix/report output, and rejects duplicates.
 - The same manifest owns path routes. Do not reintroduce a hard-coded route
   table in Python or workflow YAML; catalog validation rejects unknown suites.
 - A narrow path route must select the smallest sufficient evidence family. A

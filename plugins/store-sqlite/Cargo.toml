@@ -19,6 +19,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 cymule-runtime.workspace = true
+cymule-test-world = { path = "../../tests/test-world" }
 tempfile = "3.27.0"
 
 [lints]

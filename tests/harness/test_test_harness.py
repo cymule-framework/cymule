@@ -60,6 +60,19 @@ class ChangeRoutingTests(unittest.TestCase):
             },
         )
 
+    def test_test_world_change_selects_its_three_existing_consumers(self) -> None:
+        suites, _ = HARNESS.select_suites(["tests/test-world/src/lib.rs"])
+        self.assertEqual(
+            set(suites),
+            {
+                "test-world-deterministic",
+                "test-world-live-process",
+                "rust-durable",
+                "rust-store-plugins",
+                "rust-agent-plugin",
+            },
+        )
+
     def test_unknown_path_escalates_to_full(self) -> None:
         suites, evidence = HARNESS.select_suites(["future-domain/meaning.rs"])
         self.assertEqual(suites, ["full"])
@@ -78,6 +91,27 @@ class ChangeRoutingTests(unittest.TestCase):
         self.assertIn("sdk-python", lanes)
         self.assertIn("sdk-go", lanes)
         self.assertIn("meta", lanes)
+        rust_lane = next(entry for entry in matrix["include"] if entry["lane"] == "rust")
+        self.assertEqual(
+            set(rust_lane["execution_classes"]),
+            {"deterministic", "live_process", "live_provider"},
+        )
+
+    def test_every_leaf_has_one_execution_class(self) -> None:
+        manifest = HARNESS.load_manifest()
+        classes = HARNESS.suite_execution_classes(manifest)
+        leaves = {
+            name
+            for name, suite in manifest["suites"].items()
+            if not suite.get("abstract", False)
+        }
+        self.assertEqual(set(classes), leaves)
+
+    def test_duplicate_execution_class_is_rejected(self) -> None:
+        manifest = HARNESS.load_manifest()
+        manifest["execution_classes"]["live_provider"]["suites"].append("rust-core")
+        with self.assertRaisesRegex(ValueError, "duplicate execution classes"):
+            HARNESS.validate_manifest(manifest)
 
     def test_route_catalog_rejects_unknown_suite(self) -> None:
         manifest = HARNESS.load_manifest()

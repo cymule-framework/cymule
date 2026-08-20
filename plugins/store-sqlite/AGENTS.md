@@ -13,3 +13,6 @@
 - Reopen, stale writer, busy writer, committed-receipt loss, and corrupted-row
   tests are required. SQLite WAL and synchronous-full durability are adapter
   configuration, not framework semantics.
+- Real process-death sweeps use the workspace-private `TestWorld` temporary
+  domain and `ManagedChild` barrier/reap lifecycle. Do not reintroduce local
+  child guards or wall-clock race polling.

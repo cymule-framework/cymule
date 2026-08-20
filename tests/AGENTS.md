@@ -7,6 +7,14 @@
 - A seeded property/fuzz failure must print its seed and be minimized into a
   permanent regression fixture. Do not rely on wall-clock races when a CAS
   revision, epoch, counter, or explicit barrier can identify the interleaving.
+- Shared test composition lives in the workspace-private `tests/test-world`
+  crate only while at least three independently routed suites consume it. Keep
+  clocks, random state, fault counters, observations, temporary domains, and
+  child lifecycles owned by one test case; never add global hooks to production.
+- Generated stateful command traces are authored once in Rust. A failure prints
+  its seed, retained command path, exact Cargo replay command, and minimized
+  language-neutral JSON; SDKs consume the promoted fixture instead of owning
+  another generator.
 - User-example crash tests should execute the built binary and use explicit
   logical clock values. Exit after an identified durable boundary, reopen from
   public adapters, and assert the retained occurrence and Resource identities.
@@ -55,6 +63,9 @@
   marker immediately before or after CAS, then let the parent send `SIGKILL`.
   The wrapper belongs only in integration tests; never add a pause or crash
   switch to a reducer or production adapter.
+- Use `ManagedChild` for shared process-death tests. Its Drop path must kill and
+  wait even when the caller forgets explicit termination; keep an independent
+  leak probe in the live-process suite.
 - Effect fault matrices distinguish prepare-response loss, durable enqueue,
   scope commit, dispatch-start claim, provider application, Applied settlement,
   and Unknown observation. Assert exact provider call counts and reject

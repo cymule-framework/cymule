@@ -5,13 +5,13 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cymule_core::{
     Definition, DispatchPolicy, EffectContract, EffectProfile, Expression, MutationKind, Operation,
@@ -26,9 +26,9 @@ use cymule_runtime::{
     RuntimeError, RuntimeResult,
 };
 use cymule_store_sqlite::SqliteStore;
+use cymule_test_world::{ManagedChild, TestWorld};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
-use tempfile::tempdir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KillPhase {
@@ -94,15 +94,6 @@ impl DurableStore for CountingStore {
     ) -> DurableResult<StoreCommit> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inner.compare_and_swap(expected_revision, next)
-    }
-}
-
-struct KillChild(Child);
-
-impl Drop for KillChild {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
     }
 }
 
@@ -300,20 +291,6 @@ fn effect_candidate() -> PlanCandidate {
     }
 }
 
-fn wait_for_marker(child: &mut Child, marker: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if marker.exists() {
-            return;
-        }
-        if let Some(status) = child.try_wait().expect("worker status reads") {
-            panic!("M1 kill worker exited before barrier with {status}");
-        }
-        assert!(Instant::now() < deadline, "M1 kill worker timed out");
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
 #[test]
 fn m1_process_kill_worker_entry() {
     let Ok(database) = std::env::var("CYMULE_M1_KILL_DB") else {
@@ -355,9 +332,15 @@ fn m1_process_kill_worker_entry() {
 
 #[test]
 fn every_m1_effect_run_cas_boundary_survives_real_process_death() {
-    let baseline = tempdir().expect("baseline directory creates");
-    let baseline_database = baseline.path().join("durable.sqlite");
-    let baseline_ledger = baseline.path().join("effects.sqlite");
+    let baseline = TestWorld::new(0).expect("baseline test world creates");
+    let baseline_database = baseline
+        .domain()
+        .path("durable.sqlite")
+        .expect("baseline database path resolves");
+    let baseline_ledger = baseline
+        .domain()
+        .path("effects.sqlite")
+        .expect("baseline ledger path resolves");
     LedgerPlugin::initialize(&baseline_ledger);
     let calls = Arc::new(AtomicUsize::new(0));
     let mut runtime = ResumableRuntime::open(
@@ -386,12 +369,26 @@ fn every_m1_effect_run_cas_boundary_survives_real_process_death() {
 
     for phase in ["before_commit", "after_commit"] {
         for fail_at in 1..=boundary_count {
-            let directory = tempdir().expect("temporary directory creates");
-            let database = directory.path().join("durable.sqlite");
-            let ledger = directory.path().join("effects.sqlite");
-            let marker = directory.path().join("kill-ready");
+            let phase_seed = usize::from(phase == "after_commit") * boundary_count + fail_at;
+            let world =
+                TestWorld::new(u64::try_from(phase_seed).expect("fault-matrix position fits u64"))
+                    .expect("fault test world creates");
+            let database = world
+                .domain()
+                .path("durable.sqlite")
+                .expect("durable database path resolves");
+            let ledger = world
+                .domain()
+                .path("effects.sqlite")
+                .expect("effect ledger path resolves");
+            let marker = world
+                .domain()
+                .path("kill-ready")
+                .expect("kill marker path resolves");
             LedgerPlugin::initialize(&ledger);
-            let child = Command::new(std::env::current_exe().expect("test executable resolves"))
+            let mut command =
+                Command::new(std::env::current_exe().expect("test executable resolves"));
+            command
                 .arg("--exact")
                 .arg("m1_process_kill_worker_entry")
                 .arg("--nocapture")
@@ -402,13 +399,13 @@ fn every_m1_effect_run_cas_boundary_survives_real_process_death() {
                 .env("CYMULE_M1_KILL_MARKER", &marker)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .expect("kill worker starts");
-            let mut child = KillChild(child);
-            wait_for_marker(&mut child.0, &marker);
-            child.0.kill().expect("worker is killed");
-            assert!(!child.0.wait().expect("worker is reaped").success());
+                .stderr(Stdio::inherit());
+            let mut child = ManagedChild::spawn(&mut command).expect("kill worker starts");
+            child
+                .wait_for_path(&marker, Duration::from_secs(20))
+                .expect("kill worker reaches the selected CAS barrier");
+            assert!(!child.terminate().expect("worker is reaped").success());
+            assert!(child.is_reaped());
 
             let store =
                 SqliteStore::open(&database, "domain:m1-kill").expect("durable store reopens");

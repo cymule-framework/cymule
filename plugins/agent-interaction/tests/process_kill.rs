@@ -4,9 +4,9 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cymule_agent::{
     AgentError, AgentHost, AgentHostOccurrence, AgentHostOccurrenceState, AgentHostRequest,
@@ -22,9 +22,9 @@ use cymule_durable::{
     DurableCoordinator, DurableResult, DurableState, DurableStore, StoreCommit, StoredState,
 };
 use cymule_store_sqlite::SqliteStore;
+use cymule_test_world::{ManagedChild, TestWorld};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::json;
-use tempfile::tempdir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KillPhase {
@@ -70,15 +70,6 @@ impl DurableStore for KillStore {
                 self.stop();
             }
         }
-    }
-}
-
-struct KillChild(Child);
-
-impl Drop for KillChild {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
     }
 }
 
@@ -220,20 +211,6 @@ fn tool_response(request: &ToolRequest) -> ToolResponse {
     }
 }
 
-fn wait_for_marker(child: &mut Child, marker: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if marker.exists() {
-            return;
-        }
-        if let Some(status) = child.try_wait().expect("child status reads") {
-            panic!("Agent kill worker exited before barrier with {status}");
-        }
-        assert!(Instant::now() < deadline, "Agent kill worker timed out");
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
 #[test]
 fn agent_process_kill_worker_entry() {
     let Ok(durable_database) = std::env::var("CYMULE_AGENT_KILL_DB") else {
@@ -336,10 +313,22 @@ fn agent_stream_process_kill_worker_entry() {
 fn every_agent_occurrence_journal_boundary_survives_real_process_death() {
     for phase in ["before_commit", "after_commit"] {
         for fail_at in 1..=3 {
-            let directory = tempdir().expect("temporary directory creates");
-            let durable_database = directory.path().join("durable.sqlite");
-            let ledger = directory.path().join("host.sqlite");
-            let marker = directory.path().join("kill-ready");
+            let phase_seed = usize::from(phase == "after_commit") * 3 + fail_at;
+            let world =
+                TestWorld::new(u64::try_from(phase_seed).expect("fault-matrix position fits u64"))
+                    .expect("Agent fault test world creates");
+            let durable_database = world
+                .domain()
+                .path("durable.sqlite")
+                .expect("durable database path resolves");
+            let ledger = world
+                .domain()
+                .path("host.sqlite")
+                .expect("host ledger path resolves");
+            let marker = world
+                .domain()
+                .path("kill-ready")
+                .expect("kill marker path resolves");
             LedgerHost::initialize(&ledger);
             let store = SqliteStore::open(&durable_database, "domain:agent-kill")
                 .expect("durable store opens");
@@ -348,7 +337,9 @@ fn every_agent_occurrence_journal_boundary_survives_real_process_death() {
                 .initialize(&Machine::new())
                 .expect("domain initializes");
 
-            let child = Command::new(std::env::current_exe().expect("test executable resolves"))
+            let mut command =
+                Command::new(std::env::current_exe().expect("test executable resolves"));
+            command
                 .arg("--exact")
                 .arg("agent_process_kill_worker_entry")
                 .arg("--nocapture")
@@ -359,13 +350,13 @@ fn every_agent_occurrence_journal_boundary_survives_real_process_death() {
                 .env("CYMULE_AGENT_KILL_MARKER", &marker)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .expect("kill worker starts");
-            let mut child = KillChild(child);
-            wait_for_marker(&mut child.0, &marker);
-            child.0.kill().expect("worker is killed");
-            assert!(!child.0.wait().expect("worker is reaped").success());
+                .stderr(Stdio::inherit());
+            let mut child = ManagedChild::spawn(&mut command).expect("kill worker starts");
+            child
+                .wait_for_path(&marker, Duration::from_secs(20))
+                .expect("kill worker reaches the selected journal barrier");
+            assert!(!child.terminate().expect("worker is reaped").success());
+            assert!(child.is_reaped());
 
             let store = SqliteStore::open(&durable_database, "domain:agent-kill")
                 .expect("durable store reopens");
@@ -454,8 +445,12 @@ fn every_agent_occurrence_journal_boundary_survives_real_process_death() {
 #[test]
 fn session_and_stream_journals_survive_real_process_death_on_both_cas_sides() {
     for phase in ["before_commit", "after_commit"] {
-        let directory = tempdir().expect("temporary directory creates");
-        let session_database = directory.path().join("session.sqlite");
+        let world = TestWorld::new(u64::from(phase == "after_commit"))
+            .expect("Agent journal test world creates");
+        let session_database = world
+            .domain()
+            .path("session.sqlite")
+            .expect("Session database path resolves");
         DurableCoordinator::open(
             SqliteStore::open(&session_database, "domain:agent-session-kill")
                 .expect("Session store opens"),
@@ -463,7 +458,10 @@ fn session_and_stream_journals_survive_real_process_death_on_both_cas_sides() {
         .expect("Session domain opens")
         .initialize(&Machine::new())
         .expect("Session domain initializes");
-        let session_marker = directory.path().join("session-ready");
+        let session_marker = world
+            .domain()
+            .path("session-ready")
+            .expect("Session marker path resolves");
         run_and_kill(
             "agent_session_process_kill_worker_entry",
             &session_marker,
@@ -493,7 +491,10 @@ fn session_and_stream_journals_survive_real_process_death_on_both_cas_sides() {
             vec![running]
         );
 
-        let stream_database = directory.path().join("stream.sqlite");
+        let stream_database = world
+            .domain()
+            .path("stream.sqlite")
+            .expect("stream database path resolves");
         let mut stream_coordinator = DurableCoordinator::open(
             SqliteStore::open(&stream_database, "domain:agent-stream-kill")
                 .expect("stream store opens"),
@@ -524,7 +525,10 @@ fn session_and_stream_journals_survive_real_process_death_on_both_cas_sides() {
         )
         .expect("stream chunk persists");
         drop(stream_coordinator);
-        let stream_marker = directory.path().join("stream-ready");
+        let stream_marker = world
+            .domain()
+            .path("stream-ready")
+            .expect("stream marker path resolves");
         run_and_kill(
             "agent_stream_process_kill_worker_entry",
             &stream_marker,
@@ -576,10 +580,12 @@ fn run_and_kill(test_name: &str, marker: &Path, environment: &[(&str, &Path)]) {
     for (key, value) in environment {
         command.env(key, value);
     }
-    let mut child = KillChild(command.spawn().expect("kill worker starts"));
-    wait_for_marker(&mut child.0, marker);
-    child.0.kill().expect("worker is killed");
-    assert!(!child.0.wait().expect("worker is reaped").success());
+    let mut child = ManagedChild::spawn(&mut command).expect("kill worker starts");
+    child
+        .wait_for_path(marker, Duration::from_secs(20))
+        .expect("kill worker reaches the selected journal barrier");
+    assert!(!child.terminate().expect("worker is reaped").success());
+    assert!(child.is_reaped());
 }
 
 fn execute_replacement(coordinator: DurableCoordinator<SqliteStore>, host: LedgerHost) {

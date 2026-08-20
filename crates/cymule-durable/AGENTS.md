@@ -107,3 +107,7 @@
   child-process death sweeps in `plugins/store-sqlite`. Both discover the Run
   boundary count from a successful execution and inspect provider calls as well
   as recovered state.
+- The generated durable model trace is the single command-sequence generator.
+  It composes `cymule-test-world` faults with reopen through public durable
+  interfaces, checks each response against a small domain model, and emits a
+  minimized language-neutral fixture on failure. SDKs must not duplicate it.

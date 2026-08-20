@@ -1,4 +1,53 @@
-schema_version = 1
+schema_version = 2
+
+[execution_classes.deterministic]
+description = "Replayable in-process, compiler, packaging, or static evidence with no external service authority."
+suites = [
+  "docs",
+  "harness",
+  "test-world-deterministic",
+  "rust-core",
+  "rust-durable",
+  "rust-virtual",
+  "rust-evolution",
+  "rust-resource",
+  "package-typescript",
+  "package-rust",
+  "mlir",
+  "rust-coverage",
+  "rust-coverage-plugins",
+  "rust-mutation",
+  "rust-mutation-evolution-m4",
+  "rust-mutation-plugins",
+  "rust-agent-mcp-plugin",
+]
+
+[execution_classes.live_process]
+description = "Credential-free evidence that executes a built child or crosses a real process-death boundary."
+suites = [
+  "test-world-live-process",
+  "rust-workspace",
+  "rust-agent-plugin",
+  "protocol",
+  "sdk-rust",
+  "sdk-typescript",
+  "sdk-python",
+  "sdk-go",
+  "example",
+  "rust-soak",
+  "rust-store-plugins",
+  "rust-resource-plugins",
+  "rust-executor-plugin",
+]
+
+[execution_classes.live_provider]
+description = "Evidence against a real adapter or provider boundary, kept independent from deterministic semantics."
+suites = [
+  "rust-directory-plugin",
+  "rust-portability",
+  "rust-activation-plugins",
+  "rust-observability-plugin",
+]
 
 [suites.docs]
 description = "Validate repository-local documentation references."
@@ -11,6 +60,18 @@ description = "Validate change routing and harness behavior."
 lane = "meta"
 tools = []
 commands = [["python3", "-m", "unittest", "discover", "-s", "tests/harness", "-p", "test_*.py"]]
+
+[suites.test-world-deterministic]
+description = "Validate owned clocks, seeded traces, fault schedules, observations, and temporary domains."
+lane = "rust"
+tools = ["rust"]
+commands = [["cargo", "test", "--package", "cymule-test-world", "--test", "deterministic"]]
+
+[suites.test-world-live-process]
+description = "Prove managed child teardown reaches a barrier and reaps a forgotten child."
+lane = "rust"
+tools = ["rust"]
+commands = [["cargo", "test", "--package", "cymule-test-world", "--test", "live_process"]]
 
 [suites.rust-workspace]
 description = "Run formatting, static analysis, tests, and documentation for the Rust workspace."
@@ -205,6 +266,8 @@ abstract = true
 requires = [
   "docs",
   "harness",
+  "test-world-deterministic",
+  "test-world-live-process",
   "rust-workspace",
   "protocol",
   "sdk-rust",
@@ -333,6 +396,10 @@ suites = ["mlir"]
 [[routes]]
 patterns = ["tests/harness/**", "scripts/test_harness.py", "scripts/validate_docs.py"]
 suites = ["harness", "docs"]
+
+[[routes]]
+patterns = ["tests/test-world/**"]
+suites = ["test-world-deterministic", "test-world-live-process", "rust-durable", "rust-store-plugins", "rust-agent-plugin"]
 
 [[routes]]
 patterns = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]

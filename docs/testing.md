@@ -78,6 +78,19 @@ consumers. A frozen semantic or wire change runs all affected projections. An
 unknown path fails closed to `full`. Independent evidence can fail, run, and
 evolve without coupling unrelated toolchains.
 
+Every leaf also has one execution class in the same manifest:
+
+| Class | Meaning | Isolation rule |
+| --- | --- | --- |
+| `deterministic` | replayable in-process, compiler, packaging, or static evidence | no external service is authority |
+| `live_process` | a built child or real process-death boundary is part of the witness | use an explicit barrier and always reap the child |
+| `live_provider` | a concrete adapter or provider boundary is exercised | keep provider setup and failures outside semantic suites |
+
+The harness rejects an unclassified or multiply classified leaf and carries the
+class into list, CI matrix, and JSON execution reports. This prevents a fast
+deterministic regression from silently becoming dependent on process timing or
+provider availability.
+
 ## Evidence families
 
 | Family | Proves | Typical trigger |
@@ -284,6 +297,21 @@ Do not add test-only branches to the semantic reducer. Do not use wall-clock
 races as correctness evidence when an explicit barrier, counter, epoch, or CAS
 revision can identify the same interleaving. Seeded fuzz/property cases must
 print the seed and minimize a failure into a permanent regression fixture.
+
+Shared deterministic composition lives in the unpublished
+`cymule-test-world` workspace crate because durable, SQLite, and Agent suites
+all consume it. One owned `TestWorld` combines a logical clock, seeded random
+source, identified fault schedule, recording observer, temporary durable-domain
+root, and managed child lifecycle. None of those values enters production code,
+uses global mutation, or creates a second authority.
+
+The durable model trace generates the public `DurableCommand` sequence and the
+underlying CAS fault plan once in Rust, reopens after each injected failure, and
+checks every response against a small Run/domain model. A failure contains the
+seed, retained original command indexes, a copy-paste Cargo replay command, and
+a minimized `cymule.test-trace/1` JSON document. That document can be promoted
+to `tests/fixtures/` for all SDKs; TypeScript, Python, and Go never implement
+their own command generator or shrinker.
 
 The core Proptest suite uses an explicit crate-local failure-persistence path
 because integration tests have no discoverable `lib.rs` beside their source.

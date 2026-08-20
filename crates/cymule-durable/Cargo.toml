@@ -17,5 +17,8 @@ cymule-runtime.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+cymule-test-world = { path = "../../tests/test-world" }
+
 [lints]
 workspace = true

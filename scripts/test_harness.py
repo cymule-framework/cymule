@@ -29,7 +29,7 @@ def load_manifest(path: Path = MANIFEST) -> dict[str, Any]:
 
 def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     """Validate one already decoded suite and routing catalog."""
-    if manifest.get("schema_version") != 1:
+    if manifest.get("schema_version") != 2:
         raise ValueError("unsupported test harness manifest version")
     suites = manifest.get("suites")
     if not isinstance(suites, dict) or "full" not in suites:
@@ -42,6 +42,36 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"abstract suite {name} has no requirements")
         elif not suite.get("commands"):
             raise ValueError(f"suite {name} has no commands")
+    execution_classes = manifest.get("execution_classes")
+    expected_classes = {"deterministic", "live_process", "live_provider"}
+    if not isinstance(execution_classes, dict) or set(execution_classes) != expected_classes:
+        raise ValueError("test harness must define deterministic, live_process, and live_provider execution classes")
+    classified: dict[str, str] = {}
+    for class_name, execution_class in execution_classes.items():
+        if not isinstance(execution_class, dict) or not isinstance(
+            execution_class.get("description"), str
+        ):
+            raise ValueError(f"execution class {class_name} has no description")
+        members = execution_class.get("suites")
+        if not isinstance(members, list) or not all(isinstance(value, str) for value in members):
+            raise ValueError(f"execution class {class_name} has invalid suites")
+        for name in members:
+            if name not in suites:
+                raise ValueError(f"execution class {class_name} references unknown suite {name}")
+            if suites[name].get("abstract", False):
+                raise ValueError(f"abstract suite {name} cannot own an execution class")
+            if name in classified:
+                raise ValueError(
+                    f"suite {name} has duplicate execution classes {classified[name]} and {class_name}"
+                )
+            classified[name] = class_name
+    unclassified = sorted(
+        name
+        for name, suite in suites.items()
+        if not suite.get("abstract", False) and name not in classified
+    )
+    if unclassified:
+        raise ValueError(f"suites lack an execution class: {', '.join(unclassified)}")
     routes = manifest.get("routes")
     if not isinstance(routes, list) or not routes:
         raise ValueError("test harness manifest must define routes")
@@ -64,6 +94,15 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         if unknown:
             raise ValueError(f"route {index} references unknown suites: {', '.join(unknown)}")
     return manifest
+
+
+def suite_execution_classes(manifest: dict[str, Any]) -> dict[str, str]:
+    """Return the validated leaf-suite to execution-class index."""
+    return {
+        suite: class_name
+        for class_name, execution_class in manifest["execution_classes"].items()
+        for suite in execution_class["suites"]
+    }
 
 
 def matches(path: str, pattern: str) -> bool:
@@ -156,17 +195,23 @@ def changed_paths(base: str, head: str, include_worktree: bool) -> tuple[list[st
 def ci_matrix(names: list[str], manifest: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Group selected suites into independently executable CI lanes."""
     suites = manifest["suites"]
+    execution_classes = suite_execution_classes(manifest)
     lanes: dict[str, dict[str, Any]] = {}
     for name in expand_suites(names, manifest):
         suite = suites[name]
         lane_name = suite["lane"]
-        lane = lanes.setdefault(lane_name, {"lane": lane_name, "suites": [], "tools": set()})
+        lane = lanes.setdefault(
+            lane_name,
+            {"lane": lane_name, "suites": [], "tools": set(), "execution_classes": set()},
+        )
         lane["suites"].append(name)
         lane["tools"].update(suite.get("tools", []))
+        lane["execution_classes"].add(execution_classes[name])
     include = []
     for lane_name in sorted(lanes):
         lane = lanes[lane_name]
         tools = lane.pop("tools")
+        lane["execution_classes"] = sorted(lane["execution_classes"])
         include.append(
             {
                 **lane,
@@ -193,6 +238,7 @@ def write_report(report: dict[str, Any], path: Path) -> None:
 def run_suites(names: list[str], manifest: dict[str, Any], keep_going: bool, report_path: Path | None) -> int:
     """Execute selected leaf suites and retain structured timing evidence."""
     expanded = expand_suites(names, manifest)
+    execution_classes = suite_execution_classes(manifest)
     if not expanded:
         raise ValueError("no suites selected")
     if report_path is None:
@@ -212,7 +258,11 @@ def run_suites(names: list[str], manifest: dict[str, Any], keep_going: bool, rep
         for name in expanded:
             suite = manifest["suites"][name]
             print(f"\n== {name}: {suite['description']} ==", flush=True)
-            suite_result: dict[str, Any] = {"suite": name, "commands": []}
+            suite_result: dict[str, Any] = {
+                "suite": name,
+                "execution_class": execution_classes[name],
+                "commands": [],
+            }
             suite_started = time.monotonic()
             for command in suite["commands"]:
                 if not isinstance(command, list) or not all(isinstance(value, str) for value in command):
@@ -267,8 +317,10 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parse_args(sys.argv[1:] if argv is None else argv)
     manifest = load_manifest()
     if arguments.command == "list":
+        execution_classes = suite_execution_classes(manifest)
         for name, suite in manifest["suites"].items():
-            print(f"{name:24} {suite['description']}")
+            execution_class = "abstract" if suite.get("abstract", False) else execution_classes[name]
+            print(f"{name:32} {execution_class:14} {suite['description']}")
         return 0
     if arguments.command == "plan":
         paths, revisions = changed_paths(arguments.base, arguments.head, not arguments.no_worktree)
