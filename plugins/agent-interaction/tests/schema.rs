@@ -1,7 +1,7 @@
 //! Plugin-owned Draft 2020-12 schema and fixture conformance.
 
 use cymule_agent::AgentSession;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[test]
 fn agent_plugin_schema_validates_owned_fixtures_and_rejects_provider_fields() {
@@ -42,6 +42,52 @@ fn agent_plugin_schema_validates_owned_fixtures_and_rejects_provider_fields() {
             .expect("stream fixture parses");
     for record in &records {
         validator.validate(record).expect("stream record validates");
+    }
+
+    let mut artifact_occurrence = occurrence.clone();
+    artifact_occurrence["response"]["response"]["content"] = json!([{
+        "type": "artifact",
+        "artifact": {
+            "identity_version": "cymule.artifact/2",
+            "artifact_id": format!("sha256:{}", "a".repeat(64)),
+            "kind": "agent/output"
+        }
+    }]);
+    validator
+        .validate(&artifact_occurrence)
+        .expect("canonical Artifact reference validates");
+    for malformed_artifact in [
+        json!({
+            "artifact_id": format!("sha256:{}", "a".repeat(64)),
+            "kind": "agent/output"
+        }),
+        json!({
+            "identity_version": "cymule.artifact/1",
+            "artifact_id": format!("sha256:{}", "a".repeat(64)),
+            "kind": "agent/output"
+        }),
+        json!({
+            "identity_version": "cymule.artifact/2",
+            "artifact_id": "sha256:not-a-digest",
+            "kind": "agent/output"
+        }),
+        json!({
+            "identity_version": "cymule.artifact/2",
+            "artifact_id": format!("sha256:{}", "A".repeat(64)),
+            "kind": "agent/output"
+        }),
+        json!({
+            "identity_version": "cymule.artifact/2",
+            "artifact_id": format!("sha256:{}", "a".repeat(64)),
+            "kind": "Invalid Kind"
+        }),
+    ] {
+        let mut malformed = artifact_occurrence.clone();
+        malformed["response"]["response"]["content"][0]["artifact"] = malformed_artifact;
+        assert!(
+            !validator.is_valid(&malformed),
+            "Agent schema accepted a malformed Artifact reference"
+        );
     }
 
     let mut malformed = occurrence;

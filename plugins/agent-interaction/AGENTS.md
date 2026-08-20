@@ -32,6 +32,10 @@
   advanced. Reopen by replaying the journal; never treat an in-memory Session as
   durable authority. Adapter-local exclusion must be non-blocking and must
   surface contention instead of turning a lock into interaction semantics.
+- Validate every journal-reachable `ArtifactRef` recursively through the core
+  `ArtifactRef::validate` authority before append and again during replay. A
+  workspace reference matches a retained Machine Artifact only when the full
+  version, digest, and kind are equal; an Artifact ID alone is insufficient.
 - Every replaceable context, model, permission, tool, elicitation, and workspace
   host call must resolve its implementation binding, persist that binding with
   `prepared` and `started` before invocation, and retain it in a typed

@@ -76,7 +76,7 @@
       "required": ["identity_version", "artifact_id", "kind"],
       "properties": {
         "identity_version": { "const": "cymule.artifact/2" },
-        "artifact_id": { "$ref": "#/$defs/nonEmpty" },
+        "artifact_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "kind": { "type": "string", "pattern": "^[a-z0-9._+-]+(?:/[a-z0-9._+-]+)+$", "maxLength": 255 }
       }
     },

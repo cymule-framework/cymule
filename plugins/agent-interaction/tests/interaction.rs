@@ -707,6 +707,37 @@ fn workspace_commit_transfers_and_resolves_one_scope_obligation() {
 }
 
 #[test]
+fn workspace_overlay_requires_an_exact_canonical_artifact_before_journaling() {
+    for changed_kind in [false, true] {
+        let run_id = if changed_kind {
+            "run:workspace-forged-kind"
+        } else {
+            "run:workspace-missing-artifact"
+        };
+        let (mut coordinator, mut request) = workspace_coordinator(MemoryStore::new(), run_id);
+        if changed_kind {
+            request.overlay.kind = "workspace/forged".to_owned();
+        } else {
+            request.overlay.artifact_id = format!("sha256:{}", "f".repeat(64));
+        }
+        let revision = coordinator.revision().expect("revision exists").to_owned();
+        let mut host = WorkspaceTestHost::new(false);
+        let applies = host.applies.clone();
+        assert!(matches!(
+            WorkspaceScopeController::commit(&mut coordinator, &mut host, &request),
+            Err(AgentError::NotFound(_))
+        ));
+        assert_eq!(applies.load(Ordering::SeqCst), 0);
+        assert_eq!(coordinator.revision(), Some(revision.as_str()));
+        assert!(
+            AgentOccurrenceStore::load_occurrences(&mut coordinator, &request.session_id)
+                .expect("occurrence journal remains readable")
+                .is_empty()
+        );
+    }
+}
+
+#[test]
 fn ambiguous_workspace_commit_reconciles_without_redispatch() {
     let store = MemoryStore::new();
     let (mut coordinator, request) =
@@ -1253,7 +1284,7 @@ fn elicitation_and_workspace_calls_are_pinned_occurrences() {
             change_id: "workspace:1".to_owned(),
             overlay: ArtifactRef {
                 identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
-                artifact_id: "sha256:overlay".to_owned(),
+                artifact_id: format!("sha256:{}", "a".repeat(64)),
                 kind: "workspace/overlay".to_owned(),
             },
             commit: true,

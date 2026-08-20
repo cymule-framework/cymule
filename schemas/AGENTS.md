@@ -14,6 +14,9 @@
   machine snapshot v3 replace their predecessors without fallback. The
   `artifact-type-contract.schema.json` file freezes recoverable canonical JSON
   contracts; opaque Artifacts do not use that schema.
+- Keep this exact Artifact reference shape identical in every owning public
+  schema and retain negative fixtures for missing/legacy versions, malformed or
+  uppercase digests, and invalid kinds.
 - `cymule.ir/2` adds the closed `invoke` operation. Future operation additions
   require a new IR version rather than widening this frozen schema in place.
 - Keep semantic validation in the Rust kernel. JSON Schema validates wire shape;

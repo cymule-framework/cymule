@@ -17,6 +17,14 @@ def load(path: Path) -> object:
         return json.load(source)
 
 
+def assert_invalid(validator: Draft202012Validator, value: object, message: str) -> None:
+    try:
+        validator.validate(value)
+    except ValidationError:
+        return
+    raise AssertionError(message)
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         raise SystemExit("usage: validate_schemas.py ROOT CYMULE_BIN")
@@ -30,6 +38,36 @@ def main() -> int:
         (schema["$id"], Resource.from_contents(schema)) for schema in schemas
     )
     by_title = {schema["title"]: schema for schema in schemas}
+    canonical_artifact = {
+        "identity_version": "cymule.artifact/2",
+        "artifact_id": "sha256:" + "a" * 64,
+        "kind": "test/evidence",
+    }
+    for schema_name in [
+        "evolution-control.schema.json",
+        "live-evolution-control.schema.json",
+        "virtual-checkpoint.schema.json",
+    ]:
+        artifact_validator = Draft202012Validator(
+            {
+                "$ref": (
+                    f"https://cymule.dev/schemas/{schema_name}#/$defs/artifact"
+                )
+            },
+            registry=registry,
+        )
+        artifact_validator.validate(canonical_artifact)
+        for malformed_artifact in [
+            {**canonical_artifact, "identity_version": "cymule.artifact/1"},
+            {**canonical_artifact, "artifact_id": "sha256:not-a-digest"},
+            {**canonical_artifact, "artifact_id": "sha256:" + "A" * 64},
+            {**canonical_artifact, "kind": "Invalid Kind"},
+        ]:
+            assert_invalid(
+                artifact_validator,
+                malformed_artifact,
+                f"{schema_name} accepted a malformed Artifact reference",
+            )
     engine_validator = Draft202012Validator(
         by_title["Cymule Engine Protocol cymule.engine/1"], registry=registry
     )
@@ -211,6 +249,8 @@ def main() -> int:
             "kind": wait_activation["result"]["kind"],
         },
         {**wait_activation["result"], "identity_version": "cymule.artifact/1"},
+        {**wait_activation["result"], "artifact_id": "sha256:not-a-digest"},
+        {**wait_activation["result"], "kind": "Invalid Kind"},
     ]:
         invalid_activation = {**wait_activation, "result": invalid_result}
         try:
@@ -323,11 +363,7 @@ def main() -> int:
     )
     if verified_evolution != evolution_control:
         raise AssertionError("Rust Engine changed the evolution control fixture")
-    artifact = {
-        "identity_version": "cymule.artifact/2",
-        "artifact_id": "sha256:" + "a" * 64,
-        "kind": "test/evidence",
-    }
+    artifact = canonical_artifact
     evolution_variants = [
         {
             "control_version": "cymule.evolution-control/2",

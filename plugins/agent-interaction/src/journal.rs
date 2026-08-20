@@ -42,8 +42,8 @@ impl AgentJournal for NoopAgentJournal {
         Ok(Vec::new())
     }
 
-    fn append(&mut self, _session_id: &str, _update: &AgentUpdate) -> AgentResult<()> {
-        Ok(())
+    fn append(&mut self, _session_id: &str, update: &AgentUpdate) -> AgentResult<()> {
+        update.validate_artifact_refs()
     }
 }
 
@@ -52,8 +52,8 @@ impl AgentOccurrenceStore for NoopAgentJournal {
         Ok(Vec::new())
     }
 
-    fn record_occurrence(&mut self, _occurrence: &AgentHostOccurrence) -> AgentResult<()> {
-        Ok(())
+    fn record_occurrence(&mut self, occurrence: &AgentHostOccurrence) -> AgentResult<()> {
+        occurrence.validate()
     }
 }
 
@@ -89,15 +89,20 @@ impl MemoryAgentJournal {
 
 impl AgentJournal for MemoryAgentJournal {
     fn load(&mut self, session_id: &str) -> AgentResult<Vec<AgentUpdate>> {
-        Ok(self
+        let updates = self
             .state()?
             .updates
             .get(session_id)
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_default();
+        for update in &updates {
+            update.validate_artifact_refs()?;
+        }
+        Ok(updates)
     }
 
     fn append(&mut self, session_id: &str, update: &AgentUpdate) -> AgentResult<()> {
+        update.validate_artifact_refs()?;
         let digest =
             canonical_digest(update).map_err(|error| AgentError::Validation(error.to_string()))?;
         let mut state = self.state()?;
@@ -166,6 +171,7 @@ impl<S: DurableStore> AgentJournal for DurableCoordinator<S> {
                 }
                 let update: AgentUpdate = serde_json::from_value(record.payload.clone())
                     .map_err(|error| AgentError::Persistence(error.to_string()))?;
+                update.validate_artifact_refs()?;
                 if update.update_id() != record.record_id {
                     return Err(AgentError::Persistence(format!(
                         "journal record {} does not match update identity {}",
@@ -187,6 +193,7 @@ impl<S: DurableStore> AgentJournal for DurableCoordinator<S> {
 }
 
 pub(crate) fn agent_update_record(update: &AgentUpdate) -> AgentResult<JournalRecord> {
+    update.validate_artifact_refs()?;
     let payload =
         serde_json::to_value(update).map_err(|error| AgentError::Persistence(error.to_string()))?;
     JournalRecord::new(update.update_id(), AGENT_UPDATE_SCHEMA, payload)

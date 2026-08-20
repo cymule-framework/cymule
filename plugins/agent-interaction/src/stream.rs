@@ -114,6 +114,19 @@ impl AgentStreamRecord {
             | Self::Aborted { session_id, .. } => session_id,
         }
     }
+
+    fn validate_artifact_refs(&self) -> AgentResult<()> {
+        match self {
+            Self::Chunk { chunk, .. } => {
+                for block in &chunk.content {
+                    block.validate_artifact_refs()?;
+                }
+                Ok(())
+            }
+            Self::Finalized { update, .. } => update.validate_artifact_refs(),
+            Self::Opened { .. } | Self::Aborted { .. } => Ok(()),
+        }
+    }
 }
 
 /// Stream lifecycle state.
@@ -420,6 +433,7 @@ fn apply_record(
     projection: &mut Option<AgentStreamProjection>,
     record: AgentStreamRecord,
 ) -> AgentResult<()> {
+    record.validate_artifact_refs()?;
     validate_identity("stream", record.stream_id())?;
     validate_identity("Session", record.session_id())?;
     match (projection.as_mut(), record) {
@@ -523,6 +537,7 @@ fn validate_final_update(
     update: &AgentUpdate,
     content_digest: &str,
 ) -> AgentResult<()> {
+    update.validate_artifact_refs()?;
     let content = stream.finalized_content();
     let expected_digest =
         canonical_digest(&content).map_err(|error| AgentError::Validation(error.to_string()))?;
@@ -733,6 +748,7 @@ fn load_session<S: DurableStore>(
 }
 
 fn stream_record(record: &AgentStreamRecord) -> AgentResult<JournalRecord> {
+    record.validate_artifact_refs()?;
     let payload =
         serde_json::to_value(record).map_err(|error| AgentError::Persistence(error.to_string()))?;
     JournalRecord::new(record.record_id(), AGENT_STREAM_SCHEMA, payload).map_err(persistence)

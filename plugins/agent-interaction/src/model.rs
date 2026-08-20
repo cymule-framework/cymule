@@ -42,6 +42,28 @@ pub enum ContentBlock {
     },
 }
 
+impl ContentBlock {
+    pub(crate) fn validate_artifact_refs(&self) -> AgentResult<()> {
+        if let Self::Artifact { artifact } = self {
+            artifact
+                .validate()
+                .map_err(|error| AgentError::Validation(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_content_blocks(content: &[ContentBlock]) -> AgentResult<()> {
+    for block in content {
+        block.validate_artifact_refs()?;
+    }
+    Ok(())
+}
+
+fn validate_message_artifacts(message: &AgentMessage) -> AgentResult<()> {
+    validate_content_blocks(&message.content)
+}
+
 /// Message author role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -242,6 +264,22 @@ impl AgentUpdate {
             | Self::Elicitation { update_id, .. } => update_id,
         }
     }
+
+    pub(crate) fn validate_artifact_refs(&self) -> AgentResult<()> {
+        match self {
+            Self::Message { message, .. } => validate_message_artifacts(message),
+            Self::Tool { tool, .. } => {
+                if let Some(output) = &tool.output {
+                    validate_content_blocks(output)?;
+                }
+                Ok(())
+            }
+            Self::Elicitation { elicitation, .. } => {
+                validate_content_blocks(&elicitation.request.prompt)
+            }
+            Self::State { .. } | Self::Plan { .. } | Self::Usage { .. } => Ok(()),
+        }
+    }
 }
 
 /// Rebuildable agent Session projection.
@@ -288,6 +326,7 @@ impl AgentSession {
 
     /// Apply one idempotent typed update.
     pub fn apply(&mut self, update: AgentUpdate) -> AgentResult<()> {
+        update.validate_artifact_refs()?;
         let update_hash =
             canonical_digest(&update).map_err(|error| AgentError::Validation(error.to_string()))?;
         if let Some(existing) = self.applied_updates.get(update.update_id()) {
@@ -637,6 +676,24 @@ impl AgentHostRequest {
             Self::Workspace(_) => AgentHostCallKind::Workspace,
         }
     }
+
+    fn validate_artifact_refs(&self) -> AgentResult<()> {
+        match self {
+            Self::Context(request) => {
+                for message in &request.messages {
+                    validate_message_artifacts(message)?;
+                }
+                Ok(())
+            }
+            Self::Model(request) => validate_content_blocks(&request.context.content),
+            Self::Elicitation(request) => validate_content_blocks(&request.prompt),
+            Self::Workspace(request) => request
+                .overlay
+                .validate()
+                .map_err(|error| AgentError::Validation(error.to_string())),
+            Self::Permission(_) | Self::Tool(_) => Ok(()),
+        }
+    }
 }
 
 /// Typed response durably retained for exact host-call replay.
@@ -700,6 +757,19 @@ impl AgentHostResponse {
             Self::Tool(response) => &response.occurrence_binding,
             Self::Elicitation(response) => &response.occurrence_binding,
             Self::Workspace(response) => &response.occurrence_binding,
+        }
+    }
+
+    fn validate_artifact_refs(&self) -> AgentResult<()> {
+        match self {
+            Self::Context(response) => validate_content_blocks(&response.content),
+            Self::Model(response) => validate_message_artifacts(&response.message),
+            Self::Tool(response) => validate_content_blocks(&response.content),
+            Self::Workspace(response) => response
+                .evidence
+                .validate()
+                .map_err(|error| AgentError::Validation(error.to_string())),
+            Self::Permission(_) | Self::Elicitation(_) => Ok(()),
         }
     }
 }
@@ -862,6 +932,11 @@ impl AgentHostOccurrence {
                 "host occurrence, Session, and binding identities must not be empty".to_owned(),
             ));
         }
+        self.request.validate_artifact_refs()?;
+        if let Some(response) = &self.response {
+            response.validate_artifact_refs()?;
+        }
+        validate_content_blocks(&self.recovery_evidence)?;
         let expected = canonical_digest(&self.request)
             .map_err(|error| AgentError::Validation(error.to_string()))?;
         if self.request_digest != expected {
