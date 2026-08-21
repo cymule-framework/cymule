@@ -609,7 +609,7 @@ fn public_coordinator_rejects_every_dangling_or_legacy_artifact_reference() {
     let wait_revision = coordinator.revision().expect("revision").to_owned();
     assert!(matches!(
         coordinator.complete_wait("wait:dangling", &missing),
-        Err(DurableError::Validation(_))
+        Err(DurableError::NotFound(_))
     ));
     assert_eq!(coordinator.revision(), Some(wait_revision.as_str()));
 
