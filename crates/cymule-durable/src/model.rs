@@ -1031,8 +1031,24 @@ pub struct ComponentOccurrence {
     pub occurrence_id: String,
     /// Owning Run.
     pub run_id: String,
+    /// Exact semantic Plan interpreted for this occurrence.
+    pub plan_id: String,
+    /// Exact execution-binding Artifact pinned by the Run.
+    pub binding_context: String,
+    /// Structural invocation which owns the call site.
+    pub invocation_id: String,
+    /// Entry-rooted invocation path.
+    pub invocation_path: Vec<cymule_core::InvocationPathSegment>,
+    /// Definition containing the call site.
+    pub definition_id: String,
+    /// Nested Region path containing the call site.
+    pub region_path: Vec<usize>,
     /// Stable Plan site.
     pub site_id: String,
+    /// Exact step index of the call site.
+    pub step_index: usize,
+    /// Fenced Attempt epoch.
+    pub epoch: u64,
     /// Abstract component operation.
     pub component: String,
     /// Canonical input artifact.
@@ -1043,6 +1059,9 @@ pub struct ComponentOccurrence {
     pub occurrence_binding: String,
     /// Concrete implementation revision.
     pub implementation_revision: String,
+    /// Digest of the exact post-call Continuation committed atomically with
+    /// this record.
+    pub continuation_digest: String,
 }
 
 /// Portable checkpoint/savepoint metadata.

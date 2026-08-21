@@ -133,7 +133,14 @@ fn apply_and_checkpoint<S: DurableStore, T>(
     apply: impl FnOnce(&mut DefinitionRegistry) -> EvolutionResult<T>,
 ) -> EvolutionResult<T> {
     let before = registry.snapshot();
-    let result = apply(registry)?;
+    let result = match apply(registry) {
+        Ok(result) => result,
+        Err(error) => {
+            *registry = DefinitionRegistry::restore(before)
+                .expect("previously valid definition registry snapshot restores");
+            return Err(error);
+        }
+    };
     if let Err(error) =
         DurableDefinitionRegistry::checkpoint(coordinator, registry, journal_id, checkpoint_id)
     {

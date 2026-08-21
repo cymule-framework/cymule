@@ -121,9 +121,9 @@ func TestEngineEnvelopeRequiresExclusiveOutcomePayload(t *testing.T) {
 
 func TestEvolutionAndExecutionResponseUnionsAreClosed(t *testing.T) {
 	for _, input := range []string{
-		`{"control_version":"cymule.evolution-control/3","command_id":"command:test","operation":"future"}`,
-		`{"control_version":"cymule.evolution-control/3","command_id":"command:test","operation":"select_occurrence","occurrence_id":"occurrence:test","patch":{}}`,
-		`{"control_version":"cymule.evolution-control/3","command_id":"command:test","operation":"migrate","request":{"unexpected":true}}`,
+		`{"control_version":"cymule.evolution-control/4","command_id":"command:test","operation":"future"}`,
+		`{"control_version":"cymule.evolution-control/4","command_id":"command:test","operation":"select_occurrence","occurrence_id":"occurrence:test","patch":{}}`,
+		`{"control_version":"cymule.evolution-control/4","command_id":"command:test","operation":"migrate","request":{"unexpected":true}}`,
 	} {
 		var command EvolutionCommand
 		if err := decodeClosedJSON([]byte(input), &command); err == nil {
@@ -132,7 +132,7 @@ func TestEvolutionAndExecutionResponseUnionsAreClosed(t *testing.T) {
 	}
 	var live LiveEvolutionCommand
 	if err := decodeClosedJSON([]byte(
-		`{"control_version":"cymule.live-evolution-control/2","command_id":"command:test","operation":"future"}`,
+		`{"control_version":"cymule.live-evolution-control/3","command_id":"command:test","operation":"future"}`,
 	), &live); err == nil {
 		t.Fatal("expected closed live Evolution rejection")
 	}

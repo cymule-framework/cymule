@@ -116,6 +116,10 @@ pub struct MigrationReceipt {
     pub from_plan: String,
     /// Target Plan.
     pub to_plan: String,
+    /// Exact reviewed source-to-target Plan edge.
+    pub plan_edge_id: String,
+    /// Exact deterministic compatibility report admitted for that edge.
+    pub compatibility_id: String,
     /// Verified source Continuation safe-point proof.
     pub safe_point_id: String,
     /// Source Attempt fence at that cut.
@@ -138,6 +142,8 @@ pub struct MigrationReceipt {
     pub input_state: ArtifactRef,
     /// Migrated state artifact.
     pub output_state: ArtifactRef,
+    /// Complete mapped target Continuation which became execution authority.
+    pub target_continuation: cymule_durable::Continuation,
     /// Schema/migration evidence.
     pub evidence: ArtifactRef,
 }

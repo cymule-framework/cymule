@@ -24,10 +24,10 @@ Status: implemented for the provider-neutral single-domain profile.
   exact current/history links, and rebuild derived dependency indexes;
 - M1-journal-backed registry publication and template linking with explicit
   checkpoint lineage, stale-CAS rollback, and lost-receipt reopen;
-- one complete `cymule.live-evolution/1` authority that snapshots the registry
+- one complete `cymule.live-evolution/2` authority that snapshots the registry
   together with every template-scoped Plan DAG, rollout decision, evidence,
   and occurrence pin; compatible transitive relinks and their future decisions
-  enter one `cymule.live-evolution-checkpoint/1` journal CAS;
+  enter one `cymule.live-evolution-checkpoint/2` journal CAS;
 - exact publication command/receipt replay after acknowledgement loss, including
   the original set of advanced and blocked parent templates;
 - declared patch operations with review/compiler evidence artifacts;
@@ -66,9 +66,9 @@ Status: implemented for the provider-neutral single-domain profile.
 - atomic live-version selection plus virtual-work capacity-slot claim, so the
   immutable Plan pin and fenced worker occurrence enter one lease CAS and a
   lost acknowledgement replays only when both journal records are retained;
-- frozen `cymule.evolution-control/3` command union, schema, Rust verifier, and
+- frozen `cymule.evolution-control/4` command union, schema, Rust verifier, and
   TypeScript, Python, Rust, and Go transport interfaces/builders;
-- frozen `cymule.live-evolution-control/2` unified command union and shared
+- frozen `cymule.live-evolution-control/3` unified command union and shared
   four-language fixture for definition publication, template registration,
   atomic relinking, and template-scoped operations with required safe-point
   proofs;
@@ -86,7 +86,7 @@ the migration or shadow plugin again.
 Multi-parent exact history and unified authority advance the registry snapshot
 to `cymule.definition-registry/3` and its standalone durable checkpoint to
 `cymule.definition-registry-checkpoint/2`. Complete applications use
-`cymule.live-evolution/1`; the standalone registry/evolution controllers are
+`cymule.live-evolution/2`; the standalone registry/evolution controllers are
 lower-level reducers and do not independently constitute this profile.
 
 ## Deliberately external

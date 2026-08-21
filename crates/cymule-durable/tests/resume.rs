@@ -24,6 +24,11 @@ struct CountingPlugin {
     calls: Arc<AtomicUsize>,
 }
 
+struct ArmAfterComponentPlugin {
+    calls: Arc<AtomicUsize>,
+    lose_next: Arc<AtomicBool>,
+}
+
 struct CrashAfterApplyPlugin {
     dispatches: Arc<AtomicUsize>,
     reconciliations: Arc<AtomicUsize>,
@@ -87,6 +92,32 @@ struct CasFaultStore {
 struct ArmableLostReceiptStore {
     inner: MemoryStore,
     lose_next: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct ComponentLostAckStore {
+    inner: MemoryStore,
+    lose_next: Arc<AtomicBool>,
+}
+
+impl DurableStore for ComponentLostAckStore {
+    fn load(&mut self) -> DurableResult<Option<StoredState>> {
+        self.inner.load()
+    }
+
+    fn compare_and_commit(
+        &mut self,
+        expected: Option<&cymule_durable::StoreHead>,
+        batch: &cymule_durable::StoreBatch,
+    ) -> DurableResult<StoreCommit> {
+        let commit = self.inner.compare_and_commit(expected, batch)?;
+        if self.lose_next.swap(false, Ordering::SeqCst) {
+            return Err(DurableError::Substrate(
+                "simulated lost component checkpoint acknowledgement".to_owned(),
+            ));
+        }
+        Ok(commit)
+    }
 }
 
 impl ArmableLostReceiptStore {
@@ -413,6 +444,37 @@ impl PluginHost for CountingPlugin {
             }),
             PluginRequest::Call { component, input } if component == "test.greet" => {
                 self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(PluginResponse::CallResult {
+                    value: json!({"greeting": format!("Hello, {}!", input["name"].as_str().unwrap())}),
+                })
+            }
+            request => Err(RuntimeError::PluginDefect {
+                code: "unsupported_test_request".to_owned(),
+                message: format!("unsupported resume test request: {request:?}"),
+            }),
+        }
+    }
+}
+
+impl PluginHost for ArmAfterComponentPlugin {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        match request {
+            PluginRequest::Describe => Ok(PluginResponse::Manifest {
+                manifest: PluginManifest {
+                    plugin_version: PLUGIN_VERSION.to_owned(),
+                    implementation_id: "resume-test@1".to_owned(),
+                    components: BTreeMap::from([(
+                        "test.greet".to_owned(),
+                        PluginOperation {
+                            implementation_revision: "1".to_owned(),
+                        },
+                    )]),
+                    effects: BTreeMap::new(),
+                },
+            }),
+            PluginRequest::Call { component, input } if component == "test.greet" => {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.lose_next.store(true, Ordering::SeqCst);
                 Ok(PluginResponse::CallResult {
                     value: json!({"greeting": format!("Hello, {}!", input["name"].as_str().unwrap())}),
                 })
@@ -763,6 +825,48 @@ fn process_reopen_resumes_after_wait_without_reinvoking_component() {
             .len(),
         1
     );
+}
+
+#[test]
+fn lost_component_checkpoint_ack_reopens_without_reinvoking_component() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let lose_next = Arc::new(AtomicBool::new(false));
+    let store = ComponentLostAckStore {
+        inner: MemoryStore::new(),
+        lose_next: lose_next.clone(),
+    };
+    let plugin = || ArmAfterComponentPlugin {
+        calls: calls.clone(),
+        lose_next: lose_next.clone(),
+    };
+    let mut runtime = open_runtime(store, plugin()).expect("runtime opens");
+    assert!(matches!(
+        runtime.start(candidate(), &json!({"name": "Ada"}), "run:component-lost-ack"),
+        Err(DurableError::Substrate(message))
+            if message.contains("lost component checkpoint acknowledgement")
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let (store, _) = runtime.into_parts();
+    let mut reopened = open_runtime(store, plugin()).expect("runtime reopens");
+    let DriveOutcome::Suspended { wait_id } = reopened
+        .resume("run:component-lost-ack")
+        .expect("committed component checkpoint resumes at the next site")
+    else {
+        panic!("reopened Run should reach the wait");
+    };
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let DriveOutcome::Completed(result) = reopened
+        .complete_wait(&wait_id, &json!(true))
+        .expect("reopened Run completes")
+    else {
+        panic!("reopened Run should complete");
+    };
+    assert_eq!(result.value, json!({"greeting": "Hello, Ada!"}));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let state = reopened.coordinator().state().unwrap();
+    assert_eq!(state.component_occurrences.len(), 1);
+    state.validate().unwrap();
 }
 
 #[test]

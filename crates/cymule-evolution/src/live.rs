@@ -14,9 +14,9 @@ use crate::{
 };
 
 /// Complete provider-neutral live-evolution state version.
-pub const LIVE_EVOLUTION_VERSION: &str = "cymule.live-evolution/1";
+pub const LIVE_EVOLUTION_VERSION: &str = "cymule.live-evolution/2";
 /// One-journal durable checkpoint for the complete live-evolution authority.
-pub const LIVE_EVOLUTION_CHECKPOINT_SCHEMA: &str = "cymule.live-evolution-checkpoint/1";
+pub const LIVE_EVOLUTION_CHECKPOINT_SCHEMA: &str = "cymule.live-evolution-checkpoint/2";
 
 /// Complete portable authority for definitions, linked Plans, rollout, and pins.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -100,7 +100,7 @@ pub struct LiveVirtualClaimCommand {
     pub template_id: String,
     /// Stable identity for the exact future-work selection.
     pub selection_id: String,
-    /// Exact `cymule.execution-binding/1` Artifact authorized for execution.
+    /// Exact `cymule.execution-binding/2` Artifact authorized for execution.
     pub execution_binding: ArtifactRef,
     /// Stable worker claim command identity.
     pub command_id: String,
@@ -207,6 +207,18 @@ impl LiveEvolutionController {
 
     /// Register one parent and establish its initial immutable future decision.
     pub fn register_template(&mut self, template: PlanTemplate) -> EvolutionResult<LinkedPlan> {
+        let before = self.snapshot();
+        match self.register_template_inner(template) {
+            Ok(linked) => Ok(linked),
+            Err(error) => {
+                *self = Self::restore(before)
+                    .expect("previously valid live-evolution snapshot restores");
+                Err(error)
+            }
+        }
+    }
+
+    fn register_template_inner(&mut self, template: PlanTemplate) -> EvolutionResult<LinkedPlan> {
         let template_id = template.template_id.clone();
         if self.templates.contains_key(&template_id) {
             let current = self.registry.current_link(&template_id).ok_or_else(|| {
@@ -1129,7 +1141,14 @@ fn apply_and_checkpoint<S: DurableStore, T>(
     apply: impl FnOnce(&mut LiveEvolutionController) -> EvolutionResult<T>,
 ) -> EvolutionResult<T> {
     let before = controller.snapshot();
-    let result = apply(controller)?;
+    let result = match apply(controller) {
+        Ok(result) => result,
+        Err(error) => {
+            *controller = LiveEvolutionController::restore(before)
+                .expect("previously valid live-evolution snapshot restores");
+            return Err(error);
+        }
+    };
     if let Err(error) = DurableLiveEvolutionController::checkpoint(
         coordinator,
         controller,
@@ -1152,7 +1171,14 @@ fn apply_and_checkpoint_existing_artifacts<S: DurableStore, T>(
     required: &BTreeSet<ArtifactRef>,
 ) -> EvolutionResult<T> {
     let before = controller.snapshot();
-    let result = apply(controller)?;
+    let result = match apply(controller) {
+        Ok(result) => result,
+        Err(error) => {
+            *controller = LiveEvolutionController::restore(before)
+                .expect("previously valid live-evolution snapshot restores");
+            return Err(error);
+        }
+    };
     if let Err(error) = checkpoint_artifacts(
         coordinator,
         controller,

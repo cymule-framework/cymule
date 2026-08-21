@@ -1,14 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/execution-binding.schema.json",
-  "title": "Cymule Execution Binding cymule.execution-binding/1",
+  "title": "Cymule Execution Binding cymule.execution-binding/2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "context", "plugin_implementation_id", "components", "effects"],
+  "required": ["version", "context", "components", "effects"],
   "properties": {
-    "version": {"const": "cymule.execution-binding/1"},
+    "version": {"const": "cymule.execution-binding/2"},
     "context": {"$ref": "#/$defs/context"},
-    "plugin_implementation_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "components": {"type": "object", "additionalProperties": {"$ref": "#/$defs/componentBinding"}},
     "effects": {"type": "object", "additionalProperties": {"$ref": "#/$defs/effectBinding"}}
   },

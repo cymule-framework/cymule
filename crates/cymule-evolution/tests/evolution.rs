@@ -21,8 +21,9 @@ use cymule_core::{
     WaitSpec, sha256_bytes,
 };
 use cymule_durable::{
-    Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
-    DurableStore, FrameState, JournalBatch, JournalRecord, MemoryStore, StoreCommit, StoredState,
+    Continuation, ContinuationStatus, DriveOutcome, DurableCoordinator, DurableError,
+    DurableResult, DurableStore, FrameState, JournalBatch, JournalRecord, MemoryStore,
+    ResumableRuntime, StoreCommit, StoredState,
 };
 use cymule_evolution::{
     DefinitionRegistry, DurableDefinitionRegistry, DurableEvolutionController,
@@ -91,8 +92,11 @@ fn embedded_runtime_with_properties<P: PluginHost>(
         configuration_fingerprint: empty_digest,
     }])
     .expect("test provider graph admits");
-    let binding =
-        ExecutionBinding::admit(&graph, &manifest).expect("test execution binding admits");
+    let binding = ExecutionBinding::admit(
+        &graph,
+        &BTreeMap::from([("test-plugin".to_owned(), manifest)]),
+    )
+    .expect("test execution binding admits");
     EmbeddedRuntime::new(plugin, binding).expect("test runtime opens")
 }
 
@@ -230,7 +234,7 @@ fn durable_migration_safe_point<S: DurableStore>(
         binding_ref
     );
     let input = machine
-        .put_artifact("test/input", b"migration state".to_vec())
+        .put_artifact("test/input", br#""migration state""#.to_vec())
         .expect("migration input stores");
     submit_core(
         &mut machine,
@@ -291,7 +295,7 @@ fn durable_migration_safe_point<S: DurableStore>(
     );
     continuation.status = ContinuationStatus::Ready;
     coordinator
-        .checkpoint(&machine, continuation.clone(), None)
+        .checkpoint(&machine, continuation.clone())
         .expect("safe point checkpoints");
     (
         MigrationSafePoint::derive(&continuation).expect("safe point derives"),
@@ -522,17 +526,78 @@ impl MigrationAdapter for TestMigrationAdapter {
         request: &MigrationRequest,
     ) -> cymule_evolution::EvolutionResult<MigrationOutput> {
         self.calls += 1;
+        let output_state = artifact_record(
+            "evolution/migrated-state",
+            &format!("state:migrated:{}", request.migration_id),
+        );
+        let mut continuation = request.source_continuation.clone();
+        continuation.plan_id.clone_from(&request.to_plan);
+        continuation
+            .binding_context
+            .clone_from(&request.target_binding.artifact_id);
+        continuation.epoch = request.source_epoch + 1;
+        continuation.status = ContinuationStatus::Running;
+        continuation.state = Some(output_state.reference.clone());
         Ok(MigrationOutput {
-            output_state: artifact_record(
-                "evolution/migrated-state",
-                &format!("state:migrated:{}", request.migration_id),
-            ),
+            continuation,
+            artifacts: vec![output_state],
             evidence: artifact_record(
                 "evolution/migration-evidence",
                 &format!("evidence:migration:{}", request.migration_id),
             ),
         })
     }
+}
+
+struct ProgramCounterMigrationAdapter {
+    descriptor: MigrationAdapterDescriptor,
+}
+
+impl MigrationAdapter for ProgramCounterMigrationAdapter {
+    fn describe(&mut self) -> cymule_evolution::EvolutionResult<MigrationAdapterDescriptor> {
+        Ok(self.descriptor.clone())
+    }
+
+    fn migrate(
+        &mut self,
+        request: &MigrationRequest,
+    ) -> cymule_evolution::EvolutionResult<MigrationOutput> {
+        let output_state = artifact_record("evolution/migrated-state", "mapped-program-counter");
+        let mut continuation = request.source_continuation.clone();
+        continuation.plan_id.clone_from(&request.to_plan);
+        continuation
+            .binding_context
+            .clone_from(&request.target_binding.artifact_id);
+        continuation.frames[0].next_step = 1;
+        continuation.state = Some(output_state.reference.clone());
+        continuation.epoch += 1;
+        continuation.status = ContinuationStatus::Running;
+        Ok(MigrationOutput {
+            continuation,
+            artifacts: vec![output_state],
+            evidence: artifact_record(
+                "evolution/migration-evidence",
+                "mapped-program-counter-evidence",
+            ),
+        })
+    }
+}
+
+fn migration_admission(
+    controller: &mut EvolutionController,
+    from: &cymule_core::SealedPlan,
+    to: &cymule_core::SealedPlan,
+) -> (String, String) {
+    let edge = controller
+        .add_diff_edge(
+            from.plan_id.as_str(),
+            to,
+            artifact("evidence:migration-edge"),
+        )
+        .expect("reviewed migration edge admits");
+    let compatibility =
+        cymule_evolution::analyze_relink(from, to).expect("migration compatibility derives");
+    (edge.edge_id, compatibility.compatibility_id)
 }
 
 struct TestShadowDriver {
@@ -1023,6 +1088,8 @@ fn unified_live_evolution_publication_replays_after_lost_receipt() {
             adapter_revision: "1".to_owned(),
             from_plan: previous_plan.clone(),
             to_plan: current_plan.clone(),
+            plan_edge_id: "edge:unused".to_owned(),
+            compatibility_id: "compatibility:unused".to_owned(),
             from_schema: "schema:1".to_owned(),
             to_schema: "schema:2".to_owned(),
             state_coverage: MigrationStateCoverage::TotalReachableState,
@@ -1749,10 +1816,16 @@ fn reusable_module_dependency_cycles_fail_closed() {
     let mut template = parent_template(ReferenceStrategy::LatestCompatible);
     template.template_id = "template:cycle".to_owned();
     template.references = vec![reference("subflow:a", "review_dependency")];
+    let before = registry.snapshot();
     assert!(matches!(
         registry.register_template(template),
         Err(EvolutionError::Conflict(_))
     ));
+    assert_eq!(
+        registry.snapshot(),
+        before,
+        "failed mutation is never visible"
+    );
 }
 
 #[test]
@@ -2144,12 +2217,22 @@ fn migration_requires_safe_point_and_shadow_evidence_is_idempotent() {
     controller.register_plan(first.clone()).expect("registers");
     controller.register_plan(second.clone()).expect("registers");
     let input_state = artifact("state:1");
-    let (_, safe_point) = migration_safe_point("run:active", &first.plan_id, input_state.clone());
+    let (source_continuation, safe_point) =
+        migration_safe_point("run:active", &first.plan_id, input_state.clone());
+    let (plan_edge_id, compatibility_id) = migration_admission(&mut controller, &first, &second);
+    let output_state = artifact("state:2");
+    let mut target_continuation = source_continuation;
+    target_continuation.plan_id.clone_from(&second.plan_id);
+    target_continuation.epoch += 1;
+    target_continuation.status = ContinuationStatus::Running;
+    target_continuation.state = Some(output_state.clone());
     let migration = MigrationReceipt {
         migration_id: "migration:1".to_owned(),
         run_id: "run:active".to_owned(),
         from_plan: first.plan_id.clone(),
         to_plan: second.plan_id.clone(),
+        plan_edge_id,
+        compatibility_id,
         safe_point_id: safe_point.safe_point_id.clone(),
         source_epoch: safe_point.epoch,
         target_epoch: safe_point.epoch + 1,
@@ -2160,7 +2243,8 @@ fn migration_requires_safe_point_and_shadow_evidence_is_idempotent() {
         from_schema: "schema:1".to_owned(),
         to_schema: "schema:2".to_owned(),
         input_state,
-        output_state: artifact("state:2"),
+        output_state,
+        target_continuation,
         evidence: artifact("evidence:migration"),
     };
     let mut running = continuation(&first.plan_id);
@@ -2216,11 +2300,14 @@ fn checked_migration_adapter_is_safe_point_gated_pinned_and_idempotent() {
     controller
         .register_plan(second.clone())
         .expect("target registers");
+    let (plan_edge_id, compatibility_id) = migration_admission(&mut controller, &first, &second);
     let descriptor = MigrationAdapterDescriptor {
         adapter_id: "migration:json-state".to_owned(),
         adapter_revision: "sha256:adapter-v1".to_owned(),
         from_plan: first.plan_id.clone(),
         to_plan: second.plan_id.clone(),
+        plan_edge_id: plan_edge_id.clone(),
+        compatibility_id: compatibility_id.clone(),
         from_schema: "sha256:schema-v1".to_owned(),
         to_schema: "sha256:schema-v2".to_owned(),
         state_coverage: MigrationStateCoverage::TotalReachableState,
@@ -2229,14 +2316,18 @@ fn checked_migration_adapter_is_safe_point_gated_pinned_and_idempotent() {
         authority_and_effects: MigrationCapabilityChange::NoWidening,
     };
     let input_state = artifact("state:checked:input");
-    let (_, safe_point) = migration_safe_point("run:migrate", &first.plan_id, input_state.clone());
+    let (source_continuation, safe_point) =
+        migration_safe_point("run:migrate", &first.plan_id, input_state.clone());
     let request = MigrationRequest {
         migration_id: "migration:checked:1".to_owned(),
         run_id: "run:migrate".to_owned(),
         from_plan: first.plan_id,
         to_plan: second.plan_id,
+        plan_edge_id,
+        compatibility_id,
         safe_point_id: safe_point.safe_point_id.clone(),
         source_epoch: safe_point.epoch,
+        source_continuation,
         input_state,
         source_binding: execution_binding_ref(),
         target_binding: execution_binding_ref(),
@@ -2245,6 +2336,22 @@ fn checked_migration_adapter_is_safe_point_gated_pinned_and_idempotent() {
         descriptor: descriptor.clone(),
         calls: 0,
     };
+    let mut missing_edge = request.clone();
+    missing_edge.plan_edge_id = "sha256:missing-reviewed-edge".to_owned();
+    assert!(matches!(
+        controller.execute_migration(&mut adapter, missing_edge, &safe_point),
+        Err(EvolutionError::NotFound(_))
+    ));
+    let mut wrong_compatibility = request.clone();
+    wrong_compatibility.compatibility_id = "sha256:wrong-compatibility".to_owned();
+    assert!(matches!(
+        controller.execute_migration(&mut adapter, wrong_compatibility, &safe_point),
+        Err(EvolutionError::Conflict(_))
+    ));
+    assert_eq!(
+        adapter.calls, 0,
+        "unreviewed migration never reaches plugin"
+    );
     let mut mismatched_request = request.clone();
     mismatched_request.safe_point_id = "sha256:not-the-safe-point".to_owned();
     assert!(matches!(
@@ -3027,6 +3134,108 @@ fn durable_restart_reopens_after_lost_receipt_and_rejects_stale_proof() {
 }
 
 #[test]
+fn durable_migration_resumes_the_adapter_mapped_program_counter() {
+    let source = plan("source");
+    let target = cymule_core::seal_plan(PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "mapped_target".to_owned(),
+        entry: "main".to_owned(),
+        components: Vec::new(),
+        effects: Vec::new(),
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: vec![cymule_core::Step {
+                    id: "wait.must_be_skipped_by_mapping".to_owned(),
+                    operation: cymule_core::Operation::Wait {
+                        wait: WaitSpec::Input {
+                            correlation: "migration.must-not-wait".to_owned(),
+                            schema: json!({}),
+                        },
+                        bind: None,
+                    },
+                }],
+                result: Expression::Literal {
+                    value: json!({"resumed": "mapped-target"}),
+                },
+            },
+        }],
+        metadata: BTreeMap::new(),
+    })
+    .unwrap();
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store)
+        .unwrap()
+        .initialize(&Machine::new())
+        .unwrap();
+    let (safe_point, binding_ref) =
+        durable_migration_safe_point(&mut coordinator, "run:mapped-migration", &source);
+    let source_continuation =
+        coordinator.state().unwrap().continuations["run:mapped-migration"].clone();
+    let mut controller = EvolutionController::new();
+    controller.register_plan(source.clone()).unwrap();
+    let edge = controller
+        .add_diff_edge(&source.plan_id, &target, binding_ref.clone())
+        .unwrap();
+    let compatibility = analyze_relink(&source, &target).unwrap();
+    let request = MigrationRequest {
+        migration_id: "migration:mapped-program-counter".to_owned(),
+        run_id: "run:mapped-migration".to_owned(),
+        from_plan: source.plan_id.clone(),
+        to_plan: target.plan_id.clone(),
+        plan_edge_id: edge.edge_id.clone(),
+        compatibility_id: compatibility.compatibility_id.clone(),
+        safe_point_id: safe_point.safe_point_id.clone(),
+        source_epoch: safe_point.epoch,
+        source_continuation,
+        input_state: safe_point.state.clone().unwrap(),
+        source_binding: binding_ref.clone(),
+        target_binding: binding_ref,
+    };
+    let mut adapter = ProgramCounterMigrationAdapter {
+        descriptor: MigrationAdapterDescriptor {
+            adapter_id: "migration:mapped-program-counter".to_owned(),
+            adapter_revision: "sha256:mapped-program-counter-v1".to_owned(),
+            from_plan: source.plan_id,
+            to_plan: target.plan_id.clone(),
+            plan_edge_id: edge.edge_id,
+            compatibility_id: compatibility.compatibility_id,
+            from_schema: "schema:source".to_owned(),
+            to_schema: "schema:target".to_owned(),
+            state_coverage: MigrationStateCoverage::TotalReachableState,
+            failure_and_cancellation: MigrationPreservation::Preserved,
+            budget_and_ownership: MigrationPreservation::Preserved,
+            authority_and_effects: MigrationCapabilityChange::NoWidening,
+        },
+    };
+    DurableEvolutionController::execute_migration_and_checkpoint(
+        &mut coordinator,
+        &mut controller,
+        "evolution:mapped-program-counter",
+        "checkpoint:mapped-program-counter",
+        &mut adapter,
+        request,
+        &safe_point,
+    )
+    .unwrap();
+
+    let mut runtime = ResumableRuntime::open(
+        coordinator.into_store(),
+        EmptyPlugin,
+        empty_execution_binding(),
+    )
+    .unwrap();
+    let outcome = runtime.resume("run:mapped-migration").unwrap();
+    let DriveOutcome::Completed(result) = outcome else {
+        panic!("mapped target program counter did not resume to completion");
+    };
+    assert_eq!(result.plan_id, target.plan_id);
+    assert_eq!(result.value, json!({"resumed": "mapped-target"}));
+}
+
+#[test]
 fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
     let first = plan("1");
     let second = plan("2");
@@ -3052,6 +3261,12 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
         .expect("shadow rollout sets");
     let (migration_safe_point, migration_binding) =
         durable_migration_safe_point(&mut coordinator, "run:durable-plugin", &first);
+    let edge = controller
+        .add_diff_edge(&first.plan_id, &second, migration_binding.clone())
+        .expect("reviewed durable migration edge admits");
+    let compatibility = cymule_evolution::analyze_relink(&first, &second).unwrap();
+    let source_continuation =
+        coordinator.state().unwrap().continuations["run:durable-plugin"].clone();
     let migration_input = migration_safe_point
         .state
         .clone()
@@ -3069,8 +3284,11 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
         run_id: "run:durable-plugin".to_owned(),
         from_plan: first.plan_id.clone(),
         to_plan: second.plan_id.clone(),
+        plan_edge_id: edge.edge_id.clone(),
+        compatibility_id: compatibility.compatibility_id.clone(),
         safe_point_id: migration_safe_point.safe_point_id.clone(),
         source_epoch: migration_safe_point.epoch,
+        source_continuation,
         input_state: migration_input,
         source_binding: migration_binding.clone(),
         target_binding: migration_binding,
@@ -3081,6 +3299,8 @@ fn durable_migration_and_shadow_do_not_repeat_plugins_after_lost_receipts() {
             adapter_revision: "sha256:durable-plugin-v1".to_owned(),
             from_plan: first.plan_id.clone(),
             to_plan: second.plan_id.clone(),
+            plan_edge_id: edge.edge_id,
+            compatibility_id: compatibility.compatibility_id,
             from_schema: "sha256:schema-v1".to_owned(),
             to_schema: "sha256:schema-v2".to_owned(),
             state_coverage: MigrationStateCoverage::TotalReachableState,

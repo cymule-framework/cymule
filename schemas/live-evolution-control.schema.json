@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/live-evolution-control.schema.json",
-  "title": "Cymule Live Evolution Control cymule.live-evolution-control/2",
+  "title": "Cymule Live Evolution Control cymule.live-evolution-control/3",
   "oneOf": [
     {
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "logical_ref", "definition"],
       "properties": {
-        "control_version": { "const": "cymule.live-evolution-control/2" },
+        "control_version": { "const": "cymule.live-evolution-control/3" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "publish_definition" },
         "logical_ref": { "$ref": "#/$defs/id" },
@@ -18,7 +18,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "template"],
       "properties": {
-        "control_version": { "const": "cymule.live-evolution-control/2" },
+        "control_version": { "const": "cymule.live-evolution-control/3" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "register_template" },
         "template": { "$ref": "#/$defs/template" }
@@ -28,7 +28,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "publication"],
       "properties": {
-        "control_version": { "const": "cymule.live-evolution-control/2" },
+        "control_version": { "const": "cymule.live-evolution-control/3" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "publish_and_relink" },
         "publication": { "$ref": "#/$defs/publication" }
@@ -38,7 +38,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "template_id", "command"],
       "properties": {
-        "control_version": { "const": "cymule.live-evolution-control/2" },
+        "control_version": { "const": "cymule.live-evolution-control/3" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "apply" },
         "template_id": { "$ref": "#/$defs/id" },

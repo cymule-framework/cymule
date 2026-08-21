@@ -1,7 +1,8 @@
 use cymule_core::{
-    EffectTransition, Event, EventPayload, Machine, MachineSnapshot, ReconciliationResolution,
-    SealedPlan, WorldOutcome,
+    ArtifactRef, EffectTransition, Event, EventPayload, Machine, MachineSnapshot, Operation,
+    ReconciliationResolution, SealedPlan, WorldOutcome, canonical_digest, content_id,
 };
+use cymule_runtime::{ExecutionBinding, ExecutionOperationKind, PlanContracts};
 
 use crate::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableDelta,
@@ -245,13 +246,11 @@ impl<S: DurableStore> DurableCoordinator<S> {
         }])
     }
 
-    /// Atomically persist a Machine safe point, Continuation, and optional
-    /// component occurrence.
+    /// Atomically persist a Machine safe point and Continuation.
     pub fn checkpoint(
         &mut self,
         machine: &Machine,
         continuation: Continuation,
-        occurrence: Option<ComponentOccurrence>,
     ) -> DurableResult<String> {
         let machine_snapshot = machine.snapshot();
         let artifacts = machine_snapshot
@@ -276,31 +275,82 @@ impl<S: DurableStore> DurableCoordinator<S> {
                     .to_owned(),
             ));
         }
-        let mut operations = vec![
+        let operations = vec![
             self.machine_operation_snapshot(&machine_snapshot)?,
             DurableOperation::PutContinuation {
                 value: continuation,
             },
         ];
-        if let Some(occurrence) = occurrence {
-            match self
-                .state()?
-                .component_occurrences
-                .get(&occurrence.occurrence_id)
-            {
-                Some(existing) if existing == &occurrence => {}
-                Some(_) => {
+        self.commit_operations(operations)
+    }
+
+    /// Derive and atomically commit one component result with its exact
+    /// post-call Continuation. Callers cannot supply occurrence identity,
+    /// location, epoch, Plan, implementation, or binding claims.
+    pub fn checkpoint_component(
+        &mut self,
+        machine: &Machine,
+        continuation: Continuation,
+        input: &ArtifactRef,
+        output: &ArtifactRef,
+    ) -> DurableResult<String> {
+        let source = self
+            .state()?
+            .continuations
+            .get(&continuation.run_id)
+            .cloned()
+            .ok_or_else(|| {
+                DurableError::NotFound(format!(
+                    "component Continuation {} is missing",
+                    continuation.run_id
+                ))
+            })?;
+        let occurrence = derive_component_occurrence(
+            &self.restore_machine()?,
+            machine,
+            &source,
+            &continuation,
+            input,
+            output,
+        )?;
+        match self
+            .state()?
+            .component_occurrences
+            .get(&occurrence.occurrence_id)
+        {
+            Some(existing) if existing == &occurrence => {
+                if self.state()?.machine != machine.snapshot()
+                    || self.state()?.continuations.get(&continuation.run_id) != Some(&continuation)
+                {
                     return Err(DurableError::IllegalTransition(format!(
-                        "component occurrence {} has conflicting content",
+                        "component occurrence {} replay does not match durable state",
                         occurrence.occurrence_id
                     )));
                 }
-                None => {
-                    operations.push(DurableOperation::PutComponentOccurrence { value: occurrence });
-                }
+                return Ok(self.revision().expect("initialized").to_owned());
             }
+            Some(_) => {
+                return Err(DurableError::IllegalTransition(format!(
+                    "component occurrence {} has conflicting content",
+                    occurrence.occurrence_id
+                )));
+            }
+            None => {}
         }
-        self.commit_operations(operations)
+        let machine_snapshot = machine.snapshot();
+        ensure_artifact_machine(
+            &self.state()?.machine,
+            &machine_snapshot,
+            &std::collections::BTreeSet::from([input.clone(), output.clone()]),
+            "component checkpoint",
+        )?;
+        self.commit_operations(vec![
+            self.machine_operation_snapshot(&machine_snapshot)?,
+            DurableOperation::PutContinuation {
+                value: continuation,
+            },
+            DurableOperation::PutComponentOccurrence { value: occurrence },
+        ])
     }
 
     /// Atomically persist an admitted/prepared Effect and its outbox entry.
@@ -990,26 +1040,6 @@ impl<S: DurableStore> DurableCoordinator<S> {
             }
         }
         self.commit_operations(operations)
-    }
-
-    /// Record one component result exactly once for execution replay.
-    pub fn record_component(&mut self, occurrence: ComponentOccurrence) -> DurableResult<String> {
-        match self
-            .state()?
-            .component_occurrences
-            .get(&occurrence.occurrence_id)
-        {
-            Some(existing) if existing == &occurrence => {
-                Ok(self.revision().expect("initialized").to_owned())
-            }
-            Some(_) => Err(DurableError::IllegalTransition(format!(
-                "component occurrence {} has conflicting content",
-                occurrence.occurrence_id
-            ))),
-            None => self.commit_operations(vec![DurableOperation::PutComponentOccurrence {
-                value: occurrence,
-            }]),
-        }
     }
 
     /// Publish portable snapshot metadata.
@@ -1711,11 +1741,11 @@ fn validate_migration_continuations(
         || target.binding_context.is_empty()
         || target.binding_context == target.plan_id
         || target.state.is_none()
-        || target.frames != source.frames
-        || target.wait_set != source.wait_set
-        || target.scope_stack != source.scope_stack
-        || target.effect_obligations != source.effect_obligations
-        || target.authority_leases != source.authority_leases
+        || target.frames.is_empty()
+        || !target.wait_set.is_empty()
+        || target.scope_stack != [cymule_core::ROOT_SCOPE_ID]
+        || !target.effect_obligations.is_empty()
+        || !target.authority_leases.is_empty()
         || target.budget != source.budget
         || target.causal_frontier != source.causal_frontier
         || target.epoch
@@ -1764,6 +1794,178 @@ fn validate_migration_continuations(
         }
     }
     Ok(())
+}
+
+pub(crate) fn derive_component_occurrence(
+    current_machine: &Machine,
+    next_machine: &Machine,
+    source: &Continuation,
+    target: &Continuation,
+    input: &ArtifactRef,
+    output: &ArtifactRef,
+) -> DurableResult<ComponentOccurrence> {
+    if source.status != ContinuationStatus::Running
+        || target.run_id != source.run_id
+        || target.plan_id != source.plan_id
+        || target.binding_context != source.binding_context
+        || target.state != source.state
+        || target.wait_set != source.wait_set
+        || target.scope_stack != source.scope_stack
+        || target.effect_obligations != source.effect_obligations
+        || target.authority_leases != source.authority_leases
+        || target.budget != source.budget
+        || target.causal_frontier != source.causal_frontier
+        || target.epoch != source.epoch
+        || target.status != source.status
+        || target.frames.len() != source.frames.len()
+    {
+        return Err(DurableError::Validation(
+            "component checkpoint changed Continuation state outside the call result".to_owned(),
+        ));
+    }
+    let frame_index = source.frames.len().checked_sub(1).ok_or_else(|| {
+        DurableError::Validation("component checkpoint requires an active frame".to_owned())
+    })?;
+    if source.frames[..frame_index] != target.frames[..frame_index] {
+        return Err(DurableError::Validation(
+            "component checkpoint changed an inactive frame".to_owned(),
+        ));
+    }
+    let source_frame = &source.frames[frame_index];
+    let target_frame = &target.frames[frame_index];
+    let plan = current_machine.plan(&source.plan_id).ok_or_else(|| {
+        DurableError::NotFound(format!("component Plan {} is missing", source.plan_id))
+    })?;
+    let definition = plan
+        .candidate
+        .definitions
+        .iter()
+        .find(|definition| definition.id == source_frame.definition_id)
+        .ok_or_else(|| {
+            DurableError::Validation(format!(
+                "component frame definition {} is missing",
+                source_frame.definition_id
+            ))
+        })?;
+    let region = region_at_path(&definition.body, &source_frame.region_path)?;
+    let step = region.steps.get(source_frame.next_step).ok_or_else(|| {
+        DurableError::Validation("component frame does not point at an executable step".to_owned())
+    })?;
+    let Operation::Call {
+        component,
+        input: expression,
+        bind,
+    } = &step.operation
+    else {
+        return Err(DurableError::Validation(
+            "component checkpoint frame does not point at a component call".to_owned(),
+        ));
+    };
+    let mut expected_frame = source_frame.clone();
+    expected_frame.next_step = expected_frame
+        .next_step
+        .checked_add(1)
+        .ok_or_else(|| DurableError::Validation("component step overflowed".to_owned()))?;
+    if let Some(bind) = bind {
+        expected_frame.locals.insert(bind.clone(), output.clone());
+    }
+    if &expected_frame != target_frame {
+        return Err(DurableError::Validation(
+            "component checkpoint post-call frame is not the derived transition".to_owned(),
+        ));
+    }
+    let invocation_input = crate::executor::read_value(current_machine, &source_frame.input)?;
+    let expected_value = crate::executor::evaluate(
+        current_machine,
+        expression,
+        &invocation_input,
+        &source_frame.locals,
+    )?;
+    let expected_input = cymule_core::artifact_ref(
+        "cymule.component-input/1",
+        &cymule_core::canonical_bytes(&expected_value)?,
+    )?;
+    if input != &expected_input {
+        return Err(DurableError::Validation(
+            "component checkpoint input does not match the Plan expression".to_owned(),
+        ));
+    }
+    let input_value = crate::executor::read_value(next_machine, input)?;
+    let output_value = crate::executor::read_value(next_machine, output)?;
+    let contracts = PlanContracts::compile(&plan.candidate)?;
+    contracts.validate_component_input(component, &input_value)?;
+    contracts.validate_component_output(component, &output_value)?;
+    let binding_ref = ArtifactRef {
+        identity_version: cymule_core::ARTIFACT_IDENTITY_VERSION.to_owned(),
+        artifact_id: source.binding_context.clone(),
+        kind: cymule_runtime::EXECUTION_BINDING_VERSION.to_owned(),
+    };
+    let binding_record = current_machine.artifact(&binding_ref).ok_or_else(|| {
+        DurableError::NotFound("component execution-binding Artifact is missing".to_owned())
+    })?;
+    let binding: ExecutionBinding = cymule_core::decode_json(&binding_record.bytes)?;
+    if binding.artifact_ref()? != binding_ref {
+        return Err(DurableError::Validation(
+            "component execution-binding Artifact identity is invalid".to_owned(),
+        ));
+    }
+    binding.admit_plan(plan)?;
+    let selected = binding
+        .components
+        .get(component)
+        .ok_or_else(|| DurableError::Validation(format!("component {component} is not bound")))?;
+    let occurrence_binding =
+        binding.occurrence_binding(ExecutionOperationKind::Component, component)?;
+    let occurrence_id = content_id(
+        "cymule.component-occurrence/2",
+        &(
+            source.run_id.as_str(),
+            source.plan_id.as_str(),
+            source_frame.invocation_id.as_str(),
+            step.id.as_str(),
+            source.epoch,
+            input,
+            occurrence_binding.as_str(),
+        ),
+    )?;
+    Ok(ComponentOccurrence {
+        occurrence_id,
+        run_id: source.run_id.clone(),
+        plan_id: source.plan_id.clone(),
+        binding_context: source.binding_context.clone(),
+        invocation_id: source_frame.invocation_id.clone(),
+        invocation_path: source_frame.invocation_path.clone(),
+        definition_id: source_frame.definition_id.clone(),
+        region_path: source_frame.region_path.clone(),
+        site_id: step.id.clone(),
+        step_index: source_frame.next_step,
+        epoch: source.epoch,
+        component: component.clone(),
+        input: input.clone(),
+        output: output.clone(),
+        occurrence_binding,
+        implementation_revision: selected.operation_revision.clone(),
+        continuation_digest: canonical_digest(target)?,
+    })
+}
+
+fn region_at_path<'a>(
+    root: &'a cymule_core::Region,
+    path: &[usize],
+) -> DurableResult<&'a cymule_core::Region> {
+    let mut region = root;
+    for index in path {
+        let step = region.steps.get(*index).ok_or_else(|| {
+            DurableError::Validation("component Region path is invalid".to_owned())
+        })?;
+        let Operation::Scope { body, .. } = &step.operation else {
+            return Err(DurableError::Validation(
+                "component Region path crosses a non-scope step".to_owned(),
+            ));
+        };
+        region = body;
+    }
+    Ok(region)
 }
 
 fn ensure_run_migration_events(

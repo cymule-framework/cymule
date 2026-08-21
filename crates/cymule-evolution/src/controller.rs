@@ -6,10 +6,10 @@ use serde::Serialize;
 
 use crate::{
     EvolutionError, EvolutionResult, EvolutionSnapshot, GateOutcome, ImpactCone, MigrationAdapter,
-    MigrationReceipt, MigrationRequest, MigrationSafePoint, ObservationOutcome, PatchOperation,
-    PlanEdge, PlanNode, PlanPatch, RestartReceipt, RestartRequest, RolloutDecision,
-    RolloutEvaluation, RolloutGate, RolloutMode, RolloutObservation, RolloutTransition,
-    ShadowComparison, ShadowDriver, ShadowRequest,
+    MigrationOutput, MigrationReceipt, MigrationRequest, MigrationSafePoint, ObservationOutcome,
+    PatchOperation, PlanEdge, PlanNode, PlanPatch, RelinkCompatibility, RestartReceipt,
+    RestartRequest, RolloutDecision, RolloutEvaluation, RolloutGate, RolloutMode,
+    RolloutObservation, RolloutTransition, ShadowComparison, ShadowDriver, ShadowRequest,
 };
 
 /// Deterministic reducer for Plan DAG and future-version decisions.
@@ -373,6 +373,11 @@ impl EvolutionController {
         self.snapshot.plans.get(plan_id).map(|node| &node.plan)
     }
 
+    /// Read one exact reviewed source-to-target edge.
+    pub fn edge(&self, edge_id: &str) -> Option<&PlanEdge> {
+        self.snapshot.edges.get(edge_id)
+    }
+
     /// Record a state migration only at a semantic safe point.
     pub fn record_migration(
         &mut self,
@@ -384,8 +389,16 @@ impl EvolutionController {
             || receipt.source_epoch != safe_point.epoch
             || receipt.run_id != safe_point.run_id
             || receipt.from_plan != safe_point.plan_id
+            || receipt.plan_edge_id.is_empty()
+            || receipt.compatibility_id.is_empty()
             || safe_point.state.as_ref() != Some(&receipt.input_state)
             || receipt.target_epoch != receipt.source_epoch.saturating_add(1)
+            || receipt.target_continuation.run_id != receipt.run_id
+            || receipt.target_continuation.plan_id != receipt.to_plan
+            || receipt.target_continuation.binding_context != receipt.target_binding.artifact_id
+            || receipt.target_continuation.epoch != receipt.target_epoch
+            || receipt.target_continuation.state.as_ref() != Some(&receipt.output_state)
+            || receipt.target_continuation.status != cymule_durable::ContinuationStatus::Running
         {
             return Err(EvolutionError::Conflict(
                 "migration receipt does not match its verified safe point".to_owned(),
@@ -403,6 +416,16 @@ impl EvolutionController {
         {
             return Err(EvolutionError::NotFound(
                 "migration references an unknown Plan".to_owned(),
+            ));
+        }
+        let admission = self.migration_compatibility(
+            &receipt.plan_edge_id,
+            &receipt.from_plan,
+            &receipt.to_plan,
+        )?;
+        if admission.compatibility_id != receipt.compatibility_id {
+            return Err(EvolutionError::Conflict(
+                "migration receipt does not match its compatibility admission".to_owned(),
             ));
         }
         match self.snapshot.migrations.get(&receipt.migration_id) {
@@ -447,12 +470,38 @@ impl EvolutionController {
                 "migration request does not match its verified safe point".to_owned(),
             ));
         }
+        safe_point.verify_continuation(&request.source_continuation)?;
+        if request.source_continuation.run_id != request.run_id
+            || request.source_continuation.plan_id != request.from_plan
+            || request.source_continuation.epoch != request.source_epoch
+            || request.source_continuation.state.as_ref() != Some(&request.input_state)
+            || request.source_continuation.binding_context != request.source_binding.artifact_id
+        {
+            return Err(EvolutionError::Conflict(
+                "migration source Continuation does not match the request".to_owned(),
+            ));
+        }
         validate_execution_binding_ref(&request.source_binding)?;
         validate_execution_binding_ref(&request.target_binding)?;
+        let compatibility = self.migration_compatibility(
+            &request.plan_edge_id,
+            &request.from_plan,
+            &request.to_plan,
+        )?;
+        if compatibility.compatibility_id != request.compatibility_id {
+            return Err(EvolutionError::Conflict(
+                "migration request does not match the deterministic compatibility report"
+                    .to_owned(),
+            ));
+        }
         let descriptor = adapter.describe()?;
         validate_identity("migration adapter", &descriptor.adapter_id)?;
         validate_identity("migration adapter revision", &descriptor.adapter_revision)?;
-        if descriptor.from_plan != request.from_plan || descriptor.to_plan != request.to_plan {
+        if descriptor.from_plan != request.from_plan
+            || descriptor.to_plan != request.to_plan
+            || descriptor.plan_edge_id != request.plan_edge_id
+            || descriptor.compatibility_id != request.compatibility_id
+        {
             return Err(EvolutionError::Conflict(
                 "migration adapter Plan contract does not match the request".to_owned(),
             ));
@@ -461,6 +510,8 @@ impl EvolutionController {
             if existing.run_id == request.run_id
                 && existing.from_plan == request.from_plan
                 && existing.to_plan == request.to_plan
+                && existing.plan_edge_id == request.plan_edge_id
+                && existing.compatibility_id == request.compatibility_id
                 && existing.safe_point_id == request.safe_point_id
                 && existing.source_epoch == request.source_epoch
                 && existing.input_state == request.input_state
@@ -478,19 +529,33 @@ impl EvolutionController {
             ));
         }
         let output = adapter.migrate(&request)?;
-        verify_artifact_record(&output.output_state)?;
         verify_artifact_record(&output.evidence)?;
-        let artifacts = vec![output.output_state.clone(), output.evidence.clone()];
+        let target_epoch = request.source_epoch.checked_add(1).ok_or_else(|| {
+            EvolutionError::Validation("migration target epoch overflowed".to_owned())
+        })?;
+        verify_migration_output(&request, target_epoch, &output)?;
+        let target_plan = &self
+            .snapshot
+            .plans
+            .get(&request.to_plan)
+            .expect("migration admission resolved the target Plan")
+            .plan;
+        verify_target_program_counters(target_plan, &output.continuation)?;
+        let output_state = output.continuation.state.clone().ok_or_else(|| {
+            EvolutionError::Validation("migration output Continuation has no state".to_owned())
+        })?;
+        let mut artifacts = output.artifacts;
+        artifacts.push(output.evidence.clone());
         let receipt = MigrationReceipt {
             migration_id: request.migration_id,
             run_id: request.run_id,
             from_plan: request.from_plan,
             to_plan: request.to_plan,
+            plan_edge_id: request.plan_edge_id,
+            compatibility_id: request.compatibility_id,
             safe_point_id: request.safe_point_id,
             source_epoch: request.source_epoch,
-            target_epoch: request.source_epoch.checked_add(1).ok_or_else(|| {
-                EvolutionError::Validation("migration target epoch overflowed".to_owned())
-            })?,
+            target_epoch,
             source_binding: request.source_binding,
             target_binding: request.target_binding,
             adapter_id: descriptor.adapter_id,
@@ -498,11 +563,45 @@ impl EvolutionController {
             from_schema: descriptor.from_schema,
             to_schema: descriptor.to_schema,
             input_state: request.input_state,
-            output_state: output.output_state.reference,
+            output_state,
+            target_continuation: output.continuation,
             evidence: output.evidence.reference,
         };
         self.record_migration(receipt.clone(), safe_point)?;
         Ok((receipt, artifacts))
+    }
+
+    fn migration_compatibility(
+        &self,
+        edge_id: &str,
+        from_plan: &str,
+        to_plan: &str,
+    ) -> EvolutionResult<RelinkCompatibility> {
+        let edge = self.snapshot.edges.get(edge_id).ok_or_else(|| {
+            EvolutionError::NotFound(format!("reviewed migration edge {edge_id} is missing"))
+        })?;
+        if edge.from_plan != from_plan || edge.to_plan != to_plan {
+            return Err(EvolutionError::Conflict(
+                "migration edge does not match the requested Plan transition".to_owned(),
+            ));
+        }
+        let from = &self
+            .snapshot
+            .plans
+            .get(from_plan)
+            .ok_or_else(|| {
+                EvolutionError::NotFound(format!("migration source Plan {from_plan} is missing"))
+            })?
+            .plan;
+        let to = &self
+            .snapshot
+            .plans
+            .get(to_plan)
+            .ok_or_else(|| {
+                EvolutionError::NotFound(format!("migration target Plan {to_plan} is missing"))
+            })?
+            .plan;
+        crate::analyze_relink(from, to)
     }
 
     /// Authorize a replacement Run under one exact target Plan at a verified
@@ -1352,6 +1451,101 @@ fn verify_artifact_record(record: &ArtifactRecord) -> EvolutionResult<()> {
             "Artifact {} does not match its immutable bytes",
             record.reference.artifact_id
         )));
+    }
+    Ok(())
+}
+
+fn verify_migration_output(
+    request: &MigrationRequest,
+    target_epoch: u64,
+    output: &MigrationOutput,
+) -> EvolutionResult<()> {
+    let target = &output.continuation;
+    if target.run_id != request.run_id
+        || target.plan_id != request.to_plan
+        || target.binding_context != request.target_binding.artifact_id
+        || target.epoch != target_epoch
+        || target.status != cymule_durable::ContinuationStatus::Running
+        || target.frames.is_empty()
+        || !target.wait_set.is_empty()
+        || target.scope_stack != [cymule_core::ROOT_SCOPE_ID]
+        || !target.effect_obligations.is_empty()
+        || !target.authority_leases.is_empty()
+        || target.budget != request.source_continuation.budget
+        || target.causal_frontier != request.source_continuation.causal_frontier
+        || target.state.is_none()
+    {
+        return Err(EvolutionError::Validation(
+            "migration adapter did not return a complete fenced target Continuation".to_owned(),
+        ));
+    }
+    let mut references = BTreeSet::new();
+    for artifact in &output.artifacts {
+        verify_artifact_record(artifact)?;
+        if !references.insert(artifact.reference.clone()) {
+            return Err(EvolutionError::Validation(
+                "migration adapter returned a duplicate Artifact record".to_owned(),
+            ));
+        }
+    }
+    let required = target
+        .state
+        .iter()
+        .chain(target.frames.iter().map(|frame| &frame.input))
+        .chain(target.frames.iter().flat_map(|frame| frame.locals.values()));
+    for reference in required {
+        reference.validate()?;
+    }
+    Ok(())
+}
+
+fn verify_target_program_counters(
+    plan: &SealedPlan,
+    continuation: &Continuation,
+) -> EvolutionResult<()> {
+    for (index, frame) in continuation.frames.iter().enumerate() {
+        let definition = plan
+            .candidate
+            .definitions
+            .iter()
+            .find(|definition| definition.id == frame.definition_id)
+            .ok_or_else(|| {
+                EvolutionError::Validation(format!(
+                    "migration target frame {} references a missing definition",
+                    frame.definition_id
+                ))
+            })?;
+        let mut region = &definition.body;
+        for step_index in &frame.region_path {
+            let step = region.steps.get(*step_index).ok_or_else(|| {
+                EvolutionError::Validation(format!(
+                    "migration target frame {} has an invalid Region path",
+                    frame.definition_id
+                ))
+            })?;
+            let cymule_core::Operation::Scope { body, .. } = &step.operation else {
+                return Err(EvolutionError::Validation(format!(
+                    "migration target frame {} crosses a non-scope step",
+                    frame.definition_id
+                )));
+            };
+            region = body;
+        }
+        if frame.next_step > region.steps.len() {
+            return Err(EvolutionError::Validation(format!(
+                "migration target frame {} program counter is outside its Region",
+                frame.definition_id
+            )));
+        }
+        if index == 0
+            && (frame.definition_id != plan.candidate.entry
+                || !frame.invocation_path.is_empty()
+                || frame.invocation_id != plan.candidate.entry)
+        {
+            return Err(EvolutionError::Validation(
+                "migration target entry frame is not the target Plan entry invocation".to_owned(),
+            ));
+        }
     }
     Ok(())
 }

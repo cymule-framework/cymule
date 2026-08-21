@@ -60,7 +60,7 @@ test("TypeScript Engine success and nested unions are closed", () => {
     },
     {
       response: { type: "verified_evolution_command", command: {
-        control_version: "cymule.evolution-control/3",
+        control_version: "cymule.evolution-control/4",
         command_id: "command:test",
         operation: "future_operation",
       } },
@@ -89,7 +89,7 @@ test("TypeScript Engine success and nested unions are closed", () => {
     },
     {
       response: { type: "verified_evolution_command", command: {
-        control_version: "cymule.evolution-control/3",
+        control_version: "cymule.evolution-control/4",
         command_id: "command:test",
         operation: "migrate",
         request: { unexpected: true },

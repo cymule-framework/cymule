@@ -12,7 +12,7 @@ working-directory tree. Every request runs from a fresh private materialization,
 so a plugin that changes its own file or working data cannot change a later
 occurrence. Its canonical implementation revision covers the executable,
 arguments, explicit environment, working tree, declared runtime closure,
-deadline, and byte limits; use that revision in `cymule.execution-binding/1`.
+deadline, and byte limits; use that revision in `cymule.execution-binding/2`.
 `ProcessExecutorConfig::runtime_closure` starts with the host OS/architecture
 ABI. Deployments that rely on a mutable interpreter, loader, or sidecar must
 replace or extend that map with the immutable admitted revision of each such

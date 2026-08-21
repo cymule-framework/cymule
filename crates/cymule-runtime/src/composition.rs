@@ -23,7 +23,7 @@ pub const RUNTIME_COMPOSITION_VERSION: &str = "cymule.runtime-composition/1";
 pub const BINDING_CONTEXT_ID_DOMAIN: &str = "cymule.binding-context/1";
 
 /// Frozen executable binding descriptor version and Artifact kind.
-pub const EXECUTION_BINDING_VERSION: &str = "cymule.execution-binding/1";
+pub const EXECUTION_BINDING_VERSION: &str = "cymule.execution-binding/2";
 
 /// Domain separator for exact component and effect occurrence bindings.
 pub const OCCURRENCE_BINDING_ID_DOMAIN: &str = "cymule.occurrence-binding/1";
@@ -440,8 +440,6 @@ pub struct ExecutionBinding {
     pub version: String,
     /// Normalized provider graph input.
     pub context: BindingContextDescriptor,
-    /// Selected plugin implementation identity.
-    pub plugin_implementation_id: String,
     /// Exact selected component implementations.
     pub components: BTreeMap<String, ExecutionOperationBinding>,
     /// Exact selected effect implementations.
@@ -449,47 +447,83 @@ pub struct ExecutionBinding {
 }
 
 impl ExecutionBinding {
-    /// Select one advertised plugin against an already admitted provider graph.
+    /// Select the independent manifest advertised by every bound provider.
+    ///
+    /// Manifests are keyed by the provider identities in `graph`. A provider
+    /// may advertise operations which are not selected by the graph; those
+    /// capabilities do not enter this binding. Every selected plugin service,
+    /// however, must have an exact advertisement from its selected provider.
     pub fn admit(
         graph: &RuntimeCompositionGraph,
-        manifest: &PluginManifest,
+        manifests: &BTreeMap<String, PluginManifest>,
     ) -> Result<Self, CompositionError> {
-        validate_token("plugin implementation ID", &manifest.implementation_id)
-            .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
-        let components = manifest
-            .components
-            .iter()
-            .map(|(operation, advertised)| {
-                select_operation(
-                    graph,
-                    &manifest.implementation_id,
-                    ExecutionOperationKind::Component,
-                    operation,
-                    &advertised.implementation_revision,
-                    None,
-                )
-                .map(|binding| (operation.clone(), binding))
-            })
-            .collect::<Result<_, _>>()?;
-        let effects = manifest
-            .effects
-            .iter()
-            .map(|(operation, advertised)| {
-                select_operation(
-                    graph,
-                    &manifest.implementation_id,
-                    ExecutionOperationKind::Effect,
-                    operation,
-                    &advertised.implementation_revision,
-                    Some(advertised.can_reconcile),
-                )
-                .map(|binding| (operation.clone(), binding))
-            })
-            .collect::<Result<_, _>>()?;
+        graph.descriptor.verify()?;
+        for (provider_id, manifest) in manifests {
+            verify_manifest_shape(manifest)?;
+            let provider = graph
+                .descriptor
+                .providers
+                .iter()
+                .find(|provider| &provider.provider_id == provider_id)
+                .ok_or_else(|| CompositionError::InvalidExecutionBinding {
+                    reason: format!("manifest references unknown provider {provider_id}"),
+                })?;
+            if manifest.implementation_id != provider.implementation.implementation_id {
+                return Err(CompositionError::ManifestMismatch);
+            }
+        }
+        let mut components = BTreeMap::new();
+        let mut effects = BTreeMap::new();
+        for selected in graph.bindings.iter().filter(|binding| {
+            matches!(
+                binding.service.namespace.as_str(),
+                COMPONENT_SERVICE_NAMESPACE | EFFECT_SERVICE_NAMESPACE
+            )
+        }) {
+            let manifest = manifests.get(&selected.provider_id).ok_or_else(|| {
+                CompositionError::InvalidExecutionBinding {
+                    reason: format!(
+                        "selected provider {} has no admitted manifest",
+                        selected.provider_id
+                    ),
+                }
+            })?;
+            let (kind, revision, can_reconcile) =
+                if selected.service.namespace == COMPONENT_SERVICE_NAMESPACE {
+                    let advertised = manifest
+                        .components
+                        .get(&selected.service.name)
+                        .ok_or(CompositionError::ManifestMismatch)?;
+                    (
+                        ExecutionOperationKind::Component,
+                        advertised.implementation_revision.as_str(),
+                        None,
+                    )
+                } else {
+                    let advertised = manifest
+                        .effects
+                        .get(&selected.service.name)
+                        .ok_or(CompositionError::ManifestMismatch)?;
+                    (
+                        ExecutionOperationKind::Effect,
+                        advertised.implementation_revision.as_str(),
+                        Some(advertised.can_reconcile),
+                    )
+                };
+            let operation = selected.service.name.clone();
+            let binding = select_operation(graph, kind, &operation, revision, can_reconcile)?;
+            match kind {
+                ExecutionOperationKind::Component => {
+                    components.insert(operation, binding);
+                }
+                ExecutionOperationKind::Effect => {
+                    effects.insert(operation, binding);
+                }
+            }
+        }
         let binding = Self {
             version: EXECUTION_BINDING_VERSION.to_owned(),
             context: graph.descriptor().clone(),
-            plugin_implementation_id: manifest.implementation_id.clone(),
             components,
             effects,
         };
@@ -531,7 +565,10 @@ impl ExecutionBinding {
             configuration_schema_digest: empty_digest.clone(),
             configuration_fingerprint: empty_digest,
         }])?;
-        Self::admit(&graph, manifest)
+        Self::admit(
+            &graph,
+            &BTreeMap::from([("local-process-plugin".to_owned(), manifest.clone())]),
+        )
     }
 
     /// Verify canonical graph input and every selected operation.
@@ -562,7 +599,6 @@ impl ExecutionBinding {
                 }
                 let expected = select_operation(
                     &graph,
-                    &self.plugin_implementation_id,
                     kind,
                     operation,
                     &selected.operation_revision,
@@ -578,16 +614,28 @@ impl ExecutionBinding {
         Ok(())
     }
 
-    /// Verify that the live capability advertisement exactly matches the
-    /// immutable selection. A live manifest never updates the selection.
-    pub fn verify_manifest(&self, manifest: &PluginManifest) -> Result<(), CompositionError> {
-        if manifest.implementation_id != self.plugin_implementation_id
-            || manifest.components.len() != self.components.len()
-            || manifest.effects.len() != self.effects.len()
-        {
+    /// Verify one provider's live advertisement against its immutable subset.
+    /// Extra advertised capability remains non-authoritative.
+    pub fn verify_provider_manifest(
+        &self,
+        provider_id: &str,
+        manifest: &PluginManifest,
+    ) -> Result<(), CompositionError> {
+        self.verify()?;
+        verify_manifest_shape(manifest)?;
+        let provider = self
+            .context
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == provider_id)
+            .ok_or(CompositionError::ManifestMismatch)?;
+        if manifest.implementation_id != provider.implementation.implementation_id {
             return Err(CompositionError::ManifestMismatch);
         }
         for (operation, binding) in &self.components {
+            if binding.provider_id != provider_id {
+                continue;
+            }
             if manifest
                 .components
                 .get(operation)
@@ -599,6 +647,9 @@ impl ExecutionBinding {
             }
         }
         for (operation, binding) in &self.effects {
+            if binding.provider_id != provider_id {
+                continue;
+            }
             let advertised = manifest.effects.get(operation);
             if advertised.map(|value| value.implementation_revision.as_str())
                 != Some(binding.operation_revision.as_str())
@@ -608,6 +659,35 @@ impl ExecutionBinding {
             }
         }
         Ok(())
+    }
+
+    /// Verify a direct single-provider host. Multi-provider bindings must be
+    /// executed by an admitted router which verifies each child independently.
+    pub fn verify_single_provider_manifest(
+        &self,
+        manifest: &PluginManifest,
+    ) -> Result<(), CompositionError> {
+        let mut providers = self.required_provider_ids();
+        if providers.is_empty() && self.context.providers.len() == 1 {
+            providers.push(self.context.providers[0].provider_id.clone());
+        }
+        let [provider_id] = providers.as_slice() else {
+            return Err(CompositionError::InvalidExecutionBinding {
+                reason: "a direct PluginHost requires exactly one selected provider".to_owned(),
+            });
+        };
+        self.verify_provider_manifest(provider_id, manifest)
+    }
+
+    /// Provider identities which own at least one selected operation.
+    pub fn required_provider_ids(&self) -> Vec<String> {
+        self.components
+            .values()
+            .chain(self.effects.values())
+            .map(|binding| binding.provider_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// Admit every component and effect requirement before Run creation.
@@ -672,7 +752,6 @@ impl ExecutionBinding {
 
 fn select_operation(
     graph: &RuntimeCompositionGraph,
-    plugin_implementation_id: &str,
     kind: ExecutionOperationKind,
     operation: &str,
     operation_revision: &str,
@@ -690,14 +769,6 @@ fn select_operation(
         .ok_or_else(|| CompositionError::UnboundService {
             service: service.clone(),
         })?;
-    if selected.implementation.implementation_id != plugin_implementation_id {
-        return Err(CompositionError::InvalidExecutionBinding {
-            reason: format!(
-                "provider {} implements {service} with {}, not selected plugin {plugin_implementation_id}",
-                selected.provider_id, selected.implementation.implementation_id
-            ),
-        });
-    }
     Ok(ExecutionOperationBinding {
         service,
         provider_id: selected.provider_id.clone(),
@@ -705,6 +776,35 @@ fn select_operation(
         operation_revision: operation_revision.to_owned(),
         can_reconcile,
     })
+}
+
+fn verify_manifest_shape(manifest: &PluginManifest) -> Result<(), CompositionError> {
+    if manifest.plugin_version != PLUGIN_VERSION {
+        return Err(CompositionError::ManifestMismatch);
+    }
+    validate_token("plugin implementation ID", &manifest.implementation_id)
+        .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
+    for (operation, advertised) in &manifest.components {
+        validate_token("component operation ID", operation)
+            .and_then(|()| {
+                validate_token(
+                    "component implementation revision",
+                    &advertised.implementation_revision,
+                )
+            })
+            .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
+    }
+    for (operation, advertised) in &manifest.effects {
+        validate_token("effect operation ID", operation)
+            .and_then(|()| {
+                validate_token(
+                    "effect implementation revision",
+                    &advertised.implementation_revision,
+                )
+            })
+            .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
+    }
+    Ok(())
 }
 
 /// Runtime provider binding admission error.

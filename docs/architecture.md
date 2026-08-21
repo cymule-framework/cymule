@@ -103,7 +103,7 @@ selected provider's live manifest against that immutable selection, then admits
 every Plan requirement against the normalized provider graph. The admitted
 router dispatches each operation to the provider ID selected by the binding;
 extra advertised capability never becomes routing authority. Canonical
-descriptor bytes are stored as `cymule.execution-binding/1`; all execution
+descriptor bytes are stored as `cymule.execution-binding/2`; all execution
 records point to its Artifact identity or to a deterministic operation binding
 derived from it.
 Process-local construction and finalization remain ordinary adapter ownership,

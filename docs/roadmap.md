@@ -154,7 +154,7 @@ Status: implemented for one provider-neutral durable domain.
 - `LatestCompatible` is the wire/API default, reachable no-widening admission
   protects future heads, durable safe-point proofs replace caller booleans, and
   explicit replacement-Run restart authorization is implemented.
-- `cymule.live-evolution-control/2` exposes the complete template-scoped
+- `cymule.live-evolution-control/3` exposes the complete template-scoped
   authority through Rust, TypeScript, Python, and Go without client-side
   sequencing.
 

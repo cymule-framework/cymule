@@ -29,7 +29,7 @@
   publishing a fake Continuation or string failure.
 - Keep semantic validation in the Rust kernel. JSON Schema validates wire shape;
   it does not replace transition or authority rules.
-- `execution-binding.schema.json` freezes `cymule.execution-binding/1`. Rust
+- `execution-binding.schema.json` freezes `cymule.execution-binding/2`. Rust
   additionally enforces normalized provider order, exact service ownership,
   Plan requirements, manifest equality, and content identities.
 - `resource.schema.json` owns `cymule.resource/2` candidates/handles, separate
@@ -79,7 +79,7 @@
   Run weight. Worker addresses, heartbeats, queue/provider fields, and topology
   remain outside semantic records.
 - `evolution-control.schema.json` owns the closed
-  `cymule.evolution-control/3` command union shared by all SDKs. Migration
+  `cymule.evolution-control/4` command union shared by all SDKs. Migration
   commands additionally pin source and target ExecutionBinding Artifacts; all commands carry
   only immutable Plan/Artifact identities, exact patches, pinned migration or
   shadow requests, observations, and deterministic gates. Provider endpoints,

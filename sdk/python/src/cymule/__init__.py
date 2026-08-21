@@ -210,6 +210,46 @@ class RolloutGate(TypedDict):
     max_inequivalent_shadows: int
 
 
+class MigrationInvocationPathSegment(TypedDict):
+    """One exact dynamic invocation edge in a mapped Continuation."""
+
+    site_id: str
+    region_path: list[int]
+    scope_id: str
+    epoch: int
+
+
+class MigrationFrame(TypedDict):
+    """One mapped interpreter frame and exact target program counter."""
+
+    definition_id: str
+    invocation_id: str
+    invocation_path: list[MigrationInvocationPathSegment]
+    scope_id: str
+    input: ArtifactRef
+    region_path: list[int]
+    next_step: int
+    locals: dict[str, ArtifactRef]
+
+
+class MigrationContinuation(TypedDict):
+    """Complete source or target interpreter state at a migration boundary."""
+
+    run_id: str
+    plan_id: str
+    binding_context: str
+    frames: list[MigrationFrame]
+    state: ArtifactRef | None
+    wait_set: list[str]
+    scope_stack: list[str]
+    effect_obligations: list[str]
+    authority_leases: list[str]
+    budget: dict[str, int]
+    causal_frontier: list[str]
+    epoch: int
+    status: str
+
+
 class MigrationRequest(TypedDict):
     """Checked safe-point migration request for a pinned adapter."""
 
@@ -217,8 +257,11 @@ class MigrationRequest(TypedDict):
     run_id: str
     from_plan: str
     to_plan: str
+    plan_edge_id: str
+    compatibility_id: str
     safe_point_id: str
     source_epoch: int
+    source_continuation: MigrationContinuation
     input_state: ArtifactRef
     source_binding: ArtifactRef
     target_binding: ArtifactRef
@@ -1015,7 +1058,7 @@ class EvolutionControlBuilder:
         if not command_id:
             raise ValueError("evolution control requires a command identity")
         return {
-            "control_version": "cymule.evolution-control/3",
+            "control_version": "cymule.evolution-control/4",
             "command_id": command_id,
             **copy.deepcopy(operation),
         }
@@ -1081,7 +1124,7 @@ class LiveEvolutionControlBuilder:
         if not command_id:
             raise ValueError("live-evolution control requires a command identity")
         return {
-            "control_version": "cymule.live-evolution-control/2",
+            "control_version": "cymule.live-evolution-control/3",
             "command_id": command_id,
             **copy.deepcopy(operation),
         }
@@ -2039,6 +2082,54 @@ def _validate_linked_plan(value: object) -> None:
     if not isinstance(linked["resolved_revisions"], dict) or not all(_is_nonempty_string(v) for v in linked["resolved_revisions"].values()): raise _transport_error("invalid_engine_response", "resolved revisions are invalid")
 
 
+def _validate_migration_continuation(value: object) -> None:
+    fields = {
+        "run_id", "plan_id", "binding_context", "frames", "state", "wait_set", "scope_stack",
+        "effect_obligations", "authority_leases", "budget", "causal_frontier", "epoch", "status",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise _transport_error("invalid_engine_response", "migration Continuation is not closed")
+    _require_strings(value, {"run_id", "plan_id", "binding_context"})
+    _validate_epoch(value["epoch"])
+    if value["status"] not in {"ready", "waiting", "running", "completed"}:
+        raise _transport_error("invalid_engine_response", "migration Continuation status is invalid")
+    for field in {"wait_set", "scope_stack", "effect_obligations", "authority_leases", "causal_frontier"}:
+        items = value[field]
+        if not isinstance(items, list) or any(not isinstance(item, str) or not item for item in items):
+            raise _transport_error("invalid_engine_response", f"migration Continuation {field} is invalid")
+    if value["state"] is not None:
+        _validate_artifact_ref(value["state"])
+    if not isinstance(value["budget"], dict):
+        raise _transport_error("invalid_engine_response", "migration Continuation budget is invalid")
+    for amount in value["budget"].values():
+        _validate_epoch(amount)
+    frames = value["frames"]
+    frame_fields = {"definition_id", "invocation_id", "invocation_path", "scope_id", "input", "region_path", "next_step", "locals"}
+    if not isinstance(frames, list) or not frames:
+        raise _transport_error("invalid_engine_response", "migration Continuation frames are invalid")
+    for frame in frames:
+        if not isinstance(frame, dict) or set(frame) != frame_fields:
+            raise _transport_error("invalid_engine_response", "migration frame is not closed")
+        _require_strings(frame, {"definition_id", "invocation_id", "scope_id"})
+        _validate_epoch(frame["next_step"])
+        _validate_artifact_ref(frame["input"])
+        if not isinstance(frame["region_path"], list) or any(not isinstance(index, int) or isinstance(index, bool) or index < 0 for index in frame["region_path"]):
+            raise _transport_error("invalid_engine_response", "migration frame Region path is invalid")
+        if not isinstance(frame["locals"], dict):
+            raise _transport_error("invalid_engine_response", "migration frame locals are invalid")
+        for reference in frame["locals"].values():
+            _validate_artifact_ref(reference)
+        if not isinstance(frame["invocation_path"], list):
+            raise _transport_error("invalid_engine_response", "migration invocation path is invalid")
+        for segment in frame["invocation_path"]:
+            if not isinstance(segment, dict) or set(segment) != {"site_id", "region_path", "scope_id", "epoch"}:
+                raise _transport_error("invalid_engine_response", "migration invocation segment is not closed")
+            _require_strings(segment, {"site_id", "scope_id"})
+            _validate_epoch(segment["epoch"])
+            if not isinstance(segment["region_path"], list) or any(not isinstance(index, int) or isinstance(index, bool) or index < 0 for index in segment["region_path"]):
+                raise _transport_error("invalid_engine_response", "migration invocation Region path is invalid")
+
+
 def _validate_evolution_command(value: object) -> None:
     if not isinstance(value, dict):
         raise _transport_error("invalid_engine_response", "evolution command is not an object")
@@ -2054,7 +2145,7 @@ def _validate_evolution_command(value: object) -> None:
         "apply_gate": {"gate", "next_decision_id"},
     }.get(value.get("operation"))
     if (
-        value.get("control_version") != "cymule.evolution-control/3"
+        value.get("control_version") != "cymule.evolution-control/4"
         or variant is None
         or set(value) != common | variant
     ):
@@ -2063,15 +2154,17 @@ def _validate_evolution_command(value: object) -> None:
         request = _validate_evolution_request(
             value["request"],
             {
-                "migration_id", "run_id", "from_plan", "to_plan", "safe_point_id",
-                "source_epoch", "input_state", "source_binding", "target_binding",
+                "migration_id", "run_id", "from_plan", "to_plan", "plan_edge_id",
+                "compatibility_id", "safe_point_id", "source_epoch", "source_continuation",
+                "input_state", "source_binding", "target_binding",
             },
-            {"migration_id", "run_id", "from_plan", "to_plan", "safe_point_id"},
+            {"migration_id", "run_id", "from_plan", "to_plan", "plan_edge_id", "compatibility_id", "safe_point_id"},
         )
         _validate_artifact_ref(request["input_state"])
         _validate_artifact_ref(request["source_binding"])
         _validate_artifact_ref(request["target_binding"])
         _validate_epoch(request["source_epoch"])
+        _validate_migration_continuation(request["source_continuation"])
     elif value["operation"] == "restart_under_new_plan":
         request = _validate_evolution_request(
             value["request"],
@@ -2110,7 +2203,7 @@ def _validate_live_evolution_command(value: object) -> None:
         ],
     }.get(value.get("operation"))
     if (
-        value.get("control_version") != "cymule.live-evolution-control/2"
+        value.get("control_version") != "cymule.live-evolution-control/3"
         or variants is None
         or set(value) not in variants
     ):

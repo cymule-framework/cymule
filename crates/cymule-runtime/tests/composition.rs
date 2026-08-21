@@ -303,7 +303,8 @@ fn execution_binding_pins_provider_manifest_and_exact_operations() {
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )])
     .expect("provider graph admits");
-    let binding = ExecutionBinding::admit(&graph, &manifest).expect("manifest is selected");
+    let manifests = BTreeMap::from([("executor".to_owned(), manifest.clone())]);
+    let binding = ExecutionBinding::admit(&graph, &manifests).expect("manifest is selected");
     let reference = binding
         .artifact_ref()
         .expect("binding has an Artifact identity");
@@ -327,7 +328,7 @@ fn execution_binding_pins_provider_manifest_and_exact_operations() {
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )])
         .unwrap(),
-        &manifest,
+        &manifests,
     )
     .unwrap();
     let changed_implementation = ExecutionBinding::admit(
@@ -336,7 +337,7 @@ fn execution_binding_pins_provider_manifest_and_exact_operations() {
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         )])
         .unwrap(),
-        &manifest,
+        &manifests,
     )
     .unwrap();
     assert_ne!(reference, changed_configuration.artifact_ref().unwrap());
@@ -349,7 +350,7 @@ fn execution_binding_pins_provider_manifest_and_exact_operations() {
         .unwrap()
         .can_reconcile = false;
     assert_eq!(
-        binding.verify_manifest(&changed_manifest),
+        binding.verify_provider_manifest("executor", &changed_manifest),
         Err(CompositionError::ManifestMismatch)
     );
 }
@@ -386,20 +387,21 @@ fn admitted_router_dispatches_to_exact_composed_provider_not_capability_superset
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     );
     component_provider.provider_id = "component-provider".to_owned();
+    component_provider.implementation.implementation_id = "cymule.test.component".to_owned();
     component_provider.provides = vec![ExecutionOperationKind::Component.service_key("evaluate")];
     let mut effect_provider = execution_provider(
         "sha256:2222222222222222222222222222222222222222222222222222222222222222",
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     );
     effect_provider.provider_id = "effect-provider".to_owned();
+    effect_provider.implementation.implementation_id = "cymule.test.effect".to_owned();
     effect_provider.provides = vec![ExecutionOperationKind::Effect.service_key("publish")];
     let graph = RuntimeCompositionGraph::build(vec![component_provider, effect_provider])
         .expect("multi-provider composition admits");
-    let binding = ExecutionBinding::admit(&graph, &manifest).expect("binding admits");
-
     let component_calls = Arc::new(Mutex::new(Vec::new()));
     let effect_calls = Arc::new(Mutex::new(Vec::new()));
     let mut component_manifest = manifest.clone();
+    component_manifest.implementation_id = "cymule.test.component".to_owned();
     component_manifest.effects.clear();
     component_manifest.components.insert(
         "advertised_but_unbound".to_owned(),
@@ -408,7 +410,16 @@ fn admitted_router_dispatches_to_exact_composed_provider_not_capability_superset
         },
     );
     let mut effect_manifest = manifest;
+    effect_manifest.implementation_id = "cymule.test.effect".to_owned();
     effect_manifest.components.clear();
+    let binding = ExecutionBinding::admit(
+        &graph,
+        &BTreeMap::from([
+            ("component-provider".to_owned(), component_manifest.clone()),
+            ("effect-provider".to_owned(), effect_manifest.clone()),
+        ]),
+    )
+    .expect("independent provider manifests admit");
     let mut router = AdmittedPluginRouter::new(
         binding,
         BTreeMap::from([

@@ -42,11 +42,15 @@
 - `AdmittedPluginRouter` dispatches each operation by the provider ID sealed in
   `ExecutionBinding`. Provider manifests may advertise extra capability, but
   extra advertisements never become routing or execution authority.
+- `cymule.execution-binding/2` has no global plugin implementation identity.
+  Admission consumes manifests keyed by provider ID, pins each operation's
+  provider implementation and operation revision independently, and the router
+  rechecks every selected provider manifest before dispatch.
 - Runtime binding owns no DI container, factory lifecycle, finalizer, or live
   provider object. Ordinary Rust ownership and provider adapters manage
   process-local resources; durable cleanup remains an explicit effect
   obligation and reconciliation concern.
-- `cymule.execution-binding/1` is the executable binding authority. Persist its
+- `cymule.execution-binding/2` is the executable binding authority. Persist its
   canonical bytes as an immutable Artifact; Run, Continuation, and Attempt pin
   that Artifact ID, while component and Effect occurrence bindings derive from
   it plus the exact selected operation. A live manifest may verify the pin but

@@ -673,7 +673,7 @@ dispatch a child commit-gated effect while its child scope remains open.
 ## 12. Binding evolution
 
 A Plan changes semantic meaning. A Binding Context changes realization defaults
-for future occurrences. `cymule.execution-binding/1` is the closed executable
+for future occurrences. `cymule.execution-binding/2` is the closed executable
 binding authority: normalized provider descriptors, each selected operation's
 provider and implementation, and every advertised operation revision are serialized to
 canonical bytes and stored as an immutable Machine Artifact. Plan requirements
@@ -762,7 +762,7 @@ rollout, occurrence selection, migration, shadow evidence, promotion, and
 rollback MUST survive stale CAS and lost acknowledgement without changing an
 existing occurrence pin or creating a second decision.
 
-`cymule.live-evolution-control/2` is the complete cross-language envelope. It
+`cymule.live-evolution-control/3` is the complete cross-language envelope. It
 adds reusable-definition publication, parent-template registration, atomic
 publish/relink, and template scope around the closed Plan operations. Migration
 and replacement-Run restart commands MUST carry the exact durable safe-point
@@ -772,7 +772,7 @@ slot lease, and the worker claim MUST enter one CAS revision. Replaying a claim
 whose coupled selection record is absent or different MUST fail closed.
 The claim MUST retain `plan_id` and `occurrence_binding` separately, and
 `occurrence_binding` MUST be the Artifact identity of the exact admitted
-`cymule.execution-binding/1`, never the Plan ID.
+`cymule.execution-binding/2`, never the Plan ID.
 
 A reviewed patch carries the complete target Plan Candidate, an exact declared
 operation list, and evidence. M4 MUST seal the target, recompute the structural
@@ -817,7 +817,7 @@ A later candidate after rollback MUST use the last authoritative fallback; the
 failed target cannot become fallback merely because it remains the latest
 registry link.
 
-`cymule.evolution-control/3` is the closed cross-language command boundary.
+`cymule.evolution-control/4` is the closed cross-language command boundary.
 SDKs may construct and transport its patch, selection, migration, shadow,
 restart, observation, and gate operations, but only the Rust M4 controller
 resolves dependencies, invokes plugins, evaluates evidence, or mutates durable

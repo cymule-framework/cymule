@@ -45,6 +45,14 @@
   commit output/evidence, replace Continuation Plan/state/binding, advance the
   epoch, close old Attempt authority, create the new Attempt, and append the
   evolution receipt together.
+- A migration request pins one exact reviewed `PlanEdge` and the deterministic
+  compatibility-report identity for that source/target pair. The adapter
+  receives the complete authenticated source Continuation and returns the
+  complete target Continuation, including every mapped frame and program
+  counter. Resume uses that returned mapping; copying source frames is invalid.
+- Registry and unified live-controller mutations are staged values. Publish,
+  relink, template registration, controller admission, and durable checkpoint
+  errors leave the previously visible snapshot byte-for-byte unchanged.
 - Safe points are derived proofs over current durable Continuations, never
   caller booleans. Restart-under-new-plan authorizes a distinct replacement Run
   and explicit input; it does not mutate the source or execute a loop.

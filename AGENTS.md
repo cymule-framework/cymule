@@ -172,7 +172,7 @@ Use this precedence order when guidance conflicts:
   evaluates deterministic promotion/rollback gates. SDKs carry the closed
   control union without duplicating these decisions.
 - M4 occurrence admission pins semantic `plan_id` separately from an exact
-  `cymule.execution-binding/1` Artifact. Never store a Plan ID in
+  `cymule.execution-binding/2` Artifact. Never store a Plan ID in
   `occurrence_binding`. A safe-point migration commits its receipt and output
   Artifacts together with the Machine Plan/binding transition, Continuation
   state replacement, epoch advance, and new Attempt. A lost acknowledgement

@@ -16,7 +16,7 @@
   delivery record. Stateful source matching, consume-once admission, and
   Continuation readiness remain `cymule-durable` CAS operations.
 - `verify_evolution_command` validates only the closed
-  `cymule.evolution-control/3` envelope. Plan linking, adapter execution,
+  `cymule.evolution-control/4` envelope. Plan linking, adapter execution,
   evidence counting, and durable promotion remain `cymule-evolution` authority.
 - Write only the response JSON to stdout. Diagnostics go to stderr.
 - RPC domain failures return a successful process transport containing one
@@ -26,7 +26,7 @@
 - Never expose unrestricted raw event append.
 - Local process execution uses only `cymule-executor-process`. It copies the
   selected executable into a private sealed location, hashes those exact launch
-  bytes, and seals the advertised manifest into `cymule.execution-binding/1`
+  bytes, and seals the advertised manifest into `cymule.execution-binding/2`
   before constructing the runtime. There is no second launcher, mutable-path,
   ambient-environment, or implementation-ID-only binding fallback.
 - The package is `cymule-cli` and installs the `cymule` binary. Keep binary

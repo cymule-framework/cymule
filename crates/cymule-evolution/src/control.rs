@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// Frozen cross-language M4 control envelope version.
-pub const EVOLUTION_CONTROL_VERSION: &str = "cymule.evolution-control/3";
+pub const EVOLUTION_CONTROL_VERSION: &str = "cymule.evolution-control/4";
 
 /// Closed idempotent M4 commands shared by every SDK.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

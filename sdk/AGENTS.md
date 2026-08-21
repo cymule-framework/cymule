@@ -26,11 +26,11 @@
 - Every SDK preserves optional `wait.bind` and the closed Embedded
   completed-or-suspended outcome. Suspension has no client-side Continuation.
 - SDKs must not compute authoritative Plan/Event IDs or implement a reducer.
-- Every SDK exposes the same closed `cymule.evolution-control/3` command union
+- Every SDK exposes the same closed `cymule.evolution-control/4` command union
   and transport interface. SDKs construct commands only; Rust resolves module
   revisions, invokes pinned migration/shadow plugins, counts observations, and
   admits promotion or rollback.
-- Every SDK also exposes `cymule.live-evolution-control/2`, which scopes the
+- Every SDK also exposes `cymule.live-evolution-control/3`, which scopes the
   existing Plan operations to one parent template and adds definition
   publication, template registration, atomic publish/relink, and required
   migration/restart safe-point proofs. SDKs never sequence these writes.

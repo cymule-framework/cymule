@@ -1,5 +1,5 @@
 {
-  "control_version": "cymule.evolution-control/3",
+  "control_version": "cymule.evolution-control/4",
   "command_id": "command:evolution:fixture:promote",
   "operation": "apply_gate",
   "gate": {

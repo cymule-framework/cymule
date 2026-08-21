@@ -28,7 +28,7 @@
 - Each durable frame separates `definition_id`, structural `invocation_id`, and
   immutable input Artifact. Invoked definitions push frames without pushing a
   scope; nested scopes retain the current definition, invocation, and input.
-- Run creation stores the canonical `cymule.execution-binding/1` Artifact in
+- Run creation stores the canonical `cymule.execution-binding/2` Artifact in
   the same Machine delta as the input, Plan, start Event, Attempt, and initial
   Continuation. Reopen must resolve and verify that exact Artifact; a newly
   selected provider revision cannot reinterpret historical work. The
@@ -45,6 +45,11 @@
   invocation path, nested Region, next step, and lexical scope against the
   canonical Machine. A Wait owner is evidence only after that frame is
   authenticated; self-consistent unreachable frames fail before CAS.
+- Component results enter only through `checkpoint_component`. The coordinator
+  derives the occurrence identity, Plan, invocation, site, step, epoch,
+  execution binding, implementation revision, and post-call Continuation
+  digest, then commits the Machine Artifacts, occurrence, and Continuation in
+  one CAS. Raw occurrence insertion and detached result recording are invalid.
 - Compile the admitted Plan through `cymule-runtime` and validate Run,
   invocation, component, effect, typed-wait, definition-result, and terminal
   Result values at their exact boundary. Invalid input may not create its

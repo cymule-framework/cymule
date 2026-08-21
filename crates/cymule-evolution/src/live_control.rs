@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// Complete cross-language live-evolution control version.
-pub const LIVE_EVOLUTION_CONTROL_VERSION: &str = "cymule.live-evolution-control/2";
+pub const LIVE_EVOLUTION_CONTROL_VERSION: &str = "cymule.live-evolution-control/3";
 
 /// Closed commands for the unified registry, DAG, rollout, and pin authority.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

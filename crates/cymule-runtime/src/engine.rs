@@ -171,8 +171,7 @@ impl<P: PluginHost> EmbeddedRuntime<P> {
     /// Construct an embedded runtime with one explicitly admitted binding.
     pub fn new(mut plugin: P, binding: ExecutionBinding) -> RuntimeResult<Self> {
         binding.verify()?;
-        let manifest = plugin.describe()?;
-        binding.verify_manifest(&manifest)?;
+        plugin.admit_execution_binding(&binding)?;
         Ok(Self {
             machine: Machine::new(),
             plugin,

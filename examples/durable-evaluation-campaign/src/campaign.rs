@@ -947,7 +947,14 @@ fn campaign_execution_binding(options: &CampaignOptions) -> CampaignResult<Execu
     )
     .collect();
     let graph = RuntimeCompositionGraph::build(providers)?;
-    ExecutionBinding::admit(&graph, &manifest).map_err(Into::into)
+    ExecutionBinding::admit(
+        &graph,
+        &BTreeMap::from([
+            ("subject-runner".to_owned(), manifest.clone()),
+            ("evaluation-scorer".to_owned(), manifest),
+        ]),
+    )
+    .map_err(Into::into)
 }
 
 fn build_report(

@@ -292,7 +292,20 @@ impl DefinitionRegistry {
         definition: Definition,
         references: Vec<SubflowReference>,
     ) -> EvolutionResult<(SubflowRevision, Vec<LinkedPlan>)> {
-        let revision = self.publish_module(logical_ref, definition, references)?;
+        let mut staged = self.clone();
+        let result =
+            staged.publish_module_and_relink_inner(logical_ref.into(), definition, references)?;
+        *self = staged;
+        Ok(result)
+    }
+
+    fn publish_module_and_relink_inner(
+        &mut self,
+        logical_ref: String,
+        definition: Definition,
+        references: Vec<SubflowReference>,
+    ) -> EvolutionResult<(SubflowRevision, Vec<LinkedPlan>)> {
+        let revision = self.publish_module_inner(logical_ref, definition, references)?;
         let impacted_refs = self.transitive_dependents(&revision.logical_ref);
         let template_ids: BTreeSet<String> = impacted_refs
             .iter()
@@ -323,7 +336,18 @@ impl DefinitionRegistry {
         definition: Definition,
         references: Vec<SubflowReference>,
     ) -> EvolutionResult<SubflowRevision> {
-        let logical_ref = logical_ref.into();
+        let mut staged = self.clone();
+        let revision = staged.publish_module_inner(logical_ref.into(), definition, references)?;
+        *self = staged;
+        Ok(revision)
+    }
+
+    fn publish_module_inner(
+        &mut self,
+        logical_ref: String,
+        definition: Definition,
+        references: Vec<SubflowReference>,
+    ) -> EvolutionResult<SubflowRevision> {
         validate_name("subflow reference", &logical_ref)?;
         validate_name("definition", &definition.id)?;
         validate_module_references(&logical_ref, &definition, &references)?;
@@ -356,6 +380,13 @@ impl DefinitionRegistry {
 
     /// Register a parent template and link its current exact dependencies.
     pub fn register_template(&mut self, template: PlanTemplate) -> EvolutionResult<LinkedPlan> {
+        let mut staged = self.clone();
+        let linked = staged.register_template_inner(template)?;
+        *self = staged;
+        Ok(linked)
+    }
+
+    fn register_template_inner(&mut self, template: PlanTemplate) -> EvolutionResult<LinkedPlan> {
         validate_template_shape(&template)?;
         let template_id = template.template_id.clone();
         match self.templates.get(&template.template_id) {

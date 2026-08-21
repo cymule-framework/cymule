@@ -142,6 +142,10 @@ pub struct MigrationAdapterDescriptor {
     pub from_plan: String,
     /// Exact target Plan produced by this adapter.
     pub to_plan: String,
+    /// Exact reviewed Plan edge admitted by this implementation.
+    pub plan_edge_id: String,
+    /// Deterministic source-to-target compatibility report identity.
+    pub compatibility_id: String,
     /// Source state-schema digest.
     pub from_schema: String,
     /// Target state-schema digest.
@@ -168,10 +172,17 @@ pub struct MigrationRequest {
     pub from_plan: String,
     /// Exact target Plan.
     pub to_plan: String,
+    /// Exact reviewed Plan edge authorizing this source-to-target transition.
+    pub plan_edge_id: String,
+    /// Exact deterministic compatibility report accepted for this transition.
+    pub compatibility_id: String,
     /// Verified source Continuation cut.
     pub safe_point_id: String,
     /// Source Attempt fence at that cut.
     pub source_epoch: u64,
+    /// Complete durable source Continuation authenticated by the safe-point
+    /// proof and supplied to the migration implementation.
+    pub source_continuation: Continuation,
     /// Immutable source-state artifact.
     pub input_state: ArtifactRef,
     /// Exact source `ExecutionBinding` Artifact pinned by the safe Continuation.
@@ -184,8 +195,11 @@ pub struct MigrationRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MigrationOutput {
-    /// Migrated state bytes and their verified content reference.
-    pub output_state: ArtifactRecord,
+    /// Complete target interpreter state, including every mapped frame and
+    /// exact program counter under the target Plan.
+    pub continuation: Continuation,
+    /// New immutable Artifacts referenced by the mapped continuation.
+    pub artifacts: Vec<ArtifactRecord>,
     /// Verification or transformation evidence bytes.
     pub evidence: ArtifactRecord,
 }
@@ -195,7 +209,8 @@ pub trait MigrationAdapter {
     /// Advertise the immutable compatibility and safety contract.
     fn describe(&mut self) -> EvolutionResult<MigrationAdapterDescriptor>;
 
-    /// Transform one immutable source-state artifact.
+    /// Transform one immutable source continuation into a complete target
+    /// continuation. The output, not the source frame stack, is resumed.
     fn migrate(&mut self, request: &MigrationRequest) -> EvolutionResult<MigrationOutput>;
 }
 

@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// Versioned M4 checkpoint stored in the generic M1 journal.
-pub const EVOLUTION_CHECKPOINT_SCHEMA: &str = "cymule.evolution-checkpoint/3";
+pub const EVOLUTION_CHECKPOINT_SCHEMA: &str = "cymule.evolution-checkpoint/4";
 
 /// One complete portable evolution checkpoint with explicit lineage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -179,6 +179,18 @@ impl DurableEvolutionController {
             return Ok(receipt);
         }
         verify_durable_safe_point(coordinator, safe_point)?;
+        let reviewed_edge = controller.edge(&request.plan_edge_id).ok_or_else(|| {
+            EvolutionError::NotFound(format!(
+                "reviewed migration edge {} is missing",
+                request.plan_edge_id
+            ))
+        })?;
+        let machine = coordinator.restore_machine().map_err(durable_error)?;
+        if machine.artifact(&reviewed_edge.evidence).is_none() {
+            return Err(EvolutionError::NotFound(
+                "reviewed migration-edge evidence Artifact is missing".to_owned(),
+            ));
+        }
         let before = controller.snapshot();
         let (receipt, artifacts) =
             controller.execute_migration_with_artifacts(adapter, request, safe_point)?;
@@ -338,6 +350,10 @@ pub(crate) fn checkpoint_migrated_run<S: DurableStore>(
     machine
         .insert_plan(target_plan.clone())
         .map_err(|error| EvolutionError::Validation(error.to_string()))?;
+    let required = artifacts
+        .iter()
+        .map(|artifact| artifact.reference.clone())
+        .collect::<BTreeSet<_>>();
     for artifact in artifacts {
         let derived = machine
             .put_artifact(artifact.reference.kind.clone(), artifact.bytes)
@@ -377,15 +393,13 @@ pub(crate) fn checkpoint_migrated_run<S: DurableStore>(
             epoch: receipt.target_epoch,
         },
     )?;
-    let mut target = source.clone();
-    target.plan_id.clone_from(&receipt.to_plan);
-    target
-        .binding_context
-        .clone_from(&receipt.target_binding.artifact_id);
-    target.state = Some(receipt.output_state.clone());
-    target.epoch = receipt.target_epoch;
-    target.status = cymule_durable::ContinuationStatus::Running;
-    let required = BTreeSet::from([receipt.output_state.clone(), receipt.evidence.clone()]);
+    let target = receipt.target_continuation.clone();
+    if !required.contains(&receipt.output_state) || !required.contains(&receipt.evidence) {
+        return Err(EvolutionError::Validation(
+            "migration output state and evidence must be returned as complete Artifact records"
+                .to_owned(),
+        ));
+    }
     coordinator
         .checkpoint_run_migration_journals(cymule_durable::RunMigrationCheckpoint {
             machine: &machine,
@@ -459,6 +473,9 @@ fn replay_migration<S: DurableStore>(
         || receipt.safe_point_id != request.safe_point_id
         || receipt.source_epoch != request.source_epoch
         || receipt.input_state != request.input_state
+        || receipt.plan_edge_id != request.plan_edge_id
+        || receipt.compatibility_id != request.compatibility_id
+        || receipt.target_continuation.run_id != request.run_id
         || receipt.source_binding != request.source_binding
         || receipt.target_binding != request.target_binding
     {
@@ -488,6 +505,7 @@ pub(crate) fn verify_committed_migration<S: DurableStore>(
         || continuation.state.as_ref() != Some(&receipt.output_state)
         || continuation.epoch != receipt.target_epoch
         || continuation.status != cymule_durable::ContinuationStatus::Running
+        || continuation != &receipt.target_continuation
         || run.current_plan != receipt.to_plan
         || run.current_binding_context != receipt.target_binding.artifact_id
         || run.epoch != receipt.target_epoch
@@ -530,7 +548,14 @@ fn apply_and_checkpoint<S: DurableStore, T>(
     apply: impl FnOnce(&mut EvolutionController) -> EvolutionResult<T>,
 ) -> EvolutionResult<T> {
     let before = controller.snapshot();
-    let result = apply(controller)?;
+    let result = match apply(controller) {
+        Ok(result) => result,
+        Err(error) => {
+            *controller = EvolutionController::restore(before)
+                .expect("previously valid evolution snapshot restores");
+            return Err(error);
+        }
+    };
     if let Err(error) =
         DurableEvolutionController::checkpoint(coordinator, controller, journal_id, checkpoint_id)
     {

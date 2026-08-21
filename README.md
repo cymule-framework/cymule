@@ -127,7 +127,7 @@ Shadow execution,
 metrics, deployment, and traffic movement are also replaceable plugins; Cymule
 owns only their contracts, immutable receipts, and deterministic admission
 rules. TypeScript, Python, Rust, and Go expose the same
-`cymule.evolution-control/3` transport commands without duplicating the Rust
+`cymule.evolution-control/4` transport commands without duplicating the Rust
 controller.
 
 ## Five-minute installed-package quick start

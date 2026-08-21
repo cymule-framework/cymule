@@ -297,15 +297,55 @@ type RolloutGate struct {
 
 // MigrationRequest asks a pinned adapter for one safe-point transformation.
 type MigrationRequest struct {
-	MigrationID   string      `json:"migration_id"`
-	RunID         string      `json:"run_id"`
-	FromPlan      string      `json:"from_plan"`
-	ToPlan        string      `json:"to_plan"`
-	SafePointID   string      `json:"safe_point_id"`
-	SourceEpoch   uint64      `json:"source_epoch"`
-	InputState    ArtifactRef `json:"input_state"`
-	SourceBinding ArtifactRef `json:"source_binding"`
-	TargetBinding ArtifactRef `json:"target_binding"`
+	MigrationID        string                `json:"migration_id"`
+	RunID              string                `json:"run_id"`
+	FromPlan           string                `json:"from_plan"`
+	ToPlan             string                `json:"to_plan"`
+	PlanEdgeID         string                `json:"plan_edge_id"`
+	CompatibilityID    string                `json:"compatibility_id"`
+	SafePointID        string                `json:"safe_point_id"`
+	SourceEpoch        uint64                `json:"source_epoch"`
+	SourceContinuation MigrationContinuation `json:"source_continuation"`
+	InputState         ArtifactRef           `json:"input_state"`
+	SourceBinding      ArtifactRef           `json:"source_binding"`
+	TargetBinding      ArtifactRef           `json:"target_binding"`
+}
+
+// MigrationInvocationPathSegment identifies one exact dynamic invocation edge.
+type MigrationInvocationPathSegment struct {
+	SiteID     string   `json:"site_id"`
+	RegionPath []uint64 `json:"region_path"`
+	ScopeID    string   `json:"scope_id"`
+	Epoch      uint64   `json:"epoch"`
+}
+
+// MigrationFrame is one mapped interpreter frame and target program counter.
+type MigrationFrame struct {
+	DefinitionID   string                           `json:"definition_id"`
+	InvocationID   string                           `json:"invocation_id"`
+	InvocationPath []MigrationInvocationPathSegment `json:"invocation_path"`
+	ScopeID        string                           `json:"scope_id"`
+	Input          ArtifactRef                      `json:"input"`
+	RegionPath     []uint64                         `json:"region_path"`
+	NextStep       uint64                           `json:"next_step"`
+	Locals         map[string]ArtifactRef           `json:"locals"`
+}
+
+// MigrationContinuation is the complete interpreter state at a migration boundary.
+type MigrationContinuation struct {
+	RunID             string            `json:"run_id"`
+	PlanID            string            `json:"plan_id"`
+	BindingContext    string            `json:"binding_context"`
+	Frames            []MigrationFrame  `json:"frames"`
+	State             *ArtifactRef      `json:"state"`
+	WaitSet           []string          `json:"wait_set"`
+	ScopeStack        []string          `json:"scope_stack"`
+	EffectObligations []string          `json:"effect_obligations"`
+	AuthorityLeases   []string          `json:"authority_leases"`
+	Budget            map[string]uint64 `json:"budget"`
+	CausalFrontier    []string          `json:"causal_frontier"`
+	Epoch             uint64            `json:"epoch"`
+	Status            string            `json:"status"`
 }
 
 // RestartRequest authorizes one replacement Run under an exact new Plan.
@@ -428,7 +468,7 @@ func (command *LiveEvolutionCommand) UnmarshalJSON(input []byte) error {
 	if !ok {
 		return fmt.Errorf("live evolution command operation is missing")
 	}
-	if object["control_version"] != "cymule.live-evolution-control/2" {
+	if object["control_version"] != "cymule.live-evolution-control/3" {
 		return fmt.Errorf("unsupported live evolution control version")
 	}
 	expected := map[string][][]string{
@@ -500,7 +540,7 @@ func (command *EvolutionCommand) UnmarshalJSON(input []byte) error {
 	if !ok {
 		return fmt.Errorf("evolution command operation is missing")
 	}
-	if object["control_version"] != "cymule.evolution-control/3" {
+	if object["control_version"] != "cymule.evolution-control/4" {
 		return fmt.Errorf("unsupported evolution control version")
 	}
 	expectedFields, ok := map[string][]string{
@@ -1250,7 +1290,7 @@ type VirtualSchedulingControl interface {
 
 func evolutionCommand(commandID, operation string) EvolutionCommand {
 	return EvolutionCommand{
-		ControlVersion: "cymule.evolution-control/3",
+		ControlVersion: "cymule.evolution-control/4",
 		CommandID:      commandID,
 		Operation:      operation,
 	}
@@ -1258,7 +1298,7 @@ func evolutionCommand(commandID, operation string) EvolutionCommand {
 
 func liveEvolutionCommand(commandID, operation string) LiveEvolutionCommand {
 	return LiveEvolutionCommand{
-		ControlVersion: "cymule.live-evolution-control/2",
+		ControlVersion: "cymule.live-evolution-control/3",
 		CommandID:      commandID,
 		Operation:      operation,
 	}
@@ -1932,12 +1972,52 @@ func validateWaitSpec(wait map[string]any) error {
 
 func validateMigrationRequest(request MigrationRequest) error {
 	if request.MigrationID == "" || request.RunID == "" || request.FromPlan == "" ||
-		request.ToPlan == "" || request.SafePointID == "" {
+		request.ToPlan == "" || request.PlanEdgeID == "" || request.CompatibilityID == "" ||
+		request.SafePointID == "" {
 		return fmt.Errorf("migration request required fields are missing")
 	}
 	for _, reference := range []ArtifactRef{request.InputState, request.SourceBinding, request.TargetBinding} {
 		if err := validateArtifactRef(reference); err != nil {
 			return err
+		}
+	}
+	if err := validateMigrationContinuation(request.SourceContinuation); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateMigrationContinuation(continuation MigrationContinuation) error {
+	if continuation.RunID == "" || continuation.PlanID == "" || continuation.BindingContext == "" ||
+		len(continuation.Frames) == 0 || len(continuation.ScopeStack) == 0 {
+		return fmt.Errorf("migration Continuation required fields are missing")
+	}
+	switch continuation.Status {
+	case "ready", "waiting", "running", "completed":
+	default:
+		return fmt.Errorf("migration Continuation status is invalid")
+	}
+	if continuation.State != nil {
+		if err := validateArtifactRef(*continuation.State); err != nil {
+			return err
+		}
+	}
+	for _, frame := range continuation.Frames {
+		if frame.DefinitionID == "" || frame.InvocationID == "" || frame.ScopeID == "" {
+			return fmt.Errorf("migration frame required fields are missing")
+		}
+		if err := validateArtifactRef(frame.Input); err != nil {
+			return err
+		}
+		for _, reference := range frame.Locals {
+			if err := validateArtifactRef(reference); err != nil {
+				return err
+			}
+		}
+		for _, segment := range frame.InvocationPath {
+			if segment.SiteID == "" || segment.ScopeID == "" {
+				return fmt.Errorf("migration invocation segment required fields are missing")
+			}
 		}
 	}
 	return nil

@@ -241,6 +241,41 @@ impl DurableDelta {
                     crate::model::validate_dispatch_artifacts(&machine, value)?;
                 }
                 DurableOperation::PutComponentOccurrence { value } => {
+                    let target = self
+                        .operations
+                        .iter()
+                        .rev()
+                        .find_map(|operation| match operation {
+                            DurableOperation::PutContinuation { value: continuation }
+                                if continuation.run_id == value.run_id => Some(continuation),
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            DurableError::Validation(
+                                "component occurrence requires its post-call Continuation in the same delta"
+                                    .to_owned(),
+                            )
+                        })?;
+                    let source = state.continuations.get(&value.run_id).ok_or_else(|| {
+                        DurableError::Validation(
+                            "component occurrence requires its source Continuation".to_owned(),
+                        )
+                    })?;
+                    let current_machine = cymule_core::Machine::restore(state.machine.clone())?;
+                    let derived = crate::coordinator::derive_component_occurrence(
+                        &current_machine,
+                        &machine,
+                        source,
+                        target,
+                        &value.input,
+                        &value.output,
+                    )?;
+                    if &derived != value {
+                        return Err(DurableError::Validation(
+                            "component occurrence is not the derived atomic call transition"
+                                .to_owned(),
+                        ));
+                    }
                     crate::model::require_artifact(
                         &machine,
                         &value.input,

@@ -67,7 +67,7 @@ runner:
 | Plugin conformance | only the optional capability's public seam | one leaf suite per plugin |
 
 Cross-language differential also validates the unified
-`cymule.live-evolution-control/2` fixture in Rust, TypeScript, Python, and Go.
+`cymule.live-evolution-control/3` fixture in Rust, TypeScript, Python, and Go.
 The same leaf runs a shared negative fixture through the real Rust Engine and
 compares failure category, phase, code, and explicitly justified retry
 disposition. It never parses stderr to recover semantic meaning.

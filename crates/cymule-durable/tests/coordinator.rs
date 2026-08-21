@@ -11,10 +11,10 @@ use cymule_core::{
     seal_plan,
 };
 use cymule_durable::{
-    ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
-    DurableResult, DurableStore, EffectDispatch, FrameState, JournalBatch, JournalRecord,
-    MemoryStore, OutboxState, StoreCommit, StoredState, WaitActivation, WaitActivationSource,
-    WaitCondition, WaitKind, WaitOwner, WaitState,
+    Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
+    DurableStore, EffectDispatch, FrameState, JournalBatch, JournalRecord, MemoryStore,
+    OutboxState, StoreCommit, StoredState, WaitActivation, WaitActivationSource, WaitCondition,
+    WaitKind, WaitOwner, WaitState,
 };
 use cymule_runtime::{
     EXECUTION_BINDING_VERSION, ExecutionBinding, PLUGIN_VERSION, PluginManifest, PluginOperation,
@@ -342,6 +342,141 @@ fn direct_run(candidate: PlanCandidate, binding: &ExecutionBinding) -> (Machine,
     (machine, continuation)
 }
 
+fn component_checkpoint_fixture() -> (
+    DurableCoordinator<MemoryStore>,
+    Machine,
+    Continuation,
+    cymule_core::ArtifactRef,
+    cymule_core::ArtifactRef,
+) {
+    let manifest = PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: "component-checkpoint-plugin".to_owned(),
+        components: BTreeMap::from([(
+            "example.component".to_owned(),
+            PluginOperation {
+                implementation_revision: "component-v1".to_owned(),
+            },
+        )]),
+        effects: BTreeMap::new(),
+    };
+    let binding = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .expect("component binding seals");
+    let mut machine = Machine::new();
+    let plan = seal_into(
+        &mut machine,
+        PlanCandidate {
+            ir_version: cymule_core::IR_VERSION.to_owned(),
+            name: "component_checkpoint".to_owned(),
+            entry: "main".to_owned(),
+            components: vec![ComponentContract {
+                id: "example.component".to_owned(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                requirements: BTreeMap::new(),
+            }],
+            effects: Vec::new(),
+            definitions: vec![Definition {
+                id: "main".to_owned(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                body: Region {
+                    steps: vec![Step {
+                        id: "call.example".to_owned(),
+                        operation: Operation::Call {
+                            component: "example.component".to_owned(),
+                            input: Expression::Input,
+                            bind: Some("result".to_owned()),
+                        },
+                    }],
+                    result: Expression::Binding {
+                        name: "result".to_owned(),
+                    },
+                },
+            }],
+            metadata: BTreeMap::new(),
+        },
+    );
+    let binding_ref = machine
+        .put_artifact(
+            EXECUTION_BINDING_VERSION,
+            binding.canonical_bytes().unwrap(),
+        )
+        .unwrap();
+    machine
+        .submit(CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: "component:start".to_owned(),
+            actor: "actor:test".to_owned(),
+            run_id: "run:component".to_owned(),
+            expected_precondition: None,
+            command: Command::StartRun {
+                plan_id: plan.plan_id.clone(),
+                binding_context: binding_ref.artifact_id.clone(),
+            },
+        })
+        .unwrap();
+    submit(
+        &mut machine,
+        "run:component",
+        "component:attempt",
+        Command::BeginAttempt {
+            attempt_id: "attempt:component:0".to_owned(),
+            continuation_id: "continuation:component".to_owned(),
+            occurrence_binding: binding_ref.artifact_id.clone(),
+            epoch: 0,
+        },
+    );
+    let frame_input = machine
+        .put_artifact("cymule.input/1", b"{}".to_vec())
+        .unwrap();
+    let source = Continuation {
+        run_id: "run:component".to_owned(),
+        plan_id: plan.plan_id,
+        binding_context: binding_ref.artifact_id,
+        frames: vec![FrameState {
+            definition_id: "main".to_owned(),
+            invocation_id: "main".to_owned(),
+            invocation_path: Vec::new(),
+            scope_id: ROOT_SCOPE_ID.to_owned(),
+            input: frame_input.clone(),
+            region_path: Vec::new(),
+            next_step: 0,
+            locals: BTreeMap::new(),
+        }],
+        state: Some(frame_input),
+        wait_set: BTreeSet::new(),
+        scope_stack: vec![ROOT_SCOPE_ID.to_owned()],
+        effect_obligations: BTreeSet::new(),
+        authority_leases: BTreeSet::new(),
+        budget: BTreeMap::new(),
+        causal_frontier: BTreeSet::new(),
+        epoch: 0,
+        status: ContinuationStatus::Running,
+    };
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store)
+        .unwrap()
+        .initialize(&machine)
+        .unwrap();
+    coordinator.put_continuation(source.clone()).unwrap();
+    let input = machine
+        .put_artifact("cymule.component-input/1", b"{}".to_vec())
+        .unwrap();
+    let output = machine
+        .put_artifact("cymule.component-output/1", br#"{"ok":true}"#.to_vec())
+        .unwrap();
+    let mut target = source;
+    target.frames[0].next_step = 1;
+    target.frames[0]
+        .locals
+        .insert("result".to_owned(), output.clone());
+    (coordinator, machine, target, input, output)
+}
+
 #[test]
 fn direct_run_creation_cannot_bypass_execution_binding_admission() {
     let manifest = PluginManifest {
@@ -478,20 +613,6 @@ fn public_coordinator_rejects_every_dangling_or_legacy_artifact_reference() {
     ));
     assert_eq!(coordinator.revision(), Some(wait_revision.as_str()));
 
-    assert!(matches!(
-        coordinator.record_component(ComponentOccurrence {
-            occurrence_id: "occurrence:dangling".to_owned(),
-            run_id: "run:durable".to_owned(),
-            site_id: "site:test".to_owned(),
-            component: "test.component".to_owned(),
-            input: missing.clone(),
-            output: missing,
-            occurrence_binding: "binding:test".to_owned(),
-            implementation_revision: "1".to_owned(),
-        }),
-        Err(DurableError::Validation(_))
-    ));
-    assert_eq!(coordinator.revision(), Some(wait_revision.as_str()));
     assert_ne!(valid_revision, wait_revision);
 }
 
@@ -1059,7 +1180,7 @@ fn effect_outbox_stages_reject_unrelated_canonical_machine_changes() {
         base.snapshot()
     );
     assert!(matches!(
-        coordinator.checkpoint(&prepared, continuation.clone(), None),
+        coordinator.checkpoint(&prepared, continuation.clone()),
         Err(DurableError::Validation(message))
             if message.contains("outside its atomic outbox boundary")
     ));
@@ -1078,7 +1199,7 @@ fn effect_outbox_stages_reject_unrelated_canonical_machine_changes() {
         },
     );
     coordinator
-        .checkpoint(&committed, continuation.clone(), None)
+        .checkpoint(&committed, continuation.clone())
         .expect("scope commit checkpoints");
     let lease = coordinator
         .acquire_lease("effect:delta", "worker:effect", 1, 10)
@@ -1195,39 +1316,27 @@ fn effect_outbox_stages_reject_unrelated_canonical_machine_changes() {
 
 #[test]
 fn component_occurrence_is_exactly_once_by_content() {
-    let (mut machine, _) = machine_with_run();
-    let input = machine
-        .put_artifact("example/component-input", b"in".to_vec())
-        .expect("Artifact stores");
-    let output = machine
-        .put_artifact("example/component-output", b"out".to_vec())
-        .expect("Artifact stores");
-    let store = MemoryStore::new();
-    let mut coordinator = DurableCoordinator::open(store)
-        .expect("store opens")
-        .initialize(&machine)
-        .expect("store initializes");
-    let occurrence = ComponentOccurrence {
-        occurrence_id: "component:1".to_owned(),
-        run_id: "run:durable".to_owned(),
-        site_id: "call.example".to_owned(),
-        component: "example.component".to_owned(),
-        input,
-        output,
-        occurrence_binding: "binding:component/1".to_owned(),
-        implementation_revision: "1".to_owned(),
-    };
+    let (mut coordinator, machine, target, input, output) = component_checkpoint_fixture();
     coordinator
-        .record_component(occurrence.clone())
-        .expect("occurrence records");
-    coordinator
-        .record_component(occurrence.clone())
-        .expect("retry is idempotent");
-    let mut conflicting = occurrence;
-    conflicting.implementation_revision = "2".to_owned();
+        .checkpoint_component(&machine, target.clone(), &input, &output)
+        .expect("derived occurrence and Continuation commit atomically");
+    let state = coordinator.state().unwrap();
+    let occurrence = state.component_occurrences.values().next().unwrap();
+    assert_eq!(occurrence.plan_id, target.plan_id);
+    assert_eq!(occurrence.invocation_id, "main");
+    assert_eq!(occurrence.site_id, "call.example");
+    assert_eq!(occurrence.step_index, 0);
+    assert_eq!(occurrence.epoch, 0);
+    assert_eq!(
+        occurrence.continuation_digest,
+        cymule_core::canonical_digest(&target).unwrap()
+    );
+
+    let mut forged = target;
+    forged.frames[0].next_step = 0;
     assert!(matches!(
-        coordinator.record_component(conflicting),
-        Err(DurableError::IllegalTransition(_))
+        coordinator.checkpoint_component(&machine, forged, &input, &output),
+        Err(DurableError::Validation(_) | DurableError::IllegalTransition(_))
     ));
 }
 
@@ -1414,7 +1523,7 @@ fn machine_history_compaction_reopens_and_replays_after_lost_receipt() {
         },
     );
     reopened
-        .checkpoint(&restored, resumed, None)
+        .checkpoint(&restored, resumed)
         .expect("new suffix Event persists");
     let second = reopened
         .compact_history("compaction:events:2", 1)

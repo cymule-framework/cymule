@@ -91,11 +91,48 @@ export interface MigrationRequest {
   run_id: string;
   from_plan: string;
   to_plan: string;
+  plan_edge_id: string;
+  compatibility_id: string;
   safe_point_id: string;
   source_epoch: number;
+  source_continuation: MigrationContinuation;
   input_state: ArtifactRef;
   source_binding: ArtifactRef;
   target_binding: ArtifactRef;
+}
+
+export interface MigrationInvocationPathSegment {
+  site_id: string;
+  region_path: number[];
+  scope_id: string;
+  epoch: number;
+}
+
+export interface MigrationFrame {
+  definition_id: string;
+  invocation_id: string;
+  invocation_path: MigrationInvocationPathSegment[];
+  scope_id: string;
+  input: ArtifactRef;
+  region_path: number[];
+  next_step: number;
+  locals: Record<string, ArtifactRef>;
+}
+
+export interface MigrationContinuation {
+  run_id: string;
+  plan_id: string;
+  binding_context: string;
+  frames: MigrationFrame[];
+  state: ArtifactRef | null;
+  wait_set: string[];
+  scope_stack: string[];
+  effect_obligations: string[];
+  authority_leases: string[];
+  budget: Record<string, number>;
+  causal_frontier: string[];
+  epoch: number;
+  status: "ready" | "waiting" | "running" | "completed";
 }
 
 export interface RestartRequest {
@@ -143,7 +180,7 @@ type EvolutionOperation =
   | { operation: "apply_gate"; gate: RolloutGate; next_decision_id: string };
 
 export type EvolutionCommand = {
-  control_version: "cymule.evolution-control/3";
+  control_version: "cymule.evolution-control/4";
   command_id: string;
 } & EvolutionOperation;
 
@@ -202,7 +239,7 @@ type LiveEvolutionOperation =
     };
 
 export type LiveEvolutionCommand = {
-  control_version: "cymule.live-evolution-control/2";
+  control_version: "cymule.live-evolution-control/3";
   command_id: string;
 } & LiveEvolutionOperation;
 
@@ -1075,7 +1112,7 @@ export class EvolutionControlBuilder {
   private static build(commandId: string, operation: EvolutionOperation): EvolutionCommand {
     if (commandId.length === 0) throw new Error("evolution control requires a command identity");
     return {
-      control_version: "cymule.evolution-control/3",
+      control_version: "cymule.evolution-control/4",
       command_id: commandId,
       ...structuredClone(operation),
     };
@@ -1135,7 +1172,7 @@ export class LiveEvolutionControlBuilder {
       throw new Error("live-evolution control requires a command identity");
     }
     return {
-      control_version: "cymule.live-evolution-control/2",
+      control_version: "cymule.live-evolution-control/3",
       command_id: commandId,
       ...operation,
     };
@@ -1929,6 +1966,60 @@ function validateExecutionOutcome(value: unknown): void {
   }
 }
 
+function validateMigrationContinuation(value: unknown): void {
+  if (!isRecord(value) || Object.keys(value).sort().join(",") !== [
+    "authority_leases", "binding_context", "budget", "causal_frontier", "effect_obligations",
+    "epoch", "frames", "plan_id", "run_id", "scope_stack", "state", "status", "wait_set",
+  ].join(",")) {
+    throw transportError("invalid_engine_response", "migration Continuation is not closed");
+  }
+  requireStrings(value, ["run_id", "plan_id", "binding_context"]);
+  requireEpoch(value.epoch);
+  if (!["ready", "waiting", "running", "completed"].includes(String(value.status))) {
+    throw transportError("invalid_engine_response", "migration Continuation status is invalid");
+  }
+  for (const field of ["wait_set", "scope_stack", "effect_obligations", "authority_leases", "causal_frontier"] as const) {
+    if (!Array.isArray(value[field]) || value[field].some((item) => typeof item !== "string" || item.length === 0)) {
+      throw transportError("invalid_engine_response", `migration Continuation ${field} is invalid`);
+    }
+  }
+  if (value.state !== null) validateArtifactRef(value.state);
+  if (!isRecord(value.budget)) {
+    throw transportError("invalid_engine_response", "migration Continuation budget is invalid");
+  }
+  for (const amount of Object.values(value.budget)) requireEpoch(amount);
+  if (!Array.isArray(value.frames) || value.frames.length === 0) {
+    throw transportError("invalid_engine_response", "migration Continuation frames are invalid");
+  }
+  for (const frame of value.frames) {
+    if (!isRecord(frame) || Object.keys(frame).sort().join(",") !== [
+      "definition_id", "input", "invocation_id", "invocation_path", "locals", "next_step",
+      "region_path", "scope_id",
+    ].join(",")) {
+      throw transportError("invalid_engine_response", "migration frame is not closed");
+    }
+    requireStrings(frame, ["definition_id", "invocation_id", "scope_id"]);
+    requireEpoch(frame.next_step);
+    validateArtifactRef(frame.input);
+    if (!Array.isArray(frame.region_path) || frame.region_path.some((index) => !Number.isSafeInteger(index) || index < 0)) {
+      throw transportError("invalid_engine_response", "migration frame Region path is invalid");
+    }
+    if (!isRecord(frame.locals)) throw transportError("invalid_engine_response", "migration frame locals are invalid");
+    for (const reference of Object.values(frame.locals)) validateArtifactRef(reference);
+    if (!Array.isArray(frame.invocation_path)) throw transportError("invalid_engine_response", "migration invocation path is invalid");
+    for (const segment of frame.invocation_path) {
+      if (!isRecord(segment) || Object.keys(segment).sort().join(",") !== "epoch,region_path,scope_id,site_id") {
+        throw transportError("invalid_engine_response", "migration invocation segment is not closed");
+      }
+      requireStrings(segment, ["site_id", "scope_id"]);
+      requireEpoch(segment.epoch);
+      if (!Array.isArray(segment.region_path) || segment.region_path.some((index) => !Number.isSafeInteger(index) || index < 0)) {
+        throw transportError("invalid_engine_response", "migration invocation Region path is invalid");
+      }
+    }
+  }
+}
+
 function validateEvolutionCommand(value: unknown): void {
   if (!isRecord(value)) {
     throw transportError("invalid_engine_response", "evolution command is not an object");
@@ -1944,7 +2035,7 @@ function validateEvolutionCommand(value: unknown): void {
     ["apply_gate", "command_id,control_version,gate,next_decision_id,operation"],
   ]).get(String(value.operation));
   if (
-    value.control_version !== "cymule.evolution-control/3"
+    value.control_version !== "cymule.evolution-control/4"
     || fields === undefined
     || Object.keys(value).sort().join(",") !== fields
   ) {
@@ -1952,14 +2043,16 @@ function validateEvolutionCommand(value: unknown): void {
   }
   if (value.operation === "migrate") {
     validateEvolutionRequest(value.request, [
-      "from_plan", "input_state", "migration_id", "run_id", "safe_point_id",
-      "source_binding", "source_epoch", "target_binding", "to_plan",
-    ], ["migration_id", "run_id", "from_plan", "to_plan", "safe_point_id"]);
+      "compatibility_id", "from_plan", "input_state", "migration_id", "plan_edge_id",
+      "run_id", "safe_point_id", "source_binding", "source_continuation", "source_epoch",
+      "target_binding", "to_plan",
+    ], ["migration_id", "run_id", "from_plan", "to_plan", "plan_edge_id", "compatibility_id", "safe_point_id"]);
     const request = value.request as Record<string, unknown>;
     validateArtifactRef(request.input_state);
     validateArtifactRef(request.source_binding);
     validateArtifactRef(request.target_binding);
     requireEpoch(request.source_epoch);
+    validateMigrationContinuation(request.source_continuation);
   } else if (value.operation === "restart_under_new_plan") {
     validateEvolutionRequest(value.request, [
       "evidence", "from_plan", "input", "replacement_run", "restart_id", "safe_point_id",
@@ -1992,7 +2085,7 @@ function validateLiveEvolutionCommand(value: unknown): void {
     ]],
   ]).get(String(value.operation));
   if (
-    value.control_version !== "cymule.live-evolution-control/2"
+    value.control_version !== "cymule.live-evolution-control/3"
     || fields === undefined
     || !fields.includes(Object.keys(value).sort().join(","))
   ) {

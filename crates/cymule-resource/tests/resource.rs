@@ -6,13 +6,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use cymule_core::seal_plan;
 use cymule_core::{
-    COMMAND_VERSION, Command, CommandEnvelope, Definition, Expression, Machine, Operation,
-    PlanCandidate, Region, Step, WaitSpec, sha256_bytes,
+    COMMAND_VERSION, Command, CommandEnvelope, ComponentContract, Definition, Expression, Machine,
+    Operation, PlanCandidate, Region, Step, WaitSpec, sha256_bytes,
 };
 use cymule_durable::{
-    ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
-    DurableResult, DurableStore, FrameState, MemoryStore, StoreCommit, StoredState, WaitCondition,
-    WaitKind, WaitState,
+    Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
+    DurableStore, FrameState, MemoryStore, StoreCommit, StoredState, WaitCondition, WaitKind,
+    WaitState,
 };
 use cymule_resource::{
     ArtifactResolver, ArtifactStore, ArtifactTypeRegistry, FrameworkArtifactType, InlineData,
@@ -24,6 +24,9 @@ use cymule_resource::{
     ResourceProducerProvenance, ResourcePublication, ResourceReplayClass, ResourceShape,
     ResourceWriteIntent, ResourceWriteSession, ResourceWriter, SealedResourceManifest,
     framework_artifact_contract,
+};
+use cymule_runtime::{
+    EXECUTION_BINDING_VERSION, ExecutionBinding, PLUGIN_VERSION, PluginManifest, PluginOperation,
 };
 use serde_json::json;
 
@@ -632,7 +635,71 @@ fn machine_with_runs() -> (Machine, cymule_core::ArtifactRef) {
     })
     .expect("Plan seals");
     machine.insert_plan(plan.clone()).expect("Plan inserts");
-    for run_id in ["run:producer", "run:consumer"] {
+    let manifest = PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: "resource-producer-plugin".to_owned(),
+        components: BTreeMap::from([(
+            "component.producer".to_owned(),
+            PluginOperation {
+                implementation_revision: "producer-v1".to_owned(),
+            },
+        )]),
+        effects: BTreeMap::new(),
+    };
+    let binding = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .unwrap();
+    let producer_plan = seal_plan(PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "resource_producer".to_owned(),
+        entry: "main".to_owned(),
+        components: vec![ComponentContract {
+            id: "component.producer".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({"type": "string"}),
+            requirements: BTreeMap::new(),
+        }],
+        effects: Vec::new(),
+        definitions: vec![Definition {
+            id: "main".to_owned(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            body: Region {
+                steps: vec![Step {
+                    id: "site.producer.result".to_owned(),
+                    operation: Operation::Call {
+                        component: "component.producer".to_owned(),
+                        input: Expression::Input,
+                        bind: None,
+                    },
+                }],
+                result: Expression::Literal { value: json!(null) },
+            },
+        }],
+        metadata: BTreeMap::new(),
+    })
+    .unwrap();
+    machine.insert_plan(producer_plan.clone()).unwrap();
+    let binding_ref = machine
+        .put_artifact(
+            EXECUTION_BINDING_VERSION,
+            binding.canonical_bytes().unwrap(),
+        )
+        .unwrap();
+    for (run_id, plan_id, binding_context) in [
+        (
+            "run:producer",
+            producer_plan.plan_id.as_str(),
+            binding_ref.artifact_id.as_str(),
+        ),
+        (
+            "run:consumer",
+            plan.plan_id.as_str(),
+            "binding:resource-test/1",
+        ),
+    ] {
         machine
             .submit(CommandEnvelope {
                 command_version: COMMAND_VERSION.to_owned(),
@@ -641,12 +708,28 @@ fn machine_with_runs() -> (Machine, cymule_core::ArtifactRef) {
                 run_id: run_id.to_owned(),
                 expected_precondition: None,
                 command: Command::StartRun {
-                    plan_id: plan.plan_id.clone(),
-                    binding_context: "binding:resource-test/1".to_owned(),
+                    plan_id: plan_id.to_owned(),
+                    binding_context: binding_context.to_owned(),
                 },
             })
             .expect("Run starts");
     }
+    let precondition = machine.projection().runs["run:producer"].precondition_token();
+    machine
+        .submit(CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: "command:producer-attempt".to_owned(),
+            actor: "actor:resource-test".to_owned(),
+            run_id: "run:producer".to_owned(),
+            expected_precondition: Some(precondition),
+            command: Command::BeginAttempt {
+                attempt_id: "attempt:producer:0".to_owned(),
+                continuation_id: "continuation:producer".to_owned(),
+                occurrence_binding: binding_ref.artifact_id,
+                epoch: 0,
+            },
+        })
+        .unwrap();
     machine
         .put_artifact("test/input", b"resource input".to_vec())
         .expect("input stores");
@@ -670,25 +753,70 @@ fn machine_with_runs() -> (Machine, cymule_core::ArtifactRef) {
 fn record_producer(
     coordinator: &mut DurableCoordinator<impl DurableStore>,
     result: &cymule_core::ArtifactRef,
-) {
+) -> String {
+    let mut machine = coordinator.restore_machine().unwrap();
+    let run = &machine.projection().runs["run:producer"];
+    let input = cymule_core::artifact_ref("cymule.input/1", b"{}").unwrap();
+    let source = Continuation {
+        run_id: "run:producer".to_owned(),
+        plan_id: run.current_plan.clone(),
+        binding_context: run.current_binding_context.clone(),
+        frames: vec![FrameState {
+            definition_id: "main".to_owned(),
+            invocation_id: "main".to_owned(),
+            invocation_path: Vec::new(),
+            scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+            input: input.clone(),
+            region_path: Vec::new(),
+            next_step: 0,
+            locals: BTreeMap::new(),
+        }],
+        state: Some(input),
+        wait_set: BTreeSet::new(),
+        scope_stack: vec![cymule_core::ROOT_SCOPE_ID.to_owned()],
+        effect_obligations: BTreeSet::new(),
+        authority_leases: BTreeSet::new(),
+        budget: BTreeMap::new(),
+        causal_frontier: BTreeSet::new(),
+        epoch: 0,
+        status: ContinuationStatus::Running,
+    };
     coordinator
-        .record_component(ComponentOccurrence {
-            occurrence_id: "occurrence:producer:result".to_owned(),
-            run_id: "run:producer".to_owned(),
-            site_id: "site:producer:result".to_owned(),
-            component: "component:producer".to_owned(),
-            input: result.clone(),
-            output: result.clone(),
-            occurrence_binding: "binding:producer/1".to_owned(),
-            implementation_revision: "sha256:producer-revision".to_owned(),
-        })
-        .expect("producer occurrence records");
+        .put_continuation(source.clone())
+        .expect("producer Continuation stores");
+    let component_input = machine
+        .put_artifact("cymule.component-input/1", b"{}".to_vec())
+        .unwrap();
+    let actual_result = machine
+        .put_artifact(
+            "cymule.component-output/1",
+            br#""producer output""#.to_vec(),
+        )
+        .unwrap();
+    assert_eq!(&actual_result, result);
+    let mut target = source;
+    target.frames[0].next_step = 1;
+    coordinator
+        .checkpoint_component(&machine, target, &component_input, result)
+        .expect("producer occurrence records atomically");
+    coordinator
+        .state()
+        .unwrap()
+        .component_occurrences
+        .values()
+        .find(|occurrence| occurrence.run_id == "run:producer")
+        .unwrap()
+        .occurrence_id
+        .clone()
 }
 
-fn producer_provenance(result: &cymule_core::ArtifactRef) -> ResourceProducerProvenance {
+fn producer_provenance(
+    occurrence_id: &str,
+    result: &cymule_core::ArtifactRef,
+) -> ResourceProducerProvenance {
     ResourceProducerProvenance {
         run_id: "run:producer".to_owned(),
-        occurrence_id: "occurrence:producer:result".to_owned(),
+        occurrence_id: occurrence_id.to_owned(),
         result: result.clone(),
     }
 }
@@ -701,12 +829,12 @@ fn run_to_run_handoff_is_idempotent_conflict_checked_and_reopenable() {
         .expect("store opens")
         .initialize(&machine)
         .expect("store initializes");
-    record_producer(&mut coordinator, &producer_result);
+    let producer_occurrence = record_producer(&mut coordinator, &producer_result);
     let mut stale = DurableCoordinator::open(store.clone()).expect("stale view opens");
     let handoff = ResourceHandoff {
         handoff_version: cymule_resource::RESOURCE_HANDOFF_VERSION.to_owned(),
         transfer_id: "transfer:producer-result".to_owned(),
-        producer: producer_provenance(&producer_result),
+        producer: producer_provenance(&producer_occurrence, &producer_result),
         to_run: "run:consumer".to_owned(),
         slot: "input.dataset".to_owned(),
         resource: producer_result.clone(),
@@ -754,7 +882,7 @@ fn resource_handoff_atomically_activates_matching_input_wait() {
         .expect("store opens")
         .initialize(&machine)
         .expect("store initializes");
-    record_producer(&mut coordinator, &producer_result);
+    let producer_occurrence = record_producer(&mut coordinator, &producer_result);
     coordinator
         .put_continuation(Continuation {
             run_id: "run:consumer".to_owned(),
@@ -806,7 +934,7 @@ fn resource_handoff_atomically_activates_matching_input_wait() {
     let handoff = ResourceHandoff {
         handoff_version: cymule_resource::RESOURCE_HANDOFF_VERSION.to_owned(),
         transfer_id: "transfer:input-activation".to_owned(),
-        producer: producer_provenance(&producer_result),
+        producer: producer_provenance(&producer_occurrence, &producer_result),
         to_run: "run:consumer".to_owned(),
         slot: "input.dataset".to_owned(),
         resource: producer_result.clone(),

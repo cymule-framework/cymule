@@ -191,6 +191,16 @@ pub trait PluginHost {
             ))),
         }
     }
+
+    /// Prove that this host realizes the immutable execution binding.
+    ///
+    /// A direct host can realize exactly one selected provider. Routers
+    /// override this method and verify every child provider independently.
+    fn admit_execution_binding(&mut self, binding: &ExecutionBinding) -> RuntimeResult<()> {
+        let manifest = self.describe()?;
+        binding.verify_single_provider_manifest(&manifest)?;
+        Ok(())
+    }
 }
 
 /// Runtime router that dispatches each operation to the exact provider selected
@@ -203,7 +213,6 @@ pub trait PluginHost {
 pub struct AdmittedPluginRouter {
     binding: ExecutionBinding,
     providers: BTreeMap<String, Box<dyn PluginHost>>,
-    manifest: PluginManifest,
 }
 
 impl AdmittedPluginRouter {
@@ -213,93 +222,16 @@ impl AdmittedPluginRouter {
         mut providers: BTreeMap<String, Box<dyn PluginHost>>,
     ) -> RuntimeResult<Self> {
         binding.verify()?;
-        let mut manifests = BTreeMap::new();
-        for provider_id in binding
-            .components
-            .values()
-            .chain(binding.effects.values())
-            .map(|selected| selected.provider_id.as_str())
-        {
-            if manifests.contains_key(provider_id) {
-                continue;
-            }
-            let provider = providers.get_mut(provider_id).ok_or_else(|| {
+        for provider_id in binding.required_provider_ids() {
+            let provider = providers.get_mut(&provider_id).ok_or_else(|| {
                 RuntimeError::plugin_defect(format!(
                     "execution binding selected missing provider {provider_id}"
                 ))
             })?;
-            manifests.insert(provider_id.to_owned(), provider.describe()?);
+            let manifest = provider.describe()?;
+            binding.verify_provider_manifest(&provider_id, &manifest)?;
         }
-
-        for (operation, selected) in &binding.components {
-            let manifest = manifests
-                .get(&selected.provider_id)
-                .expect("selected provider manifest was loaded");
-            if manifest.implementation_id != selected.implementation.implementation_id
-                || manifest
-                    .components
-                    .get(operation)
-                    .map(|advertised| advertised.implementation_revision.as_str())
-                    != Some(selected.operation_revision.as_str())
-            {
-                return Err(RuntimeError::plugin_defect(format!(
-                    "provider {} does not advertise the bound component {operation}",
-                    selected.provider_id
-                )));
-            }
-        }
-        for (operation, selected) in &binding.effects {
-            let manifest = manifests
-                .get(&selected.provider_id)
-                .expect("selected provider manifest was loaded");
-            let advertised = manifest.effects.get(operation);
-            if manifest.implementation_id != selected.implementation.implementation_id
-                || advertised.map(|effect| effect.implementation_revision.as_str())
-                    != Some(selected.operation_revision.as_str())
-                || advertised.map(|effect| effect.can_reconcile) != selected.can_reconcile
-            {
-                return Err(RuntimeError::plugin_defect(format!(
-                    "provider {} does not advertise the bound effect {operation}",
-                    selected.provider_id
-                )));
-            }
-        }
-
-        let manifest = PluginManifest {
-            plugin_version: PLUGIN_VERSION.to_owned(),
-            implementation_id: binding.plugin_implementation_id.clone(),
-            components: binding
-                .components
-                .iter()
-                .map(|(operation, selected)| {
-                    (
-                        operation.clone(),
-                        PluginOperation {
-                            implementation_revision: selected.operation_revision.clone(),
-                        },
-                    )
-                })
-                .collect(),
-            effects: binding
-                .effects
-                .iter()
-                .map(|(operation, selected)| {
-                    (
-                        operation.clone(),
-                        PluginEffect {
-                            implementation_revision: selected.operation_revision.clone(),
-                            can_reconcile: selected.can_reconcile.unwrap_or(false),
-                        },
-                    )
-                })
-                .collect(),
-        };
-        binding.verify_manifest(&manifest)?;
-        Ok(Self {
-            binding,
-            providers,
-            manifest,
-        })
+        Ok(Self { binding, providers })
     }
 
     fn provider_for(
@@ -331,9 +263,9 @@ impl PluginHost for AdmittedPluginRouter {
     fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
         let route = match &request {
             PluginRequest::Describe => {
-                return Ok(PluginResponse::Manifest {
-                    manifest: self.manifest.clone(),
-                });
+                return Err(RuntimeError::plugin_defect(
+                    "a multi-provider router has no single capability manifest",
+                ));
             }
             PluginRequest::Call { component, .. } => {
                 (ExecutionOperationKind::Component, component.clone())
@@ -345,5 +277,23 @@ impl PluginHost for AdmittedPluginRouter {
             }
         };
         self.provider_for(route.0, &route.1)?.invoke(request)
+    }
+
+    fn admit_execution_binding(&mut self, binding: &ExecutionBinding) -> RuntimeResult<()> {
+        if &self.binding != binding {
+            return Err(RuntimeError::plugin_defect(
+                "router execution binding does not match the runtime binding",
+            ));
+        }
+        for provider_id in binding.required_provider_ids() {
+            let provider = self.providers.get_mut(&provider_id).ok_or_else(|| {
+                RuntimeError::plugin_defect(format!(
+                    "execution binding selected missing provider {provider_id}"
+                ))
+            })?;
+            let manifest = provider.describe()?;
+            binding.verify_provider_manifest(&provider_id, &manifest)?;
+        }
+        Ok(())
     }
 }

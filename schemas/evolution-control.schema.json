@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/evolution-control.schema.json",
-  "title": "Cymule Evolution Control cymule.evolution-control/3",
+  "title": "Cymule Evolution Control cymule.evolution-control/4",
   "oneOf": [
     {
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "patch"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/3" },
+        "control_version": { "const": "cymule.evolution-control/4" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "apply_patch" },
         "patch": { "$ref": "#/$defs/patch" }
@@ -17,7 +17,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "decision"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/3" },
+        "control_version": { "const": "cymule.evolution-control/4" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "set_rollout" },
         "decision": { "$ref": "#/$defs/decision" }
@@ -27,7 +27,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "occurrence_id"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/3" },
+        "control_version": { "const": "cymule.evolution-control/4" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "select_occurrence" },
         "occurrence_id": { "$ref": "#/$defs/id" }
@@ -37,7 +37,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "request"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/3" },
+        "control_version": { "const": "cymule.evolution-control/4" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "migrate" },
         "request": { "$ref": "#/$defs/migration" }
@@ -47,7 +47,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "request"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/3" },
+        "control_version": { "const": "cymule.evolution-control/4" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "restart_under_new_plan" },
         "request": { "$ref": "#/$defs/restart" }
@@ -57,7 +57,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "request"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/3" },
+        "control_version": { "const": "cymule.evolution-control/4" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "shadow" },
         "request": { "$ref": "#/$defs/shadow" }
@@ -67,7 +67,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "observation"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/3" },
+        "control_version": { "const": "cymule.evolution-control/4" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "observe" },
         "observation": { "$ref": "#/$defs/observation" }
@@ -77,7 +77,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "gate", "next_decision_id"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/3" },
+        "control_version": { "const": "cymule.evolution-control/4" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "apply_gate" },
         "gate": { "$ref": "#/$defs/gate" },
@@ -154,7 +154,7 @@
       "properties": {
         "identity_version": { "const": "cymule.artifact/2" },
         "artifact_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-        "kind": { "const": "cymule.execution-binding/1" }
+        "kind": { "const": "cymule.execution-binding/2" }
       }
     },
     "patchOperation": {
@@ -197,17 +197,63 @@
     },
     "migration": {
       "type": "object", "additionalProperties": false,
-      "required": ["migration_id", "run_id", "from_plan", "to_plan", "safe_point_id", "source_epoch", "input_state", "source_binding", "target_binding"],
+      "required": ["migration_id", "run_id", "from_plan", "to_plan", "plan_edge_id", "compatibility_id", "safe_point_id", "source_epoch", "source_continuation", "input_state", "source_binding", "target_binding"],
       "properties": {
         "migration_id": { "$ref": "#/$defs/id" },
         "run_id": { "$ref": "#/$defs/id" },
         "from_plan": { "$ref": "#/$defs/id" },
         "to_plan": { "$ref": "#/$defs/id" },
+        "plan_edge_id": { "$ref": "#/$defs/id" },
+        "compatibility_id": { "$ref": "#/$defs/id" },
         "safe_point_id": { "$ref": "#/$defs/id" },
         "source_epoch": { "type": "integer", "minimum": 0 },
+        "source_continuation": { "$ref": "#/$defs/continuation" },
         "input_state": { "$ref": "#/$defs/artifact" },
         "source_binding": { "$ref": "#/$defs/executionBindingArtifact" },
         "target_binding": { "$ref": "#/$defs/executionBindingArtifact" }
+      }
+    },
+    "invocationPathSegment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["site_id", "region_path", "scope_id", "epoch"],
+      "properties": {
+        "site_id": { "$ref": "#/$defs/id" },
+        "region_path": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "scope_id": { "$ref": "#/$defs/id" },
+        "epoch": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "frame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["definition_id", "invocation_id", "invocation_path", "scope_id", "input", "region_path", "next_step", "locals"],
+      "properties": {
+        "definition_id": { "$ref": "#/$defs/id" },
+        "invocation_id": { "$ref": "#/$defs/id" },
+        "invocation_path": { "type": "array", "items": { "$ref": "#/$defs/invocationPathSegment" } },
+        "scope_id": { "$ref": "#/$defs/id" },
+        "input": { "$ref": "#/$defs/artifact" },
+        "region_path": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "next_step": { "type": "integer", "minimum": 0 },
+        "locals": { "type": "object", "additionalProperties": { "$ref": "#/$defs/artifact" } }
+      }
+    },
+    "continuation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "plan_id", "binding_context", "frames", "state", "wait_set", "scope_stack", "effect_obligations", "authority_leases", "budget", "causal_frontier", "epoch", "status"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/id" },
+        "plan_id": { "$ref": "#/$defs/id" },
+        "binding_context": { "$ref": "#/$defs/id" },
+        "frames": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/frame" } },
+        "state": { "oneOf": [{ "$ref": "#/$defs/artifact" }, { "type": "null" }] },
+        "wait_set": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "scope_stack": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/id" } },
+        "effect_obligations": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "authority_leases": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "budget": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "causal_frontier": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "epoch": { "type": "integer", "minimum": 0 },
+        "status": { "enum": ["ready", "waiting", "running", "completed"] }
       }
     },
     "restart": {

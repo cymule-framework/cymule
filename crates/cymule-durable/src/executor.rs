@@ -16,10 +16,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    ComponentOccurrence, Continuation, ContinuationStatus, DurableCoordinator, DurableError,
-    DurableResult, DurableStore, EffectDispatch, FrameState, MAX_WAIT_DELIVERY_TARGETS,
-    OutboxState, WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitOwner,
-    WaitSourceDriver, WaitState,
+    Continuation, ContinuationStatus, DurableCoordinator, DurableError, DurableResult,
+    DurableStore, EffectDispatch, FrameState, MAX_WAIT_DELIVERY_TARGETS, OutboxState,
+    WaitActivation, WaitActivationSource, WaitCondition, WaitKind, WaitOwner, WaitSourceDriver,
+    WaitState,
 };
 
 /// Result of driving one Run until its next durable boundary.
@@ -57,10 +57,9 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
     /// Open a durable runtime over an existing or empty store.
     pub fn open(store: S, mut plugin: P, binding: ExecutionBinding) -> DurableResult<Self> {
         binding.verify()?;
-        let manifest = plugin
-            .describe()
+        plugin
+            .admit_execution_binding(&binding)
             .map_err(|error| DurableError::Substrate(error.to_string()))?;
-        binding.verify_manifest(&manifest)?;
         Ok(Self {
             coordinator: DurableCoordinator::open(store)?,
             plugin,
@@ -309,7 +308,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                 begin_attempt(&mut machine, run_id, &continuation.binding_context, epoch)?;
                 continuation.epoch = epoch;
                 continuation.status = ContinuationStatus::Running;
-                self.coordinator.checkpoint(&machine, continuation, None)?;
+                self.coordinator.checkpoint(&machine, continuation)?;
             }
             ContinuationStatus::Running => {}
             ContinuationStatus::Waiting => {
@@ -598,7 +597,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         parent.locals.insert(binding.clone(), result_ref);
                     }
                     self.coordinator
-                        .checkpoint(&machine, continuation.clone(), None)?;
+                        .checkpoint(&machine, continuation.clone())?;
                     if closes_scope && let Some(outcome) = self.dispatch_outbox(run_id, None)? {
                         return Ok(outcome);
                     }
@@ -616,7 +615,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         },
                     )?;
                     self.coordinator
-                        .checkpoint(&machine, continuation.clone(), None)?;
+                        .checkpoint(&machine, continuation.clone())?;
                 }
                 if let Some(outcome) = self.dispatch_outbox(run_id, None)? {
                     return Ok(outcome);
@@ -640,7 +639,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     },
                 )?;
                 continuation.status = ContinuationStatus::Completed;
-                self.coordinator.checkpoint(&machine, continuation, None)?;
+                self.coordinator.checkpoint(&machine, continuation)?;
                 machine.verify_replay()?;
                 let run = &machine.projection().runs[run_id];
                 return Ok(DriveOutcome::Completed(ExecutionResult {
@@ -663,7 +662,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                     contracts.validate_component_input(component, &value)?;
                     let input_ref = machine
                         .put_artifact("cymule.component-input/1", canonical_bytes(&value)?)?;
-                    let operation = self.binding.components.get(component).ok_or_else(|| {
+                    self.binding.components.get(component).ok_or_else(|| {
                         DurableError::Validation(format!("component {component} is not bound"))
                     })?;
                     let occurrence_binding = self
@@ -671,19 +670,20 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         .occurrence_binding(ExecutionOperationKind::Component, component)?;
                     let occurrence_id = component_occurrence_id(
                         run_id,
+                        &plan.plan_id,
                         &frame.invocation_id,
                         &step.id,
                         continuation.epoch,
                         &input_ref,
                         &occurrence_binding,
                     )?;
-                    let (output_ref, occurrence) = if let Some(recorded) = self
+                    let (output_ref, recorded) = if let Some(recorded) = self
                         .coordinator
                         .state()?
                         .component_occurrences
                         .get(&occurrence_id)
                     {
-                        (recorded.output.clone(), None)
+                        (recorded.output.clone(), true)
                     } else {
                         let response = self
                             .plugin
@@ -699,26 +699,25 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         };
                         let output_ref = machine
                             .put_artifact("cymule.component-output/1", canonical_bytes(&value)?)?;
-                        let occurrence = ComponentOccurrence {
-                            occurrence_id,
-                            run_id: run_id.to_owned(),
-                            site_id: step.id.clone(),
-                            component: component.clone(),
-                            input: input_ref,
-                            output: output_ref.clone(),
-                            occurrence_binding,
-                            implementation_revision: operation.operation_revision.clone(),
-                        };
-                        (output_ref, Some(occurrence))
+                        (output_ref, false)
                     };
                     let output = read_value(&machine, &output_ref)?;
                     contracts.validate_component_output(component, &output)?;
                     if let Some(binding) = bind {
-                        frame.locals.insert(binding.clone(), output_ref);
+                        frame.locals.insert(binding.clone(), output_ref.clone());
                     }
                     frame.next_step += 1;
-                    self.coordinator
-                        .checkpoint(&machine, continuation, occurrence)?;
+                    if recorded {
+                        return Err(DurableError::Validation(format!(
+                            "component occurrence {occurrence_id} exists without its atomic Continuation transition"
+                        )));
+                    }
+                    self.coordinator.checkpoint_component(
+                        &machine,
+                        continuation,
+                        &input_ref,
+                        &output_ref,
+                    )?;
                 }
                 Operation::Invoke {
                     definition,
@@ -763,7 +762,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         next_step: 0,
                         locals: BTreeMap::new(),
                     });
-                    self.coordinator.checkpoint(&machine, continuation, None)?;
+                    self.coordinator.checkpoint(&machine, continuation)?;
                 }
                 Operation::Wait { wait, bind } => {
                     let step_index = frame.next_step;
@@ -862,11 +861,11 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                                     frame.locals.insert(binding.clone(), result);
                                 }
                                 frame.next_step += 1;
-                                self.coordinator.checkpoint(&machine, continuation, None)?;
+                                self.coordinator.checkpoint(&machine, continuation)?;
                             }
                             OutboxState::NotApplied if bind.is_none() => {
                                 frame.next_step += 1;
-                                self.coordinator.checkpoint(&machine, continuation, None)?;
+                                self.coordinator.checkpoint(&machine, continuation)?;
                             }
                             OutboxState::NotApplied => {
                                 return Err(DurableError::IllegalTransition(format!(
@@ -983,7 +982,7 @@ impl<S: DurableStore, P: PluginHost> ResumableRuntime<S, P> {
                         next_step: 0,
                         locals: child_locals,
                     });
-                    self.coordinator.checkpoint(&machine, continuation, None)?;
+                    self.coordinator.checkpoint(&machine, continuation)?;
                 }
             }
         }
@@ -1528,14 +1527,17 @@ fn yield_attempt(machine: &mut Machine, run_id: &str, epoch: u64) -> DurableResu
     )
 }
 
-fn read_value(machine: &Machine, reference: &cymule_core::ArtifactRef) -> DurableResult<Value> {
+pub(crate) fn read_value(
+    machine: &Machine,
+    reference: &cymule_core::ArtifactRef,
+) -> DurableResult<Value> {
     let artifact = machine.artifact(reference).ok_or_else(|| {
         DurableError::NotFound(format!("artifact {} is missing", reference.artifact_id))
     })?;
     cymule_core::decode_json(&artifact.bytes).map_err(Into::into)
 }
 
-fn evaluate(
+pub(crate) fn evaluate(
     machine: &Machine,
     expression: &Expression,
     input: &Value,
@@ -1571,6 +1573,7 @@ fn wait_id(run_id: &str, invocation_id: &str, site_id: &str, epoch: u64) -> Dura
 
 fn component_occurrence_id(
     run_id: &str,
+    plan_id: &str,
     invocation_id: &str,
     site_id: &str,
     epoch: u64,
@@ -1580,6 +1583,7 @@ fn component_occurrence_id(
     #[derive(Serialize)]
     struct Preimage<'a> {
         run_id: &'a str,
+        plan_id: &'a str,
         invocation_id: &'a str,
         site_id: &'a str,
         epoch: u64,
@@ -1587,9 +1591,10 @@ fn component_occurrence_id(
         binding: &'a str,
     }
     content_id(
-        "cymule.component-occurrence/1",
+        "cymule.component-occurrence/2",
         &Preimage {
             run_id,
+            plan_id,
             invocation_id,
             site_id,
             epoch,
