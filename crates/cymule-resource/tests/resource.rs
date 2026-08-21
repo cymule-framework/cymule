@@ -450,6 +450,15 @@ fn bounded_resolver_streams_and_verifies_objects_and_directory_pages() {
             reference: "directory:fixture".to_owned(),
         }],
     );
+    let mut unproven = ResourceClient::new(MemoryResolver {
+        bytes: Vec::new(),
+        entries: entries.clone(),
+        corrupt: false,
+    });
+    assert!(matches!(
+        unproven.list_page(&directory, Some("1"), 1),
+        Err(ResourceError::Validation(_))
+    ));
     let mut directory_client = ResourceClient::new(MemoryResolver {
         bytes: Vec::new(),
         entries,

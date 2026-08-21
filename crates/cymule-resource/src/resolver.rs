@@ -81,12 +81,16 @@ pub trait ArtifactResolver {
 /// Validating facade over one resolver adapter.
 pub struct ResourceClient<R> {
     resolver: R,
+    list_frontiers: std::collections::BTreeMap<(String, String), u64>,
 }
 
 impl<R: ArtifactResolver> ResourceClient<R> {
     /// Wrap one resolver implementation.
     pub const fn new(resolver: R) -> Self {
-        Self { resolver }
+        Self {
+            resolver,
+            list_frontiers: std::collections::BTreeMap::new(),
+        }
     }
 
     /// Verify that a resolver observes the retained media type and integrity or
@@ -224,6 +228,17 @@ impl<R: ArtifactResolver> ResourceClient<R> {
                 "resource page limit must be 1..={MAX_LIST_PAGE}"
             )));
         }
+        let expected_start = match cursor {
+            None => 0,
+            Some(cursor) => *self
+                .list_frontiers
+                .get(&(publication.resource.resource_id.clone(), cursor.to_owned()))
+                .ok_or_else(|| {
+                    ResourceError::Validation(
+                        "Resource list cursor has no verified predecessor page".to_owned(),
+                    )
+                })?,
+        };
         let page =
             self.resolver
                 .list(&publication.resource, &publication.locators, cursor, limit)?;
@@ -260,9 +275,9 @@ impl<R: ArtifactResolver> ResourceClient<R> {
         })?;
         page.proof
             .verify_page(manifest, &page.entries, cursor, page.next_cursor.as_deref())?;
-        if cursor.is_none() && page.proof.start_index != 0 {
+        if page.proof.start_index != expected_start {
             return Err(ResourceError::Substrate(
-                "first Resource list page does not start at manifest entry zero".to_owned(),
+                "Resource list page does not continue its verified predecessor".to_owned(),
             ));
         }
         let end = page
@@ -274,6 +289,22 @@ impl<R: ArtifactResolver> ResourceClient<R> {
             return Err(ResourceError::Substrate(
                 "terminal Resource list page does not close the exact manifest".to_owned(),
             ));
+        }
+        if let Some(next_cursor) = &page.next_cursor {
+            let key = (
+                publication.resource.resource_id.clone(),
+                next_cursor.clone(),
+            );
+            if self
+                .list_frontiers
+                .get(&key)
+                .is_some_and(|existing| *existing != end)
+            {
+                return Err(ResourceError::Substrate(
+                    "resolver reused one opaque cursor for different manifest frontiers".to_owned(),
+                ));
+            }
+            self.list_frontiers.insert(key, end);
         }
         Ok(page)
     }
