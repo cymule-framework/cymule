@@ -24,3 +24,7 @@
   observation, process execution, OpenTelemetry export, and RMCP tool mapping.
   Each directory owns focused conformance and must remain independently
   testable.
+- Process-executor binding revisions cover the complete admitted launch
+  configuration, not only executable bytes. Unix process occurrences use a
+  fresh captured closure and an isolated process group; platform sandboxes
+  remain separate plugins.

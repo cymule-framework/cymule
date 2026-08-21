@@ -919,10 +919,7 @@ fn campaign_executor(options: &CampaignOptions) -> CampaignResult<ProcessExecuto
 fn campaign_execution_binding(options: &CampaignOptions) -> CampaignResult<ExecutionBinding> {
     let mut executor = campaign_executor(options)?;
     let manifest = executor.describe()?;
-    let implementation_revision = format!(
-        "sha256:{}",
-        sha256_bytes(&fs::read(&options.plugin_executable)?)
-    );
+    let implementation_revision = executor.implementation_revision().to_owned();
     let empty_digest = format!("sha256:{}", sha256_bytes(b"{}"));
     let providers = [
         (

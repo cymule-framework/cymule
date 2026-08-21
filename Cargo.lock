@@ -522,9 +522,10 @@ version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-runtime",
+ "nix",
+ "serde",
  "serde_json",
  "tempfile",
- "wait-timeout",
 ]
 
 [[package]]

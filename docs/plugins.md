@@ -61,8 +61,11 @@ stage. Neither database belongs in the semantic core.
   or dispatch seams.
 - Model-provider SDKs implement an application's `AgentHost`; they do not make
   model/tool turn order framework semantics.
-- The process executor is not an untrusted-code sandbox. Wasmtime Component
-  Model, containers, and remote sandboxes are separate executor plugins.
+- The official process executor captures a complete configured launch identity
+  and rematerializes executable and working-tree bytes for each occurrence. It
+  uses Unix process groups for bounded fork-tree cleanup and rejects non-Unix
+  platforms. It is not an untrusted-code sandbox; Wasmtime Component Model,
+  containers, and remote sandboxes are separate executor plugins.
 - Telemetry failure never changes a Run result.
 - Plugin credentials never enter Resource Handles, Plans, Events,
   Continuations, receipts, fixtures, or logs.

@@ -143,9 +143,11 @@ Use this precedence order when guidance conflicts:
   `unknown_world_outcome` requiring reconciliation.
 - `cymule.plugin/2` is the only process-plugin protocol. Expected component
   failures and defects are distinct closed response variants; an unclassified
-  process error is never an expected application result. The official process
-  executor launches a private sealed copy whose digest is the execution-binding
-  revision, and plugin stderr never enters an Engine failure.
+  process error is never an expected application result. The official Unix
+  process executor launches a fresh private copy of its captured closure; its
+  execution-binding revision covers executable bytes, arguments, explicit
+  environment, working tree, runtime closure, deadline, and limits. Plugin
+  stderr never enters an Engine failure.
 - `cymule.ir/2` reusable definition calls resolve inside one immutable Plan.
   Logical latest-compatible references are linked by M4 into a new parent Plan;
   a sealed Plan never dereferences a mutable `latest` alias at runtime.
