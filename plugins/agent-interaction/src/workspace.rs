@@ -949,6 +949,13 @@ fn synced_continuation<S: DurableStore>(
         match continuation.scope_stack.last() {
             Some(scope) if scope == &request.scope_id => {
                 continuation.scope_stack.pop();
+                while continuation
+                    .frames
+                    .last()
+                    .is_some_and(|frame| frame.scope_id == request.scope_id)
+                {
+                    continuation.frames.pop();
+                }
             }
             None => {}
             Some(_) if !continuation.scope_stack.contains(&request.scope_id) => {}

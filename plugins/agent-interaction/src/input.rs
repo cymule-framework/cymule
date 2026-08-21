@@ -94,7 +94,7 @@ impl AgentInputController {
         coordinator: &mut DurableCoordinator<S>,
         session_id: &str,
         wait_id: &str,
-        result: ArtifactRef,
+        result: &ArtifactRef,
         response: ElicitationResponse,
     ) -> AgentResult<AgentInputCheckpoint> {
         let mut session = load_session(coordinator, session_id)?;
@@ -127,7 +127,7 @@ impl AgentInputController {
                 .waits
                 .get(wait_id)
                 .ok_or_else(|| AgentError::NotFound(format!("wait {wait_id} does not exist")))?;
-            if wait.state != WaitState::Completed || wait.result.as_ref() != Some(&result) {
+            if wait.state != WaitState::Completed || wait.result.as_ref() != Some(result) {
                 return Err(AgentError::Persistence(format!(
                     "completed elicitation {} is inconsistent with wait {wait_id}",
                     response.request_id
@@ -174,7 +174,7 @@ impl AgentInputController {
             .map(agent_update_record)
             .collect::<AgentResult<Vec<_>>>()?;
         let revision = coordinator
-            .checkpoint_journal_wait_completion(session_id, &records, wait_id, &result)
+            .checkpoint_journal_wait_completion(session_id, &records, wait_id, result)
             .map_err(|error| AgentError::Persistence(error.to_string()))?;
         Ok(AgentInputCheckpoint {
             session,

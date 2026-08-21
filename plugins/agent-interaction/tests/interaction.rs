@@ -21,12 +21,15 @@ use cymule_agent::{
 use cymule_core::{
     ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, Definition, DispatchPolicy,
     EffectContract, EffectProfile, Expression, Machine, MutationKind, Operation, PlanCandidate,
-    ROOT_SCOPE_ID, ReconciliationMode, Region, ScopeStatus, Step, WaitSpec, WorldOutcome,
-    canonical_digest,
+    ROOT_SCOPE_ID, ReconciliationMode, Region, ScopeMode, ScopeStatus, Step, WaitSpec,
+    WorldOutcome, canonical_digest, plan_scope_id,
 };
 use cymule_durable::{
     Continuation, ContinuationStatus, DurableCoordinator, FrameState, JournalRecord, MemoryStore,
     OutboxState, WaitOwner, WaitState,
+};
+use cymule_runtime::{
+    EXECUTION_BINDING_VERSION, ExecutionBinding, PLUGIN_VERSION, PluginEffect, PluginManifest,
 };
 use serde_json::json;
 
@@ -298,23 +301,115 @@ fn usage(used: u64) -> Usage {
     }
 }
 
-fn agent_continuation(run_id: &str) -> Continuation {
+fn fixture_execution_binding(effect: Option<&str>) -> ExecutionBinding {
+    let effects = effect
+        .map(|operation| {
+            BTreeMap::from([(
+                operation.to_owned(),
+                PluginEffect {
+                    implementation_revision: "workspace-effect-v1".to_owned(),
+                    can_reconcile: true,
+                },
+            )])
+        })
+        .unwrap_or_default();
+    let manifest = PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: "test.agent-fixture/1".to_owned(),
+        components: BTreeMap::new(),
+        effects,
+    };
+    ExecutionBinding::for_local_process(&manifest, format!("sha256:{}", "a".repeat(64)))
+        .expect("fixture execution binding admits")
+}
+
+fn submit(machine: &mut Machine, run_id: &str, command_id: &str, command: Command) {
+    let expected_precondition = machine.projection().runs[run_id].precondition_token();
+    machine
+        .submit(CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: command_id.to_owned(),
+            actor: "actor:test".to_owned(),
+            run_id: run_id.to_owned(),
+            expected_precondition: Some(expected_precondition),
+            command,
+        })
+        .expect("fixture command submits");
+}
+
+fn start_fixture_run(
+    machine: &mut Machine,
+    run_id: &str,
+    plan: &cymule_core::SealedPlan,
+    binding: &ExecutionBinding,
+) -> (ArtifactRef, ArtifactRef) {
+    binding
+        .admit_plan(plan)
+        .expect("fixture binding admits the Plan");
+    let binding_ref = machine
+        .put_artifact(
+            EXECUTION_BINDING_VERSION,
+            binding.canonical_bytes().expect("binding encodes"),
+        )
+        .expect("execution binding Artifact stores");
+    assert_eq!(
+        binding_ref,
+        binding.artifact_ref().expect("binding reference derives")
+    );
+    machine
+        .submit(CommandEnvelope {
+            command_version: COMMAND_VERSION.to_owned(),
+            command_id: format!("command:start:{run_id}"),
+            actor: "actor:test".to_owned(),
+            run_id: run_id.to_owned(),
+            expected_precondition: None,
+            command: Command::StartRun {
+                plan_id: plan.plan_id.clone(),
+                binding_context: binding_ref.artifact_id.clone(),
+            },
+        })
+        .expect("fixture Run starts");
+    submit(
+        machine,
+        run_id,
+        &format!("command:attempt:{run_id}:0"),
+        Command::BeginAttempt {
+            attempt_id: format!("attempt:{run_id}:0"),
+            continuation_id: format!("continuation:{run_id}"),
+            occurrence_binding: binding_ref.artifact_id.clone(),
+            epoch: 0,
+        },
+    );
+    let input = machine
+        .put_artifact(
+            "test/agent-input",
+            format!("input for {run_id}").into_bytes(),
+        )
+        .expect("fixture input Artifact stores");
+    (binding_ref, input)
+}
+
+fn agent_continuation(
+    run_id: &str,
+    plan_id: String,
+    binding_context: String,
+    input: ArtifactRef,
+) -> Continuation {
     Continuation {
         run_id: run_id.to_owned(),
-        plan_id: agent_wait_plan().plan_id,
-        binding_context: "binding:agent-test/1".to_owned(),
+        plan_id,
+        binding_context,
         frames: vec![FrameState {
             definition_id: "agent-turn".to_owned(),
             invocation_id: "agent-turn".to_owned(),
             invocation_path: Vec::new(),
             scope_id: ROOT_SCOPE_ID.to_owned(),
-            input: cymule_core::artifact_ref("test/input", b"agent test input")
-                .expect("test input reference derives"),
+            input: input.clone(),
             region_path: Vec::new(),
             next_step: 0,
             locals: BTreeMap::new(),
         }],
-        state: None,
+        state: Some(input),
         wait_set: BTreeSet::new(),
         scope_stack: vec![ROOT_SCOPE_ID.to_owned()],
         effect_obligations: BTreeSet::new(),
@@ -322,14 +417,27 @@ fn agent_continuation(run_id: &str) -> Continuation {
         budget: BTreeMap::new(),
         causal_frontier: BTreeSet::new(),
         epoch: 0,
-        status: ContinuationStatus::Ready,
+        status: ContinuationStatus::Running,
     }
 }
 
-fn agent_input_continuation(run_id: &str) -> Continuation {
-    let mut continuation = agent_continuation(run_id);
+fn agent_input_machine(run_id: &str) -> (Machine, Continuation) {
+    let mut machine = Machine::new();
+    let plan = agent_wait_plan();
+    machine
+        .insert_plan(plan.clone())
+        .expect("agent input Plan inserts");
+    let (binding, input) = start_fixture_run(
+        &mut machine,
+        run_id,
+        &plan,
+        &fixture_execution_binding(None),
+    );
+    let mut continuation = agent_continuation(run_id, plan.plan_id, binding.artifact_id, input);
     continuation.frames[0].next_step = 1;
-    continuation
+    continuation.causal_frontier =
+        BTreeSet::from([machine.projection().runs[run_id].last_event.clone()]);
+    (machine, continuation)
 }
 
 fn agent_wait_plan() -> cymule_core::SealedPlan {
@@ -373,19 +481,8 @@ fn agent_wait_owner() -> WaitOwner {
     }
 }
 
-fn install_agent_input(machine: &mut Machine) {
-    machine
-        .insert_plan(agent_wait_plan())
-        .expect("agent input Plan inserts");
-    machine
-        .put_artifact("test/input", b"agent test input".to_vec())
-        .expect("test input stores");
-}
-
-fn workspace_machine(run_id: &str) -> (Machine, String, ArtifactRef) {
-    let mut machine = Machine::new();
-    install_agent_input(&mut machine);
-    let plan = cymule_core::seal_plan(PlanCandidate {
+fn workspace_plan() -> cymule_core::SealedPlan {
+    cymule_core::seal_plan(PlanCandidate {
         ir_version: cymule_core::IR_VERSION.to_owned(),
         name: "agent_workspace_scope".to_owned(),
         entry: "main".to_owned(),
@@ -408,43 +505,130 @@ fn workspace_machine(run_id: &str) -> (Machine, String, ArtifactRef) {
             input_schema: json!({}),
             output_schema: json!({}),
             body: Region {
-                steps: Vec::new(),
+                steps: vec![Step {
+                    id: "workspace.scope".to_owned(),
+                    operation: Operation::Scope {
+                        mode: ScopeMode::Transactional,
+                        body: Box::new(Region {
+                            steps: vec![Step {
+                                id: "workspace.finalize".to_owned(),
+                                operation: Operation::Effect {
+                                    effect: "workspace.commit".to_owned(),
+                                    input: Expression::Input,
+                                    occurrence: "primary".to_owned(),
+                                    bind: None,
+                                },
+                            }],
+                            result: Expression::Input,
+                        }),
+                        bind: None,
+                    },
+                }],
                 result: Expression::Literal { value: json!(null) },
             },
         }],
         metadata: BTreeMap::new(),
     })
-    .expect("workspace Plan seals");
-    machine.insert_plan(plan.clone()).expect("Plan inserts");
-    machine
-        .submit(CommandEnvelope {
-            command_version: COMMAND_VERSION.to_owned(),
-            command_id: format!("command:start:{run_id}"),
-            actor: "actor:test".to_owned(),
-            run_id: run_id.to_owned(),
-            expected_precondition: None,
-            command: Command::StartRun {
-                plan_id: plan.plan_id.clone(),
-                binding_context: "binding:workspace-runtime/1".to_owned(),
+    .expect("workspace Plan seals")
+}
+
+fn workspace_continuation(
+    machine: &Machine,
+    run_id: &str,
+    plan_id: String,
+    binding_context: String,
+    input: ArtifactRef,
+    scope_id: &str,
+) -> Continuation {
+    Continuation {
+        run_id: run_id.to_owned(),
+        plan_id,
+        binding_context,
+        frames: vec![
+            FrameState {
+                definition_id: "main".to_owned(),
+                invocation_id: "main".to_owned(),
+                invocation_path: Vec::new(),
+                scope_id: ROOT_SCOPE_ID.to_owned(),
+                input: input.clone(),
+                region_path: Vec::new(),
+                next_step: 1,
+                locals: BTreeMap::new(),
             },
-        })
-        .expect("workspace Run starts");
+            FrameState {
+                definition_id: "main".to_owned(),
+                invocation_id: "main".to_owned(),
+                invocation_path: Vec::new(),
+                scope_id: scope_id.to_owned(),
+                input: input.clone(),
+                region_path: vec![0],
+                next_step: 0,
+                locals: BTreeMap::new(),
+            },
+        ],
+        state: Some(input),
+        wait_set: BTreeSet::new(),
+        scope_stack: vec![ROOT_SCOPE_ID.to_owned(), scope_id.to_owned()],
+        effect_obligations: BTreeSet::new(),
+        authority_leases: BTreeSet::new(),
+        budget: BTreeMap::new(),
+        causal_frontier: BTreeSet::from([machine.projection().runs[run_id].last_event.clone()]),
+        epoch: 0,
+        status: ContinuationStatus::Running,
+    }
+}
+
+fn workspace_machine(run_id: &str) -> (Machine, Continuation, String, ArtifactRef) {
+    let mut machine = Machine::new();
+    let plan = workspace_plan();
+    machine.insert_plan(plan.clone()).expect("Plan inserts");
+    let (binding, input) = start_fixture_run(
+        &mut machine,
+        run_id,
+        &plan,
+        &fixture_execution_binding(Some("workspace.commit")),
+    );
+    let scope_id = plan_scope_id(run_id, &plan.plan_id, "main", "main", &[0], 0)
+        .expect("workspace scope identity derives");
+    submit(
+        &mut machine,
+        run_id,
+        &format!("command:scope:{run_id}"),
+        Command::OpenScope {
+            scope_id: scope_id.clone(),
+            parent_scope: ROOT_SCOPE_ID.to_owned(),
+            invocation_id: "main".to_owned(),
+            invocation_path: Vec::new(),
+            definition_id: "main".to_owned(),
+            region_path: Vec::new(),
+            site_id: "workspace.scope".to_owned(),
+        },
+    );
     let overlay = machine
         .put_artifact("workspace/overlay", b"prepared overlay".to_vec())
         .expect("Artifact stores");
-    (machine, plan.plan_id, overlay)
+    let continuation = workspace_continuation(
+        &machine,
+        run_id,
+        plan.plan_id,
+        binding.artifact_id,
+        input,
+        &scope_id,
+    );
+    (machine, continuation, scope_id, overlay)
 }
 
 fn workspace_request(
     run_id: &str,
     session_id: &str,
     occurrence_id: &str,
+    scope_id: &str,
     overlay: ArtifactRef,
 ) -> WorkspaceScopeRequest {
     WorkspaceScopeRequest {
         session_id: session_id.to_owned(),
         run_id: run_id.to_owned(),
-        scope_id: ROOT_SCOPE_ID.to_owned(),
+        scope_id: scope_id.to_owned(),
         occurrence_id: occurrence_id.to_owned(),
         change_id: format!("change:{run_id}"),
         overlay,
@@ -459,14 +643,11 @@ fn workspace_coordinator(
     store: MemoryStore,
     run_id: &str,
 ) -> (DurableCoordinator<MemoryStore>, WorkspaceScopeRequest) {
-    let (machine, plan_id, overlay) = workspace_machine(run_id);
+    let (machine, continuation, scope_id, overlay) = workspace_machine(run_id);
     let mut coordinator = DurableCoordinator::open(store)
         .expect("workspace store opens")
         .initialize(&machine)
         .expect("workspace store initializes");
-    let mut continuation = agent_continuation(run_id);
-    continuation.plan_id = plan_id;
-    "binding:workspace-runtime/1".clone_into(&mut continuation.binding_context);
     coordinator
         .put_continuation(continuation)
         .expect("workspace Continuation persists");
@@ -474,6 +655,7 @@ fn workspace_coordinator(
         run_id,
         &format!("session:{run_id}"),
         &format!("occurrence:{run_id}"),
+        &scope_id,
         overlay,
     );
     (coordinator, request)
@@ -732,17 +914,17 @@ fn workspace_commit_transfers_and_resolves_one_scope_obligation() {
     let machine = coordinator.restore_machine().expect("Machine restores");
     let run = &machine.projection().runs["run:workspace-commit"];
     assert_eq!(
-        run.scopes[ROOT_SCOPE_ID].status,
+        run.scopes[&request.scope_id].status,
         ScopeStatus::ClosedCommitted
     );
     assert_eq!(run.effects[&intent_id].outcome, WorldOutcome::Applied);
     assert!(run.obligations[&obligation_id].resolved);
     assert_eq!(state.outbox[&intent_id].state, OutboxState::Applied);
-    assert!(
-        state.continuations["run:workspace-commit"]
-            .scope_stack
-            .is_empty()
+    assert_eq!(
+        state.continuations["run:workspace-commit"].scope_stack,
+        [ROOT_SCOPE_ID]
     );
+    assert_eq!(state.continuations["run:workspace-commit"].frames.len(), 1);
     assert!(
         state.continuations["run:workspace-commit"]
             .effect_obligations
@@ -906,7 +1088,14 @@ fn workspace_abort_closes_scope_only_after_a_retained_non_commit_receipt() {
     assert_eq!(applies.load(Ordering::SeqCst), 1);
     let machine = coordinator.restore_machine().expect("Machine restores");
     let run = &machine.projection().runs["run:workspace-abort"];
-    assert_eq!(run.scopes[ROOT_SCOPE_ID].status, ScopeStatus::ClosedAborted);
+    assert_eq!(
+        run.scopes[&request.scope_id].status,
+        ScopeStatus::ClosedAborted
+    );
+    assert_eq!(
+        coordinator.state().expect("state").continuations["run:workspace-abort"].scope_stack,
+        [ROOT_SCOPE_ID]
+    );
     assert!(run.obligations.is_empty());
     assert!(coordinator.state().expect("state").outbox.is_empty());
     drop(coordinator);
@@ -960,8 +1149,7 @@ fn lost_workspace_completion_receipt_is_reconciled_from_the_started_claim() {
 
 #[test]
 fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
-    let mut machine = Machine::new();
-    install_agent_input(&mut machine);
+    let (mut machine, continuation) = agent_input_machine("run:agent-input");
     let result = machine
         .put_artifact("agent/input", br#"{"answer":"yes"}"#.to_vec())
         .expect("Artifact stores");
@@ -974,7 +1162,7 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
         .initialize(&machine)
         .expect("store initializes");
     coordinator
-        .put_continuation(agent_input_continuation("run:agent-input"))
+        .put_continuation(continuation)
         .expect("continuation persists");
 
     let request = ElicitationRequest {
@@ -1048,7 +1236,7 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
         &mut reopened,
         "session:agent-input",
         &suspended.wait_id,
-        result.clone(),
+        &result,
         response.clone(),
     )
     .expect("input completion resumes");
@@ -1075,7 +1263,7 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
         &mut reopened,
         "session:agent-input",
         &second.wait_id,
-        second_result.clone(),
+        &second_result,
         second_response.clone(),
     )
     .expect("last input completion resumes");
@@ -1088,7 +1276,7 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
         &mut reopened,
         "session:agent-input",
         &second.wait_id,
-        second_result,
+        &second_result,
         second_response,
     )
     .expect("completion retry is idempotent");
@@ -1097,7 +1285,7 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
         &mut reopened,
         "session:agent-input",
         &suspended.wait_id,
-        result,
+        &result,
         response,
     )
     .expect("older completion retry is read-only and idempotent");
@@ -1112,15 +1300,14 @@ fn durable_input_wait_suspends_and_resumes_atomically_across_reopen() {
 
 #[test]
 fn input_schema_and_external_references_fail_before_suspension() {
-    let mut machine = Machine::new();
-    install_agent_input(&mut machine);
+    let (machine, continuation) = agent_input_machine("run:invalid-schema");
     let store = MemoryStore::new();
     let mut coordinator = DurableCoordinator::open(store)
         .expect("store opens")
         .initialize(&machine)
         .expect("store initializes");
     coordinator
-        .put_continuation(agent_input_continuation("run:invalid-schema"))
+        .put_continuation(continuation)
         .expect("continuation persists");
     let revision = coordinator.revision().expect("revision exists").to_owned();
 
@@ -1157,8 +1344,7 @@ fn input_schema_and_external_references_fail_before_suspension() {
 
 #[test]
 fn invalid_completed_input_leaves_wait_and_session_pending() {
-    let mut machine = Machine::new();
-    install_agent_input(&mut machine);
+    let (mut machine, continuation) = agent_input_machine("run:invalid-input");
     let result = machine
         .put_artifact("agent/input", br#"{"answer":42}"#.to_vec())
         .expect("Artifact stores");
@@ -1168,7 +1354,7 @@ fn invalid_completed_input_leaves_wait_and_session_pending() {
         .initialize(&machine)
         .expect("store initializes");
     coordinator
-        .put_continuation(agent_input_continuation("run:invalid-input"))
+        .put_continuation(continuation)
         .expect("continuation persists");
     let suspended = AgentInputController::suspend(
         &mut coordinator,
@@ -1198,7 +1384,7 @@ fn invalid_completed_input_leaves_wait_and_session_pending() {
             &mut coordinator,
             "session:invalid-input",
             &suspended.wait_id,
-            result,
+            &result,
             ElicitationResponse {
                 request_id: "elicitation:invalid-input".to_owned(),
                 accepted: true,
@@ -1242,8 +1428,7 @@ fn invalid_completed_input_leaves_wait_and_session_pending() {
 
 #[test]
 fn declined_input_completes_without_an_instance_value() {
-    let mut machine = Machine::new();
-    install_agent_input(&mut machine);
+    let (mut machine, continuation) = agent_input_machine("run:declined-input");
     let result = machine
         .put_artifact("agent/input-declined", b"null".to_vec())
         .expect("Artifact stores");
@@ -1253,7 +1438,7 @@ fn declined_input_completes_without_an_instance_value() {
         .initialize(&machine)
         .expect("store initializes");
     coordinator
-        .put_continuation(agent_input_continuation("run:declined-input"))
+        .put_continuation(continuation)
         .expect("continuation persists");
     let suspended = AgentInputController::suspend(
         &mut coordinator,
@@ -1271,7 +1456,7 @@ fn declined_input_completes_without_an_instance_value() {
         &mut coordinator,
         "session:declined-input",
         &suspended.wait_id,
-        result,
+        &result,
         ElicitationResponse {
             request_id: "elicitation:declined-input".to_owned(),
             accepted: false,
@@ -1294,15 +1479,14 @@ fn declined_input_completes_without_an_instance_value() {
 
 #[test]
 fn stale_input_checkpoint_writes_neither_wait_nor_agent_update() {
-    let mut machine = Machine::new();
-    install_agent_input(&mut machine);
+    let (machine, continuation) = agent_input_machine("run:stale-input");
     let store = MemoryStore::new();
     let mut current = DurableCoordinator::open(store.clone())
         .expect("store opens")
         .initialize(&machine)
         .expect("store initializes");
     current
-        .put_continuation(agent_input_continuation("run:stale-input"))
+        .put_continuation(continuation)
         .expect("continuation persists");
     let mut stale = DurableCoordinator::open(store.clone()).expect("stale view opens");
     current

@@ -47,6 +47,9 @@
   Session state updates with the owning M1 wait transition. Never expose
   `RequiresAction` without a committed wait or ready a Continuation without the
   matching resolved Session projection.
+- `AgentInputController::complete` borrows the already retained result
+  `ArtifactRef`; callers keep ownership while the shared M1 CAS validates and
+  records the exact reference.
 - Every durable input request receives the exact Plan wait owner from its
   caller, including definition, invocation, Region path, site, step, and
   optional bind. The plugin never invents or omits M1 wait ownership.
@@ -61,6 +64,8 @@
 - A workspace overlay commit is a Plan-declared mutating Effect, not a special
   filesystem shortcut. Atomically couple its host occurrence to scope closure,
   the transferred obligation, outbox state, Machine snapshot, and Continuation.
+  Closing the scope also removes its nested execution frames so the persisted
+  Continuation resumes from its still-open lexical parent.
   Abort the scope only after a retained provider receipt proves the overlay was
   not committed. Filesystems, VCS implementations, sandboxes, and object stores
   remain adapters.

@@ -392,6 +392,7 @@ dependencies = [
  "cymule-core",
  "cymule-durable",
  "cymule-resource",
+ "cymule-runtime",
  "cymule-store-sqlite",
  "cymule-test-world",
  "jsonschema",
