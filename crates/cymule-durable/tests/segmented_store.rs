@@ -145,6 +145,8 @@ proptest! {
             reopened.state.application_journals["journal:property"].len(),
             values.len()
         );
-        prop_assert!(store.stats().expect("stats").reopened_segments < MAX_HOT_SEGMENTS);
+        let reopened_segments = store.stats().expect("stats").reopened_segments;
+        prop_assert_eq!(reopened_segments as usize, values.len());
+        prop_assert!(reopened_segments < MAX_HOT_SEGMENTS * MAX_CHECKPOINT_PACKS);
     }
 }

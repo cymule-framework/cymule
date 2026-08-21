@@ -1461,7 +1461,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             .cloned()
             .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
         ensure_direct_wait_completion(&wait)?;
-        if wait.state == WaitState::Completed && wait.result.as_ref() == Some(&result) {
+        if wait.state == WaitState::Completed && wait.result.as_ref() == Some(result) {
             return Ok(Vec::new());
         }
         if wait.state != WaitState::Pending {

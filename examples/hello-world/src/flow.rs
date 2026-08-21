@@ -19,7 +19,6 @@ pub fn build() -> PlanCandidate {
             "required": ["message"],
             "properties": {"message": {"type": "string"}}
         }),
-        BTreeMap::new(),
     )
     .component(
         "example.greet",
@@ -33,6 +32,7 @@ pub fn build() -> PlanCandidate {
             "required": ["message"],
             "properties": {"message": {"type": "string"}}
         }),
+        BTreeMap::new(),
     )
     .effect_contract(
         "example.capture",
