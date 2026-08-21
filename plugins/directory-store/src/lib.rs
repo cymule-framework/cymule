@@ -461,31 +461,29 @@ fn test_gc_boundary(boundary: &str) -> DurableResult<()> {
 mod tests {
     use super::*;
     use cymule_core::Machine;
-    use cymule_durable::{DurableDelta, DurableOperation, DurableState, JournalRecord, StoreBatch};
+    use cymule_durable::{DurableCoordinator, JournalRecord};
     use cymule_test_world::ManagedChild;
     use serde_json::json;
     use std::process::Command;
     use std::time::Duration;
 
     fn populate(root: &Path) -> DurableResult<StoredState> {
-        let mut store = DirectoryStore::open(root)?;
-        let batch = StoreBatch::initialize(DurableState::new(Machine::new().snapshot()))?;
-        store.compare_and_commit(None, &batch)?;
-        let mut current = store.load()?.expect("initialized state");
+        let store = DirectoryStore::open(root)?;
+        let mut coordinator = DurableCoordinator::open(store)?.initialize(&Machine::new())?;
         for index in 0..3 {
-            let delta = DurableDelta::new(vec![DurableOperation::AppendJournal {
-                journal_id: "journal:gc-crash".to_owned(),
-                records: vec![JournalRecord::new(
+            coordinator.append_journal_record(
+                "journal:gc-crash",
+                JournalRecord::new(
                     format!("record:{index}"),
                     "test.gc-crash/1",
                     json!({"index": index}),
-                )?],
-            }])?;
-            let batch = StoreBatch::transition(&current, delta)?;
-            let commit = store.compare_and_commit(Some(&current.head), &batch)?;
-            batch.apply_committed(&mut current, &commit)?;
+                )?,
+            )?;
         }
-        Ok(current)
+        let mut store = coordinator.into_store();
+        store
+            .load()?
+            .ok_or_else(|| DurableError::NotFound("initialized directory state".to_owned()))
     }
 
     #[test]

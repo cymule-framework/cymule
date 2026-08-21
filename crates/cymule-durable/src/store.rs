@@ -133,18 +133,23 @@ pub enum DurableOperation {
 #[serde(deny_unknown_fields)]
 pub struct DurableDelta {
     /// Closed operations applied atomically in order.
-    pub operations: Vec<DurableOperation>,
+    operations: Vec<DurableOperation>,
 }
 
 impl DurableDelta {
     /// Construct a non-empty delta.
-    pub fn new(operations: Vec<DurableOperation>) -> DurableResult<Self> {
+    pub(crate) fn new(operations: Vec<DurableOperation>) -> DurableResult<Self> {
         if operations.is_empty() {
             return Err(DurableError::Validation(
                 "durable delta is empty".to_owned(),
             ));
         }
         Ok(Self { operations })
+    }
+
+    /// Borrow the admitted closed operation sequence.
+    pub fn operations(&self) -> &[DurableOperation] {
+        &self.operations
     }
 
     /// Apply the already-admitted delta to an in-memory materialized projection.
@@ -613,7 +618,7 @@ impl StoreBatch {
     }
 
     /// Build one delta transition and rotate at the suffix bound.
-    pub fn transition(current: &StoredState, delta: DurableDelta) -> DurableResult<Self> {
+    pub(crate) fn transition(current: &StoredState, delta: DurableDelta) -> DurableResult<Self> {
         let segment = StateSegment::next(current, delta)?;
         let suffix_len = current.head.suffix_len.checked_add(1).ok_or_else(|| {
             DurableError::Validation("durable suffix length overflowed".to_owned())
@@ -904,6 +909,28 @@ pub trait DurableStore {
     /// Return physical object counts and bounded reopen work.
     fn stats(&self) -> DurableResult<StoreStats> {
         Ok(StoreStats::default())
+    }
+}
+
+impl<T: DurableStore + ?Sized> DurableStore for &mut T {
+    fn load(&mut self) -> DurableResult<Option<StoredState>> {
+        (**self).load()
+    }
+
+    fn compare_and_commit(
+        &mut self,
+        expected: Option<&StoreHead>,
+        batch: &StoreBatch,
+    ) -> DurableResult<StoreCommit> {
+        (**self).compare_and_commit(expected, batch)
+    }
+
+    fn reclaim_cold(&mut self, expected: &StoreHead) -> DurableResult<GcReceipt> {
+        (**self).reclaim_cold(expected)
+    }
+
+    fn stats(&self) -> DurableResult<StoreStats> {
+        (**self).stats()
     }
 }
 

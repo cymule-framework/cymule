@@ -649,8 +649,11 @@ fn frozen_wait_condition_requires_owner_when_bind_is_absent() {
 fn wait_completion_survives_reopen_and_readies_the_continuation() {
     let (mut machine, plan_id) = machine_with_run();
     let result = machine
-        .put_artifact("example/input", b"accepted".to_vec())
+        .put_artifact("example/input", br#""accepted""#.to_vec())
         .expect("Artifact stores");
+    let invalid_result = machine
+        .put_artifact("example/input", b"42".to_vec())
+        .expect("schema-invalid Artifact stores");
     let store = MemoryStore::new();
     let mut coordinator = DurableCoordinator::open(store.clone())
         .expect("store opens")
@@ -692,6 +695,12 @@ fn wait_completion_survives_reopen_and_readies_the_continuation() {
             result: None,
         })
         .expect("wait registers");
+    let before_invalid = coordinator.revision().expect("revision").to_owned();
+    assert!(matches!(
+        coordinator.complete_wait("wait:approval", &invalid_result),
+        Err(DurableError::Contract(_))
+    ));
+    assert_eq!(coordinator.revision(), Some(before_invalid.as_str()));
     coordinator
         .complete_wait("wait:approval", &result)
         .expect("wait completes");

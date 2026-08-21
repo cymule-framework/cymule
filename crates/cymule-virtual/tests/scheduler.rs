@@ -20,16 +20,16 @@ use cymule_resource::ResourceHandle;
 use cymule_virtual::{
     DurableVirtualController, FrontierLimits, MAX_VIRTUAL_CHECKPOINT_DELTA_BYTES, MaterializedPage,
     ParkReason, ParkedWork, RegionMigrationCommand, RegionMigrationKind, RegionMigrationPlan,
-    RegionMigrationRequest, RegionMigrator, RegionSource, ResourceArchiveCatalog,
-    ResourceBackedVirtualArchive, SchedulingPolicy, VIRTUAL_CLAIM_CONTROL_VERSION,
-    VIRTUAL_COMPACTION_CONTROL_VERSION, VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION,
-    VIRTUAL_RECOVERY_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_CONTROL_VERSION,
-    VIRTUAL_REGION_MIGRATION_VERSION, VIRTUAL_REHYDRATION_CONTROL_VERSION,
-    VIRTUAL_RUN_WEIGHT_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive,
-    VirtualCheckpoint, VirtualClaimCheckpoint, VirtualClaimCommand, VirtualCompactionCommand,
-    VirtualCursor, VirtualError, VirtualLeaseRenewalCommand, VirtualRecoveryCommand, VirtualRegion,
-    VirtualRehydrationCommand, VirtualResult, VirtualRunWeightCommand, VirtualScheduler, WorkItem,
-    WorkOccurrenceState, WorkResolution, WorkResolutionCommand,
+    RegionMigrationRequest, RegionMigrator, RegionSource, ResourceBackedVirtualArchive,
+    SchedulingPolicy, VIRTUAL_CLAIM_CONTROL_VERSION, VIRTUAL_COMPACTION_CONTROL_VERSION,
+    VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION, VIRTUAL_RECOVERY_CONTROL_VERSION,
+    VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_VERSION,
+    VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_RUN_WEIGHT_CONTROL_VERSION,
+    VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive, VirtualCheckpoint, VirtualClaimCheckpoint,
+    VirtualClaimCommand, VirtualCompactionCommand, VirtualCursor, VirtualError,
+    VirtualLeaseRenewalCommand, VirtualRecoveryCommand, VirtualRegion, VirtualRehydrationCommand,
+    VirtualResult, VirtualRunWeightCommand, VirtualScheduler, WorkItem, WorkOccurrenceState,
+    WorkResolution, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -2124,12 +2124,8 @@ fn resource_backed_archive_reopens_and_reads_only_selected_occurrence_range() {
     let root = directory.path().join("resources");
     let store = cymule_resource_fs::FsResourceStore::open(&root, "fs:virtual-archive")
         .expect("Resource store opens");
-    let mut archive = ResourceBackedVirtualArchive::open(
-        store,
-        "binding:archive/resource-fs@1",
-        ResourceArchiveCatalog::default(),
-    )
-    .expect("archive opens");
+    let mut archive = ResourceBackedVirtualArchive::open(store, "binding:archive/resource-fs@1")
+        .expect("archive opens");
     let (mut scheduler, occurrence_id) = completed_scheduler();
     let command = VirtualCompactionCommand {
         control_version: VIRTUAL_COMPACTION_CONTROL_VERSION.to_owned(),
@@ -2143,15 +2139,12 @@ fn resource_backed_archive_reopens_and_reads_only_selected_occurrence_range() {
         .compact(&mut archive, &command)
         .expect("region compacts");
     let cold_snapshot = scheduler.snapshot();
-    let (_store, catalog) = archive.into_parts();
+    drop(archive);
     let reopened_store = cymule_resource_fs::FsResourceStore::open(&root, "fs:virtual-archive")
         .expect("Resource store reopens");
-    let mut reopened_archive = ResourceBackedVirtualArchive::open(
-        reopened_store,
-        "binding:archive/resource-fs@1",
-        catalog,
-    )
-    .expect("archive catalog reopens");
+    let mut reopened_archive =
+        ResourceBackedVirtualArchive::open(reopened_store, "binding:archive/resource-fs@1")
+            .expect("archive catalog reopens");
     let mut reopened =
         VirtualScheduler::restore(limits(), cold_snapshot).expect("cold scheduler restores");
     reopened

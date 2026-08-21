@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use cymule_resource::{
     ArtifactResolver, ArtifactStore, MAX_WRITE_CHUNK, RESOURCE_CLEANUP_RECEIPT_VERSION,
-    RESOURCE_LOCATOR_VERSION, ResourceCandidate, ResourceChunk, ResourceCleanupReceipt,
-    ResourceDeleteIntent, ResourceDeleter, ResourceDeletionObservation, ResourceError,
-    ResourceHandle, ResourceIntegrity, ResourceLocation, ResourceLocatorSet, ResourceObservation,
-    ResourcePage, ResourcePublication, ResourceResult, ResourceShape, ResourceWriteIntent,
-    ResourceWriteSession,
+    RESOURCE_LOCATOR_VERSION, ResourceCandidate, ResourceCatalogRecord, ResourceCatalogStore,
+    ResourceChunk, ResourceCleanupReceipt, ResourceDeleteIntent, ResourceDeleter,
+    ResourceDeletionObservation, ResourceError, ResourceHandle, ResourceIntegrity,
+    ResourceLocation, ResourceLocatorSet, ResourceObservation, ResourcePage, ResourcePublication,
+    ResourceResult, ResourceShape, ResourceWriteIntent, ResourceWriteSession,
 };
 use futures_util::StreamExt;
 use object_store::path::Path;
@@ -184,6 +184,14 @@ impl ObjectResourceStore {
 
     fn staging_path(&self, upload_id: &str) -> ResourceResult<Path> {
         self.key(&format!("staging/{}", Self::upload_key(upload_id)?))
+    }
+
+    fn catalog_path(&self, namespace: &str, key: &str) -> ResourceResult<Path> {
+        let mut hasher = Sha256::new();
+        hasher.update(namespace.as_bytes());
+        hasher.update([0]);
+        hasher.update(key.as_bytes());
+        self.key(&format!("catalog/{}.json", hex_digest(&hasher.finalize())))
     }
 
     fn load_record(&self, upload_id: &str) -> ResourceResult<(UploadRecord, UpdateVersion)> {
@@ -374,6 +382,76 @@ impl ObjectResourceStore {
         };
         receipt.verify()?;
         Ok(receipt)
+    }
+}
+
+impl ResourceCatalogStore for ObjectResourceStore {
+    fn put_catalog_record(&mut self, record: &ResourceCatalogRecord) -> ResourceResult<()> {
+        record.verify()?;
+        let path = self.catalog_path(&record.namespace, &record.key)?;
+        let bytes = cymule_core::canonical_bytes(record).map_err(core_error)?;
+        let store = Arc::clone(&self.store);
+        let result = self.block_on(async move {
+            store
+                .put_opts(
+                    &path,
+                    bytes.into(),
+                    PutOptions {
+                        mode: PutMode::Create,
+                        ..Default::default()
+                    },
+                )
+                .await
+        })?;
+        match result {
+            Ok(_) => Ok(()),
+            Err(ObjectError::AlreadyExists { .. }) | Err(ObjectError::Precondition { .. }) => {
+                let existing = self
+                    .get_catalog_record(&record.namespace, &record.key)?
+                    .ok_or_else(|| {
+                        ResourceError::Conflict(
+                            "object-store catalog create conflicted without retained content"
+                                .to_owned(),
+                        )
+                    })?;
+                if existing == *record {
+                    Ok(())
+                } else {
+                    Err(ResourceError::Conflict(format!(
+                        "object-store catalog record {}/{} has conflicting content",
+                        record.namespace, record.key
+                    )))
+                }
+            }
+            Err(error) => Err(object_error(error)),
+        }
+    }
+
+    fn get_catalog_record(
+        &mut self,
+        namespace: &str,
+        key: &str,
+    ) -> ResourceResult<Option<ResourceCatalogRecord>> {
+        let _ = ResourceCatalogRecord::new(namespace, key, Vec::new())?;
+        let path = self.catalog_path(namespace, key)?;
+        let store = Arc::clone(&self.store);
+        let result = self.block_on(async move { store.get(&path).await })?;
+        let result = match result {
+            Ok(result) => result,
+            Err(ObjectError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(object_error(error)),
+        };
+        let bytes = self
+            .block_on(async move { result.bytes().await })?
+            .map_err(object_error)?;
+        let record: ResourceCatalogRecord = cymule_core::decode_json(&bytes).map_err(substrate)?;
+        record.verify()?;
+        if record.namespace != namespace || record.key != key {
+            return Err(ResourceError::Integrity(
+                "object-store catalog locator does not match its record identity".to_owned(),
+            ));
+        }
+        Ok(Some(record))
     }
 }
 

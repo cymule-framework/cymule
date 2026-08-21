@@ -1,8 +1,8 @@
 //! `SQLite` segmented-store reopen, migration, fencing, and complexity tests.
 use cymule_core::Machine;
 use cymule_durable::{
-    DurableDelta, DurableError, DurableOperation, DurableState, DurableStore, JournalRecord,
-    MAX_CHECKPOINT_PACKS, MAX_HOT_SEGMENTS, StoreBatch, StoreHead, StoredState,
+    DurableCoordinator, DurableError, DurableState, DurableStore, JournalRecord,
+    MAX_CHECKPOINT_PACKS, MAX_HOT_SEGMENTS, StoreHead, StoredState,
 };
 use cymule_store_sqlite::SqliteStore;
 use rusqlite::Connection;
@@ -14,9 +14,9 @@ fn state() -> DurableState {
     DurableState::new(Machine::new().snapshot())
 }
 fn initialize(store: &mut impl DurableStore) -> StoredState {
-    let batch = StoreBatch::initialize(state()).expect("initial batch");
-    store
-        .compare_and_commit(None, &batch)
+    DurableCoordinator::open(&mut *store)
+        .expect("opens")
+        .initialize(&Machine::new())
         .expect("initial commit");
     store.load().expect("loads").expect("state exists")
 }
@@ -27,14 +27,13 @@ fn append(store: &mut impl DurableStore, current: &StoredState, index: usize) ->
         json!({"index": index}),
     )
     .expect("record");
-    let delta = DurableDelta::new(vec![DurableOperation::AppendJournal {
-        journal_id: "journal:test".to_owned(),
-        records: vec![record],
-    }])
-    .expect("delta");
-    let batch = StoreBatch::transition(current, delta).expect("transition");
-    store
-        .compare_and_commit(Some(&current.head), &batch)
+    assert_eq!(
+        store.load().expect("loads").expect("state exists").head,
+        current.head
+    );
+    DurableCoordinator::open(&mut *store)
+        .expect("opens")
+        .append_journal_record("journal:test", record)
         .expect("delta commits");
     store.load().expect("loads").expect("state exists")
 }
@@ -47,22 +46,17 @@ fn sqlite_reopens_authenticated_suffix_and_rejects_stale_head() {
     let mut stale = SqliteStore::open(&path, "domain:one").expect("second store opens");
     let initial = initialize(&mut writer);
     let stale_view = stale.load().expect("stale view loads").expect("state");
+    let mut stale_coordinator = DurableCoordinator::open(&mut stale).expect("stale coordinator");
     let next = append(&mut writer, &initial, 1);
-    let stale_batch = StoreBatch::transition(
-        &stale_view,
-        DurableDelta::new(vec![DurableOperation::AppendJournal {
-            journal_id: "journal:stale".to_owned(),
-            records: vec![
-                JournalRecord::new("stale", "test.record/1", json!(null)).expect("record"),
-            ],
-        }])
-        .expect("delta"),
-    )
-    .expect("transition");
     assert!(matches!(
-        stale.compare_and_commit(Some(&stale_view.head), &stale_batch),
+        stale_coordinator.append_journal_record(
+            "journal:stale",
+            JournalRecord::new("stale", "test.record/1", json!(null)).expect("record")
+        ),
         Err(DurableError::Conflict { .. })
     ));
+    drop(stale_coordinator);
+    assert_eq!(stale_view.head.sequence, 0);
     let reopened = SqliteStore::open(&path, "domain:one")
         .expect("reopens")
         .load()
@@ -163,10 +157,12 @@ fn separate_domains_and_nonblocking_writer_contention_hold() {
     blocker
         .execute_batch("BEGIN IMMEDIATE")
         .expect("writer begins");
-    let batch = StoreBatch::initialize(state()).expect("batch");
-    assert!(
-        matches!(second.compare_and_commit(None, &batch), Err(DurableError::Conflict { current: Some(current), .. }) if current == "sqlite-writer-active")
-    );
+    assert!(matches!(
+        DurableCoordinator::open(&mut second)
+            .expect("second coordinator opens")
+            .initialize(&Machine::new()),
+        Err(DurableError::Conflict { current: Some(current), .. }) if current == "sqlite-writer-active"
+    ));
     blocker.execute_batch("ROLLBACK").expect("writer releases");
 }
 
@@ -181,18 +177,15 @@ fn read_only_observer_reads_but_cannot_commit() {
         observer.load().expect("reads").expect("state").revision,
         retained.revision
     );
-    let batch = StoreBatch::transition(
-        &retained,
-        DurableDelta::new(vec![DurableOperation::AppendJournal {
-            journal_id: "journal:x".to_owned(),
-            records: vec![JournalRecord::new("x", "x/1", json!(null)).expect("record")],
-        }])
-        .expect("delta"),
-    )
-    .expect("transition");
-    assert!(
-        matches!(observer.compare_and_commit(Some(&retained.head), &batch), Err(DurableError::Validation(message)) if message.contains("read-only"))
-    );
+    let mut observer_coordinator = DurableCoordinator::open(&mut observer).expect("observer opens");
+    assert!(matches!(
+        observer_coordinator.append_journal_record(
+            "journal:x",
+            JournalRecord::new("x", "x/1", json!(null)).expect("record")
+        ),
+        Err(DurableError::Validation(message)) if message.contains("read-only")
+    ));
+    assert_eq!(retained.head.sequence, 0);
 }
 
 #[test]
@@ -260,19 +253,12 @@ fn sqlite_statement_failures_roll_back_immutable_rows_and_head_together() {
         raw.execute_batch(trigger).expect("fault trigger installs");
         let record =
             JournalRecord::new("fault", "test.fault/1", json!({"name": name})).expect("record");
-        let batch = StoreBatch::transition(
-            &initial,
-            DurableDelta::new(vec![DurableOperation::AppendJournal {
-                journal_id: "journal:fault".to_owned(),
-                records: vec![record],
-            }])
-            .expect("delta"),
-        )
-        .expect("transition");
+        let mut coordinator = DurableCoordinator::open(&mut store).expect("coordinator opens");
         assert!(matches!(
-            store.compare_and_commit(Some(&initial.head), &batch),
+            coordinator.append_journal_record("journal:fault", record),
             Err(DurableError::Substrate(_))
         ));
+        drop(coordinator);
         raw.execute_batch("DROP TRIGGER IF EXISTS fail_segment; DROP TRIGGER IF EXISTS fail_head;")
             .expect("fault trigger removes");
         let reopened = store

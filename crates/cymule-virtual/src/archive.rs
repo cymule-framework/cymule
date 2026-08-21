@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use cymule_core::canonical_bytes;
 use cymule_resource::{
     ArtifactResolver, ArtifactStore, MAX_READ_CHUNK, MAX_WRITE_CHUNK, MerkleSide, MerkleStep,
-    RESOURCE_VERSION, ResourceCandidate, ResourceHandle, ResourceIntegrity, ResourcePublication,
-    ResourceShape, ResourceWriteIntent,
+    RESOURCE_VERSION, ResourceCandidate, ResourceCatalogRecord, ResourceCatalogStore,
+    ResourceHandle, ResourceIntegrity, ResourcePublication, ResourceShape, ResourceWriteIntent,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,8 @@ pub const MAX_VIRTUAL_ARCHIVE_CHUNK: u32 = 8 * 1024 * 1024;
 
 const OCCURRENCE_LEAF_DOMAIN: &str = "cymule.virtual-archive-occurrence-leaf/1";
 const OCCURRENCE_NODE_DOMAIN: &str = "cymule.virtual-archive-occurrence-node/1";
+const ARCHIVE_PUBLICATION_CATALOG: &str = "cymule.virtual-archive-publication/1";
+const ARCHIVE_PROOF_CATALOG: &str = "cymule.virtual-archive-proof/1";
 
 /// Bounded proof locating one exact occurrence inside an immutable archive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,79 +76,59 @@ pub struct VirtualArchiveObject {
     pub occurrence_proofs: BTreeMap<String, VirtualArchiveOccurrenceProof>,
 }
 
-/// Non-semantic locator and proof catalog retained by the archive provider.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ResourceArchiveCatalog {
-    /// Replaceable Resource publications keyed by semantic Resource ID.
-    pub publications: BTreeMap<String, ResourcePublication>,
-    /// Range proofs keyed by archive Resource then occurrence identity.
-    pub occurrence_proofs: BTreeMap<String, BTreeMap<String, VirtualArchiveOccurrenceProof>>,
+struct ArchivePublicationCatalogEntry {
+    resource_id: String,
+    publication: ResourcePublication,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveProofCatalogEntry {
+    resource_id: String,
+    proof: VirtualArchiveOccurrenceProof,
 }
 
 /// Production adapter that stores archives through standard Resource interfaces.
 pub struct ResourceBackedVirtualArchive<S> {
     store: S,
     binding: String,
-    catalog: ResourceArchiveCatalog,
 }
 
-impl<S: ArtifactStore + ArtifactResolver> ResourceBackedVirtualArchive<S> {
-    /// Open over an admitted Resource provider and durable provider-side catalog.
-    pub fn open(
-        store: S,
-        binding: impl Into<String>,
-        catalog: ResourceArchiveCatalog,
-    ) -> VirtualResult<Self> {
+impl<S: ArtifactStore + ArtifactResolver + ResourceCatalogStore> ResourceBackedVirtualArchive<S> {
+    /// Open over an admitted Resource provider whose catalog records survive restart.
+    pub fn open(store: S, binding: impl Into<String>) -> VirtualResult<Self> {
         let binding = binding.into();
         if binding.is_empty() || binding.chars().any(char::is_control) {
             return Err(VirtualError::Validation(
                 "Resource-backed archive binding must be non-empty and printable".to_owned(),
             ));
         }
-        for (resource_id, publication) in &catalog.publications {
-            publication
-                .verify()
-                .map_err(|error| resource_error(&error))?;
-            if resource_id != &publication.resource.resource_id {
-                return Err(VirtualError::Source(
-                    "Resource archive catalog key changed".to_owned(),
-                ));
-            }
-        }
-        Ok(Self {
-            store,
-            binding,
-            catalog,
-        })
+        Ok(Self { store, binding })
     }
 
-    /// Return the provider and its durable, non-semantic locator catalog.
-    pub fn into_parts(self) -> (S, ResourceArchiveCatalog) {
-        (self.store, self.catalog)
+    /// Return the provider after archive coordination completes.
+    pub fn into_inner(self) -> S {
+        self.store
     }
 }
 
-impl<S: ArtifactStore + ArtifactResolver> VirtualArchive for ResourceBackedVirtualArchive<S> {
+impl<S: ArtifactStore + ArtifactResolver + ResourceCatalogStore> VirtualArchive
+    for ResourceBackedVirtualArchive<S>
+{
     fn binding(&self) -> &str {
         &self.binding
     }
 
     fn put(&mut self, object: &VirtualArchiveObject) -> VirtualResult<()> {
-        if let Some(publication) = self
-            .catalog
-            .publications
-            .get(&object.descriptor.resource_id)
-        {
-            if publication.resource != object.descriptor {
+        if let Some(entry) = load_publication(&mut self.store, &object.descriptor.resource_id)? {
+            if entry.publication.resource != object.descriptor {
                 return Err(VirtualError::Source(
                     "archive Resource ID was reused with a different descriptor".to_owned(),
                 ));
             }
-            self.catalog.occurrence_proofs.insert(
-                object.descriptor.resource_id.clone(),
-                object.occurrence_proofs.clone(),
-            );
+            retain_proofs(&mut self.store, object)?;
             return Ok(());
         }
         let intent = ResourceWriteIntent {
@@ -182,13 +164,21 @@ impl<S: ArtifactStore + ArtifactResolver> VirtualArchive for ResourceBackedVirtu
                 "Resource archive provider changed the framework descriptor".to_owned(),
             ));
         }
-        self.catalog
-            .publications
-            .insert(object.descriptor.resource_id.clone(), publication);
-        self.catalog.occurrence_proofs.insert(
-            object.descriptor.resource_id.clone(),
-            object.occurrence_proofs.clone(),
-        );
+        retain_proofs(&mut self.store, object)?;
+        let payload = canonical_bytes(&ArchivePublicationCatalogEntry {
+            resource_id: object.descriptor.resource_id.clone(),
+            publication,
+        })
+        .map_err(|error| VirtualError::Validation(error.to_string()))?;
+        let record = ResourceCatalogRecord::new(
+            ARCHIVE_PUBLICATION_CATALOG,
+            &object.descriptor.resource_id,
+            payload,
+        )
+        .map_err(|error| resource_error(&error))?;
+        self.store
+            .put_catalog_record(&record)
+            .map_err(|error| resource_error(&error))?;
         Ok(())
     }
 
@@ -203,14 +193,11 @@ impl<S: ArtifactStore + ArtifactResolver> VirtualArchive for ResourceBackedVirtu
                 "virtual archive range exceeds the provider-neutral bound".to_owned(),
             ));
         }
-        let publication = self
-            .catalog
-            .publications
-            .get(&descriptor.resource_id)
+        let publication = load_publication(&mut self.store, &descriptor.resource_id)?
             .ok_or_else(|| {
                 VirtualError::NotFound("archive Resource locator is missing".to_owned())
             })?
-            .clone();
+            .publication;
         if publication.resource != *descriptor {
             return Err(VirtualError::Source(
                 "archive locator catalog changed the semantic descriptor".to_owned(),
@@ -233,13 +220,73 @@ impl<S: ArtifactStore + ArtifactResolver> VirtualArchive for ResourceBackedVirtu
         descriptor: &ResourceHandle,
         occurrence_id: &str,
     ) -> VirtualResult<VirtualArchiveOccurrenceProof> {
-        self.catalog
-            .occurrence_proofs
-            .get(&descriptor.resource_id)
-            .and_then(|proofs| proofs.get(occurrence_id))
-            .cloned()
-            .ok_or_else(|| VirtualError::NotFound(format!("archive occurrence {occurrence_id}")))
+        let key = proof_catalog_key(&descriptor.resource_id, occurrence_id)?;
+        let record = self
+            .store
+            .get_catalog_record(ARCHIVE_PROOF_CATALOG, &key)
+            .map_err(|error| resource_error(&error))?
+            .ok_or_else(|| VirtualError::NotFound(format!("archive occurrence {occurrence_id}")))?;
+        record.verify().map_err(|error| resource_error(&error))?;
+        let entry: ArchiveProofCatalogEntry = cymule_core::decode_json(&record.payload)
+            .map_err(|error| VirtualError::Source(error.to_string()))?;
+        if entry.resource_id != descriptor.resource_id || entry.proof.occurrence_id != occurrence_id
+        {
+            return Err(VirtualError::Source(
+                "archive proof catalog record changed identity".to_owned(),
+            ));
+        }
+        Ok(entry.proof)
     }
+}
+
+fn retain_proofs(
+    store: &mut impl ResourceCatalogStore,
+    object: &VirtualArchiveObject,
+) -> VirtualResult<()> {
+    for proof in object.occurrence_proofs.values() {
+        let key = proof_catalog_key(&object.descriptor.resource_id, &proof.occurrence_id)?;
+        let payload = canonical_bytes(&ArchiveProofCatalogEntry {
+            resource_id: object.descriptor.resource_id.clone(),
+            proof: proof.clone(),
+        })
+        .map_err(|error| VirtualError::Validation(error.to_string()))?;
+        let record = ResourceCatalogRecord::new(ARCHIVE_PROOF_CATALOG, key, payload)
+            .map_err(|error| resource_error(&error))?;
+        store
+            .put_catalog_record(&record)
+            .map_err(|error| resource_error(&error))?;
+    }
+    Ok(())
+}
+
+fn load_publication(
+    store: &mut impl ResourceCatalogStore,
+    resource_id: &str,
+) -> VirtualResult<Option<ArchivePublicationCatalogEntry>> {
+    let Some(record) = store
+        .get_catalog_record(ARCHIVE_PUBLICATION_CATALOG, resource_id)
+        .map_err(|error| resource_error(&error))?
+    else {
+        return Ok(None);
+    };
+    record.verify().map_err(|error| resource_error(&error))?;
+    let entry: ArchivePublicationCatalogEntry = cymule_core::decode_json(&record.payload)
+        .map_err(|error| VirtualError::Source(error.to_string()))?;
+    entry
+        .publication
+        .verify()
+        .map_err(|error| resource_error(&error))?;
+    if entry.resource_id != resource_id || entry.publication.resource.resource_id != resource_id {
+        return Err(VirtualError::Source(
+            "archive publication catalog record changed identity".to_owned(),
+        ));
+    }
+    Ok(Some(entry))
+}
+
+fn proof_catalog_key(resource_id: &str, occurrence_id: &str) -> VirtualResult<String> {
+    cymule_core::content_id(ARCHIVE_PROOF_CATALOG, &(resource_id, occurrence_id))
+        .map_err(|error| VirtualError::Validation(error.to_string()))
 }
 
 /// Canonically encode a manifest and derive its semantic cold Resource descriptor.

@@ -747,7 +747,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         result: &cymule_core::ArtifactRef,
     ) -> DurableResult<String> {
         let mut operations = vec![self.machine_operation(machine)?];
-        operations.extend(self.wait_completion_operations(wait_id, result)?);
+        operations.extend(self.wait_completion_operations(machine, wait_id, result)?);
         self.commit_operations(operations)
     }
 
@@ -791,7 +791,10 @@ impl<S: DurableStore> DurableCoordinator<S> {
         wait_id: &str,
         result: &cymule_core::ArtifactRef,
     ) -> DurableResult<String> {
-        let operations = self.wait_completion_operations(wait_id, result)?;
+        let machine = self.machine.as_ref().ok_or_else(|| {
+            DurableError::NotFound("durable Machine is not initialized".to_owned())
+        })?;
+        let operations = self.wait_completion_operations(machine, wait_id, result)?;
         if operations.is_empty() {
             return Ok(self.revision().expect("initialized").to_owned());
         }
@@ -1334,7 +1337,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             "input wait checkpoint",
         )?;
         let mut operations = vec![self.machine_operation_snapshot(&machine_snapshot)?];
-        operations.extend(self.wait_completion_operations(wait_id, result)?);
+        operations.extend(self.wait_completion_operations(machine, wait_id, result)?);
         for batch in batches {
             if let Some(operation) =
                 self.journal_append_operation(&batch.journal_id, &batch.records)?
@@ -1401,7 +1404,10 @@ impl<S: DurableStore> DurableCoordinator<S> {
         result: &cymule_core::ArtifactRef,
     ) -> DurableResult<String> {
         validate_journal_batch(journal_id, records)?;
-        let mut operations = self.wait_completion_operations(wait_id, result)?;
+        let machine = self.machine.as_ref().ok_or_else(|| {
+            DurableError::NotFound("durable Machine is not initialized".to_owned())
+        })?;
+        let mut operations = self.wait_completion_operations(machine, wait_id, result)?;
         if let Some(operation) = self.journal_append_operation(journal_id, records)? {
             operations.push(operation);
         }
@@ -1483,6 +1489,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
 
     fn wait_completion_operations(
         &self,
+        machine: &Machine,
         wait_id: &str,
         result: &cymule_core::ArtifactRef,
     ) -> DurableResult<Vec<DurableOperation>> {
@@ -1493,6 +1500,14 @@ impl<S: DurableStore> DurableCoordinator<S> {
             .cloned()
             .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
         ensure_direct_wait_completion(&wait)?;
+        if let WaitKind::Input { schema, .. } = &wait.kind {
+            let value = crate::executor::read_value(machine, result)?;
+            cymule_runtime::ContractValidator::compile(
+                cymule_runtime::ContractTarget::wait(&wait.wait_id),
+                schema,
+            )?
+            .validate(&value)?;
+        }
         if wait.state == WaitState::Completed && wait.result.as_ref() == Some(result) {
             return Ok(Vec::new());
         }

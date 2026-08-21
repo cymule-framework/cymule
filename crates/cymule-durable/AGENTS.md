@@ -188,3 +188,6 @@
   must not duplicate this generator.
 - Read-only control owns only a coordinator and must not require a `PluginHost`
   or create an execution binding.
+- `DurableDelta::new` and `StoreBatch::transition` are crate-private admission
+  seams. Public stores accept only batches produced by `DurableCoordinator`;
+  provider implementations must never expose a second raw mutation path.

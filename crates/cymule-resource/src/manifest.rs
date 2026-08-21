@@ -124,7 +124,23 @@ impl ResourceManifestDescriptor {
             )));
         }
         validate_digest("manifest", &self.digest)?;
-        validate_digest("manifest root", &self.root_digest)
+        validate_digest("manifest root", &self.root_digest)?;
+        if self.entry_count == 0
+            && (self.size != 0
+                || self.digest != format!("sha256:{}", cymule_core::sha256_bytes(&[]))
+                || self.root_digest != empty_root()?)
+        {
+            return Err(ResourceError::Validation(
+                "empty Resource manifests require the canonical empty bytes and Merkle root"
+                    .to_owned(),
+            ));
+        }
+        if self.entry_count > 0 && self.size == 0 {
+            return Err(ResourceError::Validation(
+                "non-empty Resource manifests require canonical bytes".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 

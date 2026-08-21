@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 
 use cymule_resource::{
     ArtifactResolver, ArtifactStore, MAX_WRITE_CHUNK, RESOURCE_CLEANUP_RECEIPT_VERSION,
-    RESOURCE_LOCATOR_VERSION, ResourceCandidate, ResourceChunk, ResourceCleanupReceipt,
-    ResourceDeleteIntent, ResourceDeleter, ResourceDeletionObservation, ResourceEntry,
-    ResourceError, ResourceHandle, ResourceIntegrity, ResourceLocation, ResourceLocatorSet,
-    ResourceManifestEntry, ResourceObservation, ResourcePage, ResourcePublication, ResourceResult,
-    ResourceShape, ResourceWriteIntent, ResourceWriteSession, SealedResourceManifest,
+    RESOURCE_LOCATOR_VERSION, ResourceCandidate, ResourceCatalogRecord, ResourceCatalogStore,
+    ResourceChunk, ResourceCleanupReceipt, ResourceDeleteIntent, ResourceDeleter,
+    ResourceDeletionObservation, ResourceEntry, ResourceError, ResourceHandle, ResourceIntegrity,
+    ResourceLocation, ResourceLocatorSet, ResourceManifestEntry, ResourceObservation, ResourcePage,
+    ResourcePublication, ResourceResult, ResourceShape, ResourceWriteIntent, ResourceWriteSession,
+    SealedResourceManifest,
 };
 use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};
@@ -57,7 +58,7 @@ impl FsResourceStore {
                 "filesystem resource binding must be non-empty and printable".to_owned(),
             ));
         }
-        for child in ["uploads", "objects", "locks", "staging"] {
+        for child in ["uploads", "objects", "catalog", "locks", "staging"] {
             fs::create_dir_all(root.join(child)).map_err(substrate)?;
         }
         Ok(Self { root, binding })
@@ -300,6 +301,42 @@ impl FsResourceStore {
         }
     }
 
+    fn catalog_token(namespace: &str, key: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(namespace.as_bytes());
+        hasher.update([0]);
+        hasher.update(key.as_bytes());
+        hex_digest(&hasher.finalize())
+    }
+
+    fn catalog_path(&self, namespace: &str, key: &str) -> PathBuf {
+        self.root
+            .join("catalog")
+            .join(format!("{}.json", Self::catalog_token(namespace, key)))
+    }
+
+    fn claim_catalog(&self, namespace: &str, key: &str) -> ResourceResult<File> {
+        let token = Self::catalog_token(namespace, key);
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(
+                self.root
+                    .join("locks")
+                    .join(format!("catalog-{token}.lock")),
+            )
+            .map_err(substrate)?;
+        match FileExt::try_lock(&lock) {
+            Ok(()) => Ok(lock),
+            Err(TryLockError::WouldBlock) => Err(ResourceError::Conflict(format!(
+                "filesystem catalog record {namespace}/{key} has an active writer"
+            ))),
+            Err(TryLockError::Error(error)) => Err(substrate(error)),
+        }
+    }
+
     fn load_record(&self, upload_id: &str) -> ResourceResult<UploadRecord> {
         let record: UploadRecord =
             cymule_core::decode_json(&fs::read(self.record_path(upload_id)?).map_err(substrate)?)
@@ -400,6 +437,63 @@ impl FsResourceStore {
             ));
         }
         Ok(self.root.join("objects").join(digest))
+    }
+}
+
+impl ResourceCatalogStore for FsResourceStore {
+    fn put_catalog_record(&mut self, record: &ResourceCatalogRecord) -> ResourceResult<()> {
+        record.verify()?;
+        let _claim = self.claim_catalog(&record.namespace, &record.key)?;
+        let destination = self.catalog_path(&record.namespace, &record.key);
+        if destination.exists() {
+            let existing: ResourceCatalogRecord =
+                cymule_core::decode_json(&fs::read(&destination).map_err(substrate)?)
+                    .map_err(substrate)?;
+            existing.verify()?;
+            return if existing == *record {
+                Ok(())
+            } else {
+                Err(ResourceError::Conflict(format!(
+                    "filesystem catalog record {}/{} has conflicting content",
+                    record.namespace, record.key
+                )))
+            };
+        }
+        let token = Self::catalog_token(&record.namespace, &record.key);
+        let staging = self
+            .root
+            .join("staging")
+            .join(format!("catalog-{token}.next"));
+        write_synced(
+            &staging,
+            &cymule_core::canonical_bytes(record).map_err(core_error)?,
+        )?;
+        fs::rename(staging, destination).map_err(substrate)?;
+        sync_directory(&self.root.join("catalog"))?;
+        sync_directory(&self.root)?;
+        Ok(())
+    }
+
+    fn get_catalog_record(
+        &mut self,
+        namespace: &str,
+        key: &str,
+    ) -> ResourceResult<Option<ResourceCatalogRecord>> {
+        let _ = ResourceCatalogRecord::new(namespace, key, Vec::new())?;
+        let path = self.catalog_path(namespace, key);
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(substrate(error)),
+        };
+        let record: ResourceCatalogRecord = cymule_core::decode_json(&bytes).map_err(substrate)?;
+        record.verify()?;
+        if record.namespace != namespace || record.key != key {
+            return Err(ResourceError::Integrity(
+                "filesystem catalog locator does not match its record identity".to_owned(),
+            ));
+        }
+        Ok(Some(record))
     }
 }
 

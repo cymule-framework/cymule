@@ -2,8 +2,8 @@
 
 use cymule_core::Machine;
 use cymule_durable::{
-    DurableDelta, DurableOperation, DurableState, DurableStore, JournalRecord,
-    MAX_CHECKPOINT_PACKS, MAX_HOT_SEGMENTS, MemoryStore, StoreBatch,
+    DurableCoordinator, DurableStore, JournalRecord, MAX_CHECKPOINT_PACKS, MAX_HOT_SEGMENTS,
+    MemoryStore, StoreBatch,
 };
 use proptest::prelude::*;
 use serde_json::json;
@@ -78,13 +78,11 @@ fn fixed_size_journal_append_has_history_independent_hot_work() {
 
 #[test]
 fn automatic_materialized_bases_bound_manifest_recovery() {
-    let mut store = MemoryStore::new();
-    let initial = StoreBatch::initialize(DurableState::new(Machine::new().snapshot()))
-        .expect("initial batch");
-    store
-        .compare_and_commit(None, &initial)
-        .expect("initial commit");
-    let mut current = store.load().expect("loads").expect("state");
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store.clone())
+        .expect("opens")
+        .initialize(&Machine::new())
+        .expect("initializes");
     let commits = MAX_HOT_SEGMENTS * MAX_CHECKPOINT_PACKS + 7;
     for index in 0..commits {
         let record = JournalRecord::new(
@@ -93,19 +91,12 @@ fn automatic_materialized_bases_bound_manifest_recovery() {
             json!({"value": 7}),
         )
         .expect("record");
-        let delta = DurableDelta::new(vec![DurableOperation::AppendJournal {
-            journal_id: "journal:bounded-manifest".to_owned(),
-            records: vec![record],
-        }])
-        .expect("delta");
-        let batch = StoreBatch::transition(&current, delta).expect("transition");
-        let commit = store
-            .compare_and_commit(Some(&current.head), &batch)
+        coordinator
+            .append_journal_record("journal:bounded-manifest", record)
             .expect("commit");
-        batch
-            .apply_committed(&mut current, &commit)
-            .expect("local projection advances");
     }
+    drop(coordinator);
+    let mut store = store;
     let reopened = store.load().expect("reopens").expect("state");
     assert_eq!(
         reopened.state.application_journals["journal:bounded-manifest"].len(),
@@ -119,49 +110,38 @@ fn automatic_materialized_bases_bound_manifest_recovery() {
 
 #[test]
 fn memory_gc_resets_manifest_depth_and_accepts_the_next_increment() {
-    let mut store = MemoryStore::new();
-    let initial = StoreBatch::initialize(DurableState::new(Machine::new().snapshot()))
-        .expect("initial batch");
-    store
-        .compare_and_commit(None, &initial)
-        .expect("initial commit");
-    let mut current = store.load().expect("loads").expect("state");
+    let store = MemoryStore::new();
+    let mut coordinator = DurableCoordinator::open(store.clone())
+        .expect("opens")
+        .initialize(&Machine::new())
+        .expect("initializes");
     for index in 0..MAX_HOT_SEGMENTS {
-        let delta = DurableDelta::new(vec![DurableOperation::AppendJournal {
-            journal_id: "journal:memory-gc".to_owned(),
-            records: vec![
+        coordinator
+            .append_journal_record(
+                "journal:memory-gc",
                 JournalRecord::new(
                     format!("record:{index}"),
                     "test.memory-gc/1",
                     json!({"index": index}),
                 )
                 .expect("record"),
-            ],
-        }])
-        .expect("delta");
-        let batch = StoreBatch::transition(&current, delta).expect("transition");
-        let commit = store
-            .compare_and_commit(Some(&current.head), &batch)
+            )
             .expect("commit");
-        batch
-            .apply_committed(&mut current, &commit)
-            .expect("projection advances");
     }
+    drop(coordinator);
+    let mut store = store;
+    let current = store.load().expect("loads").expect("state");
     assert!(current.head.checkpoint_depth > 0);
     store.reclaim_cold(&current.head).expect("memory GC");
     let reclaimed = store.load().expect("loads after GC").expect("state");
     assert_eq!(reclaimed.head.checkpoint_depth, 0);
-    let delta = DurableDelta::new(vec![DurableOperation::AppendJournal {
-        journal_id: "journal:memory-gc".to_owned(),
-        records: vec![
+    let mut coordinator = DurableCoordinator::open(store).expect("reopens after GC");
+    coordinator
+        .append_journal_record(
+            "journal:memory-gc",
             JournalRecord::new("record:after", "test.memory-gc/1", json!({"after": true}))
                 .expect("record"),
-        ],
-    }])
-    .expect("delta");
-    let batch = StoreBatch::transition(&reclaimed, delta).expect("post-GC transition");
-    store
-        .compare_and_commit(Some(&reclaimed.head), &batch)
+        )
         .expect("post-GC commit");
 }
 
@@ -170,24 +150,21 @@ proptest! {
 
     #[test]
     fn arbitrary_journal_deltas_reopen_exactly_and_remain_bounded(values in prop::collection::vec(any::<u16>(), 1..40)) {
-        let mut store = MemoryStore::new();
-        let batch = StoreBatch::initialize(DurableState::new(Machine::new().snapshot())).expect("initial batch");
-        store.compare_and_commit(None, &batch).expect("initial commit");
-        let mut current = store.load().expect("loads").expect("state");
+        let store = MemoryStore::new();
+        let mut coordinator = DurableCoordinator::open(store.clone()).expect("opens").initialize(&Machine::new()).expect("initializes");
         for (index, value) in values.iter().enumerate() {
             let record = JournalRecord::new(
                     format!("record:{index}"),
                     "test.segment-property/1",
                     json!({"value": value}),
                 ).expect("record");
-            let delta = DurableDelta::new(vec![DurableOperation::AppendJournal {
-                journal_id: "journal:property".to_owned(), records: vec![record],
-            }]).expect("delta");
-            let batch = StoreBatch::transition(&current, delta).expect("transition");
-            store.compare_and_commit(Some(&current.head), &batch).expect("commit");
-            current = store.load().expect("loads").expect("state");
+            coordinator.append_journal_record("journal:property", record).expect("commit");
+            let mut observer = store.clone();
+            let current = observer.load().expect("loads").expect("state");
             prop_assert!(current.head.suffix_len < MAX_HOT_SEGMENTS);
         }
+        drop(coordinator);
+        let mut store = store;
         let reopened = store.load().expect("reopens").expect("state");
         prop_assert_eq!(
             reopened.state.application_journals["journal:property"].len(),

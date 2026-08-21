@@ -49,3 +49,6 @@
   later pins, and completion requires exact absence readback. Abort and
   completed-write convergence remove every
   owned staging/chunk object and return verified cleanup evidence.
+- Empty manifests have one canonical byte digest and Merkle root. Provider-side
+  locator and proof metadata uses immutable `ResourceCatalogRecord` values
+  through `ResourceCatalogStore`; an in-memory catalog is not restart authority.

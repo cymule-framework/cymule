@@ -1,5 +1,6 @@
 //! Provider-neutral cross-Run resource descriptors and transfer contracts.
 
+mod catalog;
 mod error;
 mod handoff;
 mod lifecycle;
@@ -9,6 +10,7 @@ mod resolver;
 mod store;
 mod type_contract;
 
+pub use catalog::{RESOURCE_CATALOG_RECORD_VERSION, ResourceCatalogRecord, ResourceCatalogStore};
 pub use error::{ResourceError, ResourceResult, ResourceSchemaIssue};
 pub use handoff::{
     RESOURCE_HANDOFF_ACTIVATION_VERSION, RESOURCE_HANDOFF_VERSION, ResourceHandoff,

@@ -104,3 +104,6 @@
   journal growth, bounded record size, and exact reopen from delta history.
 - Cross-profile tests must prove M1 wait activation and M3 exact-index wake are
   one CAS transition and that a projection conflict commits neither side.
+- Resource-backed archive publications and occurrence proofs must survive
+  process loss in the provider's immutable catalog. Reopen must not require a
+  caller to carry an in-memory catalog between processes.
