@@ -159,7 +159,7 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
     let cancellation = install_cancellation()?;
     let mut input = Vec::new();
     let response = match io::stdin().read_to_end(&mut input) {
-        Ok(_) => decode_and_execute_request_with_cancellation(&input, Some(cancellation)),
+        Ok(_) => decode_and_execute_request_with_cancellation(&input, Some(&cancellation)),
         Err(error) => Err(EngineFailure::transport(
             "engine_read_failed",
             error.to_string(),
@@ -171,13 +171,14 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
     })
 }
 
+#[cfg(test)]
 fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFailure> {
     decode_and_execute_request_with_cancellation(input, None)
 }
 
 fn decode_and_execute_request_with_cancellation(
     input: &[u8],
-    cancellation: Option<Arc<AtomicBool>>,
+    cancellation: Option<&Arc<AtomicBool>>,
 ) -> Result<EngineResponse, EngineFailure> {
     validate_strict_json(input).map_err(|error| {
         let mut failure = EngineFailure::new(
@@ -255,14 +256,14 @@ fn decode_and_execute_request_with_cancellation(
             EngineResponse::VerifiedLiveEvolutionCommand { command }
         }
         EngineRequest::ExecuteDurable { target, command } => EngineResponse::DurableExecuted {
-            response: execute_durable(&target, command, cancellation.clone())?,
+            response: execute_durable(&target, command, cancellation.cloned())?,
         },
         EngineRequest::ExecuteLiveEvolution {
             target,
             journal_id,
             command,
         } => EngineResponse::LiveEvolutionExecuted {
-            response: execute_live_evolution(&target, &journal_id, command, cancellation.clone())?,
+            response: execute_live_evolution(&target, &journal_id, command, cancellation.cloned())?,
         },
         EngineRequest::Run {
             plan,
@@ -270,7 +271,7 @@ fn decode_and_execute_request_with_cancellation(
             plugin,
             run_id,
         } => {
-            let mut runtime = local_process_runtime(&plugin, cancellation.clone())
+            let mut runtime = local_process_runtime(&plugin, cancellation.cloned())
                 .map_err(|error| EngineFailure::from_runtime(error, EnginePhase::ExecutePlan))?;
             EngineResponse::ExecutionBoundary {
                 execution: runtime.execute(plan, &input, run_id).map_err(|error| {

@@ -405,7 +405,7 @@ impl ResourceCatalogStore for ObjectResourceStore {
         })?;
         match result {
             Ok(_) => Ok(()),
-            Err(ObjectError::AlreadyExists { .. }) | Err(ObjectError::Precondition { .. }) => {
+            Err(ObjectError::AlreadyExists { .. } | ObjectError::Precondition { .. }) => {
                 let existing = self
                     .get_catalog_record(&record.namespace, &record.key)?
                     .ok_or_else(|| {
