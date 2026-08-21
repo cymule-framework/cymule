@@ -83,3 +83,5 @@
   only immutable Plan/Artifact identities, exact patches, pinned migration or
   shadow requests, observations, and deterministic gates. Provider endpoints,
   credentials, clocks, and Agent-loop state never enter this boundary.
+- Engine successes contain no untyped durable or live-evolution object;
+  `cymule.evolution-plugin/1` separately freezes migration/shadow process I/O.

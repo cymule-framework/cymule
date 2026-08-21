@@ -14,8 +14,9 @@ use cymule_durable::{
 use cymule_evolution::{EvolutionCommand, LiveEvolutionCommand, LiveEvolutionResponse};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{
-    EngineFailure, EngineFailureCategory, EnginePhase, EngineRequestEnvelope,
-    EngineResponseEnvelope, EngineResult, ExecutionOutcome, validate_strict_json,
+    EngineDurableTarget, EngineEvolutionTarget, EngineFailure, EngineFailureCategory, EnginePhase,
+    EnginePluginTarget, EngineRequestEnvelope, EngineResponseEnvelope, EngineResult,
+    EngineStoreTarget, ExecutionOutcome, validate_strict_json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,14 +44,13 @@ pub trait Engine {
     /// Submit one stateful command to a durable Rust authority.
     fn execute_durable(
         &self,
-        store: &Path,
-        plugin: &Path,
+        target: &EngineDurableTarget,
         command: &DurableCommand,
     ) -> EngineResult<DurableResponse>;
     /// Submit one stateful live-evolution command to its durable journal.
     fn execute_live_evolution(
         &self,
-        store: &Path,
+        target: &EngineEvolutionTarget,
         journal_id: &str,
         command: &LiveEvolutionCommand,
     ) -> EngineResult<LiveEvolutionResponse>;
@@ -156,6 +156,8 @@ impl CliEngine {
                 ),
             ));
         }
+        validate_strict_json(&output.stdout)
+            .map_err(|error| EngineFailure::transport("invalid_engine_response", error))?;
         let envelope: EngineResponseEnvelope<EngineResponse> = decode_json(&output.stdout)
             .map_err(|error| {
                 EngineFailure::transport("invalid_engine_response", error.to_string())
@@ -291,13 +293,11 @@ impl Engine for CliEngine {
 
     fn execute_durable(
         &self,
-        store: &Path,
-        plugin: &Path,
+        target: &EngineDurableTarget,
         command: &DurableCommand,
     ) -> EngineResult<DurableResponse> {
         match self.request(&EngineRequest::ExecuteDurable {
-            store: store.display().to_string(),
-            plugin: plugin.display().to_string(),
+            target: target.clone(),
             command: command.clone(),
         })? {
             EngineResponse::DurableExecuted { response } => Ok(response),
@@ -307,12 +307,12 @@ impl Engine for CliEngine {
 
     fn execute_live_evolution(
         &self,
-        store: &Path,
+        target: &EngineEvolutionTarget,
         journal_id: &str,
         command: &LiveEvolutionCommand,
     ) -> EngineResult<LiveEvolutionResponse> {
         match self.request(&EngineRequest::ExecuteLiveEvolution {
-            store: store.display().to_string(),
+            target: target.clone(),
             journal_id: journal_id.to_owned(),
             command: command.clone(),
         })? {
@@ -362,12 +362,11 @@ enum EngineRequest {
         command: LiveEvolutionCommand,
     },
     ExecuteDurable {
-        store: String,
-        plugin: String,
+        target: EngineDurableTarget,
         command: DurableCommand,
     },
     ExecuteLiveEvolution {
-        store: String,
+        target: EngineEvolutionTarget,
         journal_id: String,
         command: LiveEvolutionCommand,
     },
@@ -396,15 +395,17 @@ enum EngineResponse {
 
 /// High-level provider-neutral durable Run client over an Engine transport.
 #[derive(Debug, Clone)]
-pub struct DurableEngine {
-    transport: CliEngine,
-    store: PathBuf,
-    plugin: PathBuf,
+pub struct DurableEngine<E = CliEngine> {
+    transport: E,
+    store: EngineStoreTarget,
+    executor: Option<EnginePluginTarget>,
+    migration: Option<EnginePluginTarget>,
+    shadow: Option<EnginePluginTarget>,
     evolution_journal: String,
 }
 
-impl DurableEngine {
-    /// Bind one CLI transport, durable domain, and immutable process plugin.
+impl DurableEngine<CliEngine> {
+    /// Bind one CLI transport, directory domain, and sealed process executor.
     pub fn new(
         executable: impl AsRef<Path>,
         store: impl AsRef<Path>,
@@ -412,10 +413,70 @@ impl DurableEngine {
     ) -> Self {
         Self {
             transport: CliEngine::new(executable),
-            store: store.as_ref().to_path_buf(),
-            plugin: plugin.as_ref().to_path_buf(),
+            store: EngineStoreTarget::directory(store.as_ref().display().to_string()),
+            executor: Some(EnginePluginTarget::process(
+                plugin.as_ref().display().to_string(),
+            )),
+            migration: None,
+            shadow: None,
             evolution_journal: "cymule.sdk.live-evolution".to_owned(),
         }
+    }
+
+    /// Override the complete high-level durable request deadline.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.transport = self.transport.with_timeout(timeout);
+        self
+    }
+
+    /// Bind an externally controlled high-level durable cancellation flag.
+    #[must_use]
+    pub fn with_cancellation(mut self, cancelled: Arc<AtomicBool>) -> Self {
+        self.transport = self.transport.with_cancellation(cancelled);
+        self
+    }
+}
+
+impl<E: Engine> DurableEngine<E> {
+    /// Bind any Engine transport to provider-neutral durable targets.
+    pub fn from_transport(transport: E, store: EngineStoreTarget) -> Self {
+        Self {
+            transport,
+            store,
+            executor: None,
+            migration: None,
+            shadow: None,
+            evolution_journal: "cymule.sdk.live-evolution".to_owned(),
+        }
+    }
+
+    /// Select the execution provider used by mutating Run commands.
+    #[must_use]
+    pub fn with_executor(mut self, executor: EnginePluginTarget) -> Self {
+        self.executor = Some(executor);
+        self
+    }
+
+    /// Select one exact migration adapter.
+    #[must_use]
+    pub fn with_migration_plugin(mut self, plugin: EnginePluginTarget) -> Self {
+        self.migration = Some(plugin);
+        self
+    }
+
+    /// Select one exact shadow driver.
+    #[must_use]
+    pub fn with_shadow_plugin(mut self, plugin: EnginePluginTarget) -> Self {
+        self.shadow = Some(plugin);
+        self
+    }
+
+    /// Select the durable live-evolution journal identity.
+    #[must_use]
+    pub fn with_evolution_journal(mut self, journal: impl Into<String>) -> Self {
+        self.evolution_journal = journal.into();
+        self
     }
 
     /// Start an idempotent Run and drive it to the next durable boundary.
@@ -480,13 +541,27 @@ impl DurableEngine {
 
     /// Submit one atomic live-evolution command to the same durable domain.
     pub fn evolve(&self, command: &LiveEvolutionCommand) -> EngineResult<LiveEvolutionResponse> {
-        self.transport
-            .execute_live_evolution(&self.store, &self.evolution_journal, command)
+        self.transport.execute_live_evolution(
+            &EngineEvolutionTarget {
+                store: self.store.clone(),
+                migration: self.migration.clone(),
+                shadow: self.shadow.clone(),
+            },
+            &self.evolution_journal,
+            command,
+        )
     }
 
     fn submit(&self, command: &DurableCommand) -> EngineResult<DurableResponse> {
-        self.transport
-            .execute_durable(&self.store, &self.plugin, command)
+        let target = if command.is_query() {
+            EngineDurableTarget::query(self.store.clone())
+        } else {
+            EngineDurableTarget {
+                store: self.store.clone(),
+                executor: self.executor.clone(),
+            }
+        };
+        self.transport.execute_durable(&target, command)
     }
 }
 
@@ -524,8 +599,10 @@ mod tests {
             metadata: std::collections::BTreeMap::default(),
         };
         let mutation = EngineRequest::ExecuteDurable {
-            store: "domain".to_owned(),
-            plugin: "plugin".to_owned(),
+            target: EngineDurableTarget::execute(
+                EngineStoreTarget::directory("domain"),
+                EnginePluginTarget::process("plugin"),
+            ),
             command: DurableCommand::StartRun {
                 control_version: DURABLE_CONTROL_VERSION.to_owned(),
                 run_id: "run:test".to_owned(),
@@ -541,8 +618,7 @@ mod tests {
         );
 
         let query = EngineRequest::ExecuteDurable {
-            store: "domain".to_owned(),
-            plugin: "plugin".to_owned(),
+            target: EngineDurableTarget::query(EngineStoreTarget::directory("domain")),
             command: DurableCommand::QueryDomain {
                 control_version: DURABLE_CONTROL_VERSION.to_owned(),
                 query_id: "query:test".to_owned(),

@@ -623,17 +623,37 @@ func (response DurableResponse) validate() error {
 		if len(response.Boundary) == 0 || len(response.ReadyRunIDs) != 0 || len(response.Run) != 0 || len(response.Domain) != 0 {
 			return fmt.Errorf("durable response fields are not closed")
 		}
+		if err := validateDurableBoundary(response.Boundary); err != nil {
+			return err
+		}
 	case "wait_activated":
 		if len(response.Boundary) != 0 || response.ReadyRunIDs == nil || len(response.Run) != 0 || len(response.Domain) != 0 {
 			return fmt.Errorf("durable response fields are not closed")
+		}
+		for _, runID := range response.ReadyRunIDs {
+			if runID == "" {
+				return fmt.Errorf("ready Run identity is empty")
+			}
 		}
 	case "run":
 		if len(response.Boundary) != 0 || len(response.ReadyRunIDs) != 0 || len(response.Run) == 0 || len(response.Domain) != 0 {
 			return fmt.Errorf("durable response fields are not closed")
 		}
+		if string(response.Run) != "null" {
+			if err := validateDurableRun(response.Run); err != nil {
+				return err
+			}
+		}
 	case "domain":
 		if len(response.Boundary) != 0 || len(response.ReadyRunIDs) != 0 || len(response.Run) != 0 || len(response.Domain) == 0 {
 			return fmt.Errorf("durable response fields are not closed")
+		}
+		var domain struct {
+			Revision *string  `json:"revision"`
+			RunIDs   []string `json:"run_ids"`
+		}
+		if err := validateClosedRaw(response.Domain, []string{"revision", "run_ids"}, &domain); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("durable response variant is unknown")
@@ -683,7 +703,144 @@ func (response LiveEvolutionResponse) validate() error {
 	if !valid || (response.Result == "applied" && count != 0) || (response.Result != "applied" && count != 1) {
 		return fmt.Errorf("live-evolution response fields are not closed")
 	}
+	var raw json.RawMessage
+	var fields []string
+	switch response.Result {
+	case "definition_published":
+		raw, fields = response.Revision, []string{"revision_version", "revision_id", "logical_ref", "sequence", "definition", "references"}
+	case "template_registered":
+		raw, fields = response.Linked, []string{"template_id", "plan", "resolved_revisions"}
+	case "publication_applied":
+		raw, fields = response.Receipt, []string{"revision", "updates"}
+	case "patch_applied":
+		raw, fields = response.Edge, []string{"edge_id", "from_plan", "to_plan", "operations", "evidence"}
+	case "migrated":
+		raw, fields = response.Receipt, []string{"migration_id", "run_id", "from_plan", "to_plan", "safe_point_id", "source_epoch", "target_epoch", "source_binding", "target_binding", "adapter_id", "adapter_revision", "from_schema", "to_schema", "input_state", "output_state", "evidence"}
+	case "restart_authorized":
+		raw, fields = response.Receipt, []string{"request", "target_plan"}
+	case "shadow_recorded":
+		raw, fields = response.Comparison, []string{"comparison_id", "subject", "decision_id", "primary_plan", "shadow_plan", "driver_id", "driver_revision", "comparison_policy", "primary_digest", "shadow_digest", "equivalent", "evidence"}
+	case "gate_applied":
+		raw, fields = response.Transition, []string{"transition_id", "from_decision", "to_decision", "evaluation"}
+	}
+	if len(raw) != 0 {
+		var object map[string]json.RawMessage
+		if err := validateClosedRaw(raw, fields, &object); err != nil {
+			return err
+		}
+		for _, name := range []string{"evidence", "source_binding", "target_binding", "input_state", "output_state"} {
+			if artifact, ok := object[name]; ok {
+				var reference ArtifactRef
+				if err := validateClosedRaw(artifact, []string{"identity_version", "artifact_id", "kind"}, &reference); err != nil {
+					return err
+				}
+				if err := validateArtifactRef(reference); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	return nil
+}
+
+func validateDurableBoundary(raw json.RawMessage) error {
+	var tag struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &tag); err != nil {
+		return err
+	}
+	fields := map[string][]string{
+		"suspended": {"status", "wait_id"}, "reconciliation_required": {"status", "intent_id"},
+		"release_required": {"status", "intent_ids"}, "completed": {"status", "result"},
+	}[tag.Status]
+	if fields == nil {
+		return fmt.Errorf("durable boundary variant is unknown")
+	}
+	var object map[string]json.RawMessage
+	if err := validateClosedRaw(raw, fields, &object); err != nil {
+		return err
+	}
+	if tag.Status == "completed" {
+		var result struct {
+			RunID             string          `json:"run_id"`
+			PlanID            string          `json:"plan_id"`
+			Value             json.RawMessage `json:"value"`
+			ProjectionDigest  string          `json:"projection_digest"`
+			PreconditionToken string          `json:"precondition_token"`
+			Effects           []string        `json:"effects"`
+		}
+		return validateClosedRaw(object["result"], []string{"run_id", "plan_id", "value", "projection_digest", "precondition_token", "effects"}, &result)
+	}
+	return nil
+}
+
+func validateDurableRun(raw json.RawMessage) error {
+	var run struct {
+		Revision     string            `json:"revision"`
+		Continuation json.RawMessage   `json:"continuation"`
+		Waits        []json.RawMessage `json:"waits"`
+		Effects      []json.RawMessage `json:"effects"`
+		Result       json.RawMessage   `json:"result"`
+	}
+	if err := validateClosedRaw(raw, []string{"revision", "continuation", "waits", "effects", "result"}, &run); err != nil {
+		return err
+	}
+	var continuation struct {
+		RunID             string            `json:"run_id"`
+		PlanID            string            `json:"plan_id"`
+		BindingContext    string            `json:"binding_context"`
+		Frames            []json.RawMessage `json:"frames"`
+		State             json.RawMessage   `json:"state"`
+		WaitSet           []string          `json:"wait_set"`
+		ScopeStack        []string          `json:"scope_stack"`
+		EffectObligations []string          `json:"effect_obligations"`
+		AuthorityLeases   []string          `json:"authority_leases"`
+		Budget            map[string]uint64 `json:"budget"`
+		CausalFrontier    []string          `json:"causal_frontier"`
+		Epoch             uint64            `json:"epoch"`
+		Status            string            `json:"status"`
+	}
+	if err := validateClosedRaw(run.Continuation, []string{"run_id", "plan_id", "binding_context", "frames", "state", "wait_set", "scope_stack", "effect_obligations", "authority_leases", "budget", "causal_frontier", "epoch", "status"}, &continuation); err != nil {
+		return err
+	}
+	if continuation.RunID == "" || continuation.PlanID == "" || continuation.BindingContext == "" {
+		return fmt.Errorf("Continuation identities are missing")
+	}
+	for _, frame := range continuation.Frames {
+		var object map[string]json.RawMessage
+		if err := validateClosedRaw(frame, []string{"definition_id", "invocation_id", "invocation_path", "scope_id", "input", "region_path", "next_step", "locals"}, &object); err != nil {
+			return err
+		}
+	}
+	for _, wait := range run.Waits {
+		var object map[string]json.RawMessage
+		if err := validateClosedRaw(wait, []string{"wait_id", "run_id", "kind", "consume_once", "owner", "state", "result"}, &object); err != nil {
+			return err
+		}
+	}
+	for _, effect := range run.Effects {
+		var object map[string]json.RawMessage
+		if err := validateClosedRaw(effect, []string{"intent_id", "run_id", "operation", "input", "occurrence_binding", "state", "claim_epoch", "claim_owner", "result"}, &object); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateClosedRaw(raw json.RawMessage, fields []string, target any) error {
+	value, err := decodeUniqueJSON(raw)
+	if err != nil {
+		return err
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("JSON value is not an object")
+	}
+	if err := requireExactJSONFields(object, fields); err != nil {
+		return err
+	}
+	return decodeClosedValue(value, target)
 }
 
 // ParkReason identifies one exact indexed condition for virtual work.
@@ -1940,6 +2097,48 @@ type CliEngine struct {
 	Timeout    time.Duration
 }
 
+// EngineStoreTarget selects one provider-owned durable domain.
+type EngineStoreTarget struct {
+	Provider string `json:"provider"`
+	Location string `json:"location"`
+	Domain   string `json:"domain,omitempty"`
+}
+
+// EnginePluginTarget selects one implementation, optionally by exact revision.
+type EnginePluginTarget struct {
+	Provider string `json:"provider"`
+	Location string `json:"location"`
+	Revision string `json:"revision,omitempty"`
+}
+
+// EngineDurableTarget separates durable storage from optional execution authority.
+type EngineDurableTarget struct {
+	Store    EngineStoreTarget   `json:"store"`
+	Executor *EnginePluginTarget `json:"executor,omitempty"`
+}
+
+// EngineEvolutionTarget carries only the exact plugins needed by M4 operations.
+type EngineEvolutionTarget struct {
+	Store     EngineStoreTarget   `json:"store"`
+	Migration *EnginePluginTarget `json:"migration,omitempty"`
+	Shadow    *EnginePluginTarget `json:"shadow,omitempty"`
+}
+
+// DirectoryStore selects the official directory store.
+func DirectoryStore(location string) EngineStoreTarget {
+	return EngineStoreTarget{Provider: "cymule.directory-store/2", Location: location}
+}
+
+// SQLiteStore selects one domain in the official SQLite store.
+func SQLiteStore(location, domain string) EngineStoreTarget {
+	return EngineStoreTarget{Provider: "cymule.sqlite-store/2", Location: location, Domain: domain}
+}
+
+// ProcessPlugin selects the official sealed process provider.
+func ProcessPlugin(location, revision string) EnginePluginTarget {
+	return EnginePluginTarget{Provider: "cymule.executor-process/1", Location: location, Revision: revision}
+}
+
 // Seal validates and content-addresses a candidate.
 func (engine CliEngine) Seal(candidate PlanCandidate) (SealedPlan, error) {
 	var response struct {
@@ -2029,13 +2228,13 @@ func (engine CliEngine) VerifyLiveEvolutionCommand(
 }
 
 // ExecuteDurable submits one stateful command to a durable Rust domain.
-func (engine CliEngine) ExecuteDurable(store, plugin string, command DurableCommand) (DurableResponse, error) {
+func (engine CliEngine) ExecuteDurable(target EngineDurableTarget, command DurableCommand) (DurableResponse, error) {
 	var response struct {
 		Type     string          `json:"type"`
 		Response DurableResponse `json:"response"`
 	}
 	err := engine.request(map[string]any{
-		"type": "execute_durable", "store": store, "plugin": plugin, "command": command,
+		"type": "execute_durable", "target": target, "command": command,
 	}, &response)
 	if err == nil && response.Type != "durable_executed" {
 		err = unexpectedEngineResponse("durable_executed", response.Type)
@@ -2049,7 +2248,7 @@ func (engine CliEngine) ExecuteDurable(store, plugin string, command DurableComm
 
 // ExecuteLiveEvolution submits one atomic command to durable evolution authority.
 func (engine CliEngine) ExecuteLiveEvolution(
-	store, journalID string,
+	target EngineEvolutionTarget, journalID string,
 	command LiveEvolutionCommand,
 ) (LiveEvolutionResponse, error) {
 	var response struct {
@@ -2057,7 +2256,7 @@ func (engine CliEngine) ExecuteLiveEvolution(
 		Response LiveEvolutionResponse `json:"response"`
 	}
 	err := engine.request(map[string]any{
-		"type": "execute_live_evolution", "store": store,
+		"type": "execute_live_evolution", "target": target,
 		"journal_id": journalID, "command": command,
 	}, &response)
 	if err == nil && response.Type != "live_evolution_executed" {
@@ -2072,8 +2271,10 @@ func (engine CliEngine) ExecuteLiveEvolution(
 
 // DurableEngine is the high-level provider-neutral durable Run client.
 type DurableEngine struct {
-	Store            string
-	Plugin           string
+	Store            EngineStoreTarget
+	Executor         *EnginePluginTarget
+	Migration        *EnginePluginTarget
+	Shadow           *EnginePluginTarget
 	Transport        CliEngine
 	EvolutionJournal string
 }
@@ -2125,11 +2326,17 @@ func (engine DurableEngine) Evolve(command LiveEvolutionCommand) (LiveEvolutionR
 	if journal == "" {
 		journal = "cymule.sdk.live-evolution"
 	}
-	return engine.Transport.ExecuteLiveEvolution(engine.Store, journal, command)
+	return engine.Transport.ExecuteLiveEvolution(EngineEvolutionTarget{
+		Store: engine.Store, Migration: engine.Migration, Shadow: engine.Shadow,
+	}, journal, command)
 }
 
 func (engine DurableEngine) submit(command DurableCommand) (DurableResponse, error) {
-	return engine.Transport.ExecuteDurable(engine.Store, engine.Plugin, command)
+	target := EngineDurableTarget{Store: engine.Store}
+	if command.Type != "query_run" && command.Type != "query_domain" {
+		target.Executor = engine.Executor
+	}
+	return engine.Transport.ExecuteDurable(target, command)
 }
 
 // Run executes a sealed plan through one plugin realization.

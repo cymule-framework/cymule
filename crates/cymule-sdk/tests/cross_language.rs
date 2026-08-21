@@ -6,12 +6,13 @@ use std::path::Path;
 
 use cymule::{
     CliEngine, DispatchPolicy, DurableCommand, DurableEngine, DurableResponse, EffectProfile,
-    Engine, EngineFailure, EvolutionCommand, Expression, FlowBuilder,
-    LIVE_EVOLUTION_CONTROL_VERSION, LiveEvolutionCommand, LiveEvolutionResponse, MutationKind,
-    Operation, PlanCandidate, ReconciliationMode, Region, RegionMigrationCommand,
-    ResourceCandidate, Step, VirtualClaimCommand, VirtualCompactionCommand,
-    VirtualLeaseRenewalCommand, VirtualRecoveryCommand, VirtualRehydrationCommand,
-    VirtualRunWeightCommand, WaitActivation, WorkOccurrence, WorkResolutionCommand,
+    Engine, EngineDurableTarget, EngineFailure, EnginePluginTarget, EngineStoreTarget,
+    EvolutionCommand, Expression, FlowBuilder, LIVE_EVOLUTION_CONTROL_VERSION,
+    LiveEvolutionCommand, LiveEvolutionResponse, MutationKind, Operation, PlanCandidate,
+    ReconciliationMode, Region, RegionMigrationCommand, ResourceCandidate, Step,
+    VirtualClaimCommand, VirtualCompactionCommand, VirtualLeaseRenewalCommand,
+    VirtualRecoveryCommand, VirtualRehydrationCommand, VirtualRunWeightCommand, WaitActivation,
+    WorkOccurrence, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -88,13 +89,18 @@ fn rust_candidate_seals_and_executes_through_the_cli() {
     assert_eq!(result.effects.len(), 1);
 
     let domain = tempfile::tempdir().expect("temporary durable domain");
-    let durable = DurableEngine::new(&engine_path, domain.path(), &plugin_path);
+    let store = EngineStoreTarget::sqlite(
+        domain.path().join("domain.sqlite").display().to_string(),
+        "sdk-rust",
+    );
+    let durable = DurableEngine::from_transport(CliEngine::new(&engine_path), store.clone())
+        .with_executor(EnginePluginTarget::process(&plugin_path));
     let response = durable
         .start("run:rust-durable-e2e", candidate.clone(), input)
         .expect("durable Run starts through the CLI");
     assert!(matches!(response, DurableResponse::RunBoundary { .. }));
     assert!(
-        durable
+        DurableEngine::from_transport(CliEngine::new(&engine_path), store)
             .get("run:rust-durable-e2e")
             .expect("Run query succeeds")
             .is_some()
@@ -111,6 +117,23 @@ fn rust_candidate_seals_and_executes_through_the_cli() {
         evolved,
         LiveEvolutionResponse::DefinitionPublished { .. }
     ));
+}
+
+#[test]
+fn rust_rejects_malicious_nested_engine_success() {
+    let Ok(engine_path) = env::var("CYMULE_MALICIOUS_ENGINE") else {
+        return;
+    };
+    let error = CliEngine::new(engine_path)
+        .execute_durable(
+            &EngineDurableTarget::query(EngineStoreTarget::directory("unused")),
+            &DurableCommand::QueryDomain {
+                control_version: "cymule.durable-control/1".to_owned(),
+                query_id: "query:malicious".to_owned(),
+            },
+        )
+        .expect_err("forged nested Continuation must fail closed");
+    assert_eq!(error.code.as_ref(), "invalid_engine_response");
 }
 
 #[test]

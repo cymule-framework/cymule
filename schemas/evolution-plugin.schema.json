@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/evolution-plugin.schema.json",
+  "title": "Cymule Evolution Plugin Protocol cymule.evolution-plugin/1",
+  "oneOf": [
+    { "$ref": "#/$defs/requestEnvelope" },
+    { "$ref": "#/$defs/responseEnvelope" }
+  ],
+  "$defs": {
+    "requestEnvelope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evolution_plugin_protocol", "implementation_revision", "request"],
+      "properties": {
+        "evolution_plugin_protocol": { "const": "cymule.evolution-plugin/1" },
+        "implementation_revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "request": {
+          "oneOf": [
+            { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "describe_migration" } } },
+            { "type": "object", "additionalProperties": false, "required": ["type", "request"], "properties": { "type": { "const": "migrate" }, "request": { "$ref": "evolution-control.schema.json#/$defs/migration" } } },
+            { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "describe_shadow" } } },
+            { "type": "object", "additionalProperties": false, "required": ["type", "request"], "properties": { "type": { "const": "execute_shadow" }, "request": { "$ref": "evolution-control.schema.json#/$defs/shadow" } } }
+          ]
+        }
+      }
+    },
+    "responseEnvelope": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["outcome", "evolution_plugin_protocol", "response"],
+          "properties": {
+            "outcome": { "const": "success" },
+            "evolution_plugin_protocol": { "const": "cymule.evolution-plugin/1" },
+            "response": { "$ref": "#/$defs/success" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["outcome", "evolution_plugin_protocol", "error"],
+          "properties": {
+            "outcome": { "const": "failure" },
+            "evolution_plugin_protocol": { "const": "cymule.evolution-plugin/1" },
+            "error": {
+              "type": "object", "additionalProperties": false,
+              "required": ["code", "message"],
+              "properties": {
+                "code": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "message": { "type": "string", "minLength": 1, "maxLength": 8192 }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "success": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["type", "descriptor"], "properties": { "type": { "const": "migration_descriptor" }, "descriptor": { "$ref": "evolution-control.schema.json#/$defs/migrationDescriptor" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "output"], "properties": { "type": { "const": "migrated" }, "output": { "$ref": "evolution-control.schema.json#/$defs/migrationOutput" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "descriptor"], "properties": { "type": { "const": "shadow_descriptor" }, "descriptor": { "$ref": "evolution-control.schema.json#/$defs/shadowDescriptor" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "output"], "properties": { "type": { "const": "shadow_executed" }, "output": { "$ref": "evolution-control.schema.json#/$defs/shadowOutput" } } }
+      ]
+    }
+  }
+}

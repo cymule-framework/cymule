@@ -42,3 +42,5 @@
 - `LiveEvolutionControl` transports the unified registry/DAG/rollout/pin
   envelope. It must preserve the template identity and safe-point proof without
   splitting one command into lower-level registry and rollout calls.
+- `DurableEngine` is generic over `Engine`, stores provider-neutral targets,
+  omits executors for queries, and forwards CLI timeout and cancellation.

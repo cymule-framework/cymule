@@ -13,6 +13,7 @@ import {
   FlowBuilder,
   LiveEvolutionControlBuilder,
   ResourceBuilder,
+  sqliteStore,
   VirtualSchedulingControlBuilder,
   VirtualWorkControlBuilder,
   WaitActivationBuilder,
@@ -211,9 +212,10 @@ test("TypeScript candidate seals and executes through the Rust engine", () => {
 
   const store = mkdtempSync(join(tmpdir(), "cymule-ts-durable-"));
   try {
-    const durable = new DurableEngine(store, pluginPath, engine);
+    const target = sqliteStore(join(store, "domain.sqlite"), "sdk-typescript");
+    const durable = new DurableEngine(target, pluginPath, engine);
     assert.equal(durable.start("run:typescript-durable-e2e", candidate, input).type, "run_boundary");
-    assert.notEqual(durable.get("run:typescript-durable-e2e"), null);
+    assert.notEqual(new DurableEngine(target, undefined, engine).get("run:typescript-durable-e2e"), null);
     assert.equal(
       durable.evolve(
         LiveEvolutionControlBuilder.publishDefinition(
@@ -227,6 +229,15 @@ test("TypeScript candidate seals and executes through the Rust engine", () => {
   } finally {
     rmSync(store, { recursive: true, force: true });
   }
+});
+
+test("TypeScript rejects a malicious nested Engine success", () => {
+  const malicious = process.env.CYMULE_MALICIOUS_ENGINE;
+  if (malicious === undefined) return;
+  assert.throws(
+    () => new DurableEngine("unused", undefined, new CliEngine(malicious)).get("run:fake"),
+    (error: unknown) => error instanceof EngineError && error.failure.code === "invalid_engine_response",
+  );
 });
 
 test("TypeScript resource seals through the Rust engine", () => {

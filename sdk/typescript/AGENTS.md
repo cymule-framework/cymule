@@ -45,3 +45,5 @@
   workflow review.
 - npm publication uses GitHub Actions trusted publishing with provenance. Never
   add a long-lived npm token to repository or organization secrets.
+- Recursively validate durable Run views and live-evolution results before
+  returning them; static types are not runtime admission.

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use cymule_core::{canonical_bytes, decode_json, sha256_bytes};
 use cymule_runtime::{PluginHost, PluginRequest, PluginResponse, RuntimeError, RuntimeResult};
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use tempfile::{Builder, TempDir};
 
 /// Default request/output safety bound.
@@ -225,12 +225,39 @@ impl ProcessExecutor {
         &self.implementation_revision
     }
 
-    fn invoke_process(&self, request: &PluginRequest) -> RuntimeResult<PluginResponse> {
-        let started_at = Instant::now();
-        let deadline = started_at.checked_add(self.config.timeout).ok_or_else(|| {
-            RuntimeError::plugin_defect("process executor timeout exceeds the clock range")
-        })?;
+    /// Invoke one closed JSON request through the same sealed, bounded process boundary.
+    ///
+    /// This is used by provider protocols such as migration and shadow execution that
+    /// deliberately remain outside `cymule.plugin/2`.
+    pub fn invoke_json<Q: Serialize, R: DeserializeOwned>(&self, request: &Q) -> RuntimeResult<R> {
         let input = serde_json::to_vec(request)?;
+        let output = self.invoke_bytes(&input, false)?;
+        decode_json(&output).map_err(|_| {
+            RuntimeError::substrate(
+                "invalid_process_response",
+                "sealed process returned an invalid protocol response",
+            )
+        })
+    }
+
+    fn invoke_process(&self, request: &PluginRequest) -> RuntimeResult<PluginResponse> {
+        let input = serde_json::to_vec(request)?;
+        let output = self.invoke_bytes(&input, is_dispatch(request))?;
+        decode_json(&output).map_err(|_| {
+            post_start_failure(
+                request,
+                "invalid_plugin_response",
+                "process plugin returned an invalid protocol response",
+            )
+        })
+    }
+
+    fn invoke_bytes(&self, input: &[u8], ambiguous_world_effect: bool) -> RuntimeResult<Vec<u8>> {
+        let deadline = Instant::now()
+            .checked_add(self.config.timeout)
+            .ok_or_else(|| {
+                RuntimeError::plugin_defect("process executor timeout exceeds the clock range")
+            })?;
         if input.len() > self.config.message_limit {
             return Err(RuntimeError::plugin_defect(
                 "process plugin request exceeds the configured byte limit",
@@ -266,8 +293,8 @@ impl ProcessExecutor {
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
             terminate_process_tree(&mut child, process_group);
-            return Err(post_start_failure(
-                request,
+            return Err(process_failure(
+                ambiguous_world_effect,
                 "process_pipe_unavailable",
                 "one or more plugin process pipes were unavailable",
             ));
@@ -277,8 +304,8 @@ impl ProcessExecutor {
             || set_nonblocking(&stderr).is_err()
         {
             terminate_process_tree(&mut child, process_group);
-            return Err(post_start_failure(
-                request,
+            return Err(process_failure(
+                ambiguous_world_effect,
                 "process_pipe_configuration_failed",
                 "plugin process pipes could not be configured for bounded I/O",
             ));
@@ -298,14 +325,14 @@ impl ProcessExecutor {
                 terminate_process_tree(&mut child, process_group);
                 let _ = read_available(&mut stdout, &mut stdout_bytes, limit);
                 let _ = read_available(&mut stderr, &mut stderr_bytes, limit);
-                return Err(invocation_timeout(request));
+                return Err(invocation_timeout(ambiguous_world_effect));
             }
             let mut progressed = false;
             if let Some(writer) = stdin.as_mut() {
                 let Ok(wrote) = write_available(writer, &input, &mut input_offset) else {
                     terminate_process_tree(&mut child, process_group);
-                    return Err(post_start_failure(
-                        request,
+                    return Err(process_failure(
+                        ambiguous_world_effect,
                         "process_io_failed",
                         "plugin process did not consume its complete request",
                     ));
@@ -318,8 +345,8 @@ impl ProcessExecutor {
             if !stdout_eof {
                 let Ok((read, eof)) = read_available(&mut stdout, &mut stdout_bytes, limit) else {
                     terminate_process_tree(&mut child, process_group);
-                    return Err(post_start_failure(
-                        request,
+                    return Err(process_failure(
+                        ambiguous_world_effect,
                         "process_io_failed",
                         "bounded plugin stdout could not be collected",
                     ));
@@ -330,8 +357,8 @@ impl ProcessExecutor {
             if !stderr_eof {
                 let Ok((read, eof)) = read_available(&mut stderr, &mut stderr_bytes, limit) else {
                     terminate_process_tree(&mut child, process_group);
-                    return Err(post_start_failure(
-                        request,
+                    return Err(process_failure(
+                        ambiguous_world_effect,
                         "process_io_failed",
                         "bounded plugin stderr could not be collected",
                     ));
@@ -348,8 +375,8 @@ impl ProcessExecutor {
                     Ok(None) => {}
                     Err(_) => {
                         terminate_process_tree(&mut child, process_group);
-                        return Err(post_start_failure(
-                            request,
+                        return Err(process_failure(
+                            ambiguous_world_effect,
                             "process_wait_failed",
                             "process plugin completion could not be observed",
                         ));
@@ -364,8 +391,8 @@ impl ProcessExecutor {
                 group_closed = true;
                 if stdin.is_some() {
                     terminate_process_tree(&mut child, process_group);
-                    return Err(post_start_failure(
-                        request,
+                    return Err(process_failure(
+                        ambiguous_world_effect,
                         "process_io_failed",
                         "plugin process exited before consuming its complete request",
                     ));
@@ -379,16 +406,10 @@ impl ProcessExecutor {
             }
         }
         validate_exit(
-            request,
+            ambiguous_world_effect,
             status.expect("loop exits only after observing status"),
         )?;
-        decode_json(&stdout_bytes).map_err(|_| {
-            post_start_failure(
-                request,
-                "invalid_plugin_response",
-                "process plugin returned an invalid protocol response",
-            )
-        })
+        Ok(stdout_bytes)
     }
 
     fn materialize_invocation(&self) -> RuntimeResult<InvocationFiles> {
@@ -596,15 +617,19 @@ fn is_dispatch(request: &PluginRequest) -> bool {
 }
 
 fn post_start_failure(request: &PluginRequest, code: &str, message: &str) -> RuntimeError {
-    if is_dispatch(request) {
+    process_failure(is_dispatch(request), code, message)
+}
+
+fn process_failure(ambiguous_world_effect: bool, code: &str, message: &str) -> RuntimeError {
+    if ambiguous_world_effect {
         RuntimeError::unknown_world(code, message)
     } else {
         RuntimeError::substrate(code, message)
     }
 }
 
-fn invocation_timeout(request: &PluginRequest) -> RuntimeError {
-    if is_dispatch(request) {
+fn invocation_timeout(ambiguous_world_effect: bool) -> RuntimeError {
+    if ambiguous_world_effect {
         RuntimeError::unknown_world(
             "effect_dispatch_timed_out",
             "effect dispatch process timed out after starting",
@@ -617,11 +642,11 @@ fn invocation_timeout(request: &PluginRequest) -> RuntimeError {
     }
 }
 
-fn validate_exit(request: &PluginRequest, status: ExitStatus) -> RuntimeResult<()> {
+fn validate_exit(ambiguous_world_effect: bool, status: ExitStatus) -> RuntimeResult<()> {
     if status.success() {
         return Ok(());
     }
-    Err(if is_dispatch(request) {
+    Err(if ambiguous_world_effect {
         RuntimeError::unknown_world(
             "effect_dispatch_response_lost",
             "effect dispatch process exited without an authoritative response",

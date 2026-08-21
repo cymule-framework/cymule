@@ -96,6 +96,58 @@
         "kind": { "type": "string", "pattern": "^[a-z0-9._+-]+(?:/[a-z0-9._+-]+)+$", "maxLength": 255 }
       }
     },
+    "artifactRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reference", "bytes"],
+      "properties": {
+        "reference": { "$ref": "#/$defs/artifact" },
+        "bytes": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } }
+      }
+    },
+    "migrationDescriptor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["adapter_id", "adapter_revision", "from_plan", "to_plan", "from_schema", "to_schema", "state_coverage", "failure_and_cancellation", "budget_and_ownership", "authority_and_effects"],
+      "properties": {
+        "adapter_id": { "$ref": "#/$defs/id" },
+        "adapter_revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "from_plan": { "$ref": "#/$defs/id" },
+        "to_plan": { "$ref": "#/$defs/id" },
+        "from_schema": { "$ref": "#/$defs/id" },
+        "to_schema": { "$ref": "#/$defs/id" },
+        "state_coverage": { "const": "total_reachable_state" },
+        "failure_and_cancellation": { "const": "preserved" },
+        "budget_and_ownership": { "const": "preserved" },
+        "authority_and_effects": { "const": "no_widening" }
+      }
+    },
+    "migrationOutput": {
+      "type": "object", "additionalProperties": false,
+      "required": ["output_state", "evidence"],
+      "properties": {
+        "output_state": { "$ref": "#/$defs/artifactRecord" },
+        "evidence": { "$ref": "#/$defs/artifactRecord" }
+      }
+    },
+    "shadowDescriptor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["driver_id", "driver_revision", "target_effects", "occurrence_bindings"],
+      "properties": {
+        "driver_id": { "$ref": "#/$defs/id" },
+        "driver_revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "target_effects": { "const": "suppressed_or_simulated" },
+        "occurrence_bindings": { "const": "pinned" }
+      }
+    },
+    "shadowOutput": {
+      "type": "object", "additionalProperties": false,
+      "required": ["primary_digest", "shadow_digest", "equivalent", "evidence"],
+      "properties": {
+        "primary_digest": { "$ref": "#/$defs/id" },
+        "shadow_digest": { "$ref": "#/$defs/id" },
+        "equivalent": { "type": "boolean" },
+        "evidence": { "$ref": "#/$defs/artifactRecord" }
+      }
+    },
     "executionBindingArtifact": {
       "type": "object", "additionalProperties": false,
       "required": ["identity_version", "artifact_id", "kind"],

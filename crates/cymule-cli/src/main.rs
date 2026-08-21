@@ -8,8 +8,9 @@ use std::path::Path;
 use cymule_core::{PlanCandidate, SealedPlan, decode_json, seal_plan};
 use cymule_directory_store::DirectoryStore;
 use cymule_durable::{
-    DurableCommand, DurableCoordinator, DurableResponse, DurableRuntimeControl, ResumableRuntime,
-    WaitActivation,
+    DurableCommand, DurableCoordinator, DurableQueryControl, DurableResponse,
+    DurableRuntimeControl, DurableStore, GcReceipt, ResumableRuntime, StoreBatch, StoreCommit,
+    StoreHead, StoreStats, StoredState, WaitActivation,
 };
 use cymule_evolution::{
     DurableLiveEvolutionController, EvolutionCommand, EvolutionError, EvolutionResult,
@@ -20,10 +21,14 @@ use cymule_evolution::{
 use cymule_executor_process::{ProcessExecutor, ProcessExecutorConfig};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
 use cymule_runtime::{
-    ENGINE_PROTOCOL_VERSION, EmbeddedRuntime, EngineContractSide, EngineFailure,
-    EngineFailureCategory, EngineIssue, EnginePhase, EngineRequestEnvelope, EngineResponseEnvelope,
-    EngineRetryDisposition, ExecutionBinding, ExecutionOutcome, PluginHost, verify_plan,
+    ENGINE_DIRECTORY_STORE_PROVIDER, ENGINE_PROCESS_EXECUTOR_PROVIDER, ENGINE_PROTOCOL_VERSION,
+    ENGINE_SQLITE_STORE_PROVIDER, EVOLUTION_PLUGIN_PROTOCOL_VERSION, EmbeddedRuntime,
+    EngineContractSide, EngineDurableTarget, EngineEvolutionTarget, EngineFailure,
+    EngineFailureCategory, EngineIssue, EnginePhase, EnginePluginTarget, EngineRequestEnvelope,
+    EngineResponseEnvelope, EngineRetryDisposition, ExecutionBinding, ExecutionOutcome, PluginHost,
+    validate_strict_json, verify_plan,
 };
+use cymule_store_sqlite::SqliteStore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -52,12 +57,11 @@ enum EngineRequest {
         command: LiveEvolutionCommand,
     },
     ExecuteDurable {
-        store: String,
-        plugin: String,
+        target: EngineDurableTarget,
         command: DurableCommand,
     },
     ExecuteLiveEvolution {
-        store: String,
+        target: EngineEvolutionTarget,
         journal_id: String,
         command: LiveEvolutionCommand,
     },
@@ -165,6 +169,16 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFailure> {
+    validate_strict_json(input).map_err(|error| {
+        let mut failure = EngineFailure::new(
+            EngineFailureCategory::Validation,
+            EnginePhase::DecodeRequest,
+            "invalid_engine_request",
+            error,
+        );
+        failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
+        failure
+    })?;
     let envelope: EngineRequestEnvelope<EngineRequest> = decode_json(input).map_err(|error| {
         let mut failure = EngineFailure::new(
             EngineFailureCategory::Validation,
@@ -230,19 +244,15 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
             })?;
             EngineResponse::VerifiedLiveEvolutionCommand { command }
         }
-        EngineRequest::ExecuteDurable {
-            store,
-            plugin,
-            command,
-        } => EngineResponse::DurableExecuted {
-            response: execute_durable(&store, &plugin, command)?,
+        EngineRequest::ExecuteDurable { target, command } => EngineResponse::DurableExecuted {
+            response: execute_durable(&target, command)?,
         },
         EngineRequest::ExecuteLiveEvolution {
-            store,
+            target,
             journal_id,
             command,
         } => EngineResponse::LiveEvolutionExecuted {
-            response: execute_live_evolution(&store, &journal_id, command)?,
+            response: execute_live_evolution(&target, &journal_id, command)?,
         },
         EngineRequest::Run {
             plan,
@@ -263,11 +273,29 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
 }
 
 fn execute_durable(
-    store: &str,
-    plugin: &str,
+    target: &EngineDurableTarget,
     command: DurableCommand,
 ) -> Result<DurableResponse, EngineFailure> {
-    let runtime = local_durable_runtime(store, plugin)
+    target.verify()?;
+    command
+        .verify()
+        .map_err(|error| map_durable_error(&error, EnginePhase::ExecuteDurable))?;
+    let store = open_store(&target.store)
+        .map_err(|error| map_durable_error(&error, EnginePhase::ExecuteDurable))?;
+    if command.is_query() {
+        return DurableQueryControl::open(store)
+            .and_then(|mut control| control.submit(command))
+            .map_err(|error| map_durable_error(&error, EnginePhase::ExecuteDurable));
+    }
+    let executor = target.executor.as_ref().ok_or_else(|| {
+        EngineFailure::new(
+            EngineFailureCategory::Validation,
+            EnginePhase::ExecuteDurable,
+            "missing_execution_provider",
+            "durable mutation requires an execution provider",
+        )
+    })?;
+    let runtime = local_durable_runtime(store, executor)
         .map_err(|error| map_durable_error(&error, EnginePhase::ExecuteDurable))?;
     DurableRuntimeControl::new(runtime)
         .submit(command)
@@ -275,12 +303,26 @@ fn execute_durable(
 }
 
 fn local_durable_runtime(
-    store: &str,
-    executable: &str,
-) -> cymule_durable::DurableResult<ResumableRuntime<DirectoryStore, ProcessExecutor>> {
-    let store = DirectoryStore::open(store)?;
-    let mut plugin = ProcessExecutor::new(ProcessExecutorConfig::new(executable))
+    store: CliStore,
+    target: &EnginePluginTarget,
+) -> cymule_durable::DurableResult<ResumableRuntime<CliStore, ProcessExecutor>> {
+    if target.provider != ENGINE_PROCESS_EXECUTOR_PROVIDER {
+        return Err(cymule_durable::DurableError::Validation(format!(
+            "unsupported execution provider {}",
+            target.provider
+        )));
+    }
+    let mut plugin = ProcessExecutor::new(ProcessExecutorConfig::new(&target.location))
         .map_err(|error| cymule_durable::DurableError::Substrate(error.to_string()))?;
+    if target
+        .revision
+        .as_deref()
+        .is_some_and(|expected| expected != plugin.implementation_revision())
+    {
+        return Err(cymule_durable::DurableError::Validation(
+            "execution provider revision does not match the sealed executable bytes".to_owned(),
+        ));
+    }
     let implementation_revision = plugin.implementation_revision().to_owned();
     let manifest = plugin
         .describe()
@@ -291,55 +333,288 @@ fn local_durable_runtime(
 }
 
 fn execute_live_evolution(
-    store: &str,
+    target: &EngineEvolutionTarget,
     journal_id: &str,
     command: LiveEvolutionCommand,
 ) -> Result<LiveEvolutionResponse, EngineFailure> {
-    let store = DirectoryStore::open(store)
+    target.verify()?;
+    let store = open_store(&target.store)
         .map_err(|error| map_durable_error(&error, EnginePhase::ExecuteLiveEvolution))?;
     let mut coordinator = DurableCoordinator::open(store)
         .map_err(|error| map_durable_error(&error, EnginePhase::ExecuteLiveEvolution))?;
     let mut controller = DurableLiveEvolutionController::load(&coordinator, journal_id)
         .map_err(|error| map_evolution_error(&error, EnginePhase::ExecuteLiveEvolution))?;
-    let mut unsupported = UnsupportedEvolutionPlugin;
+    let mut migration = ProcessEvolutionPlugin::optional(target.migration.as_ref())?;
+    let mut shadow = ProcessEvolutionPlugin::optional(target.shadow.as_ref())?;
     DurableLiveEvolutionController::submit(
         &mut coordinator,
         &mut controller,
         journal_id,
         command,
-        &mut unsupported,
-        &mut UnsupportedEvolutionPlugin,
+        &mut migration,
+        &mut shadow,
     )
     .map_err(|error| map_evolution_error(&error, EnginePhase::ExecuteLiveEvolution))
 }
 
-struct UnsupportedEvolutionPlugin;
+enum CliStore {
+    Directory(DirectoryStore),
+    Sqlite(SqliteStore),
+}
 
-impl MigrationAdapter for UnsupportedEvolutionPlugin {
-    fn describe(&mut self) -> EvolutionResult<MigrationAdapterDescriptor> {
-        Err(EvolutionError::Validation(
-            "the local CLI transport has no migration adapter binding".to_owned(),
-        ))
+impl DurableStore for CliStore {
+    fn load(&mut self) -> cymule_durable::DurableResult<Option<StoredState>> {
+        match self {
+            Self::Directory(store) => store.load(),
+            Self::Sqlite(store) => store.load(),
+        }
     }
 
-    fn migrate(&mut self, _request: &MigrationRequest) -> EvolutionResult<MigrationOutput> {
-        Err(EvolutionError::Validation(
-            "the local CLI transport has no migration adapter binding".to_owned(),
-        ))
+    fn compare_and_commit(
+        &mut self,
+        expected: Option<&StoreHead>,
+        batch: &StoreBatch,
+    ) -> cymule_durable::DurableResult<StoreCommit> {
+        match self {
+            Self::Directory(store) => store.compare_and_commit(expected, batch),
+            Self::Sqlite(store) => store.compare_and_commit(expected, batch),
+        }
+    }
+
+    fn reclaim_cold(&mut self, expected: &StoreHead) -> cymule_durable::DurableResult<GcReceipt> {
+        match self {
+            Self::Directory(store) => store.reclaim_cold(expected),
+            Self::Sqlite(store) => store.reclaim_cold(expected),
+        }
+    }
+
+    fn stats(&self) -> cymule_durable::DurableResult<StoreStats> {
+        match self {
+            Self::Directory(store) => store.stats(),
+            Self::Sqlite(store) => store.stats(),
+        }
     }
 }
 
-impl ShadowDriver for UnsupportedEvolutionPlugin {
-    fn describe(&mut self) -> EvolutionResult<ShadowDriverDescriptor> {
-        Err(EvolutionError::Validation(
-            "the local CLI transport has no shadow driver binding".to_owned(),
-        ))
+fn open_store(
+    target: &cymule_runtime::EngineStoreTarget,
+) -> cymule_durable::DurableResult<CliStore> {
+    match target.provider.as_str() {
+        ENGINE_DIRECTORY_STORE_PROVIDER if target.domain.is_none() => {
+            DirectoryStore::open(&target.location).map(CliStore::Directory)
+        }
+        ENGINE_SQLITE_STORE_PROVIDER => {
+            let domain = target.domain.as_ref().ok_or_else(|| {
+                cymule_durable::DurableError::Validation(
+                    "SQLite store target requires a domain".to_owned(),
+                )
+            })?;
+            SqliteStore::open(&target.location, domain).map(CliStore::Sqlite)
+        }
+        ENGINE_DIRECTORY_STORE_PROVIDER => Err(cymule_durable::DurableError::Validation(
+            "directory store target must not contain a domain".to_owned(),
+        )),
+        provider => Err(cymule_durable::DurableError::Validation(format!(
+            "the CLI Engine does not provide store {provider}; select a custom Engine transport"
+        ))),
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum EvolutionPluginRequest<'a> {
+    DescribeMigration,
+    Migrate { request: &'a MigrationRequest },
+    DescribeShadow,
+    ExecuteShadow { request: &'a ShadowRequest },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EvolutionPluginRequestEnvelope<'a> {
+    evolution_plugin_protocol: &'static str,
+    implementation_revision: &'a str,
+    request: EvolutionPluginRequest<'a>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+enum EvolutionPluginResponseEnvelope {
+    Success {
+        evolution_plugin_protocol: String,
+        response: EvolutionPluginResponse,
+    },
+    Failure {
+        evolution_plugin_protocol: String,
+        error: EvolutionPluginFailure,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum EvolutionPluginResponse {
+    MigrationDescriptor {
+        descriptor: MigrationAdapterDescriptor,
+    },
+    Migrated {
+        output: MigrationOutput,
+    },
+    ShadowDescriptor {
+        descriptor: ShadowDriverDescriptor,
+    },
+    ShadowExecuted {
+        output: ShadowOutput,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvolutionPluginFailure {
+    code: String,
+    message: String,
+}
+
+struct ProcessEvolutionPlugin {
+    process: Option<ProcessExecutor>,
+}
+
+impl ProcessEvolutionPlugin {
+    fn optional(target: Option<&EnginePluginTarget>) -> Result<Self, EngineFailure> {
+        let Some(target) = target else {
+            return Ok(Self { process: None });
+        };
+        if target.provider != ENGINE_PROCESS_EXECUTOR_PROVIDER {
+            return Err(EngineFailure::new(
+                EngineFailureCategory::Validation,
+                EnginePhase::ExecuteLiveEvolution,
+                "unsupported_evolution_plugin_provider",
+                format!("unsupported evolution plugin provider {}", target.provider),
+            ));
+        }
+        let process = ProcessExecutor::new(ProcessExecutorConfig::new(&target.location)).map_err(
+            |error| EngineFailure::from_runtime(error, EnginePhase::ExecuteLiveEvolution),
+        )?;
+        if target.revision.as_deref() != Some(process.implementation_revision()) {
+            return Err(EngineFailure::new(
+                EngineFailureCategory::AdmissionDenied,
+                EnginePhase::ExecuteLiveEvolution,
+                "evolution_plugin_revision_mismatch",
+                "evolution plugin revision does not match the sealed executable bytes",
+            ));
+        }
+        Ok(Self {
+            process: Some(process),
+        })
     }
 
-    fn execute(&mut self, _request: &ShadowRequest) -> EvolutionResult<ShadowOutput> {
-        Err(EvolutionError::Validation(
-            "the local CLI transport has no shadow driver binding".to_owned(),
-        ))
+    fn invoke(
+        &self,
+        request: EvolutionPluginRequest<'_>,
+    ) -> EvolutionResult<EvolutionPluginResponse> {
+        let process = self.process.as_ref().ok_or_else(|| {
+            EvolutionError::Validation(
+                "this evolution operation requires a pinned plugin".to_owned(),
+            )
+        })?;
+        let envelope: EvolutionPluginResponseEnvelope = process
+            .invoke_json(&EvolutionPluginRequestEnvelope {
+                evolution_plugin_protocol: EVOLUTION_PLUGIN_PROTOCOL_VERSION,
+                implementation_revision: process.implementation_revision(),
+                request,
+            })
+            .map_err(|error| EvolutionError::Substrate(error.to_string()))?;
+        match envelope {
+            EvolutionPluginResponseEnvelope::Success {
+                evolution_plugin_protocol,
+                response,
+            } => {
+                if evolution_plugin_protocol != EVOLUTION_PLUGIN_PROTOCOL_VERSION {
+                    return Err(EvolutionError::Validation(
+                        "evolution plugin returned an unsupported protocol version".to_owned(),
+                    ));
+                }
+                Ok(response)
+            }
+            EvolutionPluginResponseEnvelope::Failure {
+                evolution_plugin_protocol,
+                error,
+            } => {
+                if evolution_plugin_protocol != EVOLUTION_PLUGIN_PROTOCOL_VERSION {
+                    return Err(EvolutionError::Validation(
+                        "evolution plugin returned an unsupported protocol version".to_owned(),
+                    ));
+                }
+                Err(EvolutionError::Substrate(format!(
+                    "{}: {}",
+                    error.code, error.message
+                )))
+            }
+        }
+    }
+
+    fn sealed_revision(&self) -> EvolutionResult<&str> {
+        self.process
+            .as_ref()
+            .map(ProcessExecutor::implementation_revision)
+            .ok_or_else(|| {
+                EvolutionError::Validation(
+                    "this evolution operation requires a pinned plugin".to_owned(),
+                )
+            })
+    }
+}
+
+impl MigrationAdapter for ProcessEvolutionPlugin {
+    fn describe(&mut self) -> EvolutionResult<MigrationAdapterDescriptor> {
+        match self.invoke(EvolutionPluginRequest::DescribeMigration)? {
+            EvolutionPluginResponse::MigrationDescriptor { descriptor }
+                if descriptor.adapter_revision == self.sealed_revision()? =>
+            {
+                Ok(descriptor)
+            }
+            EvolutionPluginResponse::MigrationDescriptor { .. } => Err(EvolutionError::Conflict(
+                "migration descriptor revision does not match the sealed plugin".to_owned(),
+            )),
+            _ => Err(EvolutionError::Validation(
+                "evolution plugin returned the wrong migration response variant".to_owned(),
+            )),
+        }
+    }
+
+    fn migrate(&mut self, request: &MigrationRequest) -> EvolutionResult<MigrationOutput> {
+        match self.invoke(EvolutionPluginRequest::Migrate { request })? {
+            EvolutionPluginResponse::Migrated { output } => Ok(output),
+            _ => Err(EvolutionError::Validation(
+                "evolution plugin returned the wrong migration response variant".to_owned(),
+            )),
+        }
+    }
+}
+
+impl ShadowDriver for ProcessEvolutionPlugin {
+    fn describe(&mut self) -> EvolutionResult<ShadowDriverDescriptor> {
+        match self.invoke(EvolutionPluginRequest::DescribeShadow)? {
+            EvolutionPluginResponse::ShadowDescriptor { descriptor }
+                if descriptor.driver_revision == self.sealed_revision()? =>
+            {
+                Ok(descriptor)
+            }
+            EvolutionPluginResponse::ShadowDescriptor { .. } => Err(EvolutionError::Conflict(
+                "shadow descriptor revision does not match the sealed plugin".to_owned(),
+            )),
+            _ => Err(EvolutionError::Validation(
+                "evolution plugin returned the wrong shadow response variant".to_owned(),
+            )),
+        }
+    }
+
+    fn execute(&mut self, request: &ShadowRequest) -> EvolutionResult<ShadowOutput> {
+        match self.invoke(EvolutionPluginRequest::ExecuteShadow { request })? {
+            EvolutionPluginResponse::ShadowExecuted { output } => Ok(output),
+            _ => Err(EvolutionError::Validation(
+                "evolution plugin returned the wrong shadow response variant".to_owned(),
+            )),
+        }
     }
 }
 
@@ -469,6 +744,11 @@ fn map_evolution_error(
             "evolution_conflict",
             Some(EngineRetryDisposition::Never),
         ),
+        EvolutionError::Substrate(_) => (
+            EngineFailureCategory::SubstrateFailure,
+            "evolution_plugin_substrate_failed",
+            Some(EngineRetryDisposition::RetrySameRequest),
+        ),
     };
     let mut failure = EngineFailure::new(category, phase, code, error.to_string());
     failure.retry_disposition = retry;
@@ -491,6 +771,7 @@ fn read_path<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Box<dyn st
     } else {
         fs::read(Path::new(path))?
     };
+    validate_strict_json(&bytes)?;
     Ok(decode_json(&bytes)?)
 }
 
@@ -511,5 +792,15 @@ mod tests {
         .expect_err("duplicate Plan member is rejected");
         assert_eq!(error.code.as_ref(), "invalid_engine_request");
         assert!(error.message.contains("duplicate JSON object member"));
+    }
+
+    #[test]
+    fn rpc_rejects_integers_outside_the_shared_sdk_domain() {
+        let error = decode_and_execute_request(
+            br#"{"engine_protocol":"cymule.engine/2","request":{"type":"verify_durable_command","command":{"type":"activate_wait","control_version":"cymule.durable-control/1","activation_id":"activation:test","source":{"source":"signal","key":"signal:test"},"wait_ids":["wait:test"],"value":9007199254740992}}}"#,
+        )
+        .expect_err("unsafe integer is rejected before typed decode");
+        assert_eq!(error.code.as_ref(), "invalid_engine_request");
+        assert!(error.message.contains("shared JSON range"));
     }
 }

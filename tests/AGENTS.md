@@ -143,3 +143,5 @@
   recovery; prove distinct slots can progress, one slot cannot overclaim,
   expiry rejects normal output, explicit takeover increments work epoch, and
   Run-weight commands replay without leaking old deficit.
+- Every SDK rejects response-shaped malicious Engines with forged nested
+  durable or live-evolution fields.

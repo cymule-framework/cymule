@@ -7,6 +7,184 @@ use crate::RuntimeError;
 /// Current Engine transport protocol.
 pub const ENGINE_PROTOCOL_VERSION: &str = "cymule.engine/2";
 
+/// Official directory-store provider identity understood by the CLI Engine.
+pub const ENGINE_DIRECTORY_STORE_PROVIDER: &str = "cymule.directory-store/2";
+/// Official SQLite-store provider identity understood by the CLI Engine.
+pub const ENGINE_SQLITE_STORE_PROVIDER: &str = "cymule.sqlite-store/2";
+/// Official sealed process-executor provider identity understood by the CLI Engine.
+pub const ENGINE_PROCESS_EXECUTOR_PROVIDER: &str = "cymule.executor-process/1";
+/// Sealed process protocol used by migration and shadow plugins.
+pub const EVOLUTION_PLUGIN_PROTOCOL_VERSION: &str = "cymule.evolution-plugin/1";
+
+/// Provider-neutral locator for one durable store instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EngineStoreTarget {
+    /// Stable provider contract identity.
+    pub provider: String,
+    /// Provider-owned opaque location.
+    pub location: String,
+    /// Provider-owned domain when one physical store contains many domains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+impl EngineStoreTarget {
+    /// Address one official directory-backed domain.
+    pub fn directory(location: impl Into<String>) -> Self {
+        Self {
+            provider: ENGINE_DIRECTORY_STORE_PROVIDER.to_owned(),
+            location: location.into(),
+            domain: None,
+        }
+    }
+
+    /// Address one official SQLite-backed domain.
+    pub fn sqlite(location: impl Into<String>, domain: impl Into<String>) -> Self {
+        Self {
+            provider: ENGINE_SQLITE_STORE_PROVIDER.to_owned(),
+            location: location.into(),
+            domain: Some(domain.into()),
+        }
+    }
+
+    /// Validate the transport-level locator independently of a provider.
+    pub fn verify(&self) -> EngineResult<()> {
+        verify_non_empty_bound(&self.provider, 256, "store provider")?;
+        verify_non_empty_bound(&self.location, 4096, "store location")?;
+        if let Some(domain) = &self.domain {
+            verify_non_empty_bound(domain, 512, "store domain")?;
+        }
+        Ok(())
+    }
+}
+
+/// Provider-neutral locator for one immutable execution implementation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnginePluginTarget {
+    /// Stable provider contract identity.
+    pub provider: String,
+    /// Provider-owned opaque location.
+    pub location: String,
+    /// Expected immutable implementation revision when exact bytes must be pinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+impl EnginePluginTarget {
+    /// Select the official sealed process executor.
+    pub fn process(location: impl Into<String>) -> Self {
+        Self {
+            provider: ENGINE_PROCESS_EXECUTOR_PROVIDER.to_owned(),
+            location: location.into(),
+            revision: None,
+        }
+    }
+
+    /// Select exact process bytes by their SHA-256 revision.
+    pub fn pinned_process(location: impl Into<String>, revision: impl Into<String>) -> Self {
+        Self {
+            provider: ENGINE_PROCESS_EXECUTOR_PROVIDER.to_owned(),
+            location: location.into(),
+            revision: Some(revision.into()),
+        }
+    }
+
+    /// Validate the transport-level locator independently of a provider.
+    pub fn verify(&self) -> EngineResult<()> {
+        verify_non_empty_bound(&self.provider, 256, "plugin provider")?;
+        verify_non_empty_bound(&self.location, 4096, "plugin location")?;
+        if let Some(revision) = &self.revision {
+            if !is_sha256_id(revision) {
+                return Err(EngineFailure::transport(
+                    "invalid_plugin_revision",
+                    "plugin revision must be a lowercase sha256 identity",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Complete provider selection for one durable Engine request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EngineDurableTarget {
+    /// Durable state provider.
+    pub store: EngineStoreTarget,
+    /// Execution provider. Read-only queries intentionally omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor: Option<EnginePluginTarget>,
+}
+
+impl EngineDurableTarget {
+    /// Construct a read-only target.
+    pub fn query(store: EngineStoreTarget) -> Self {
+        Self {
+            store,
+            executor: None,
+        }
+    }
+
+    /// Construct a mutation target.
+    pub fn execute(store: EngineStoreTarget, executor: EnginePluginTarget) -> Self {
+        Self {
+            store,
+            executor: Some(executor),
+        }
+    }
+
+    /// Validate all provider-neutral locators.
+    pub fn verify(&self) -> EngineResult<()> {
+        self.store.verify()?;
+        if let Some(executor) = &self.executor {
+            executor.verify()?;
+        }
+        Ok(())
+    }
+}
+
+/// Complete provider selection for one live-evolution Engine request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EngineEvolutionTarget {
+    /// Durable state provider shared with Run execution.
+    pub store: EngineStoreTarget,
+    /// Exact migration adapter, required only by migration commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration: Option<EnginePluginTarget>,
+    /// Exact shadow driver, required only by shadow commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<EnginePluginTarget>,
+}
+
+impl EngineEvolutionTarget {
+    /// Construct an evolution target without optional execution plugins.
+    pub fn new(store: EngineStoreTarget) -> Self {
+        Self {
+            store,
+            migration: None,
+            shadow: None,
+        }
+    }
+
+    /// Validate every configured locator and require exact plugin revisions.
+    pub fn verify(&self) -> EngineResult<()> {
+        self.store.verify()?;
+        for plugin in [&self.migration, &self.shadow].into_iter().flatten() {
+            plugin.verify()?;
+            if plugin.revision.is_none() {
+                return Err(EngineFailure::transport(
+                    "unpinned_evolution_plugin",
+                    "migration and shadow plugins require an exact implementation revision",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One versioned Engine request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -486,6 +664,15 @@ fn verify_protocol_version(version: &str) -> EngineResult<()> {
     failure.contract_side = Some(EngineContractSide::Schema);
     failure.retry_disposition = Some(EngineRetryDisposition::Never);
     Err(failure)
+}
+
+fn is_sha256_id(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
 }
 
 fn verify_code(value: &str, max: usize, label: &str) -> EngineResult<()> {

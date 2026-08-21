@@ -247,3 +247,6 @@ repository verification. The suite model and fault-test rules live in
 Run `python3 scripts/test_harness.py run rust-soak` only for scheduled, release,
 or explicit anomaly-depth verification; keep it independent from focused local
 feedback.
+- Durable Engine requests carry separate store and optional executor targets;
+  queries omit execution authority. Migration and shadow targets pin exact
+  process bytes and use the closed `cymule.evolution-plugin/1` protocol.

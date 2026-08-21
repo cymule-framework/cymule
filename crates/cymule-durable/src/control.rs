@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    Continuation, DriveOutcome, DurableError, DurableResult, DurableStore, EffectDispatch,
-    ResumableRuntime, WaitActivationSource, WaitCondition,
+    Continuation, DriveOutcome, DurableCoordinator, DurableError, DurableResult, DurableStore,
+    EffectDispatch, ResumableRuntime, WaitActivationSource, WaitCondition,
 };
 
 /// Frozen provider-neutral M1 control protocol version.
@@ -74,6 +74,11 @@ pub enum DurableCommand {
 }
 
 impl DurableCommand {
+    /// Return whether this command is guaranteed not to mutate durable authority.
+    pub const fn is_query(&self) -> bool {
+        matches!(self, Self::QueryRun { .. } | Self::QueryDomain { .. })
+    }
+
     /// Validate the closed command independently of current durable state.
     pub fn verify(&self) -> DurableResult<()> {
         let version = match self {
@@ -139,6 +144,36 @@ impl DurableCommand {
             Self::QueryDomain { query_id, .. } => validate_identity("query", query_id)?,
         }
         Ok(())
+    }
+}
+
+/// Read-only durable authority that never constructs or admits an executor.
+pub struct DurableQueryControl<S> {
+    coordinator: DurableCoordinator<S>,
+}
+
+impl<S: DurableStore> DurableQueryControl<S> {
+    /// Open the selected store for read-only control.
+    pub fn open(store: S) -> DurableResult<Self> {
+        Ok(Self {
+            coordinator: DurableCoordinator::open(store)?,
+        })
+    }
+
+    /// Submit one verified read-only command.
+    pub fn submit(&mut self, command: DurableCommand) -> DurableResult<DurableResponse> {
+        command.verify()?;
+        match command {
+            DurableCommand::QueryRun { run_id, .. } => Ok(DurableResponse::Run {
+                run: query_run_from_coordinator(&self.coordinator, &run_id)?.map(Box::new),
+            }),
+            DurableCommand::QueryDomain { .. } => Ok(DurableResponse::Domain {
+                domain: query_domain_from_coordinator(&self.coordinator)?,
+            }),
+            _ => Err(DurableError::Validation(
+                "read-only durable control accepts only query commands".to_owned(),
+            )),
+        }
     }
 }
 
@@ -299,7 +334,13 @@ impl<S: DurableStore, P: PluginHost> DurableRuntimeControl<S, P> {
 fn query_domain<S: DurableStore, P: PluginHost>(
     runtime: &ResumableRuntime<S, P>,
 ) -> DurableResult<DurableDomainView> {
-    let Some(revision) = runtime.coordinator().revision() else {
+    query_domain_from_coordinator(runtime.coordinator())
+}
+
+fn query_domain_from_coordinator<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+) -> DurableResult<DurableDomainView> {
+    let Some(revision) = coordinator.revision() else {
         return Ok(DurableDomainView {
             revision: None,
             run_ids: Vec::new(),
@@ -307,13 +348,7 @@ fn query_domain<S: DurableStore, P: PluginHost>(
     };
     Ok(DurableDomainView {
         revision: Some(revision.to_owned()),
-        run_ids: runtime
-            .coordinator()
-            .state()?
-            .continuations
-            .keys()
-            .cloned()
-            .collect(),
+        run_ids: coordinator.state()?.continuations.keys().cloned().collect(),
     })
 }
 
@@ -321,14 +356,21 @@ fn query_run<S: DurableStore, P: PluginHost>(
     runtime: &ResumableRuntime<S, P>,
     run_id: &str,
 ) -> DurableResult<Option<DurableRunView>> {
-    let Some(revision) = runtime.coordinator().revision() else {
+    query_run_from_coordinator(runtime.coordinator(), run_id)
+}
+
+fn query_run_from_coordinator<S: DurableStore>(
+    coordinator: &DurableCoordinator<S>,
+    run_id: &str,
+) -> DurableResult<Option<DurableRunView>> {
+    let Some(revision) = coordinator.revision() else {
         return Ok(None);
     };
-    let state = runtime.coordinator().state()?;
+    let state = coordinator.state()?;
     let Some(continuation) = state.continuations.get(run_id).cloned() else {
         return Ok(None);
     };
-    let machine = runtime.coordinator().restore_machine()?;
+    let machine = coordinator.restore_machine()?;
     let result = machine
         .projection()
         .runs

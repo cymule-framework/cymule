@@ -37,9 +37,12 @@ pub use cymule_resource::{
     ResourcePublication, ResourceReplayClass, ResourceSchemaIssue, ResourceShape,
 };
 pub use cymule_runtime::{
-    ENGINE_PROTOCOL_VERSION, EffectReconciliationBoundary, EffectReleaseBoundary,
-    EngineContractSide, EngineFailure, EngineFailureCategory, EngineIssue, EnginePhase,
-    EngineResult, EngineRetryDisposition, ExecutionOutcome, ExecutionResult, SuspensionBoundary,
+    ENGINE_DIRECTORY_STORE_PROVIDER, ENGINE_PROCESS_EXECUTOR_PROVIDER, ENGINE_PROTOCOL_VERSION,
+    ENGINE_SQLITE_STORE_PROVIDER, EVOLUTION_PLUGIN_PROTOCOL_VERSION, EffectReconciliationBoundary,
+    EffectReleaseBoundary, EngineContractSide, EngineDurableTarget, EngineEvolutionTarget,
+    EngineFailure, EngineFailureCategory, EngineIssue, EnginePhase, EnginePluginTarget,
+    EngineResult, EngineRetryDisposition, EngineStoreTarget, ExecutionOutcome, ExecutionResult,
+    SuspensionBoundary,
 };
 pub use cymule_virtual::{
     ArchivedWorkIndex, CompactedWorkIndex, ParkReason, RegionMigrationCommand, RegionMigrationKind,

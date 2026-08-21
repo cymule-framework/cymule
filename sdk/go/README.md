@@ -25,5 +25,5 @@ plan, err := engine.Seal(candidate)
 plugin. `Finish` returns a deep-frozen candidate: later builder changes cannot
 mutate it. Context cancellation and deadlines preserve structured Engine
 failures, including `unknown_world_outcome` for a lost mutating response.
-Migration and shadow evolution commands require a transport with their pinned
-adapter or driver binding; the local CLI rejects those variants when unbound.
+Use `SQLiteStore` or a custom Engine for other stores; queries omit the
+executor. Migration and shadow commands accept exact-revision process targets.

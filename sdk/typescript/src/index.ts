@@ -264,23 +264,130 @@ export interface DurableControl<Response = Json> {
   submit(command: DurableCommand): Promise<Response>;
 }
 
+export interface EngineStoreTarget {
+  provider: string;
+  location: string;
+  domain?: string;
+}
+
+export interface EnginePluginTarget {
+  provider: string;
+  location: string;
+  revision?: string;
+}
+
+export interface EngineDurableTarget {
+  store: EngineStoreTarget;
+  executor?: EnginePluginTarget;
+}
+
+export interface EngineEvolutionTarget {
+  store: EngineStoreTarget;
+  migration?: EnginePluginTarget;
+  shadow?: EnginePluginTarget;
+}
+
+export const directoryStore = (location: string): EngineStoreTarget => ({
+  provider: "cymule.directory-store/2",
+  location,
+});
+
+export const sqliteStore = (location: string, domain: string): EngineStoreTarget => ({
+  provider: "cymule.sqlite-store/2",
+  location,
+  domain,
+});
+
+export const processPlugin = (location: string, revision?: string): EnginePluginTarget => ({
+  provider: "cymule.executor-process/1",
+  location,
+  ...(revision === undefined ? {} : { revision }),
+});
+
+export interface DurableFrameState {
+  definition_id: string;
+  invocation_id: string;
+  invocation_path: Array<{ site_id: string; region_path: number[]; scope_id: string; epoch: number }>;
+  scope_id: string;
+  input: ArtifactRef;
+  region_path: number[];
+  next_step: number;
+  locals: Record<string, ArtifactRef>;
+}
+
+export interface DurableContinuation {
+  run_id: string;
+  plan_id: string;
+  binding_context: string;
+  frames: DurableFrameState[];
+  state: ArtifactRef | null;
+  wait_set: string[];
+  scope_stack: string[];
+  effect_obligations: string[];
+  authority_leases: string[];
+  budget: Record<string, number>;
+  causal_frontier: string[];
+  epoch: number;
+  status: "ready" | "waiting" | "running" | "completed";
+}
+
+export interface DurableWaitCondition {
+  wait_id: string;
+  run_id: string;
+  kind: { kind: "signal"; key: string } | { kind: "timer"; timer_id: string } |
+    { kind: "input"; correlation: string; schema: Json };
+  consume_once: boolean;
+  owner: {
+    invocation_id: string; definition_id: string; site_id: string;
+    region_path: number[]; step_index: number; bind: string | null;
+  };
+  state: "pending" | "completed" | "cancelled";
+  result: ArtifactRef | null;
+}
+
+export interface DurableEffectDispatch {
+  intent_id: string;
+  run_id: string;
+  operation: string;
+  input: ArtifactRef;
+  occurrence_binding: string;
+  state: "pending" | "claimed" | "applied" | "not_applied" | "unknown";
+  claim_epoch: number;
+  claim_owner: string | null;
+  result: ArtifactRef | null;
+}
+
+export interface DurableRunView {
+  revision: string;
+  continuation: DurableContinuation;
+  waits: DurableWaitCondition[];
+  effects: DurableEffectDispatch[];
+  result: ArtifactRef | null;
+}
+
+export type DurableBoundary =
+  | { status: "suspended"; wait_id: string }
+  | { status: "reconciliation_required"; intent_id: string }
+  | { status: "release_required"; intent_ids: string[] }
+  | { status: "completed"; result: ExecutionResult };
+
 export type DurableResponse =
-  | { type: "run_boundary"; boundary: Json }
+  | { type: "run_boundary"; boundary: DurableBoundary }
   | { type: "wait_activated"; ready_run_ids: string[] }
-  | { type: "run"; run: Json | null }
-  | { type: "domain"; domain: Json };
+  | { type: "run"; run: DurableRunView | null }
+  | { type: "domain"; domain: { revision: string | null; run_ids: string[] } };
 
 export type LiveEvolutionResponse =
-  | { result: "definition_published"; revision: Json }
-  | { result: "template_registered"; linked: Json }
-  | { result: "publication_applied"; receipt: Json }
-  | { result: "patch_applied"; edge: Json }
+  | { result: "definition_published"; revision: Record<string, unknown> }
+  | { result: "template_registered"; linked: Record<string, unknown> }
+  | { result: "publication_applied"; receipt: Record<string, unknown> }
+  | { result: "patch_applied"; edge: Record<string, unknown> }
   | { result: "applied" }
   | { result: "occurrence_selected"; plan_id: string }
-  | { result: "migrated"; receipt: Json }
-  | { result: "restart_authorized"; receipt: Json }
-  | { result: "shadow_recorded"; comparison: Json }
-  | { result: "gate_applied"; transition: Json };
+  | { result: "migrated"; receipt: Record<string, unknown> }
+  | { result: "restart_authorized"; receipt: Record<string, unknown> }
+  | { result: "shadow_recorded"; comparison: Record<string, unknown> }
+  | { result: "gate_applied"; transition: Record<string, unknown> };
 
 export type ParkReason =
   | { kind: "wait"; key: string }
@@ -1494,8 +1601,8 @@ export class CliEngine {
     return response.command;
   }
 
-  executeDurable(store: string, plugin: string, command: DurableCommand): DurableResponse {
-    const response = this.request({ type: "execute_durable", store, plugin, command });
+  executeDurable(target: EngineDurableTarget, command: DurableCommand): DurableResponse {
+    const response = this.request({ type: "execute_durable", target, command });
     if (response.type !== "durable_executed") {
       throw unexpectedResponse("durable_executed", response.type);
     }
@@ -1503,13 +1610,13 @@ export class CliEngine {
   }
 
   executeLiveEvolution(
-    store: string,
+    target: EngineEvolutionTarget,
     journalId: string,
     command: LiveEvolutionCommand,
   ): LiveEvolutionResponse {
     const response = this.request({
       type: "execute_live_evolution",
-      store,
+      target,
       journal_id: journalId,
       command,
     });
@@ -1584,10 +1691,12 @@ export class DurableEngine {
   readonly #transport: CliEngine;
 
   constructor(
-    readonly store: string,
-    readonly plugin: string,
+    readonly store: EngineStoreTarget | string,
+    readonly executor: EnginePluginTarget | string | undefined,
     transport = new CliEngine(),
     readonly evolutionJournal = "cymule.sdk.live-evolution",
+    readonly migration?: EnginePluginTarget,
+    readonly shadow?: EnginePluginTarget,
   ) {
     this.#transport = transport;
   }
@@ -1596,7 +1705,7 @@ export class DurableEngine {
     return this.submit(DurableControlBuilder.startRun(runId, candidate, input));
   }
 
-  get(runId: string): Json | null {
+  get(runId: string): DurableRunView | null {
     const response = this.submit(DurableControlBuilder.queryRun(`sdk:get:${runId}`, runId));
     if (response.type !== "run") throw unexpectedResponse("run", response.type);
     return response.run;
@@ -1620,11 +1729,27 @@ export class DurableEngine {
   }
 
   evolve(command: LiveEvolutionCommand): LiveEvolutionResponse {
-    return this.#transport.executeLiveEvolution(this.store, this.evolutionJournal, command);
+    return this.#transport.executeLiveEvolution(
+      {
+        store: typeof this.store === "string" ? directoryStore(this.store) : this.store,
+        ...(this.migration === undefined ? {} : { migration: this.migration }),
+        ...(this.shadow === undefined ? {} : { shadow: this.shadow }),
+      },
+      this.evolutionJournal,
+      command,
+    );
   }
 
   private submit(command: DurableCommand): DurableResponse {
-    return this.#transport.executeDurable(this.store, this.plugin, command);
+    const query = command.type === "query_run" || command.type === "query_domain";
+    const store = typeof this.store === "string" ? directoryStore(this.store) : this.store;
+    const executor = typeof this.executor === "string"
+      ? processPlugin(this.executor)
+      : this.executor;
+    return this.#transport.executeDurable(
+      { store, ...(!query && executor !== undefined ? { executor } : {}) },
+      command,
+    );
   }
 }
 
@@ -1654,10 +1779,10 @@ type EngineRequest =
   | { type: "verify_durable_command"; command: DurableCommand }
   | { type: "verify_evolution_command"; command: EvolutionCommand }
   | { type: "verify_live_evolution_command"; command: LiveEvolutionCommand }
-  | { type: "execute_durable"; store: string; plugin: string; command: DurableCommand }
+  | { type: "execute_durable"; target: EngineDurableTarget; command: DurableCommand }
   | {
       type: "execute_live_evolution";
-      store: string;
+      target: EngineEvolutionTarget;
       journal_id: string;
       command: LiveEvolutionCommand;
     }
@@ -1886,6 +2011,120 @@ function validateDurableResponse(value: unknown): void {
   if (keys === undefined || Object.keys(value).sort().join(",") !== keys) {
     throw transportError("invalid_engine_response", "durable response fields are not closed");
   }
+  if (value.type === "run_boundary") {
+    validateDurableBoundary(value.boundary);
+  } else if (value.type === "wait_activated") {
+    requireStringArray(value.ready_run_ids, "ready Run identities");
+  } else if (value.type === "run") {
+    if (value.run !== null) validateDurableRunView(value.run);
+  } else {
+    requireClosedRecord(value.domain, ["revision", "run_ids"], "durable domain view");
+    if (value.domain.revision !== null && !isNonEmptyString(value.domain.revision)) {
+      throw transportError("invalid_engine_response", "durable revision is invalid");
+    }
+    requireStringArray(value.domain.run_ids, "durable Run index");
+  }
+}
+
+function validateDurableBoundary(value: unknown): void {
+  if (!isRecord(value)) throw transportError("invalid_engine_response", "durable boundary is invalid");
+  const fields = new Map<string, string>([
+    ["suspended", "status,wait_id"],
+    ["reconciliation_required", "intent_id,status"],
+    ["release_required", "intent_ids,status"],
+    ["completed", "result,status"],
+  ]).get(String(value.status));
+  if (fields === undefined || Object.keys(value).sort().join(",") !== fields) {
+    throw transportError("invalid_engine_response", "durable boundary is not closed");
+  }
+  if (value.status === "suspended") requireStrings(value, ["wait_id"]);
+  if (value.status === "reconciliation_required") requireStrings(value, ["intent_id"]);
+  if (value.status === "release_required") requireStringArray(value.intent_ids, "effect intents");
+  if (value.status === "completed") validateExecutionResult(value.result);
+}
+
+function validateExecutionResult(value: unknown): void {
+  requireClosedRecord(value, ["run_id", "plan_id", "value", "projection_digest", "precondition_token", "effects"], "execution result");
+  requireStrings(value, ["run_id", "plan_id", "projection_digest", "precondition_token"]);
+  requireStringArray(value.effects, "execution effects");
+}
+
+function validateDurableRunView(value: unknown): void {
+  requireClosedRecord(value, ["revision", "continuation", "waits", "effects", "result"], "durable Run view");
+  requireStrings(value, ["revision"]);
+  validateContinuation(value.continuation);
+  if (!Array.isArray(value.waits)) throw transportError("invalid_engine_response", "durable waits are invalid");
+  value.waits.forEach(validateWaitCondition);
+  if (!Array.isArray(value.effects)) throw transportError("invalid_engine_response", "durable effects are invalid");
+  value.effects.forEach(validateEffectDispatch);
+  if (value.result !== null) validateArtifactRef(value.result);
+}
+
+function validateContinuation(value: unknown): void {
+  requireClosedRecord(value, [
+    "run_id", "plan_id", "binding_context", "frames", "state", "wait_set", "scope_stack",
+    "effect_obligations", "authority_leases", "budget", "causal_frontier", "epoch", "status",
+  ], "Continuation");
+  requireStrings(value, ["run_id", "plan_id", "binding_context"]);
+  if (!new Set(["ready", "waiting", "running", "completed"]).has(String(value.status))) {
+    throw transportError("invalid_engine_response", "Continuation status is invalid");
+  }
+  requireEpoch(value.epoch);
+  for (const field of ["wait_set", "scope_stack", "effect_obligations", "authority_leases", "causal_frontier"]) {
+    requireStringArray(value[field], `Continuation ${field}`);
+  }
+  if (value.state !== null) validateArtifactRef(value.state);
+  if (!isRecord(value.budget) || !Object.values(value.budget).every(isNonNegativeInteger)) {
+    throw transportError("invalid_engine_response", "Continuation budget is invalid");
+  }
+  if (!Array.isArray(value.frames)) throw transportError("invalid_engine_response", "Continuation frames are invalid");
+  for (const frame of value.frames) {
+    requireClosedRecord(frame, ["definition_id", "invocation_id", "invocation_path", "scope_id", "input", "region_path", "next_step", "locals"], "Continuation frame");
+    requireStrings(frame, ["definition_id", "invocation_id", "scope_id"]);
+    validateArtifactRef(frame.input);
+    requireIndexArray(frame.region_path, "frame Region path");
+    if (!isNonNegativeInteger(frame.next_step) || !isRecord(frame.locals)) throw transportError("invalid_engine_response", "Continuation frame is invalid");
+    Object.values(frame.locals).forEach(validateArtifactRef);
+    if (!Array.isArray(frame.invocation_path)) throw transportError("invalid_engine_response", "invocation path is invalid");
+    for (const segment of frame.invocation_path) {
+      requireClosedRecord(segment, ["site_id", "region_path", "scope_id", "epoch"], "invocation segment");
+      requireStrings(segment, ["site_id", "scope_id"]);
+      requireIndexArray(segment.region_path, "invocation Region path");
+      requireEpoch(segment.epoch);
+    }
+  }
+}
+
+function validateWaitCondition(value: unknown): void {
+  requireClosedRecord(value, ["wait_id", "run_id", "kind", "consume_once", "owner", "state", "result"], "wait condition");
+  requireStrings(value, ["wait_id", "run_id"]);
+  if (typeof value.consume_once !== "boolean" || !new Set(["pending", "completed", "cancelled"]).has(String(value.state))) throw transportError("invalid_engine_response", "wait condition state is invalid");
+  validateDurableWaitKind(value.kind);
+  requireClosedRecord(value.owner, ["invocation_id", "definition_id", "site_id", "region_path", "step_index", "bind"], "wait owner");
+  requireStrings(value.owner, ["invocation_id", "definition_id", "site_id"]);
+  requireIndexArray(value.owner.region_path, "wait owner Region path");
+  requireEpoch(value.owner.step_index);
+  if (value.owner.bind !== null && !isNonEmptyString(value.owner.bind)) throw transportError("invalid_engine_response", "wait bind is invalid");
+  if (value.result !== null) validateArtifactRef(value.result);
+}
+
+function validateDurableWaitKind(value: unknown): void {
+  if (!isRecord(value)) throw transportError("invalid_engine_response", "durable wait kind is invalid");
+  const fields = value.kind === "signal" ? "key,kind" : value.kind === "timer" ? "kind,timer_id" : value.kind === "input" ? "correlation,kind,schema" : undefined;
+  if (fields === undefined || Object.keys(value).sort().join(",") !== fields) throw transportError("invalid_engine_response", "durable wait kind is not closed");
+  if (value.kind === "signal") requireStrings(value, ["key"]);
+  if (value.kind === "timer") requireStrings(value, ["timer_id"]);
+  if (value.kind === "input") requireStrings(value, ["correlation"]);
+}
+
+function validateEffectDispatch(value: unknown): void {
+  requireClosedRecord(value, ["intent_id", "run_id", "operation", "input", "occurrence_binding", "state", "claim_epoch", "claim_owner", "result"], "effect dispatch");
+  requireStrings(value, ["intent_id", "run_id", "operation", "occurrence_binding"]);
+  validateArtifactRef(value.input);
+  requireEpoch(value.claim_epoch);
+  if (!new Set(["pending", "claimed", "applied", "not_applied", "unknown"]).has(String(value.state))) throw transportError("invalid_engine_response", "effect state is invalid");
+  if (value.claim_owner !== null && !isNonEmptyString(value.claim_owner)) throw transportError("invalid_engine_response", "effect claim owner is invalid");
+  if (value.result !== null) validateArtifactRef(value.result);
 }
 
 function validateLiveEvolutionResponse(value: unknown): void {
@@ -1902,6 +2141,83 @@ function validateLiveEvolutionResponse(value: unknown): void {
   if (keys === undefined || Object.keys(value).sort().join(",") !== keys) {
     throw transportError("invalid_engine_response", "live-evolution response fields are not closed");
   }
+  switch (value.result) {
+    case "definition_published": validateSubflowRevision(value.revision); break;
+    case "template_registered": validateLinkedPlan(value.linked); break;
+    case "publication_applied":
+      requireClosedRecord(value.receipt, ["revision", "updates"], "publication receipt");
+      validateSubflowRevision(value.receipt.revision);
+      if (!Array.isArray(value.receipt.updates)) throw transportError("invalid_engine_response", "publication updates are invalid");
+      for (const update of value.receipt.updates) {
+        requireClosedRecord(update, ["template_id", "previous_plan_id", "current_plan_id", "decision_id", "advanced"], "template update");
+        requireStrings(update, ["template_id", "previous_plan_id", "current_plan_id"]);
+        if ((update.decision_id !== null && !isNonEmptyString(update.decision_id)) || typeof update.advanced !== "boolean") throw transportError("invalid_engine_response", "template update is invalid");
+      }
+      break;
+    case "patch_applied": validatePlanEdge(value.edge); break;
+    case "occurrence_selected": if (!isNonEmptyString(value.plan_id)) throw transportError("invalid_engine_response", "selected Plan is invalid"); break;
+    case "migrated": validateMigrationReceipt(value.receipt); break;
+    case "restart_authorized":
+      requireClosedRecord(value.receipt, ["request", "target_plan"], "restart receipt");
+      validateEvolutionRequest(value.receipt.request, ["evidence", "from_plan", "input", "replacement_run", "restart_id", "safe_point_id", "source_epoch", "source_run", "to_plan"], ["restart_id", "source_run", "replacement_run", "from_plan", "to_plan", "safe_point_id"]);
+      validateSealedPlan(value.receipt.target_plan);
+      break;
+    case "shadow_recorded": validateShadowComparison(value.comparison); break;
+    case "gate_applied": validateRolloutTransition(value.transition); break;
+  }
+}
+
+function validateSubflowRevision(value: unknown): void {
+  requireClosedRecord(value, ["revision_version", "revision_id", "logical_ref", "sequence", "definition", "references"], "subflow revision");
+  if (value.revision_version !== "cymule.subflow-revision/2") throw transportError("invalid_engine_response", "subflow revision version is invalid");
+  requireStrings(value, ["revision_id", "logical_ref"]);
+  requireEpoch(value.sequence);
+  if (!isRecord(value.definition) || !Array.isArray(value.references)) throw transportError("invalid_engine_response", "subflow revision payload is invalid");
+  for (const reference of value.references) {
+    requireClosedRecord(reference, ["logical_ref", "local_definition", "input_schema", "output_schema", "strategy"], "subflow reference");
+    requireStrings(reference, ["logical_ref", "local_definition"]);
+    if (!isRecord(reference.strategy) || !new Set(["latest_compatible", "pinned"]).has(String(reference.strategy.strategy))) throw transportError("invalid_engine_response", "subflow strategy is invalid");
+  }
+}
+
+function validateLinkedPlan(value: unknown): void {
+  requireClosedRecord(value, ["template_id", "plan", "resolved_revisions"], "linked Plan");
+  requireStrings(value, ["template_id"]);
+  validateSealedPlan(value.plan);
+  if (!isRecord(value.resolved_revisions) || !Object.values(value.resolved_revisions).every(isNonEmptyString)) throw transportError("invalid_engine_response", "resolved revisions are invalid");
+}
+
+function validatePlanEdge(value: unknown): void {
+  requireClosedRecord(value, ["edge_id", "from_plan", "to_plan", "operations", "evidence"], "Plan edge");
+  requireStrings(value, ["edge_id", "from_plan", "to_plan"]);
+  validateArtifactRef(value.evidence);
+  if (!Array.isArray(value.operations)) throw transportError("invalid_engine_response", "Plan edge operations are invalid");
+  for (const operation of value.operations) requireClosedRecord(operation, ["kind", "target", "before", "after"], "patch operation");
+}
+
+function validateMigrationReceipt(value: unknown): void {
+  requireClosedRecord(value, ["migration_id", "run_id", "from_plan", "to_plan", "safe_point_id", "source_epoch", "target_epoch", "source_binding", "target_binding", "adapter_id", "adapter_revision", "from_schema", "to_schema", "input_state", "output_state", "evidence"], "migration receipt");
+  requireStrings(value, ["migration_id", "run_id", "from_plan", "to_plan", "safe_point_id", "adapter_id", "adapter_revision", "from_schema", "to_schema"]);
+  requireEpoch(value.source_epoch); requireEpoch(value.target_epoch);
+  for (const field of ["source_binding", "target_binding", "input_state", "output_state", "evidence"]) validateArtifactRef(value[field]);
+}
+
+function validateShadowComparison(value: unknown): void {
+  requireClosedRecord(value, ["comparison_id", "subject", "decision_id", "primary_plan", "shadow_plan", "driver_id", "driver_revision", "comparison_policy", "primary_digest", "shadow_digest", "equivalent", "evidence"], "shadow comparison");
+  requireStrings(value, ["comparison_id", "subject", "decision_id", "primary_plan", "shadow_plan", "driver_id", "driver_revision", "comparison_policy", "primary_digest", "shadow_digest"]);
+  if (typeof value.equivalent !== "boolean") throw transportError("invalid_engine_response", "shadow comparison result is invalid");
+  validateArtifactRef(value.evidence);
+}
+
+function validateRolloutTransition(value: unknown): void {
+  requireClosedRecord(value, ["transition_id", "from_decision", "to_decision", "evaluation"], "rollout transition");
+  requireStrings(value, ["transition_id", "from_decision", "to_decision"]);
+  requireClosedRecord(value.evaluation, ["evaluation_id", "gate", "target_observations", "target_failures", "equivalent_shadows", "inequivalent_shadows", "outcome", "evidence_ids"], "rollout evaluation");
+  requireStrings(value.evaluation, ["evaluation_id"]);
+  if (!new Set(["pending", "promote", "rollback"]).has(String(value.evaluation.outcome))) throw transportError("invalid_engine_response", "rollout outcome is invalid");
+  for (const field of ["target_observations", "target_failures", "equivalent_shadows", "inequivalent_shadows"]) requireEpoch(value.evaluation[field]);
+  requireStringArray(value.evaluation.evidence_ids, "rollout evidence");
+  if (!isRecord(value.evaluation.gate)) throw transportError("invalid_engine_response", "rollout gate is invalid");
 }
 
 function validateSealedPlan(value: unknown): void {
@@ -1976,6 +2292,22 @@ function requireStrings(value: Record<string, unknown>, fields: string[]): void 
 function requireEpoch(value: unknown): void {
   if (!Number.isSafeInteger(value) || Number(value) < 0) {
     throw transportError("invalid_engine_response", "evolution epoch is invalid");
+  }
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function requireIndexArray(value: unknown, label: string): void {
+  if (!Array.isArray(value) || !value.every(isNonNegativeInteger)) {
+    throw transportError("invalid_engine_response", `${label} is invalid`);
+  }
+}
+
+function requireStringArray(value: unknown, label: string): void {
+  if (!Array.isArray(value) || !value.every(isNonEmptyString)) {
+    throw transportError("invalid_engine_response", `${label} is invalid`);
   }
 }
 

@@ -19,6 +19,10 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
     io::stdin().read_to_end(&mut bytes)?;
+    let value: serde_json::Value = decode_json(&bytes)?;
+    if value.get("evolution_plugin_protocol").is_some() {
+        return evolution(value);
+    }
     let request: PluginRequest = decode_json(&bytes)?;
     let response = match request {
         PluginRequest::Describe => PluginResponse::Manifest {
@@ -86,5 +90,60 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
     println!("{}", serde_json::to_string(&response)?);
+    Ok(())
+}
+
+fn evolution(value: serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
+    let revision = value
+        .get("implementation_revision")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing implementation revision",
+            )
+        })?;
+    let request_type = value
+        .get("request")
+        .and_then(|request| request.get("type"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "missing evolution request type")
+        })?;
+    let response = match request_type {
+        "describe_migration" => serde_json::json!({
+            "type": "migration_descriptor",
+            "descriptor": {
+                "adapter_id": "test.migration",
+                "adapter_revision": revision,
+                "from_plan": "sha256:test-from",
+                "to_plan": "sha256:test-to",
+                "from_schema": "schema:test-from",
+                "to_schema": "schema:test-to",
+                "state_coverage": "total_reachable_state",
+                "failure_and_cancellation": "preserved",
+                "budget_and_ownership": "preserved",
+                "authority_and_effects": "no_widening"
+            }
+        }),
+        "describe_shadow" => serde_json::json!({
+            "type": "shadow_descriptor",
+            "descriptor": {
+                "driver_id": "test.shadow",
+                "driver_revision": revision,
+                "target_effects": "suppressed_or_simulated",
+                "occurrence_bindings": "pinned"
+            }
+        }),
+        _ => return Err(format!("unsupported evolution request {request_type}").into()),
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "outcome": "success",
+            "evolution_plugin_protocol": "cymule.evolution-plugin/1",
+            "response": response
+        })
+    );
     Ok(())
 }

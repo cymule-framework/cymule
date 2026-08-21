@@ -72,3 +72,5 @@
 - Durable evolution records use the generic M1 journal with explicit checkpoint
   lineage. Receipt loss must reopen to the committed occurrence pin or control
   decision without creating a second edge or selection.
+- Process-hosted migration and shadow implementations use
+  `cymule.evolution-plugin/1`; descriptor revision must equal sealed bytes.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import unittest
 from collections.abc import Callable
 
@@ -20,6 +21,7 @@ from cymule import (
     VirtualSchedulingControlBuilder,
     VirtualWorkControlBuilder,
     WaitActivationBuilder,
+    sqlite_store,
 )
 from cymule import _unique_json_object, _validate_engine_envelope
 
@@ -330,12 +332,13 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(result["value"], input_value)
         self.assertEqual(len(result["effects"]), 1)
         with tempfile.TemporaryDirectory(prefix="cymule-python-durable-") as store:
-            durable = DurableEngine(store, plugin_path, engine)
+            target = sqlite_store(os.path.join(store, "domain.sqlite"), "sdk-python")
+            durable = DurableEngine(target, plugin_path, engine)
             self.assertEqual(
                 durable.start("run:python-durable-e2e", candidate, input_value)["type"],
                 "run_boundary",
             )
-            self.assertIsNotNone(durable.get("run:python-durable-e2e"))
+            self.assertIsNotNone(DurableEngine(target, None, engine).get("run:python-durable-e2e"))
             self.assertEqual(
                 durable.evolve(
                     LiveEvolutionControlBuilder.publish_definition(
@@ -346,6 +349,26 @@ class EndToEndTest(unittest.TestCase):
                 )["result"],
                 "definition_published",
             )
+
+    def test_python_rejects_malicious_engine_and_cancels_in_flight(self) -> None:
+        malicious = os.environ.get("CYMULE_MALICIOUS_ENGINE")
+        slow = os.environ.get("CYMULE_SLOW_ENGINE")
+        if malicious is None or slow is None:
+            self.skipTest("malicious Engine conformance is not configured")
+        with self.assertRaises(EngineError) as forged:
+            DurableEngine("unused", None, CliEngine(malicious)).get("run:fake")
+        self.assertEqual(forged.exception.failure["code"], "invalid_engine_response")
+        cancelled = threading.Event()
+        timer = threading.Timer(0.05, cancelled.set)
+        timer.start()
+        try:
+            with self.assertRaises(EngineError) as interrupted:
+                CliEngine(slow, timeout_seconds=5, cancelled=cancelled.is_set).seal(
+                    FlowBuilder("cancel-in-flight", {}, {}).finish({"kind": "input"})
+                )
+            self.assertEqual(interrupted.exception.failure["category"], "cancelled")
+        finally:
+            timer.cancel()
 
     def test_python_resource_seals_through_rust_engine(self) -> None:
         engine_path = os.environ.get("CYMULE_BIN")

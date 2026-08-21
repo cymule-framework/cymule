@@ -384,8 +384,12 @@ def main() -> int:
     validate_engine_request(
         {
             "type": "execute_durable",
-            "store": "/tmp/cymule-schema-domain",
-            "plugin": "/tmp/cymule-schema-plugin",
+            "target": {
+                "store": {
+                    "provider": "cymule.directory-store/2",
+                    "location": "/tmp/cymule-schema-domain",
+                }
+            },
             "command": durable_control,
         }
     )
@@ -590,7 +594,12 @@ def main() -> int:
     validate_engine_request(
         {
             "type": "execute_live_evolution",
-            "store": "/tmp/cymule-schema-domain",
+            "target": {
+                "store": {
+                    "provider": "cymule.directory-store/2",
+                    "location": "/tmp/cymule-schema-domain",
+                }
+            },
             "journal_id": "schema:live-evolution",
             "command": live_evolution,
         }

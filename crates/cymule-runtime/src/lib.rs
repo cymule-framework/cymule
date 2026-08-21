@@ -30,8 +30,10 @@ pub use plugin::{
     PluginManifest, PluginOperation, PluginRequest, PluginResponse,
 };
 pub use protocol::{
-    ENGINE_PROTOCOL_VERSION, EngineContractSide, EngineFailure, EngineFailureCategory, EngineIssue,
-    EnginePhase, EngineRequestEnvelope, EngineResponseEnvelope, EngineResult,
-    EngineRetryDisposition,
+    ENGINE_DIRECTORY_STORE_PROVIDER, ENGINE_PROCESS_EXECUTOR_PROVIDER, ENGINE_PROTOCOL_VERSION,
+    ENGINE_SQLITE_STORE_PROVIDER, EVOLUTION_PLUGIN_PROTOCOL_VERSION, EngineContractSide,
+    EngineDurableTarget, EngineEvolutionTarget, EngineFailure, EngineFailureCategory, EngineIssue,
+    EnginePhase, EnginePluginTarget, EngineRequestEnvelope, EngineResponseEnvelope, EngineResult,
+    EngineRetryDisposition, EngineStoreTarget,
 };
 pub use strict_json::validate_strict_json;

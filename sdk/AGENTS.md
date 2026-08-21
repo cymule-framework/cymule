@@ -70,3 +70,5 @@
   discover workers, read clocks, infer expiry, classify failures, or reduce
   state locally. Run-weight updates are typed future scheduling commands.
 - Avoid runtime dependencies unless they materially improve correctness.
+- Durable and live-evolution successes are recursively closed. Store, executor,
+  migration, and shadow targets remain separate; queries send no executor.

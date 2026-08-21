@@ -32,3 +32,6 @@
 - The package is `cymule-cli` and installs the `cymule` binary. Keep binary
   rustdoc disabled so it cannot collide with the public `cymule` facade library;
   user API documentation belongs to the facade and profile crates.
+- Dispatch provider-neutral store targets to directory or SQLite adapters.
+  Read-only commands never construct an executor. Migration and shadow calls
+  require a sealed process whose digest matches its returned descriptor.

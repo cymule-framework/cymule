@@ -47,20 +47,19 @@
         },
         {
           "type": "object", "additionalProperties": false,
-          "required": ["type", "store", "plugin", "command"],
+          "required": ["type", "target", "command"],
           "properties": {
             "type": { "const": "execute_durable" },
-            "store": { "type": "string", "minLength": 1 },
-            "plugin": { "type": "string", "minLength": 1 },
+            "target": { "$ref": "#/$defs/durableTarget" },
             "command": { "$ref": "durable-control.schema.json" }
           }
         },
         {
           "type": "object", "additionalProperties": false,
-          "required": ["type", "store", "journal_id", "command"],
+          "required": ["type", "target", "journal_id", "command"],
           "properties": {
             "type": { "const": "execute_live_evolution" },
-            "store": { "type": "string", "minLength": 1 },
+            "target": { "$ref": "#/$defs/evolutionTarget" },
             "journal_id": { "type": "string", "minLength": 1, "maxLength": 512 },
             "command": { "$ref": "live-evolution-control.schema.json" }
           }
@@ -73,6 +72,39 @@
           }
         }
       ]
+    },
+    "storeTarget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "location"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "location": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "domain": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "pluginTarget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "location"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "location": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "durableTarget": {
+      "type": "object", "additionalProperties": false, "required": ["store"],
+      "properties": {
+        "store": { "$ref": "#/$defs/storeTarget" },
+        "executor": { "$ref": "#/$defs/pluginTarget" }
+      }
+    },
+    "evolutionTarget": {
+      "type": "object", "additionalProperties": false, "required": ["store"],
+      "properties": {
+        "store": { "$ref": "#/$defs/storeTarget" },
+        "migration": { "$ref": "#/$defs/pluginTarget" },
+        "shadow": { "$ref": "#/$defs/pluginTarget" }
+      }
     },
     "responseEnvelope": {
       "oneOf": [
@@ -179,25 +211,250 @@
     },
     "durableResponse": {
       "oneOf": [
-        { "type": "object", "additionalProperties": false, "required": ["type", "boundary"], "properties": { "type": { "const": "run_boundary" }, "boundary": true } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "boundary"], "properties": { "type": { "const": "run_boundary" }, "boundary": { "$ref": "#/$defs/durableBoundary" } } },
         { "type": "object", "additionalProperties": false, "required": ["type", "ready_run_ids"], "properties": { "type": { "const": "wait_activated" }, "ready_run_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string" } } } },
-        { "type": "object", "additionalProperties": false, "required": ["type", "run"], "properties": { "type": { "const": "run" }, "run": { "type": ["object", "null"] } } },
-        { "type": "object", "additionalProperties": false, "required": ["type", "domain"], "properties": { "type": { "const": "domain" }, "domain": { "type": "object" } } }
+        { "type": "object", "additionalProperties": false, "required": ["type", "run"], "properties": { "type": { "const": "run" }, "run": { "oneOf": [{ "$ref": "#/$defs/durableRunView" }, { "type": "null" }] } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "domain"], "properties": { "type": { "const": "domain" }, "domain": { "$ref": "#/$defs/durableDomainView" } } }
       ]
     },
     "liveEvolutionResponse": {
       "oneOf": [
-        { "type": "object", "additionalProperties": false, "required": ["result", "revision"], "properties": { "result": { "const": "definition_published" }, "revision": { "type": "object" } } },
-        { "type": "object", "additionalProperties": false, "required": ["result", "linked"], "properties": { "result": { "const": "template_registered" }, "linked": { "type": "object" } } },
-        { "type": "object", "additionalProperties": false, "required": ["result", "receipt"], "properties": { "result": { "const": "publication_applied" }, "receipt": { "type": "object" } } },
-        { "type": "object", "additionalProperties": false, "required": ["result", "edge"], "properties": { "result": { "const": "patch_applied" }, "edge": { "type": "object" } } },
+        { "type": "object", "additionalProperties": false, "required": ["result", "revision"], "properties": { "result": { "const": "definition_published" }, "revision": { "$ref": "#/$defs/subflowRevision" } } },
+        { "type": "object", "additionalProperties": false, "required": ["result", "linked"], "properties": { "result": { "const": "template_registered" }, "linked": { "$ref": "#/$defs/linkedPlan" } } },
+        { "type": "object", "additionalProperties": false, "required": ["result", "receipt"], "properties": { "result": { "const": "publication_applied" }, "receipt": { "$ref": "#/$defs/publicationReceipt" } } },
+        { "type": "object", "additionalProperties": false, "required": ["result", "edge"], "properties": { "result": { "const": "patch_applied" }, "edge": { "$ref": "#/$defs/planEdge" } } },
         { "type": "object", "additionalProperties": false, "required": ["result"], "properties": { "result": { "const": "applied" } } },
         { "type": "object", "additionalProperties": false, "required": ["result", "plan_id"], "properties": { "result": { "const": "occurrence_selected" }, "plan_id": { "type": "string", "minLength": 1 } } },
-        { "type": "object", "additionalProperties": false, "required": ["result", "receipt"], "properties": { "result": { "const": "migrated" }, "receipt": { "type": "object" } } },
-        { "type": "object", "additionalProperties": false, "required": ["result", "receipt"], "properties": { "result": { "const": "restart_authorized" }, "receipt": { "type": "object" } } },
-        { "type": "object", "additionalProperties": false, "required": ["result", "comparison"], "properties": { "result": { "const": "shadow_recorded" }, "comparison": { "type": "object" } } },
-        { "type": "object", "additionalProperties": false, "required": ["result", "transition"], "properties": { "result": { "const": "gate_applied" }, "transition": { "type": "object" } } }
+        { "type": "object", "additionalProperties": false, "required": ["result", "receipt"], "properties": { "result": { "const": "migrated" }, "receipt": { "$ref": "#/$defs/migrationReceipt" } } },
+        { "type": "object", "additionalProperties": false, "required": ["result", "receipt"], "properties": { "result": { "const": "restart_authorized" }, "receipt": { "$ref": "#/$defs/restartReceipt" } } },
+        { "type": "object", "additionalProperties": false, "required": ["result", "comparison"], "properties": { "result": { "const": "shadow_recorded" }, "comparison": { "$ref": "#/$defs/shadowComparison" } } },
+        { "type": "object", "additionalProperties": false, "required": ["result", "transition"], "properties": { "result": { "const": "gate_applied" }, "transition": { "$ref": "#/$defs/rolloutTransition" } } }
       ]
+    },
+    "artifactRef": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity_version", "artifact_id", "kind"],
+      "properties": {
+        "identity_version": { "const": "cymule.artifact/2" },
+        "artifact_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "kind": { "type": "string", "pattern": "^[a-z0-9._+-]+(?:/[a-z0-9._+-]+)+$" }
+      }
+    },
+    "nullableArtifact": { "oneOf": [{ "$ref": "#/$defs/artifactRef" }, { "type": "null" }] },
+    "durableBoundary": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["status", "wait_id"], "properties": { "status": { "const": "suspended" }, "wait_id": { "type": "string", "minLength": 1 } } },
+        { "type": "object", "additionalProperties": false, "required": ["status", "intent_id"], "properties": { "status": { "const": "reconciliation_required" }, "intent_id": { "type": "string", "minLength": 1 } } },
+        { "type": "object", "additionalProperties": false, "required": ["status", "intent_ids"], "properties": { "status": { "const": "release_required" }, "intent_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } } } },
+        { "type": "object", "additionalProperties": false, "required": ["status", "result"], "properties": { "status": { "const": "completed" }, "result": { "$ref": "#/$defs/executionResult" } } }
+      ]
+    },
+    "invocationPathSegment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["site_id", "region_path", "scope_id", "epoch"],
+      "properties": {
+        "site_id": { "type": "string", "minLength": 1 },
+        "region_path": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "scope_id": { "type": "string", "minLength": 1 },
+        "epoch": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "frameState": {
+      "type": "object", "additionalProperties": false,
+      "required": ["definition_id", "invocation_id", "invocation_path", "scope_id", "input", "region_path", "next_step", "locals"],
+      "properties": {
+        "definition_id": { "type": "string", "minLength": 1 },
+        "invocation_id": { "type": "string", "minLength": 1 },
+        "invocation_path": { "type": "array", "items": { "$ref": "#/$defs/invocationPathSegment" } },
+        "scope_id": { "type": "string", "minLength": 1 },
+        "input": { "$ref": "#/$defs/artifactRef" },
+        "region_path": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "next_step": { "type": "integer", "minimum": 0 },
+        "locals": { "type": "object", "additionalProperties": { "$ref": "#/$defs/artifactRef" } }
+      }
+    },
+    "continuation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "plan_id", "binding_context", "frames", "state", "wait_set", "scope_stack", "effect_obligations", "authority_leases", "budget", "causal_frontier", "epoch", "status"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "plan_id": { "type": "string", "minLength": 1 },
+        "binding_context": { "type": "string", "minLength": 1 },
+        "frames": { "type": "array", "items": { "$ref": "#/$defs/frameState" } },
+        "state": { "$ref": "#/$defs/nullableArtifact" },
+        "wait_set": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "scope_stack": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "effect_obligations": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "authority_leases": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "budget": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "causal_frontier": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "epoch": { "type": "integer", "minimum": 0 },
+        "status": { "enum": ["ready", "waiting", "running", "completed"] }
+      }
+    },
+    "waitOwner": {
+      "type": "object", "additionalProperties": false,
+      "required": ["invocation_id", "definition_id", "site_id", "region_path", "step_index", "bind"],
+      "properties": {
+        "invocation_id": { "type": "string", "minLength": 1 },
+        "definition_id": { "type": "string", "minLength": 1 },
+        "site_id": { "type": "string", "minLength": 1 },
+        "region_path": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "step_index": { "type": "integer", "minimum": 0 },
+        "bind": { "type": ["string", "null"] }
+      }
+    },
+    "waitKind": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "key"], "properties": { "kind": { "const": "signal" }, "key": { "type": "string", "minLength": 1 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "timer_id"], "properties": { "kind": { "const": "timer" }, "timer_id": { "type": "string", "minLength": 1 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "correlation", "schema"], "properties": { "kind": { "const": "input" }, "correlation": { "type": "string", "minLength": 1 }, "schema": { "oneOf": [{ "type": "boolean" }, { "type": "object" }] } } }
+      ]
+    },
+    "waitCondition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wait_id", "run_id", "kind", "consume_once", "owner", "state", "result"],
+      "properties": {
+        "wait_id": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 },
+        "kind": { "$ref": "#/$defs/waitKind" },
+        "consume_once": { "type": "boolean" },
+        "owner": { "$ref": "#/$defs/waitOwner" },
+        "state": { "enum": ["pending", "completed", "cancelled"] },
+        "result": { "$ref": "#/$defs/nullableArtifact" }
+      }
+    },
+    "effectDispatch": {
+      "type": "object", "additionalProperties": false,
+      "required": ["intent_id", "run_id", "operation", "input", "occurrence_binding", "state", "claim_epoch", "claim_owner", "result"],
+      "properties": {
+        "intent_id": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 },
+        "operation": { "type": "string", "minLength": 1 },
+        "input": { "$ref": "#/$defs/artifactRef" },
+        "occurrence_binding": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["pending", "claimed", "applied", "not_applied", "unknown"] },
+        "claim_epoch": { "type": "integer", "minimum": 0 },
+        "claim_owner": { "type": ["string", "null"] },
+        "result": { "$ref": "#/$defs/nullableArtifact" }
+      }
+    },
+    "durableRunView": {
+      "type": "object", "additionalProperties": false,
+      "required": ["revision", "continuation", "waits", "effects", "result"],
+      "properties": {
+        "revision": { "type": "string", "minLength": 1 },
+        "continuation": { "$ref": "#/$defs/continuation" },
+        "waits": { "type": "array", "items": { "$ref": "#/$defs/waitCondition" } },
+        "effects": { "type": "array", "items": { "$ref": "#/$defs/effectDispatch" } },
+        "result": { "$ref": "#/$defs/nullableArtifact" }
+      }
+    },
+    "durableDomainView": {
+      "type": "object", "additionalProperties": false,
+      "required": ["revision", "run_ids"],
+      "properties": {
+        "revision": { "type": ["string", "null"] },
+        "run_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "subflowReference": { "$ref": "live-evolution-control.schema.json#/$defs/reference" },
+    "subflowRevision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["revision_version", "revision_id", "logical_ref", "sequence", "definition", "references"],
+      "properties": {
+        "revision_version": { "const": "cymule.subflow-revision/2" },
+        "revision_id": { "type": "string", "minLength": 1 },
+        "logical_ref": { "type": "string", "minLength": 1 },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "definition": { "$ref": "plan-candidate.schema.json#/$defs/definition" },
+        "references": { "type": "array", "items": { "$ref": "#/$defs/subflowReference" } }
+      }
+    },
+    "linkedPlan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["template_id", "plan", "resolved_revisions"],
+      "properties": {
+        "template_id": { "type": "string", "minLength": 1 },
+        "plan": { "$ref": "sealed-plan.schema.json" },
+        "resolved_revisions": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "publicationReceipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["revision", "updates"],
+      "properties": {
+        "revision": { "$ref": "#/$defs/subflowRevision" },
+        "updates": { "type": "array", "items": { "$ref": "#/$defs/templateUpdate" } }
+      }
+    },
+    "templateUpdate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["template_id", "previous_plan_id", "current_plan_id", "decision_id", "advanced"],
+      "properties": {
+        "template_id": { "type": "string", "minLength": 1 },
+        "previous_plan_id": { "type": "string", "minLength": 1 },
+        "current_plan_id": { "type": "string", "minLength": 1 },
+        "decision_id": { "type": ["string", "null"] },
+        "advanced": { "type": "boolean" }
+      }
+    },
+    "patchOperation": { "$ref": "evolution-control.schema.json#/$defs/patchOperation" },
+    "planEdge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["edge_id", "from_plan", "to_plan", "operations", "evidence"],
+      "properties": {
+        "edge_id": { "type": "string", "minLength": 1 },
+        "from_plan": { "type": "string", "minLength": 1 },
+        "to_plan": { "type": "string", "minLength": 1 },
+        "operations": { "type": "array", "items": { "$ref": "#/$defs/patchOperation" } },
+        "evidence": { "$ref": "#/$defs/artifactRef" }
+      }
+    },
+    "migrationReceipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["migration_id", "run_id", "from_plan", "to_plan", "safe_point_id", "source_epoch", "target_epoch", "source_binding", "target_binding", "adapter_id", "adapter_revision", "from_schema", "to_schema", "input_state", "output_state", "evidence"],
+      "properties": {
+        "migration_id": { "type": "string", "minLength": 1 }, "run_id": { "type": "string", "minLength": 1 },
+        "from_plan": { "type": "string", "minLength": 1 }, "to_plan": { "type": "string", "minLength": 1 },
+        "safe_point_id": { "type": "string", "minLength": 1 }, "source_epoch": { "type": "integer", "minimum": 0 }, "target_epoch": { "type": "integer", "minimum": 1 },
+        "source_binding": { "$ref": "#/$defs/artifactRef" }, "target_binding": { "$ref": "#/$defs/artifactRef" },
+        "adapter_id": { "type": "string", "minLength": 1 }, "adapter_revision": { "type": "string", "minLength": 1 },
+        "from_schema": { "type": "string", "minLength": 1 }, "to_schema": { "type": "string", "minLength": 1 },
+        "input_state": { "$ref": "#/$defs/artifactRef" }, "output_state": { "$ref": "#/$defs/artifactRef" }, "evidence": { "$ref": "#/$defs/artifactRef" }
+      }
+    },
+    "restartReceipt": {
+      "type": "object", "additionalProperties": false, "required": ["request", "target_plan"],
+      "properties": { "request": { "$ref": "evolution-control.schema.json#/$defs/restart" }, "target_plan": { "$ref": "sealed-plan.schema.json" } }
+    },
+    "shadowComparison": {
+      "type": "object", "additionalProperties": false,
+      "required": ["comparison_id", "subject", "decision_id", "primary_plan", "shadow_plan", "driver_id", "driver_revision", "comparison_policy", "primary_digest", "shadow_digest", "equivalent", "evidence"],
+      "properties": {
+        "comparison_id": { "type": "string", "minLength": 1 }, "subject": { "type": "string", "minLength": 1 }, "decision_id": { "type": "string", "minLength": 1 },
+        "primary_plan": { "type": "string", "minLength": 1 }, "shadow_plan": { "type": "string", "minLength": 1 },
+        "driver_id": { "type": "string", "minLength": 1 }, "driver_revision": { "type": "string", "minLength": 1 }, "comparison_policy": { "type": "string", "minLength": 1 },
+        "primary_digest": { "type": "string", "minLength": 1 }, "shadow_digest": { "type": "string", "minLength": 1 }, "equivalent": { "type": "boolean" }, "evidence": { "$ref": "#/$defs/artifactRef" }
+      }
+    },
+    "rolloutTransition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["transition_id", "from_decision", "to_decision", "evaluation"],
+      "properties": {
+        "transition_id": { "type": "string", "minLength": 1 }, "from_decision": { "type": "string", "minLength": 1 }, "to_decision": { "type": "string", "minLength": 1 },
+        "evaluation": { "$ref": "#/$defs/rolloutEvaluation" }
+      }
+    },
+    "rolloutEvaluation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evaluation_id", "gate", "target_observations", "target_failures", "equivalent_shadows", "inequivalent_shadows", "outcome", "evidence_ids"],
+      "properties": {
+        "evaluation_id": { "type": "string", "minLength": 1 }, "gate": { "$ref": "evolution-control.schema.json#/$defs/gate" },
+        "target_observations": { "type": "integer", "minimum": 0 }, "target_failures": { "type": "integer", "minimum": 0 },
+        "equivalent_shadows": { "type": "integer", "minimum": 0 }, "inequivalent_shadows": { "type": "integer", "minimum": 0 },
+        "outcome": { "enum": ["pending", "promote", "rollback"] }, "evidence_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
     },
     "failure": {
       "type": "object", "additionalProperties": false,

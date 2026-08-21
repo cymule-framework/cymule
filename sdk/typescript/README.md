@@ -32,8 +32,8 @@ store and process plugin are transport configuration; the Plan and durable
 command remain provider-neutral. A deadline or cancellation after a mutating
 request begins returns a structured `unknown_world_outcome` that callers must
 reconcile.
-Migration and shadow evolution commands require a transport with their pinned
-adapter/driver binding; the local CLI rejects those variants when unbound.
+Use `sqliteStore` or a custom Engine for other stores; queries omit the
+executor. Migration and shadow commands accept exact-revision process targets.
 
 Use `ResourceBuilder.external` for content-addressed/version-pinned objects,
 directories, collections, snapshots, and live references. Its optional manifest

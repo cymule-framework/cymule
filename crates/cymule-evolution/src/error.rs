@@ -14,6 +14,8 @@ pub enum EvolutionError {
     NotFound(String),
     /// A DAG, pin, rollout, or migration transition conflicts with history.
     Conflict(String),
+    /// A selected migration or shadow provider could not complete its protocol.
+    Substrate(String),
 }
 
 impl Display for EvolutionError {
@@ -23,6 +25,7 @@ impl Display for EvolutionError {
             Self::Contract(error) => write!(formatter, "contract_violation: {error}"),
             Self::NotFound(message) => write!(formatter, "not_found: {message}"),
             Self::Conflict(message) => write!(formatter, "conflict: {message}"),
+            Self::Substrate(message) => write!(formatter, "substrate_failed: {message}"),
         }
     }
 }

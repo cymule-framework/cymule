@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '%s\n' '{"outcome":"success","engine_protocol":"cymule.engine/2","response":{"type":"durable_executed","response":{"type":"run","run":{"revision":"sha256:fake","continuation":{"run_id":"run:fake","plan_id":"sha256:fake","binding_context":"sha256:fake","frames":[],"state":null,"wait_set":[],"scope_stack":[],"effect_obligations":[],"authority_leases":[],"budget":{},"causal_frontier":[],"epoch":0,"status":"ready","forged":true},"waits":[],"effects":[],"result":null}}}}'

@@ -90,9 +90,11 @@ disposition for an admitted external intent whose world outcome is unknown.
 SDKs MUST preserve the complete failure object. Process status and stderr are
 transport diagnostics only and MUST NOT become a parallel semantic error path.
 The CLI transport's `execute_durable` request MUST invoke the Rust durable
-runtime against one explicitly configured store and immutable plugin. Its
-`execute_live_evolution` request MUST checkpoint one closed command in the same
-durable domain. Validation-only requests are not execution receipts. Duplicate
+runtime against separate provider-neutral store and optional executor targets.
+Queries MUST omit the executor. Its `execute_live_evolution` request MUST
+checkpoint one closed command in the same durable domain. Migration and shadow
+processes MUST be sealed to the caller-pinned revision and speak
+`cymule.evolution-plugin/1`. Validation-only requests are not execution receipts. Duplicate
 JSON object keys, non-finite numbers, and integers outside the shared exact
 range of `-9007199254740991..=9007199254740991` MUST be rejected before
 semantic admission. If a deadline or cancellation loses the response to a

@@ -10,8 +10,8 @@ mod store;
 mod wait_source;
 
 pub use control::{
-    DURABLE_CONTROL_VERSION, DurableBoundary, DurableCommand, DurableDomainView, DurableResponse,
-    DurableRunView, DurableRuntimeControl,
+    DURABLE_CONTROL_VERSION, DurableBoundary, DurableCommand, DurableDomainView,
+    DurableQueryControl, DurableResponse, DurableRunView, DurableRuntimeControl,
 };
 pub use coordinator::{DurableCoordinator, RunMigrationCheckpoint};
 pub use error::{DurableError, DurableResult};

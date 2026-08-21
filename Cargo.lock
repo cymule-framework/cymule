@@ -423,6 +423,7 @@ dependencies = [
  "cymule-executor-process",
  "cymule-resource",
  "cymule-runtime",
+ "cymule-store-sqlite",
  "serde",
  "serde_json",
 ]

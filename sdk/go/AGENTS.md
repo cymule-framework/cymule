@@ -43,3 +43,5 @@
 - Keep migration and restart proof fields explicit and typed. Go transports do
   not derive safe points or reuse a source Run identity for a replacement.
 - Run `gofmt` and `go test ./...` for every change.
+- Validate every nested `json.RawMessage` in durable and live-evolution success
+  payloads before returning it.

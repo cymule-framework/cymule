@@ -6,6 +6,8 @@ import copy
 import json
 import re
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, TypedDict
 
@@ -24,6 +26,53 @@ EvolutionCommand = dict[str, Any]
 LiveEvolutionCommand = dict[str, Any]
 DurableCommand = dict[str, Any]
 ENGINE_PROTOCOL_VERSION = "cymule.engine/2"
+
+
+class EngineStoreTarget(TypedDict, total=False):
+    provider: str
+    location: str
+    domain: str
+
+
+class EnginePluginTarget(TypedDict, total=False):
+    provider: str
+    location: str
+    revision: str
+
+
+class EngineDurableTarget(TypedDict, total=False):
+    store: EngineStoreTarget
+    executor: EnginePluginTarget
+
+
+class EngineEvolutionTarget(TypedDict, total=False):
+    store: EngineStoreTarget
+    migration: EnginePluginTarget
+    shadow: EnginePluginTarget
+
+
+def directory_store(location: str | Path) -> EngineStoreTarget:
+    return {"provider": "cymule.directory-store/2", "location": str(location)}
+
+
+def sqlite_store(location: str | Path, domain: str) -> EngineStoreTarget:
+    return {
+        "provider": "cymule.sqlite-store/2",
+        "location": str(location),
+        "domain": domain,
+    }
+
+
+def process_plugin(
+    location: str | Path, revision: str | None = None
+) -> EnginePluginTarget:
+    target: EnginePluginTarget = {
+        "provider": "cymule.executor-process/1",
+        "location": str(location),
+    }
+    if revision is not None:
+        target["revision"] = revision
+    return target
 
 
 class EngineIssue(TypedDict, total=False):
@@ -1428,16 +1477,14 @@ class CliEngine:
 
     def execute_durable(
         self,
-        store: str | Path,
-        plugin: str | Path,
+        target: EngineDurableTarget,
         command: DurableCommand,
     ) -> dict[str, Any]:
         """Execute one closed stateful command against a durable Rust domain."""
         response = self._request(
             {
                 "type": "execute_durable",
-                "store": str(store),
-                "plugin": str(plugin),
+                "target": target,
                 "command": command,
             }
         )
@@ -1447,7 +1494,7 @@ class CliEngine:
 
     def execute_live_evolution(
         self,
-        store: str | Path,
+        target: EngineEvolutionTarget,
         journal_id: str,
         command: LiveEvolutionCommand,
     ) -> dict[str, Any]:
@@ -1455,7 +1502,7 @@ class CliEngine:
         response = self._request(
             {
                 "type": "execute_live_evolution",
-                "store": str(store),
+                "target": target,
                 "journal_id": journal_id,
                 "command": command,
             }
@@ -1492,27 +1539,72 @@ class CliEngine:
             "request": request,
         }
         _validate_json_value(envelope_request)
+        encoded = json.dumps(
+            envelope_request, separators=(",", ":"), allow_nan=False
+        ).encode()
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 [self.executable, "rpc"],
-                input=json.dumps(envelope_request, separators=(",", ":"), allow_nan=False),
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=self.timeout_seconds,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
         except OSError as error:
             raise _transport_error("engine_start_failed", str(error)) from error
-        except subprocess.TimeoutExpired as error:
-            raise _interrupted_error(request, "timed_out") from error
-        if completed.returncode != 0:
+        streams: dict[str, bytes | BaseException] = {}
+
+        def write_input() -> None:
+            try:
+                assert process.stdin is not None
+                process.stdin.write(encoded)
+                process.stdin.close()
+            except BaseException as error:  # retained until the process outcome is known
+                streams["stdin"] = error
+
+        def read_stream(name: str, stream: Any) -> None:
+            try:
+                streams[name] = stream.read(16 * 1024 * 1024 + 1)
+            except BaseException as error:  # retained until the process outcome is known
+                streams[name] = error
+
+        assert process.stdout is not None and process.stderr is not None
+        workers = [
+            threading.Thread(target=write_input),
+            threading.Thread(target=read_stream, args=("stdout", process.stdout)),
+            threading.Thread(target=read_stream, args=("stderr", process.stderr)),
+        ]
+        for worker in workers:
+            worker.start()
+        deadline = time.monotonic() + self.timeout_seconds
+        interruption: str | None = None
+        while process.poll() is None:
+            if self.cancelled is not None and self.cancelled():
+                interruption = "cancelled"
+                break
+            if time.monotonic() >= deadline:
+                interruption = "timed_out"
+                break
+            time.sleep(0.01)
+        if interruption is not None:
+            process.kill()
+        process.wait()
+        for worker in workers:
+            worker.join()
+        process.stdout.close()
+        process.stderr.close()
+        if interruption is not None:
+            raise _interrupted_error(request, interruption)
+        if process.returncode != 0:
             raise _transport_error(
                 "engine_process_failed",
-                f"engine exited without a protocol response (status {completed.returncode})",
+                f"engine exited without a protocol response (status {process.returncode})",
             )
+        stdout = streams.get("stdout")
+        if not isinstance(stdout, bytes) or len(stdout) > 16 * 1024 * 1024:
+            raise _transport_error("invalid_engine_response", "Engine stdout was unavailable or oversized")
         try:
-            envelope = _strict_json_loads(completed.stdout)
-        except (json.JSONDecodeError, ValueError) as error:
+            envelope = _strict_json_loads(stdout.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             raise _transport_error("invalid_engine_response", str(error)) from error
         _validate_engine_envelope(envelope)
         if envelope.get("engine_protocol") != ENGINE_PROTOCOL_VERSION:
@@ -1553,15 +1645,19 @@ class DurableEngine:
 
     def __init__(
         self,
-        store: str | Path,
-        plugin: str | Path,
+        store: EngineStoreTarget | str | Path,
+        plugin: EnginePluginTarget | str | Path | None,
         transport: CliEngine | None = None,
         evolution_journal: str = "cymule.sdk.live-evolution",
+        migration: EnginePluginTarget | None = None,
+        shadow: EnginePluginTarget | None = None,
     ) -> None:
-        self.store = Path(store)
-        self.plugin = Path(plugin)
+        self.store = directory_store(store) if isinstance(store, (str, Path)) else store
+        self.plugin = process_plugin(plugin) if isinstance(plugin, (str, Path)) else plugin
         self.transport = transport or CliEngine()
         self.evolution_journal = evolution_journal
+        self.migration = migration
+        self.shadow = shadow
 
     def start(self, run_id: str, candidate: dict[str, Any], input_value: Json) -> dict[str, Any]:
         return self._submit(DurableControlBuilder.start_run(run_id, candidate, input_value))
@@ -1591,11 +1687,21 @@ class DurableEngine:
 
     def evolve(self, command: LiveEvolutionCommand) -> dict[str, Any]:
         return self.transport.execute_live_evolution(
-            self.store, self.evolution_journal, command
+            {
+                "store": self.store,
+                **({"migration": self.migration} if self.migration is not None else {}),
+                **({"shadow": self.shadow} if self.shadow is not None else {}),
+            },
+            self.evolution_journal,
+            command,
         )
 
     def _submit(self, command: DurableCommand) -> dict[str, Any]:
-        return self.transport.execute_durable(self.store, self.plugin, command)
+        query = command["type"] in {"query_run", "query_domain"}
+        target: EngineDurableTarget = {"store": self.store}
+        if not query and self.plugin is not None:
+            target["executor"] = self.plugin
+        return self.transport.execute_durable(target, command)
 
 
 def _interrupted_error(request: dict[str, Any], kind: str) -> EngineError:
@@ -1741,33 +1847,9 @@ def _validate_success_response(value: object) -> None:
     if value["type"] == "sealed":
         _validate_sealed_plan(value["plan"])
     if value["type"] == "durable_executed":
-        _validate_tagged_result(
-            value["response"],
-            "type",
-            {
-                "run_boundary": {"type", "boundary"},
-                "wait_activated": {"type", "ready_run_ids"},
-                "run": {"type", "run"},
-                "domain": {"type", "domain"},
-            },
-        )
+        _validate_durable_response(value["response"])
     if value["type"] == "live_evolution_executed":
-        _validate_tagged_result(
-            value["response"],
-            "result",
-            {
-                "definition_published": {"result", "revision"},
-                "template_registered": {"result", "linked"},
-                "publication_applied": {"result", "receipt"},
-                "patch_applied": {"result", "edge"},
-                "applied": {"result"},
-                "occurrence_selected": {"result", "plan_id"},
-                "migrated": {"result", "receipt"},
-                "restart_authorized": {"result", "receipt"},
-                "shadow_recorded": {"result", "comparison"},
-                "gate_applied": {"result", "transition"},
-            },
-        )
+        _validate_live_evolution_response(value["response"])
 
     if value["type"] == "execution_boundary":
         _validate_execution_outcome(value["execution"])
@@ -1830,6 +1912,127 @@ def _validate_execution_outcome(value: object) -> None:
             raise _transport_error("invalid_engine_response", "effect release intents are invalid")
     else:
         _require_strings(nested, {"run_id", "plan_id", "intent_id"})
+
+
+def _validate_durable_response(value: object) -> None:
+    response = _validate_tagged_result(value, "type", {
+        "run_boundary": {"type", "boundary"}, "wait_activated": {"type", "ready_run_ids"},
+        "run": {"type", "run"}, "domain": {"type", "domain"},
+    })
+    kind = response["type"]
+    if kind == "run_boundary":
+        boundary = _validate_tagged_result(response["boundary"], "status", {
+            "suspended": {"status", "wait_id"},
+            "reconciliation_required": {"status", "intent_id"},
+            "release_required": {"status", "intent_ids"},
+            "completed": {"status", "result"},
+        })
+        if boundary["status"] == "completed":
+            _validate_execution_result(boundary["result"])
+        elif boundary["status"] == "release_required":
+            _require_string_list(boundary["intent_ids"], "effect intents")
+        else:
+            _require_strings(boundary, {"wait_id"} if boundary["status"] == "suspended" else {"intent_id"})
+    elif kind == "wait_activated":
+        _require_string_list(response["ready_run_ids"], "ready Runs")
+    elif kind == "run":
+        if response["run"] is not None:
+            _validate_durable_run(response["run"])
+    else:
+        domain = _require_closed_record(response["domain"], {"revision", "run_ids"}, "durable domain")
+        if domain["revision"] is not None and not _is_nonempty_string(domain["revision"]):
+            raise _transport_error("invalid_engine_response", "durable revision is invalid")
+        _require_string_list(domain["run_ids"], "durable Run index")
+
+
+def _validate_execution_result(value: object) -> None:
+    result = _require_closed_record(value, {"run_id", "plan_id", "value", "projection_digest", "precondition_token", "effects"}, "execution result")
+    _require_strings(result, {"run_id", "plan_id", "projection_digest", "precondition_token"})
+    _require_string_list(result["effects"], "execution effects")
+
+
+def _validate_durable_run(value: object) -> None:
+    run = _require_closed_record(value, {"revision", "continuation", "waits", "effects", "result"}, "durable Run")
+    _require_strings(run, {"revision"})
+    continuation = _require_closed_record(run["continuation"], {
+        "run_id", "plan_id", "binding_context", "frames", "state", "wait_set", "scope_stack",
+        "effect_obligations", "authority_leases", "budget", "causal_frontier", "epoch", "status",
+    }, "Continuation")
+    _require_strings(continuation, {"run_id", "plan_id", "binding_context"})
+    _validate_epoch(continuation["epoch"])
+    if continuation["status"] not in {"ready", "waiting", "running", "completed"}:
+        raise _transport_error("invalid_engine_response", "Continuation status is invalid")
+    for field in ("wait_set", "scope_stack", "effect_obligations", "authority_leases", "causal_frontier"):
+        _require_string_list(continuation[field], f"Continuation {field}")
+    if continuation["state"] is not None:
+        _validate_artifact_ref(continuation["state"])
+    if not isinstance(continuation["frames"], list) or not isinstance(continuation["budget"], dict):
+        raise _transport_error("invalid_engine_response", "Continuation projections are invalid")
+    for frame in continuation["frames"]:
+        typed = _require_closed_record(frame, {"definition_id", "invocation_id", "invocation_path", "scope_id", "input", "region_path", "next_step", "locals"}, "Continuation frame")
+        _require_strings(typed, {"definition_id", "invocation_id", "scope_id"})
+        _validate_artifact_ref(typed["input"])
+        _validate_epoch(typed["next_step"])
+        if not isinstance(typed["locals"], dict) or not isinstance(typed["invocation_path"], list):
+            raise _transport_error("invalid_engine_response", "Continuation frame projections are invalid")
+        for artifact in typed["locals"].values(): _validate_artifact_ref(artifact)
+    if not isinstance(run["waits"], list) or not isinstance(run["effects"], list):
+        raise _transport_error("invalid_engine_response", "durable Run collections are invalid")
+    for wait in run["waits"]:
+        typed = _require_closed_record(wait, {"wait_id", "run_id", "kind", "consume_once", "owner", "state", "result"}, "wait condition")
+        _require_strings(typed, {"wait_id", "run_id"})
+        if typed["result"] is not None: _validate_artifact_ref(typed["result"])
+    for effect in run["effects"]:
+        typed = _require_closed_record(effect, {"intent_id", "run_id", "operation", "input", "occurrence_binding", "state", "claim_epoch", "claim_owner", "result"}, "effect dispatch")
+        _require_strings(typed, {"intent_id", "run_id", "operation", "occurrence_binding"})
+        _validate_artifact_ref(typed["input"])
+        if typed["result"] is not None: _validate_artifact_ref(typed["result"])
+    if run["result"] is not None: _validate_artifact_ref(run["result"])
+
+
+def _validate_live_evolution_response(value: object) -> None:
+    response = _validate_tagged_result(value, "result", {
+        "definition_published": {"result", "revision"}, "template_registered": {"result", "linked"},
+        "publication_applied": {"result", "receipt"}, "patch_applied": {"result", "edge"},
+        "applied": {"result"}, "occurrence_selected": {"result", "plan_id"},
+        "migrated": {"result", "receipt"}, "restart_authorized": {"result", "receipt"},
+        "shadow_recorded": {"result", "comparison"}, "gate_applied": {"result", "transition"},
+    })
+    kind = response["result"]
+    if kind == "definition_published": _validate_subflow_revision(response["revision"])
+    elif kind == "template_registered": _validate_linked_plan(response["linked"])
+    elif kind == "publication_applied":
+        receipt = _require_closed_record(response["receipt"], {"revision", "updates"}, "publication receipt")
+        _validate_subflow_revision(receipt["revision"])
+        if not isinstance(receipt["updates"], list): raise _transport_error("invalid_engine_response", "publication updates are invalid")
+        for update in receipt["updates"]: _require_closed_record(update, {"template_id", "previous_plan_id", "current_plan_id", "decision_id", "advanced"}, "template update")
+    elif kind == "patch_applied":
+        edge = _require_closed_record(response["edge"], {"edge_id", "from_plan", "to_plan", "operations", "evidence"}, "Plan edge")
+        _require_strings(edge, {"edge_id", "from_plan", "to_plan"}); _validate_artifact_ref(edge["evidence"])
+    elif kind == "occurrence_selected": _require_strings(response, {"plan_id"})
+    elif kind == "migrated":
+        receipt = _require_closed_record(response["receipt"], {"migration_id", "run_id", "from_plan", "to_plan", "safe_point_id", "source_epoch", "target_epoch", "source_binding", "target_binding", "adapter_id", "adapter_revision", "from_schema", "to_schema", "input_state", "output_state", "evidence"}, "migration receipt")
+        for field in ("source_binding", "target_binding", "input_state", "output_state", "evidence"): _validate_artifact_ref(receipt[field])
+    elif kind == "restart_authorized":
+        receipt = _require_closed_record(response["receipt"], {"request", "target_plan"}, "restart receipt"); _validate_sealed_plan(receipt["target_plan"])
+    elif kind == "shadow_recorded":
+        comparison = _require_closed_record(response["comparison"], {"comparison_id", "subject", "decision_id", "primary_plan", "shadow_plan", "driver_id", "driver_revision", "comparison_policy", "primary_digest", "shadow_digest", "equivalent", "evidence"}, "shadow comparison"); _validate_artifact_ref(comparison["evidence"])
+    elif kind == "gate_applied":
+        transition = _require_closed_record(response["transition"], {"transition_id", "from_decision", "to_decision", "evaluation"}, "rollout transition")
+        _require_closed_record(transition["evaluation"], {"evaluation_id", "gate", "target_observations", "target_failures", "equivalent_shadows", "inequivalent_shadows", "outcome", "evidence_ids"}, "rollout evaluation")
+
+
+def _validate_subflow_revision(value: object) -> None:
+    revision = _require_closed_record(value, {"revision_version", "revision_id", "logical_ref", "sequence", "definition", "references"}, "subflow revision")
+    if revision["revision_version"] != "cymule.subflow-revision/2": raise _transport_error("invalid_engine_response", "subflow revision version is invalid")
+    _require_strings(revision, {"revision_id", "logical_ref"}); _validate_epoch(revision["sequence"])
+    if not isinstance(revision["definition"], dict) or not isinstance(revision["references"], list): raise _transport_error("invalid_engine_response", "subflow revision payload is invalid")
+
+
+def _validate_linked_plan(value: object) -> None:
+    linked = _require_closed_record(value, {"template_id", "plan", "resolved_revisions"}, "linked Plan")
+    _require_strings(linked, {"template_id"}); _validate_sealed_plan(linked["plan"])
+    if not isinstance(linked["resolved_revisions"], dict) or not all(_is_nonempty_string(v) for v in linked["resolved_revisions"].values()): raise _transport_error("invalid_engine_response", "resolved revisions are invalid")
 
 
 def _validate_evolution_command(value: object) -> None:
@@ -1914,12 +2117,18 @@ def _validate_live_evolution_command(value: object) -> None:
 
 def _validate_tagged_result(
     value: object, tag: str, variants: dict[str, set[str]]
-) -> None:
+) -> dict[str, Any]:
     if not isinstance(value, dict) or not isinstance(value.get(tag), str):
         raise _transport_error("invalid_engine_response", "response union is not tagged")
     expected = variants.get(value[tag])
     if expected is None or set(value) != expected:
         raise _transport_error("invalid_engine_response", "response union fields are not closed")
+    return value
+
+
+def _require_string_list(value: object, label: str) -> None:
+    if not isinstance(value, list) or not all(_is_nonempty_string(item) for item in value):
+        raise _transport_error("invalid_engine_response", f"{label} are invalid")
 
 
 def _validate_sealed_plan(value: object) -> None:

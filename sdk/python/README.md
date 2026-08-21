@@ -29,8 +29,8 @@ outside the candidate. Resource IDs are always validated and sealed by Rust.
 `start`, `get`, `resume`, `signal`, `release`, and `evolve` operations. Python
 does not replay Continuations or reduce state. Non-finite numbers, duplicate
 response keys, and integers outside the shared safe JSON range fail closed.
-Migration and shadow evolution commands require a transport with their pinned
-adapter or driver binding; the local CLI rejects them when unbound.
+Use `sqlite_store` or a custom Engine for other stores; queries omit the
+executor. Migration and shadow commands accept exact-revision process targets.
 
 
 `WaitActivationBuilder` creates provider-neutral signal and timer delivery

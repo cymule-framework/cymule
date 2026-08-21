@@ -28,6 +28,8 @@ CYMULE_EVOLUTION_CONTROL_FIXTURE="$ROOT/tests/fixtures/evolution-control.json"
 CYMULE_EVOLUTION_RESTART_FIXTURE="$ROOT/tests/fixtures/evolution-restart-control.json"
 CYMULE_LIVE_EVOLUTION_CONTROL_FIXTURE="$ROOT/tests/fixtures/live-evolution-control.json"
 CYMULE_ENGINE_FAILURE_FIXTURE="$ROOT/tests/fixtures/engine-failures.json"
+CYMULE_MALICIOUS_ENGINE="$ROOT/tests/fixtures/malicious-engine"
+CYMULE_SLOW_ENGINE="$ROOT/tests/fixtures/slow-engine"
 CYMULE_EXPECTED_PLAN_ID=$("$CYMULE_BIN" seal --input "$ROOT/tests/fixtures/cross-language-plan.json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["plan_id"])')
 CYMULE_EXPECTED_RESOURCE_ID=$("$CYMULE_BIN" resource seal --input "$ROOT/tests/fixtures/resource-candidate.json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["resource_id"])')
 export CYMULE_BIN CYMULE_TEST_PLUGIN CYMULE_WAIT_ACTIVATION_FIXTURE
@@ -42,6 +44,7 @@ export CYMULE_EVOLUTION_CONTROL_FIXTURE
 export CYMULE_EVOLUTION_RESTART_FIXTURE
 export CYMULE_LIVE_EVOLUTION_CONTROL_FIXTURE
 export CYMULE_ENGINE_FAILURE_FIXTURE
+export CYMULE_MALICIOUS_ENGINE CYMULE_SLOW_ENGINE
 export CYMULE_EXPECTED_RESOURCE_ID
 
 case "$LANGUAGE" in

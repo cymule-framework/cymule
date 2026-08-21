@@ -31,3 +31,5 @@
 - No process pool, Agent Loop, shell interpretation, sandbox policy, or network
   authority belongs in this crate. Higher-isolation executors are separate
   plugins.
+- Adjacent closed provider protocols may reuse the same sealed, bounded JSON
+  process primitive without widening `cymule.plugin/2`.

@@ -307,8 +307,10 @@ func TestCrossLanguageEndToEnd(t *testing.T) {
 	if len(execution.Result.Effects) != 1 {
 		t.Fatalf("expected one effect, got %d", len(execution.Result.Effects))
 	}
+	executor := ProcessPlugin(pluginPath, "")
+	store := SQLiteStore(filepath.Join(t.TempDir(), "domain.sqlite"), "sdk-go")
 	durable := DurableEngine{
-		Store: t.TempDir(), Plugin: pluginPath, Transport: engine,
+		Store: store, Executor: &executor, Transport: engine,
 	}
 	response, err := durable.Start("run:go-durable-e2e", candidate, input)
 	if err != nil {
@@ -317,7 +319,7 @@ func TestCrossLanguageEndToEnd(t *testing.T) {
 	if response.Type != "run_boundary" {
 		t.Fatalf("unexpected durable response %q", response.Type)
 	}
-	if run, err := durable.Get("run:go-durable-e2e"); err != nil || string(run) == "null" {
+	if run, err := (DurableEngine{Store: store, Transport: engine}).Get("run:go-durable-e2e"); err != nil || string(run) == "null" {
 		t.Fatalf("durable Run query failed: %s %v", run, err)
 	}
 	evolved, err := durable.Evolve(PublishLiveDefinition(
@@ -325,6 +327,18 @@ func TestCrossLanguageEndToEnd(t *testing.T) {
 	))
 	if err != nil || evolved.Result != "definition_published" {
 		t.Fatalf("durable evolution failed: %#v %v", evolved, err)
+	}
+}
+
+func TestMaliciousNestedEngineSuccessFailsClosed(t *testing.T) {
+	malicious := os.Getenv("CYMULE_MALICIOUS_ENGINE")
+	if malicious == "" {
+		t.Skip("malicious Engine conformance is not configured")
+	}
+	_, err := (DurableEngine{Store: DirectoryStore("unused"), Transport: CliEngine{Executable: malicious}}).Get("run:fake")
+	var failure EngineFailure
+	if !errors.As(err, &failure) || failure.Code != "invalid_engine_response" {
+		t.Fatalf("expected nested response rejection, got %v", err)
 	}
 }
 

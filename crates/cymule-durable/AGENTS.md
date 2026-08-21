@@ -177,3 +177,5 @@
   Fault paths retain original command indexes while shrinking, and a minimized
   fixture must reproduce the exact failure code, phase, and invariant. SDKs
   must not duplicate this generator.
+- Read-only control owns only a coordinator and must not require a `PluginHost`
+  or create an execution binding.
