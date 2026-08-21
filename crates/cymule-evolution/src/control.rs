@@ -46,7 +46,7 @@ pub enum EvolutionCommand {
         /// Stable command/idempotency identity.
         command_id: String,
         /// Migration request.
-        request: MigrationRequest,
+        request: Box<MigrationRequest>,
     },
     /// Authorize a replacement Run under a different exact Plan.
     RestartUnderNewPlan {

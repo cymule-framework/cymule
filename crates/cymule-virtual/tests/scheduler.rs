@@ -296,11 +296,12 @@ impl VirtualArchive for MemoryArchive {
                 self.calls
             )));
         }
+        let start =
+            usize::try_from(offset).map_err(|error| VirtualError::Source(error.to_string()))?;
         self.records
             .get(&descriptor.resource_id)
             .and_then(|record| {
                 (record.descriptor == *descriptor).then(|| {
-                    let start = offset as usize;
                     let end = record
                         .bytes
                         .len()

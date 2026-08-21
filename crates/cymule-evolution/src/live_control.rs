@@ -92,7 +92,7 @@ pub enum LiveEvolutionResponse {
     /// One checked migration completed.
     Migrated {
         /// Migration receipt.
-        receipt: MigrationReceipt,
+        receipt: Box<MigrationReceipt>,
     },
     /// One replacement Run was authorized.
     RestartAuthorized {

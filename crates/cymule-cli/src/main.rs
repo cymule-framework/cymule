@@ -442,7 +442,7 @@ struct EvolutionPluginRequestEnvelope<'a> {
 enum EvolutionPluginResponseEnvelope {
     Success {
         evolution_plugin_protocol: String,
-        response: EvolutionPluginResponse,
+        response: Box<EvolutionPluginResponse>,
     },
     Failure {
         evolution_plugin_protocol: String,
@@ -457,7 +457,7 @@ enum EvolutionPluginResponse {
         descriptor: MigrationAdapterDescriptor,
     },
     Migrated {
-        output: MigrationOutput,
+        output: Box<MigrationOutput>,
     },
     ShadowDescriptor {
         descriptor: ShadowDriverDescriptor,
@@ -533,7 +533,7 @@ impl ProcessEvolutionPlugin {
                         "evolution plugin returned an unsupported protocol version".to_owned(),
                     ));
                 }
-                Ok(response)
+                Ok(*response)
             }
             EvolutionPluginResponseEnvelope::Failure {
                 evolution_plugin_protocol,
@@ -583,7 +583,7 @@ impl MigrationAdapter for ProcessEvolutionPlugin {
 
     fn migrate(&mut self, request: &MigrationRequest) -> EvolutionResult<MigrationOutput> {
         match self.invoke(EvolutionPluginRequest::Migrate { request })? {
-            EvolutionPluginResponse::Migrated { output } => Ok(output),
+            EvolutionPluginResponse::Migrated { output } => Ok(*output),
             _ => Err(EvolutionError::Validation(
                 "evolution plugin returned the wrong migration response variant".to_owned(),
             )),

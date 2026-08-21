@@ -21,7 +21,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     io::stdin().read_to_end(&mut bytes)?;
     let value: serde_json::Value = decode_json(&bytes)?;
     if value.get("evolution_plugin_protocol").is_some() {
-        return evolution(value);
+        return evolution(&value);
     }
     let request: PluginRequest = decode_json(&bytes)?;
     let response = match request {
@@ -93,7 +93,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn evolution(value: serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
+fn evolution(value: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
     let revision = value
         .get("implementation_revision")
         .and_then(serde_json::Value::as_str)

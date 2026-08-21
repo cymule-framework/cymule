@@ -898,11 +898,13 @@ impl DurableLiveEvolutionController {
                         migration_adapter,
                         LiveMigrationCommand {
                             template_id,
-                            request,
+                            request: *request,
                             safe_point,
                         },
                     )
-                    .map(|receipt| LiveEvolutionResponse::Migrated { receipt })
+                    .map(|receipt| LiveEvolutionResponse::Migrated {
+                        receipt: Box::new(receipt),
+                    })
                 }
                 EvolutionCommand::RestartUnderNewPlan { request, .. } => {
                     let safe_point = safe_point.ok_or_else(|| {
