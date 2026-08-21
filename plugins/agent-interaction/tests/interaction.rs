@@ -552,7 +552,7 @@ fn workspace_continuation(
                 scope_id: ROOT_SCOPE_ID.to_owned(),
                 input: input.clone(),
                 region_path: Vec::new(),
-                next_step: 1,
+                next_step: 0,
                 locals: BTreeMap::new(),
             },
             FrameState {

@@ -950,7 +950,7 @@ fn campaign_execution_binding(options: &CampaignOptions) -> CampaignResult<Execu
     ExecutionBinding::admit(
         &graph,
         &BTreeMap::from([
-            ("subject-runner".to_owned(), manifest.clone()),
+            ("evaluation-subject".to_owned(), manifest.clone()),
             ("evaluation-scorer".to_owned(), manifest),
         ]),
     )

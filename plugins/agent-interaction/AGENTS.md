@@ -57,6 +57,9 @@
   and validate accepted values again from the persisted request before
   completion. External schema retrieval stays disabled; schema or instance
   failures must occur before the shared M1 CAS and leave no durable mutation.
+- The durable elicitation wait admits either the declared accepted-value schema
+  or JSON `null`, which is the explicit declined-input result. No other schema
+  widening is allowed.
 - Reconciliation queries the original binding and may settle only the original
   occurrence as `completed` or evidence-backed `not_applied`. A prepared call
   may be cancelled only with proof that dispatch never started. Reconciliation

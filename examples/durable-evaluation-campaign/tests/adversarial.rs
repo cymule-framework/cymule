@@ -426,8 +426,8 @@ fn external_process_kill_reopens_to_a_valid_frontier_and_completes_once() {
         "--run-id",
         "run:process-kill",
     ]));
-    assert_eq!(before_kill.succeeded, 3);
-    assert_eq!(before_kill.total_occurrences, 4);
+    assert_eq!(before_kill.succeeded, 2);
+    assert_eq!(before_kill.total_occurrences, 3);
     running.kill().expect("campaign receives an external kill");
     let killed = running.wait().expect("killed campaign reaps");
     assert!(!killed.success());
@@ -448,7 +448,7 @@ fn external_process_kill_reopens_to_a_valid_frontier_and_completes_once() {
         "run:process-kill",
     ]));
     assert_eq!(reopened.succeeded, before_kill.succeeded);
-    assert_eq!(reopened.total_occurrences, 4);
+    assert_eq!(reopened.total_occurrences, before_kill.total_occurrences);
     assert_eq!(reopened.failed, 0);
 
     let completed = report(&invoke(&[

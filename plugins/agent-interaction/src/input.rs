@@ -41,6 +41,7 @@ impl AgentInputController {
             .map_err(|error| AgentError::Validation(error.to_string()))?;
         let wait_id = format!("wait:agent-input:{digest}");
         let update_base = format!("update:agent-input:{digest}");
+        let wait_schema = nullable_input_schema(&request.schema);
         let updates = [
             AgentUpdate::Elicitation {
                 update_id: format!("{update_base}:pending"),
@@ -73,7 +74,7 @@ impl AgentInputController {
                     run_id: run_id.to_owned(),
                     kind: WaitKind::Input {
                         correlation: request.request_id,
-                        schema: request.schema,
+                        schema: wait_schema,
                     },
                     consume_once: true,
                     owner,
@@ -193,6 +194,22 @@ fn compile_input_schema(request: &ElicitationRequest) -> AgentResult<jsonschema:
                 request.request_id
             ))
         })
+}
+
+fn nullable_input_schema(schema: &serde_json::Value) -> serde_json::Value {
+    let mut wrapped = serde_json::Map::new();
+    if let Some(object) = schema.as_object() {
+        for keyword in ["$schema", "$id", "$defs"] {
+            if let Some(value) = object.get(keyword) {
+                wrapped.insert(keyword.to_owned(), value.clone());
+            }
+        }
+    }
+    wrapped.insert(
+        "anyOf".to_owned(),
+        serde_json::json!([schema, {"type": "null"}]),
+    );
+    serde_json::Value::Object(wrapped)
 }
 
 fn validate_input_completion(
