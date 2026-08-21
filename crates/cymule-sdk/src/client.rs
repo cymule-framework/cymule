@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -100,11 +102,15 @@ impl CliEngine {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(interrupted_failure(request, "cancelled", false));
         }
-        let mut child = Command::new(&self.executable)
+        let mut command = Command::new(&self.executable);
+        command
             .arg("rpc")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command
             .spawn()
             .map_err(|error| EngineFailure::transport("engine_start_failed", error.to_string()))?;
         let encoded_request =
@@ -124,13 +130,11 @@ impl CliEngine {
         let deadline = Instant::now() + self.timeout;
         loop {
             if self.cancelled.load(Ordering::Acquire) {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_engine(&mut child);
                 return Err(interrupted_failure(request, "cancelled", true));
             }
             if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_engine(&mut child);
                 return Err(interrupted_failure(request, "timed_out", true));
             }
             match child.try_wait() {
@@ -218,6 +222,18 @@ impl CliEngine {
             )),
         }
     }
+}
+
+fn terminate_engine(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("/bin/kill")
+            .arg("-KILL")
+            .arg(format!("-{}", child.id()))
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn interrupted_failure(request: &EngineRequest, kind: &str, began: bool) -> EngineFailure {

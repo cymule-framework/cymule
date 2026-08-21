@@ -42,4 +42,4 @@
 - Migration/restart builders preserve safe-point proof identity, source epoch,
   distinct Run IDs, explicit input, and evidence without local interpretation.
 - Poll cancellation while the child is running, drain pipes concurrently, and
-  always kill and reap an interrupted process.
+  always kill the isolated process group and reap an interrupted process.

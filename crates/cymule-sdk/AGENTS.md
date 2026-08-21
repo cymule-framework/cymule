@@ -44,3 +44,5 @@
   splitting one command into lower-level registry and rollout calls.
 - `DurableEngine` is generic over `Engine`, stores provider-neutral targets,
   omits executors for queries, and forwards CLI timeout and cancellation.
+- CLI cancellation terminates the isolated Engine process group before reaping
+  the direct child so provider descendants cannot retain transport pipes.

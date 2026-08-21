@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -1549,6 +1551,7 @@ class CliEngine:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                start_new_session=True,
             )
         except OSError as error:
             raise _transport_error("engine_start_failed", str(error)) from error
@@ -1587,7 +1590,7 @@ class CliEngine:
                 break
             time.sleep(0.01)
         if interruption is not None:
-            process.kill()
+            os.killpg(process.pid, signal.SIGKILL)
         process.wait()
         for worker in workers:
             worker.join()
