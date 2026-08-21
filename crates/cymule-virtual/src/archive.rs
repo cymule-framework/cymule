@@ -105,7 +105,9 @@ impl<S: ArtifactStore + ArtifactResolver> ResourceBackedVirtualArchive<S> {
             ));
         }
         for (resource_id, publication) in &catalog.publications {
-            publication.verify().map_err(resource_error)?;
+            publication
+                .verify()
+                .map_err(|error| resource_error(&error))?;
             if resource_id != &publication.resource.resource_id {
                 return Err(VirtualError::Source(
                     "Resource archive catalog key changed".to_owned(),
@@ -153,8 +155,11 @@ impl<S: ArtifactStore + ArtifactResolver> VirtualArchive for ResourceBackedVirtu
             media_type: VIRTUAL_ARCHIVE_MANIFEST_KIND.to_owned(),
             annotations: BTreeMap::new(),
         };
-        intent.validate().map_err(resource_error)?;
-        let session = self.store.begin_write(&intent).map_err(resource_error)?;
+        intent.validate().map_err(|error| resource_error(&error))?;
+        let session = self
+            .store
+            .begin_write(&intent)
+            .map_err(|error| resource_error(&error))?;
         if session.write_id != intent.write_id {
             return Err(VirtualError::Source(
                 "archive Resource store changed the write identity".to_owned(),
@@ -163,10 +168,15 @@ impl<S: ArtifactStore + ArtifactResolver> VirtualArchive for ResourceBackedVirtu
         for (index, chunk) in object.bytes.chunks(MAX_WRITE_CHUNK).enumerate() {
             self.store
                 .write_chunk(&session, (index * MAX_WRITE_CHUNK) as u64, chunk)
-                .map_err(resource_error)?;
+                .map_err(|error| resource_error(&error))?;
         }
-        let publication = self.store.commit_write(&session).map_err(resource_error)?;
-        publication.verify().map_err(resource_error)?;
+        let publication = self
+            .store
+            .commit_write(&session)
+            .map_err(|error| resource_error(&error))?;
+        publication
+            .verify()
+            .map_err(|error| resource_error(&error))?;
         if publication.resource != object.descriptor {
             return Err(VirtualError::Source(
                 "Resource archive provider changed the framework descriptor".to_owned(),
@@ -209,7 +219,7 @@ impl<S: ArtifactStore + ArtifactResolver> VirtualArchive for ResourceBackedVirtu
         let chunk = self
             .store
             .read(descriptor, &publication.locators, offset, max_bytes)
-            .map_err(resource_error)?;
+            .map_err(|error| resource_error(&error))?;
         if chunk.offset != offset || chunk.bytes.len() > max_bytes as usize {
             return Err(VirtualError::Source(
                 "archive provider returned an invalid byte range".to_owned(),
@@ -423,6 +433,6 @@ fn find_unique(haystack: &[u8], needle: &[u8]) -> VirtualResult<usize> {
     Ok(first)
 }
 
-fn resource_error(error: cymule_resource::ResourceError) -> VirtualError {
+fn resource_error(error: &cymule_resource::ResourceError) -> VirtualError {
     VirtualError::Source(error.to_string())
 }

@@ -2102,7 +2102,9 @@ fn verify_archive_descriptor(
     let mut offset = 0_u64;
     let mut hasher = Sha256::new();
     while offset < *size {
-        let limit = (*size - offset).min(u64::from(crate::MAX_VIRTUAL_ARCHIVE_CHUNK)) as u32;
+        let limit =
+            u32::try_from((*size - offset).min(u64::from(crate::MAX_VIRTUAL_ARCHIVE_CHUNK)))
+                .map_err(|error| VirtualError::Source(error.to_string()))?;
         let bytes = archive.read_range(descriptor, offset, limit)?;
         if bytes.is_empty() || bytes.len() > limit as usize {
             return Err(VirtualError::Source(

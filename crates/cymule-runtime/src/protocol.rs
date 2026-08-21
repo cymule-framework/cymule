@@ -95,13 +95,13 @@ impl EnginePluginTarget {
     pub fn verify(&self) -> EngineResult<()> {
         verify_non_empty_bound(&self.provider, 256, "plugin provider")?;
         verify_non_empty_bound(&self.location, 4096, "plugin location")?;
-        if let Some(revision) = &self.revision {
-            if !is_sha256_id(revision) {
-                return Err(EngineFailure::transport(
-                    "invalid_plugin_revision",
-                    "plugin revision must be a lowercase sha256 identity",
-                ));
-            }
+        if let Some(revision) = &self.revision
+            && !is_sha256_id(revision)
+        {
+            return Err(EngineFailure::transport(
+                "invalid_plugin_revision",
+                "plugin revision must be a lowercase sha256 identity",
+            ));
         }
         Ok(())
     }

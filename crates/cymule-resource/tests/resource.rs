@@ -651,6 +651,9 @@ fn machine_with_runs() -> (Machine, cymule_core::ArtifactRef) {
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
     .unwrap();
+    let resource_handle_contract =
+        framework_artifact_contract(FrameworkArtifactType::ResourceHandle)
+            .expect("Resource Handle contract builds");
     let producer_plan = seal_plan(PlanCandidate {
         ir_version: cymule_core::IR_VERSION.to_owned(),
         name: "resource_producer".to_owned(),
@@ -658,7 +661,7 @@ fn machine_with_runs() -> (Machine, cymule_core::ArtifactRef) {
         components: vec![ComponentContract {
             id: "component.producer".to_owned(),
             input_schema: json!({}),
-            output_schema: json!({"type": "string"}),
+            output_schema: resource_handle_contract.schema.clone(),
             requirements: BTreeMap::new(),
         }],
         effects: Vec::new(),
@@ -733,14 +736,17 @@ fn machine_with_runs() -> (Machine, cymule_core::ArtifactRef) {
     machine
         .put_artifact("test/input", b"resource input".to_vec())
         .expect("input stores");
+    machine
+        .put_artifact("cymule.input/1", b"{}".to_vec())
+        .expect("producer component input stores");
     let handle = ResourceCandidate::text("producer output")
         .seal()
         .expect("Resource seals");
-    let contract = framework_artifact_contract(FrameworkArtifactType::ResourceHandle)
-        .expect("Resource Handle contract builds");
     let mut registry = ArtifactTypeRegistry::new();
-    let contract_id = contract.contract_id.clone();
-    registry.register(contract).expect("contract registers");
+    let contract_id = resource_handle_contract.contract_id.clone();
+    registry
+        .register(resource_handle_contract)
+        .expect("contract registers");
     let typed = registry
         .put_canonical_json(&contract_id, &handle)
         .expect("typed Resource Handle seals");
@@ -787,13 +793,6 @@ fn record_producer(
     let component_input = machine
         .put_artifact("cymule.component-input/1", b"{}".to_vec())
         .unwrap();
-    let actual_result = machine
-        .put_artifact(
-            "cymule.component-output/1",
-            br#""producer output""#.to_vec(),
-        )
-        .unwrap();
-    assert_eq!(&actual_result, result);
     let mut target = source;
     target.frames[0].next_step = 1;
     coordinator

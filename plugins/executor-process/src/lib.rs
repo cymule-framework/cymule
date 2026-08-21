@@ -329,7 +329,7 @@ impl ProcessExecutor {
             }
             let mut progressed = false;
             if let Some(writer) = stdin.as_mut() {
-                let Ok(wrote) = write_available(writer, &input, &mut input_offset) else {
+                let Ok(wrote) = write_available(writer, input, &mut input_offset) else {
                     terminate_process_tree(&mut child, process_group);
                     return Err(process_failure(
                         ambiguous_world_effect,

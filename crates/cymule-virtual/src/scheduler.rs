@@ -1230,11 +1230,15 @@ impl VirtualScheduler {
             .chunks(crate::MAX_VIRTUAL_ARCHIVE_CHUNK as usize)
             .enumerate()
         {
-            let observed = archive.read_range(
-                &record.descriptor,
-                (index * crate::MAX_VIRTUAL_ARCHIVE_CHUNK as usize) as u64,
-                expected.len() as u32,
-            )?;
+            let offset = u64::try_from(index)
+                .ok()
+                .and_then(|value| value.checked_mul(u64::from(crate::MAX_VIRTUAL_ARCHIVE_CHUNK)))
+                .ok_or_else(|| {
+                    VirtualError::Source("archive readback offset overflowed".to_owned())
+                })?;
+            let limit = u32::try_from(expected.len())
+                .map_err(|error| VirtualError::Source(error.to_string()))?;
+            let observed = archive.read_range(&record.descriptor, offset, limit)?;
             if observed != expected {
                 return Err(VirtualError::Source(
                     "archive range readback does not match the stored manifest".to_owned(),
