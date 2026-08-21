@@ -115,10 +115,12 @@ No concrete storage product is part of this profile. An adapter conforms only
 when immutable-object insertion and head movement are atomic, reopen is bounded,
 and it passes the stale-head, acknowledgement-loss, crash, tamper, and GC suite.
 
-Version decision: segmented storage introduces independent
-`cymule.durable-head/1`, `cymule.durable-segment/1`,
+Version decision: segmented storage uses independent
+`cymule.durable-head/1`, `cymule.durable-segment/2`,
 `cymule.durable-checkpoint/1`, and `cymule.durable-gc-receipt/1` physical
-contracts without changing `cymule.durable-state/2`. Terminal Resources replace the pre-release descriptor and
+contracts. Segment v2 replaces whole-Machine operations with the closed
+`cymule.machine-delta/1` transition and has no v1 reader or dual authority.
+This does not change `cymule.durable-state/2`. Terminal Resources replace the pre-release descriptor and
 handoff domains with `cymule.resource/2` and `cymule.resource-handoff/2`.
 There is no `/1` compatibility reader or dual authority. Locator sets,
 manifests/list proofs, and lifecycle receipts use independent `/1` domains.

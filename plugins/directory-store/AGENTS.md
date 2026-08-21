@@ -18,5 +18,9 @@
 - Tests must cover bounded reopen, stale writers, interrupted staging residue,
   malformed bytes, explicit legacy migration, and cold reclamation. Production adapters for databases or object stores belong in
   separate plugin crates and must satisfy the same conformance behavior.
+- Reopen reads only identities reachable from `head.json`; unrelated immutable
+  files are not authority. Under the writer claim, normal load removes `.next`
+  residue and completes deletion for a head-published GC receipt. GC must move
+  the recoverable head before deleting any formerly reachable object.
 - Reopen fixtures use real Machine-retained Artifact inputs; never bypass
   durable reference closure with a syntactically valid missing digest.

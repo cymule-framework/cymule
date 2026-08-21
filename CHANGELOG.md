@@ -6,6 +6,11 @@ domains described in `docs/specification.md`.
 
 ## [Unreleased]
 
+- Replace whole-Machine durable segment operations with
+  `cymule.machine-delta/1` in `cymule.durable-segment/2`, bound provider reopen
+  to head-reachable objects, and make directory GC recover through ordinary
+  load across internal process-death boundaries.
+
 ## [0.2.0] - 2026-08-21
 
 - Replace `cymule.virtual-checkpoint/1` whole-snapshot journal records with

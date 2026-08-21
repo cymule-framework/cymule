@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Small mutable storage-head schema.
 pub const STORE_HEAD_VERSION: &str = "cymule.durable-head/1";
 /// Immutable state-delta segment schema.
-pub const STATE_SEGMENT_VERSION: &str = "cymule.durable-segment/1";
+pub const STATE_SEGMENT_VERSION: &str = "cymule.durable-segment/2";
 /// Authenticated projection-checkpoint schema.
 pub const STATE_CHECKPOINT_VERSION: &str = "cymule.durable-checkpoint/1";
 /// Cold-reclamation receipt schema.
@@ -74,10 +74,10 @@ impl StoreHead {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DurableOperation {
-    /// Replace the canonical Machine projection at a verified semantic boundary.
-    PutMachine {
-        /// Exact next Machine snapshot admitted by the coordinator.
-        machine: cymule_core::MachineSnapshot,
+    /// Apply one incremental canonical Machine transition.
+    ApplyMachine {
+        /// Exact semantic delta admitted by the core.
+        delta: cymule_core::MachineDelta,
     },
     /// Insert or replace one Continuation.
     PutContinuation {
@@ -151,7 +151,7 @@ impl DurableDelta {
     pub fn apply(&self, state: &mut DurableState) -> DurableResult<()> {
         for operation in &self.operations {
             match operation {
-                DurableOperation::PutMachine { machine } => state.machine.clone_from(machine),
+                DurableOperation::ApplyMachine { delta } => state.machine.apply_delta(delta)?,
                 DurableOperation::PutContinuation { value } => {
                     state
                         .continuations
@@ -201,36 +201,21 @@ impl DurableDelta {
         Ok(())
     }
 
-    pub(crate) fn validate_against(&self, state: &DurableState) -> DurableResult<()> {
-        let machine_snapshot = self
-            .operations
-            .iter()
-            .rev()
-            .find_map(|operation| match operation {
-                DurableOperation::PutMachine { machine } => Some(machine),
-                _ => None,
-            })
-            .unwrap_or(&state.machine);
-        let needs_machine = self.operations.iter().any(|operation| {
-            matches!(
-                operation,
-                DurableOperation::PutContinuation { .. }
-                    | DurableOperation::PutWait { .. }
-                    | DurableOperation::PutOutbox { .. }
-                    | DurableOperation::PutComponentOccurrence { .. }
-                    | DurableOperation::PutWaitActivation { .. }
-            )
-        });
-        let machine = needs_machine
-            .then(|| cymule_core::Machine::restore(machine_snapshot.clone()))
-            .transpose()?;
+    pub(crate) fn validate_against(
+        &self,
+        state: &DurableState,
+        current_machine: &cymule_core::Machine,
+    ) -> DurableResult<cymule_core::Machine> {
+        let mut machine = current_machine.clone();
+        for operation in &self.operations {
+            if let DurableOperation::ApplyMachine { delta } = operation {
+                machine.apply_delta(delta)?;
+            }
+        }
         for operation in &self.operations {
             match operation {
                 DurableOperation::PutContinuation { value } => {
-                    crate::model::validate_continuation_artifacts(
-                        machine.as_ref().expect("required"),
-                        value,
-                    )?;
+                    crate::model::validate_continuation_artifacts(&machine, value)?;
                 }
                 DurableOperation::PutWait { value } => {
                     let continuation = self
@@ -250,26 +235,19 @@ impl DurableDelta {
                                 value.wait_id
                             ))
                         })?;
-                    crate::model::validate_wait_artifacts(
-                        machine.as_ref().expect("required"),
-                        continuation,
-                        value,
-                    )?;
+                    crate::model::validate_wait_artifacts(&machine, continuation, value)?;
                 }
                 DurableOperation::PutOutbox { value } => {
-                    crate::model::validate_dispatch_artifacts(
-                        machine.as_ref().expect("required"),
-                        value,
-                    )?;
+                    crate::model::validate_dispatch_artifacts(&machine, value)?;
                 }
                 DurableOperation::PutComponentOccurrence { value } => {
                     crate::model::require_artifact(
-                        machine.as_ref().expect("required"),
+                        &machine,
                         &value.input,
                         "component occurrence input",
                     )?;
                     crate::model::require_artifact(
-                        machine.as_ref().expect("required"),
+                        &machine,
                         &value.output,
                         "component occurrence output",
                     )?;
@@ -277,7 +255,7 @@ impl DurableDelta {
                 DurableOperation::PutWaitActivation { value } => {
                     value.verify()?;
                     crate::model::require_artifact(
-                        machine.as_ref().expect("required"),
+                        &machine,
                         &value.result,
                         "wait activation result",
                     )?;
@@ -307,12 +285,12 @@ impl DurableDelta {
                         }
                     }
                 }
-                DurableOperation::PutMachine { .. }
+                DurableOperation::ApplyMachine { .. }
                 | DurableOperation::PutLease { .. }
                 | DurableOperation::PutSnapshot { .. } => {}
             }
         }
-        Ok(())
+        Ok(machine)
     }
 }
 
@@ -933,8 +911,8 @@ impl DurableStore for MemoryStore {
         }
         let (stored, reopened) = restore(
             &head,
-            |id| domain.checkpoints.get(id).cloned(),
-            |id| domain.segments.get(id).cloned(),
+            |id| Ok(domain.checkpoints.get(id).cloned()),
+            |id| Ok(domain.segments.get(id).cloned()),
         )?;
         domain.reopened_segments = reopened;
         Ok(Some(stored))
@@ -970,8 +948,8 @@ impl DurableStore for MemoryStore {
         }
         let stored = restore(
             expected,
-            |id| domain.checkpoints.get(id).cloned(),
-            |id| domain.segments.get(id).cloned(),
+            |id| Ok(domain.checkpoints.get(id).cloned()),
+            |id| Ok(domain.segments.get(id).cloned()),
         )?
         .0;
         let checkpoint = StateCheckpoint::for_revision(
@@ -983,10 +961,12 @@ impl DurableStore for MemoryStore {
         )?;
         let mut head = expected.clone();
         head.checkpoint_id.clone_from(&checkpoint.checkpoint_id);
+        head.checkpoint_depth = 0;
         head.suffix_head = None;
         head.suffix_len = 0;
         let mut reclaimed = domain.checkpoints.keys().cloned().collect::<BTreeSet<_>>();
         reclaimed.extend(domain.segments.keys().cloned());
+        reclaimed.remove(&checkpoint.checkpoint_id);
         domain.checkpoints.clear();
         domain.segments.clear();
         domain
@@ -1055,11 +1035,11 @@ fn conflict(expected: Option<&StoreHead>, current: Option<&StoreHead>) -> Durabl
 /// Restore and authenticate one checkpoint plus its bounded suffix.
 pub fn restore(
     head: &StoreHead,
-    mut checkpoint: impl FnMut(&str) -> Option<StateCheckpoint>,
-    mut segment: impl FnMut(&str) -> Option<StateSegment>,
+    mut checkpoint: impl FnMut(&str) -> DurableResult<Option<StateCheckpoint>>,
+    mut segment: impl FnMut(&str) -> DurableResult<Option<StateSegment>>,
 ) -> DurableResult<(StoredState, u32)> {
     head.verify()?;
-    let latest = checkpoint(&head.checkpoint_id).ok_or_else(|| {
+    let latest = checkpoint(&head.checkpoint_id)?.ok_or_else(|| {
         DurableError::NotFound(format!(
             "durable checkpoint {} does not exist",
             head.checkpoint_id
@@ -1080,7 +1060,7 @@ pub fn restore(
             .last()
             .and_then(|value| value.parent_checkpoint.as_deref())
             .ok_or_else(|| DurableError::Validation("checkpoint lineage has no base".to_owned()))?;
-        let parent = checkpoint(parent_id).ok_or_else(|| {
+        let parent = checkpoint(parent_id)?.ok_or_else(|| {
             DurableError::NotFound(format!("durable checkpoint {parent_id} does not exist"))
         })?;
         parent.verify()?;
@@ -1165,7 +1145,7 @@ fn segment_ids_between(
     start: Option<String>,
     stop: Option<&str>,
     bound: u32,
-    segment: &mut impl FnMut(&str) -> Option<StateSegment>,
+    segment: &mut impl FnMut(&str) -> DurableResult<Option<StateSegment>>,
 ) -> DurableResult<Vec<String>> {
     let mut reverse = Vec::new();
     let mut cursor = start;
@@ -1178,7 +1158,7 @@ fn segment_ids_between(
         let id = cursor.ok_or_else(|| {
             DurableError::Validation("durable suffix does not connect to its checkpoint".to_owned())
         })?;
-        let value = segment(&id).ok_or_else(|| {
+        let value = segment(&id)?.ok_or_else(|| {
             DurableError::NotFound(format!("durable segment {id} does not exist"))
         })?;
         value.verify()?;
@@ -1193,10 +1173,10 @@ fn apply_segment_ids(
     ids: &[String],
     state: &mut DurableState,
     revision: &mut String,
-    segment: &mut impl FnMut(&str) -> Option<StateSegment>,
+    segment: &mut impl FnMut(&str) -> DurableResult<Option<StateSegment>>,
 ) -> DurableResult<()> {
     for id in ids {
-        let value = segment(id).ok_or_else(|| {
+        let value = segment(id)?.ok_or_else(|| {
             DurableError::NotFound(format!("durable segment {id} does not exist"))
         })?;
         if value.base_revision != *revision {

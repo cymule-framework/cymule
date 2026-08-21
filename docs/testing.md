@@ -295,6 +295,20 @@ the hot path and a history-independent bound on segment, manifest, and head
 bytes; explicit GC is measured separately because it deliberately materializes
 the cold base outside writer exclusion.
 
+Reopen follows only IDs reachable from one observed head. Directory tests add
+malformed unrelated immutable files and interrupted `.next` files; SQLite tests
+add malformed unrelated rows. Neither may be decoded as authority. SQLite holds
+one deferred read transaction from head observation through reachable lineage
+validation, so a concurrent commit cannot splice two revisions into one reopen.
+
+Directory GC has a separate internal process-death sweep. A child is stopped
+with `SIGKILL` after the new materialized checkpoint is durable, after the GC
+receipt is durable, after the recoverable head is published, and after deletion
+starts. Ordinary `load()` must reopen the old head before publication or the
+new head afterward and must finish only the deletion authorized by its receipt.
+The test hook is compiled only into the crate's unit-test artifact; production
+reducer and adapter builds have no pause or crash switch.
+
 The production SQLite witness repeats that automatically discovered boundary
 set with real child-process death on both CAS sides. A separate SQLite provider
 ledger counts dispatch and reconciliation independently of Cymule state. Every
@@ -303,6 +317,9 @@ probe again. The filesystem Resource witness likewise kills after a retained
 chunk and after publication, then verifies the exact content digest. Its upload
 record is the durable chunk frontier: bytes are synced before the frontier
 advances, and reopen discards only a suffix that was never acknowledged.
+SQLite provider tests also inject aborting triggers at immutable-segment insert
+and head update to prove the enclosing SQL transaction rolls back every row.
+This reaches SQLite statement and transaction boundaries, not VFS I/O.
 
 HTTP and timer sources own independent live-process leaves. Each kills a child
 after ingress or schedule persistence, after target selection, on both M1

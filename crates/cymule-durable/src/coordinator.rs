@@ -14,6 +14,7 @@ use crate::{
 pub struct DurableCoordinator<S> {
     store: S,
     stored: Option<StoredState>,
+    machine: Option<Machine>,
 }
 
 /// Exact inputs for one higher-profile Run migration CAS.
@@ -39,10 +40,17 @@ impl<S: DurableStore> DurableCoordinator<S> {
     /// Open a coordinator and verify the latest durable revision.
     pub fn open(mut store: S) -> DurableResult<Self> {
         let stored = store.load()?;
-        if let Some(stored) = &stored {
+        let machine = if let Some(stored) = &stored {
             stored.verify()?;
-        }
-        Ok(Self { store, stored })
+            Some(Machine::restore(stored.state.machine.clone())?)
+        } else {
+            None
+        };
+        Ok(Self {
+            store,
+            stored,
+            machine,
+        })
     }
 
     /// Initialize an empty durable state from a semantic Machine.
@@ -71,6 +79,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             head: commit.head,
             checkpoint_covered_segment: checkpoint.covered_segment,
         });
+        self.machine = Some(machine.clone());
         Ok(commit.revision)
     }
 
@@ -112,6 +121,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             head: commit.head,
             checkpoint_covered_segment: checkpoint.covered_segment,
         });
+        self.machine = Some(machine.clone());
         Ok(commit.revision)
     }
 
@@ -142,9 +152,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         let next_machine = machine.snapshot();
         ensure_run_start_machine(&self.state()?.machine, &next_machine, &continuation)?;
         self.commit_operations(vec![
-            DurableOperation::PutMachine {
-                machine: next_machine,
-            },
+            self.machine_operation_snapshot(&next_machine)?,
             DurableOperation::PutContinuation {
                 value: continuation,
             },
@@ -171,7 +179,9 @@ impl<S: DurableStore> DurableCoordinator<S> {
 
     /// Restore the current semantic Machine from canonical durable inputs.
     pub fn restore_machine(&self) -> DurableResult<Machine> {
-        Machine::restore(self.state()?.machine.clone()).map_err(Into::into)
+        self.machine
+            .clone()
+            .ok_or_else(|| DurableError::NotFound("durable state is not initialized".to_owned()))
     }
 
     /// Compact one causal Event prefix and atomically publish its M1 receipt.
@@ -220,7 +230,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         receipt.verify()?;
         let snapshot = machine.snapshot();
         self.commit_operations(vec![
-            DurableOperation::PutMachine { machine: snapshot },
+            self.machine_operation_snapshot(&snapshot)?,
             DurableOperation::PutHistoryCompaction {
                 value: receipt.clone(),
             },
@@ -267,9 +277,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             ));
         }
         let mut operations = vec![
-            DurableOperation::PutMachine {
-                machine: machine_snapshot,
-            },
+            self.machine_operation_snapshot(&machine_snapshot)?,
             DurableOperation::PutContinuation {
                 value: continuation,
             },
@@ -330,9 +338,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             }
         }
         self.commit_operations(vec![
-            DurableOperation::PutMachine {
-                machine: machine_snapshot,
-            },
+            self.machine_operation_snapshot(&machine_snapshot)?,
             DurableOperation::PutOutbox { value: dispatch },
             DurableOperation::PutContinuation {
                 value: continuation,
@@ -392,9 +398,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             }
         }
         let mut operations = vec![
-            DurableOperation::PutMachine {
-                machine: machine_snapshot,
-            },
+            self.machine_operation_snapshot(&machine_snapshot)?,
             DurableOperation::PutOutbox { value: dispatch },
             DurableOperation::PutContinuation {
                 value: continuation,
@@ -433,9 +437,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         dispatch.claim_owner = Some(owner.to_owned());
         dispatch.claim_epoch = lease_epoch;
         self.commit_operations(vec![
-            DurableOperation::PutMachine {
-                machine: machine_snapshot,
-            },
+            self.machine_operation_snapshot(&machine_snapshot)?,
             DurableOperation::PutOutbox { value: dispatch },
         ])
     }
@@ -483,9 +485,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         dispatch.claim_owner = Some(owner.to_owned());
         dispatch.claim_epoch = lease_epoch;
         let mut operations = vec![
-            DurableOperation::PutMachine {
-                machine: machine_snapshot,
-            },
+            self.machine_operation_snapshot(&machine_snapshot)?,
             DurableOperation::PutOutbox { value: dispatch },
             DurableOperation::PutContinuation {
                 value: continuation,
@@ -552,9 +552,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         dispatch.state = outcome;
         dispatch.result = result;
         self.commit_operations(vec![
-            DurableOperation::PutMachine {
-                machine: machine_snapshot,
-            },
+            self.machine_operation_snapshot(&machine_snapshot)?,
             DurableOperation::PutOutbox { value: dispatch },
         ])
     }
@@ -624,9 +622,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             dispatch.result = result;
         }
         let mut operations = vec![
-            DurableOperation::PutMachine {
-                machine: machine_snapshot,
-            },
+            self.machine_operation_snapshot(&machine_snapshot)?,
             DurableOperation::PutOutbox { value: dispatch },
             DurableOperation::PutContinuation {
                 value: continuation,
@@ -654,9 +650,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
     ) -> DurableResult<String> {
         validate_journal_batch(journal_id, records)?;
         let mut operations = vec![
-            DurableOperation::PutMachine {
-                machine: machine.snapshot(),
-            },
+            self.machine_operation(machine)?,
             DurableOperation::PutContinuation {
                 value: continuation,
             },
@@ -687,9 +681,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         continuation.wait_set.insert(wait.wait_id.clone());
         continuation.status = ContinuationStatus::Waiting;
         self.commit_operations(vec![
-            DurableOperation::PutMachine {
-                machine: machine.snapshot(),
-            },
+            self.machine_operation(machine)?,
             DurableOperation::PutWait { value: wait },
             DurableOperation::PutContinuation {
                 value: continuation,
@@ -704,9 +696,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         wait_id: &str,
         result: &cymule_core::ArtifactRef,
     ) -> DurableResult<String> {
-        let mut operations = vec![DurableOperation::PutMachine {
-            machine: machine.snapshot(),
-        }];
+        let mut operations = vec![self.machine_operation(machine)?];
         operations.extend(self.wait_completion_operations(wait_id, result)?);
         self.commit_operations(operations)
     }
@@ -877,9 +867,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             .source
             .validate_target_cardinality(activation.wait_ids.len(), consume_once_targets)?;
 
-        let mut operations = vec![DurableOperation::PutMachine {
-            machine: machine_snapshot,
-        }];
+        let mut operations = vec![self.machine_operation_snapshot(&machine_snapshot)?];
         for wait_id in &activation.wait_ids {
             let mut wait =
                 self.state()?.waits.get(wait_id).cloned().ok_or_else(|| {
@@ -1189,9 +1177,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             artifacts,
             "Artifact journal checkpoint",
         )?;
-        let mut operations = vec![DurableOperation::PutMachine {
-            machine: machine_snapshot,
-        }];
+        let mut operations = vec![self.machine_operation_snapshot(&machine_snapshot)?];
         for batch in batches {
             if let Some(operation) =
                 self.journal_append_operation(&batch.journal_id, &batch.records)?
@@ -1272,9 +1258,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         }
         binding.admit_plan(target_plan)?;
         let mut operations = vec![
-            DurableOperation::PutMachine {
-                machine: machine_snapshot,
-            },
+            self.machine_operation_snapshot(&machine_snapshot)?,
             DurableOperation::PutContinuation {
                 value: target.clone(),
             },
@@ -1319,9 +1303,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             &std::collections::BTreeSet::from([result.clone()]),
             "input wait checkpoint",
         )?;
-        let mut operations = vec![DurableOperation::PutMachine {
-            machine: machine_snapshot,
-        }];
+        let mut operations = vec![self.machine_operation_snapshot(&machine_snapshot)?];
         operations.extend(self.wait_completion_operations(wait_id, result)?);
         for batch in batches {
             if let Some(operation) =
@@ -1411,12 +1393,32 @@ impl<S: DurableStore> DurableCoordinator<S> {
             .ok_or_else(|| DurableError::NotFound("durable state is not initialized".to_owned()))?;
         let expected = stored.head.clone();
         let delta = DurableDelta::new(operations)?;
-        delta.validate_against(&stored.state)?;
+        let next_machine = delta.validate_against(
+            &stored.state,
+            self.machine.as_ref().ok_or_else(|| {
+                DurableError::NotFound("durable Machine is not initialized".to_owned())
+            })?,
+        )?;
         let batch = StoreBatch::transition(stored, delta.clone())?;
         let commit = self.store.compare_and_commit(Some(&expected), &batch)?;
         let stored = self.stored.as_mut().expect("initialized state remains");
         batch.apply_committed(stored, &commit)?;
+        self.machine = Some(next_machine);
         Ok(commit.revision)
+    }
+
+    fn machine_operation(&self, machine: &Machine) -> DurableResult<DurableOperation> {
+        self.machine_operation_snapshot(&machine.snapshot())
+    }
+
+    fn machine_operation_snapshot(
+        &self,
+        next: &MachineSnapshot,
+    ) -> DurableResult<DurableOperation> {
+        let previous = &self.state()?.machine;
+        Ok(DurableOperation::ApplyMachine {
+            delta: cymule_core::MachineDelta::between(previous, next)?,
+        })
     }
 
     fn journal_append_operation(

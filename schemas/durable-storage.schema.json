@@ -4,6 +4,20 @@
   "title": "Cymule Durable Storage Records",
   "$defs": {
     "identity": { "type": "string", "minLength": 1 },
+    "machine_delta": {
+      "type": "object",
+      "properties": {
+        "delta_version": { "const": "cymule.machine-delta/1" },
+        "plans": { "type": "array", "items": { "type": "object" } },
+        "artifacts": { "type": "array", "items": { "type": "object" } },
+        "compacted_event_ids": { "type": "array", "items": { "$ref": "#/$defs/identity" }, "uniqueItems": true },
+        "base": { "type": "object" },
+        "events": { "type": "array", "items": { "type": "object" } },
+        "commands": { "type": "object" }
+      },
+      "required": ["delta_version", "plans", "artifacts", "compacted_event_ids", "events", "commands"],
+      "additionalProperties": false
+    },
     "durable_delta": {
       "type": "object",
       "properties": {
@@ -14,8 +28,8 @@
             "oneOf": [
               {
                 "type": "object",
-                "properties": { "op": { "const": "put_machine" }, "machine": { "type": "object" } },
-                "required": ["op", "machine"],
+                "properties": { "op": { "const": "apply_machine" }, "delta": { "$ref": "#/$defs/machine_delta" } },
+                "required": ["op", "delta"],
                 "additionalProperties": false
               },
               {
@@ -62,7 +76,7 @@
     "segment": {
       "type": "object",
       "properties": {
-        "segment_version": { "const": "cymule.durable-segment/1" },
+        "segment_version": { "const": "cymule.durable-segment/2" },
         "segment_id": { "$ref": "#/$defs/identity" },
         "sequence": { "type": "integer", "minimum": 1 },
         "parent_segment": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },

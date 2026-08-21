@@ -287,7 +287,7 @@ safe point expressible by the frozen sequential/nested IR. The Embedded profile
 does not claim this persistence because it deliberately uses one-shot memory.
 
 The M1 store MUST persist each non-empty transition as an immutable
-content-addressed `cymule.durable-segment/1` containing closed typed operations and atomically move one
+content-addressed `cymule.durable-segment/2` containing closed typed operations and atomically move one
 `cymule.durable-head/1`. The head MUST authenticate the semantic revision, one
 `cymule.durable-checkpoint/1`, the latest suffix segment, its exact length, and
 a monotonic physical sequence. A store MUST reconstruct and validate the
@@ -299,6 +299,12 @@ move only the small head under writer exclusion. Reclaiming cold objects MUST
 materialize a new base before its CAS and emit a content-addressed
 `cymule.durable-gc-receipt/1`. Physical storage migrations are explicit and
 offline; runtime open MUST NOT mix or implicitly fall back to an older format.
+Each semantic Machine transition uses `cymule.machine-delta/1`: only newly
+admitted Plans, Artifacts, Events, command receipts, and an exact optional
+compaction cut enter the segment. A normal commit MUST NOT serialize or replay
+the complete Machine snapshot. Providers load only checkpoint and segment IDs
+reachable from one consistent head observation; unrelated immutable residue is
+not reopen authority.
 
 A durable domain MAY contain multiple independent Runs. Creating the first Run
 initializes the domain; creating any later Run MUST append only that Run's exact

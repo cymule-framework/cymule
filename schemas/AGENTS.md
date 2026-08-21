@@ -52,6 +52,8 @@
   recursive delta, checkpoint envelope, and GC receipt. Rust additionally
   verifies every content identity, segment lineage, semantic revision, and the
   checkpoint-plus-suffix replay bound.
+  Segment v2 carries the closed `cymule.machine-delta/1`; whole-Machine replace
+  operations are not part of the physical protocol.
 - `virtual-checkpoint.schema.json` owns `cymule.virtual-checkpoint/2`
   content-addressed cursor and bounded-frontier delta payloads. Each record
   authenticates its parent and resulting transition head and never repeats a

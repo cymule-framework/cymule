@@ -1529,9 +1529,24 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
             },
         ))
         .expect("attempt yields");
+    let before_epoch = machine.snapshot();
     machine
         .submit(envelope(&machine, 4, run_id, Command::AdvanceEpoch))
         .expect("epoch advances");
+    let epoch_snapshot = machine.snapshot();
+    let epoch_delta = cymule_core::MachineDelta::between(&before_epoch, &epoch_snapshot)
+        .expect("one-Event delta derives");
+    assert_eq!(epoch_delta.events.len(), 1);
+    assert!(epoch_delta.plans.is_empty());
+    assert!(epoch_delta.artifacts.is_empty());
+    assert!(
+        cymule_core::canonical_bytes(&epoch_delta)
+            .expect("delta encodes")
+            .len()
+            < cymule_core::canonical_bytes(&epoch_snapshot)
+                .expect("snapshot encodes")
+                .len()
+    );
     let expected_projection = machine.projection().clone();
     let event_ids: Vec<String> = machine
         .events()
@@ -1557,6 +1572,7 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
         Err(CoreError::Validation(_))
     ));
 
+    let before_compaction = machine.snapshot();
     let compaction = machine.compact_event_history(2).expect("prefix compacts");
     assert_eq!(compaction.compacted_events, 2);
     assert_eq!(compaction.retained_events, 2);
@@ -1566,6 +1582,27 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
     );
     machine.verify_replay().expect("base plus suffix replays");
     let snapshot = machine.snapshot();
+    let delta = cymule_core::MachineDelta::between(&before_compaction, &snapshot)
+        .expect("incremental compaction delta derives");
+    let mut incrementally_restored =
+        Machine::restore(before_compaction.clone()).expect("pre-compaction Machine restores once");
+    incrementally_restored
+        .apply_delta(&delta)
+        .expect("semantic delta applies without retained-history replay");
+    assert_eq!(incrementally_restored.snapshot(), snapshot);
+    let mut assembled = before_compaction;
+    assembled
+        .apply_delta(&delta)
+        .expect("snapshot delta assembles");
+    assert_eq!(assembled, snapshot);
+    assert!(
+        cymule_core::canonical_bytes(&delta)
+            .expect("delta encodes")
+            .len()
+            < cymule_core::canonical_bytes(&snapshot)
+                .expect("snapshot encodes")
+                .len()
+    );
     let base = snapshot.base.as_ref().expect("base exists");
     assert_eq!(base.compacted_events.len(), 2);
     assert_eq!(base.compacted_events[0].event_id, event_ids[0]);

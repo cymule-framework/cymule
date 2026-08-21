@@ -290,7 +290,7 @@ fn checkpoint_rotation_bounds_reopen_and_cold_gc_preserves_state() {
 }
 
 #[test]
-fn pending_gc_manifest_recovers_after_partial_deletion() {
+fn normal_load_ignores_uncommitted_objects_and_finishes_published_gc() {
     let directory = test_directory();
     let mut coordinator =
         DurableCoordinator::open(DirectoryStore::open(&directory).expect("store opens"))
@@ -350,35 +350,54 @@ fn pending_gc_manifest_recovers_after_partial_deletion() {
         cymule_core::canonical_bytes(&checkpoint).expect("checkpoint bytes"),
     )
     .expect("materialized checkpoint writes");
-    let mut recovered_head = head.clone();
-    recovered_head
+    let mut published_head = head.clone();
+    published_head
         .checkpoint_id
         .clone_from(&checkpoint.checkpoint_id);
-    recovered_head.checkpoint_depth = 0;
-    recovered_head.suffix_head = None;
-    recovered_head.suffix_len = 0;
-    let receipt = GcReceipt::new(&recovered_head, &reclaimed).expect("pending receipt constructs");
+    published_head.checkpoint_depth = 0;
+    published_head.suffix_head = None;
+    published_head.suffix_len = 0;
+    reclaimed.remove(&checkpoint.checkpoint_id);
+    let receipt = GcReceipt::new(&published_head, &reclaimed).expect("GC receipt constructs");
     fs::write(
         object_path("gc-receipts", &receipt.receipt_id),
         cymule_core::canonical_bytes(&receipt).expect("receipt bytes"),
     )
     .expect("pending receipt writes");
-    let first = reclaimed.iter().next().expect("cold object exists");
-    fs::remove_file(&paths[first]).expect("first cold object deletion simulates crash");
-    assert_eq!(
-        store
-            .reclaim_cold(&head)
-            .expect("pending reclamation resumes"),
-        receipt
+    let uncommitted = directory.join("segments").join("orphan.next");
+    fs::write(&uncommitted, b"partial immutable bytes").expect("staging residue writes");
+    fs::write(
+        directory.join("segments").join("unreachable-corrupt"),
+        b"{}",
+    )
+    .expect("unreachable corrupt object writes");
+
+    let before_publish = store
+        .load()
+        .expect("old head remains readable")
+        .expect("state");
+    assert_eq!(before_publish.head, head);
+    assert!(
+        !uncommitted.exists(),
+        "normal load removes uncommitted staging"
     );
-    assert_eq!(
-        store
-            .load()
-            .expect("reopens after resumed GC")
-            .expect("state")
-            .head
-            .gc_receipt,
-        Some(receipt.receipt_id)
-    );
+
+    published_head.gc_receipt = Some(receipt.receipt_id.clone());
+    fs::write(
+        directory.join("head.json"),
+        cymule_core::canonical_bytes(&published_head).expect("published head bytes"),
+    )
+    .expect("published head writes");
+    let recovered = store
+        .load()
+        .expect("normal load completes published reclamation")
+        .expect("state");
+    assert_eq!(recovered.state, before_publish.state);
+    assert_eq!(recovered.head.gc_receipt, Some(receipt.receipt_id));
+    for object_id in reclaimed {
+        if let Some(path) = paths.get(&object_id) {
+            assert!(!path.exists(), "published GC removes {object_id}");
+        }
+    }
     fs::remove_dir_all(directory).expect("test directory removes");
 }

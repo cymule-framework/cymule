@@ -212,6 +212,86 @@ fn corrupted_head_fails_closed() {
 }
 
 #[test]
+fn reopen_reads_only_head_reachable_objects() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("reachable.sqlite");
+    let mut store = SqliteStore::open(&path, "domain:reachable").expect("opens");
+    let initial = initialize(&mut store);
+    let expected = append(&mut store, &initial, 1);
+    let connection = Connection::open(&path).expect("raw connection opens");
+    for table in ["cymule_checkpoints", "cymule_segments"] {
+        connection
+            .execute(
+                &format!("INSERT INTO {table}(domain, object_id, object_json) VALUES (?1, ?2, ?3)"),
+                (
+                    "domain:reachable",
+                    format!("unreachable:{table}"),
+                    b"{}".as_slice(),
+                ),
+            )
+            .expect("unreachable corrupt row writes");
+    }
+    let reopened = store
+        .load()
+        .expect("reachable lineage loads")
+        .expect("state");
+    assert_eq!(reopened, expected);
+}
+
+#[test]
+fn sqlite_statement_failures_roll_back_immutable_rows_and_head_together() {
+    for (name, trigger) in [
+        (
+            "segment_insert",
+            "CREATE TRIGGER fail_segment BEFORE INSERT ON cymule_segments
+             BEGIN SELECT RAISE(ABORT, 'injected segment failure'); END;",
+        ),
+        (
+            "head_update",
+            "CREATE TRIGGER fail_head BEFORE UPDATE ON cymule_heads
+             BEGIN SELECT RAISE(ABORT, 'injected head failure'); END;",
+        ),
+    ] {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join(format!("fault-{name}.sqlite"));
+        let mut store = SqliteStore::open(&path, "domain:fault").expect("opens");
+        let initial = initialize(&mut store);
+        let raw = Connection::open(&path).expect("fault connection opens");
+        raw.execute_batch(trigger).expect("fault trigger installs");
+        let record =
+            JournalRecord::new("fault", "test.fault/1", json!({"name": name})).expect("record");
+        let batch = StoreBatch::transition(
+            &initial,
+            DurableDelta::new(vec![DurableOperation::AppendJournal {
+                journal_id: "journal:fault".to_owned(),
+                records: vec![record],
+            }])
+            .expect("delta"),
+        )
+        .expect("transition");
+        assert!(matches!(
+            store.compare_and_commit(Some(&initial.head), &batch),
+            Err(DurableError::Substrate(_))
+        ));
+        raw.execute_batch("DROP TRIGGER IF EXISTS fail_segment; DROP TRIGGER IF EXISTS fail_head;")
+            .expect("fault trigger removes");
+        let reopened = store
+            .load()
+            .expect("store remains readable")
+            .expect("state");
+        assert_eq!(reopened, initial);
+        let segments: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM cymule_segments WHERE domain = ?1",
+                ["domain:fault"],
+                |row| row.get(0),
+            )
+            .expect("segment count reads");
+        assert_eq!(segments, 0, "{name} rolls back the whole transaction");
+    }
+}
+
+#[test]
 fn content_addressed_row_locator_must_match_embedded_segment_id() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("aliased-segment.sqlite");

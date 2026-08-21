@@ -171,6 +171,267 @@ pub struct MachineSnapshot {
     commands: BTreeMap<String, CommandRecord>,
 }
 
+/// Incremental canonical Machine mutation retained by durable state segments.
+///
+/// The private command records keep idempotency authority inside the semantic
+/// core while allowing durable adapters to persist only newly admitted values.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineDelta {
+    /// Delta schema version.
+    pub delta_version: String,
+    /// Newly admitted sealed Plans.
+    pub plans: Vec<SealedPlan>,
+    /// Newly retained immutable Artifacts.
+    pub artifacts: Vec<ArtifactRecord>,
+    /// Exact current Event prefix compacted by this transition.
+    pub compacted_event_ids: Vec<String>,
+    /// Replacement authenticated base when compaction occurs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<MachineBaseSnapshot>,
+    /// Newly admitted canonical Events in order.
+    pub events: Vec<Event>,
+    /// Newly admitted command receipts, including conflict receipts without Events.
+    commands: BTreeMap<String, CommandRecord>,
+}
+
+impl MachineDelta {
+    /// Current incremental Machine-delta schema.
+    pub const VERSION: &'static str = "cymule.machine-delta/1";
+
+    /// Derive the unique additive/compaction delta between two snapshots.
+    pub fn between(previous: &MachineSnapshot, next: &MachineSnapshot) -> Result<Self> {
+        if previous.snapshot_version != MachineSnapshot::VERSION
+            || next.snapshot_version != MachineSnapshot::VERSION
+        {
+            return Err(CoreError::Validation(
+                "Machine delta requires current snapshot versions".to_owned(),
+            ));
+        }
+        let plans = additions_by(
+            &previous.plans,
+            &next.plans,
+            |value| value.plan_id.as_str(),
+            "Plan",
+        )?;
+        let artifacts = additions_by(
+            &previous.artifacts,
+            &next.artifacts,
+            |value| value.reference.artifact_id.as_str(),
+            "Artifact",
+        )?;
+        let commands = map_additions(&previous.commands, &next.commands, "command")?;
+
+        let (compacted_event_ids, base, events) = if previous.base == next.base {
+            if !next.events.starts_with(&previous.events) {
+                return Err(CoreError::Validation(
+                    "Machine delta cannot rewrite or remove retained Events".to_owned(),
+                ));
+            }
+            (
+                Vec::new(),
+                None,
+                next.events[previous.events.len()..].to_vec(),
+            )
+        } else {
+            let base = next.base.clone().ok_or_else(|| {
+                CoreError::Validation("Machine delta cannot remove a compacted base".to_owned())
+            })?;
+            let retained_start = (0..=previous.events.len())
+                .find(|index| next.events.starts_with(&previous.events[*index..]))
+                .ok_or_else(|| {
+                    CoreError::Validation(
+                        "Machine compaction does not retain an exact Event suffix".to_owned(),
+                    )
+                })?;
+            let retained = previous.events.len() - retained_start;
+            (
+                previous.events[..retained_start]
+                    .iter()
+                    .map(|event| event.event_id.clone())
+                    .collect(),
+                Some(base),
+                next.events[retained..].to_vec(),
+            )
+        };
+        Ok(Self {
+            delta_version: Self::VERSION.to_owned(),
+            plans,
+            artifacts,
+            compacted_event_ids,
+            base,
+            events,
+            commands,
+        })
+    }
+
+    /// Whether this transition changes canonical Machine state.
+    pub fn is_empty(&self) -> bool {
+        self.plans.is_empty()
+            && self.artifacts.is_empty()
+            && self.compacted_event_ids.is_empty()
+            && self.base.is_none()
+            && self.events.is_empty()
+            && self.commands.is_empty()
+    }
+}
+
+impl MachineSnapshot {
+    /// Apply an authenticated incremental representation without replaying the
+    /// semantic Event projection. Full semantic validation remains a single
+    /// reopen boundary after all retained deltas are assembled.
+    pub fn apply_delta(&mut self, delta: &MachineDelta) -> Result<()> {
+        if self.snapshot_version != Self::VERSION || delta.delta_version != MachineDelta::VERSION {
+            return Err(CoreError::Validation(
+                "Machine snapshot and delta versions do not match".to_owned(),
+            ));
+        }
+        merge_snapshot_values(
+            &mut self.plans,
+            &delta.plans,
+            |value| value.plan_id.as_str(),
+            "Plan",
+        )?;
+        merge_snapshot_values(
+            &mut self.artifacts,
+            &delta.artifacts,
+            |value| value.reference.artifact_id.as_str(),
+            "Artifact",
+        )?;
+        match (&delta.base, delta.compacted_event_ids.is_empty()) {
+            (None, true) => {}
+            (Some(base), false) => {
+                if self
+                    .events
+                    .iter()
+                    .take(delta.compacted_event_ids.len())
+                    .map(|event| event.event_id.as_str())
+                    .ne(delta.compacted_event_ids.iter().map(String::as_str))
+                {
+                    return Err(CoreError::Validation(
+                        "Machine delta compaction does not match the snapshot Event prefix"
+                            .to_owned(),
+                    ));
+                }
+                self.events.drain(..delta.compacted_event_ids.len());
+                self.base = Some(base.clone());
+            }
+            _ => {
+                return Err(CoreError::Validation(
+                    "Machine delta compaction requires both a base and an Event prefix".to_owned(),
+                ));
+            }
+        }
+        self.events.extend(delta.events.iter().cloned());
+        for (id, record) in &delta.commands {
+            match self.commands.get(id) {
+                Some(existing) if existing == record => {}
+                Some(_) => {
+                    return Err(CoreError::IdentityMismatch(format!(
+                        "Machine delta command {id} conflicts with retained authority"
+                    )));
+                }
+                None => {
+                    self.commands.insert(id.clone(), record.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn merge_snapshot_values<T: Clone + PartialEq>(
+    retained: &mut Vec<T>,
+    added: &[T],
+    identity: impl Fn(&T) -> &str,
+    kind: &str,
+) -> Result<()> {
+    let mut values = retained
+        .drain(..)
+        .map(|value| (identity(&value).to_owned(), value))
+        .collect::<BTreeMap<_, _>>();
+    for value in added {
+        let id = identity(value).to_owned();
+        match values.get(&id) {
+            Some(existing) if existing == value => {}
+            Some(_) => {
+                return Err(CoreError::IdentityMismatch(format!(
+                    "Machine delta rewrites {kind} {id}"
+                )));
+            }
+            None => {
+                values.insert(id, value.clone());
+            }
+        }
+    }
+    retained.extend(values.into_values());
+    Ok(())
+}
+
+fn additions_by<T: Clone + PartialEq>(
+    previous: &[T],
+    next: &[T],
+    identity: impl Fn(&T) -> &str,
+    kind: &str,
+) -> Result<Vec<T>> {
+    let previous = previous
+        .iter()
+        .map(|value| (identity(value), value))
+        .collect::<BTreeMap<_, _>>();
+    let mut additions = Vec::new();
+    let mut next_ids = BTreeSet::new();
+    for value in next {
+        let id = identity(value);
+        if !next_ids.insert(id) {
+            return Err(CoreError::Validation(format!(
+                "Machine snapshot repeats {kind} {id}"
+            )));
+        }
+        match previous.get(id) {
+            Some(existing) if *existing == value => {}
+            Some(_) => {
+                return Err(CoreError::IdentityMismatch(format!(
+                    "Machine delta rewrites {kind} {id}"
+                )));
+            }
+            None => additions.push(value.clone()),
+        }
+    }
+    if previous.keys().any(|id| !next_ids.contains(id)) {
+        return Err(CoreError::Validation(format!(
+            "Machine delta removes an existing {kind}"
+        )));
+    }
+    Ok(additions)
+}
+
+fn map_additions<T: Clone + PartialEq>(
+    previous: &BTreeMap<String, T>,
+    next: &BTreeMap<String, T>,
+    kind: &str,
+) -> Result<BTreeMap<String, T>> {
+    let mut additions = BTreeMap::new();
+    for (id, value) in next {
+        match previous.get(id) {
+            Some(existing) if existing == value => {}
+            Some(_) => {
+                return Err(CoreError::IdentityMismatch(format!(
+                    "Machine delta rewrites {kind} {id}"
+                )));
+            }
+            None => {
+                additions.insert(id.clone(), value.clone());
+            }
+        }
+    }
+    if previous.keys().any(|id| !next.contains_key(id)) {
+        return Err(CoreError::Validation(format!(
+            "Machine delta removes an existing {kind}"
+        )));
+    }
+    Ok(additions)
+}
+
 impl MachineSnapshot {
     /// Current snapshot schema version.
     pub const VERSION: &'static str = "cymule.machine-snapshot/5";
@@ -223,6 +484,157 @@ impl Machine {
             events: self.events().cloned().collect(),
             commands: self.commands.clone(),
         }
+    }
+
+    /// Apply one verified incremental Machine mutation without replaying the
+    /// retained Event history.
+    pub fn apply_delta(&mut self, delta: &MachineDelta) -> Result<()> {
+        if delta.delta_version != MachineDelta::VERSION {
+            return Err(CoreError::Validation(format!(
+                "unsupported machine delta version {:?}",
+                delta.delta_version
+            )));
+        }
+        for plan in &delta.plans {
+            self.insert_plan(plan.clone())?;
+        }
+        for artifact in &delta.artifacts {
+            artifact.reference.validate()?;
+            let reference =
+                self.put_artifact(artifact.reference.kind.clone(), artifact.bytes.clone())?;
+            if reference != artifact.reference {
+                return Err(CoreError::IdentityMismatch(format!(
+                    "Artifact {} does not match its Machine delta bytes",
+                    artifact.reference.artifact_id
+                )));
+            }
+        }
+        match (&delta.base, delta.compacted_event_ids.is_empty()) {
+            (None, true) => {}
+            (Some(base), false) => {
+                base.verify()?;
+                let count = delta.compacted_event_ids.len();
+                if self.event_order.get(..count) != Some(delta.compacted_event_ids.as_slice()) {
+                    return Err(CoreError::Validation(
+                        "Machine delta compaction does not match the retained Event prefix"
+                            .to_owned(),
+                    ));
+                }
+                let previous_evidence = self
+                    .base
+                    .as_ref()
+                    .map(|value| value.compacted_events.as_slice())
+                    .unwrap_or_default();
+                if !base.compacted_events.starts_with(previous_evidence)
+                    || base.compacted_events.len() != previous_evidence.len() + count
+                {
+                    return Err(CoreError::Validation(
+                        "Machine delta compaction evidence is not cumulative".to_owned(),
+                    ));
+                }
+                let mut projected = self
+                    .base
+                    .as_ref()
+                    .map(|value| value.projection.clone())
+                    .unwrap_or_default();
+                for (offset, event_id) in delta.compacted_event_ids.iter().enumerate() {
+                    let event = self.events.get(event_id).ok_or_else(|| {
+                        CoreError::NotFound(format!("compacted Event {event_id} does not exist"))
+                    })?;
+                    projected.apply_event(event)?;
+                    let record = self.commands.get(&event.command_id).ok_or_else(|| {
+                        CoreError::NotFound(format!(
+                            "compacted Event {event_id} has no command record"
+                        ))
+                    })?;
+                    let evidence = &base.compacted_events[previous_evidence.len() + offset];
+                    if evidence.event_id != *event_id
+                        || evidence.command_id != event.command_id
+                        || evidence.command_hash != event.command_hash
+                        || evidence.command_record_digest != canonical_digest(record)?
+                    {
+                        return Err(CoreError::IdentityMismatch(format!(
+                            "compacted Event {event_id} evidence does not match"
+                        )));
+                    }
+                }
+                if projected != base.projection {
+                    return Err(CoreError::IdentityMismatch(
+                        "Machine delta compacted projection does not match its Event prefix"
+                            .to_owned(),
+                    ));
+                }
+                for event_id in &delta.compacted_event_ids {
+                    self.events.remove(event_id);
+                }
+                self.event_order.drain(..count);
+                self.compacted_event_ids = base.event_ids();
+                self.base = Some(base.clone());
+            }
+            _ => {
+                return Err(CoreError::Validation(
+                    "Machine delta compaction requires both a base and an Event prefix".to_owned(),
+                ));
+            }
+        }
+        for event in &delta.events {
+            self.append_event(event.clone())?;
+        }
+        let new_events = delta
+            .events
+            .iter()
+            .map(|event| (event.event_id.as_str(), event))
+            .collect::<BTreeMap<_, _>>();
+        let mut claimed_events = BTreeSet::new();
+        for (command_id, record) in &delta.commands {
+            if command_id != &record.receipt.command_id || self.commands.contains_key(command_id) {
+                return Err(CoreError::IdentityMismatch(format!(
+                    "Machine delta command {command_id} conflicts with retained authority"
+                )));
+            }
+            match (&record.receipt.status, &record.receipt.event_id) {
+                (CommandReceiptStatus::Applied, Some(event_id))
+                    if record.receipt.error_code.is_none() && record.receipt.message.is_none() =>
+                {
+                    let event = new_events.get(event_id.as_str()).ok_or_else(|| {
+                        CoreError::NotFound(format!(
+                            "Machine delta command {command_id} references a non-delta Event {event_id}"
+                        ))
+                    })?;
+                    if event.command_id != *command_id
+                        || event.command_hash != record.semantic_hash
+                        || !claimed_events.insert(event_id.clone())
+                    {
+                        return Err(CoreError::IdentityMismatch(format!(
+                            "Machine delta command {command_id} does not uniquely match Event {event_id}"
+                        )));
+                    }
+                }
+                (CommandReceiptStatus::Applied, _) => {
+                    return Err(CoreError::IdentityMismatch(format!(
+                        "applied Machine delta command {command_id} must have one Event and no error"
+                    )));
+                }
+                (CommandReceiptStatus::Conflict, None)
+                    if record
+                        .receipt
+                        .error_code
+                        .as_deref()
+                        .is_some_and(|code| !code.is_empty()) => {}
+                (CommandReceiptStatus::Conflict, _) => {
+                    return Err(CoreError::IdentityMismatch(format!(
+                        "conflicting Machine delta command {command_id} has invalid Event or error evidence"
+                    )));
+                }
+            }
+            self.commands.insert(command_id.clone(), record.clone());
+        }
+        if claimed_events.len() != delta.events.len() {
+            return Err(CoreError::NotFound(
+                "Machine delta Event has no newly admitted command receipt".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Restore a Machine and deterministically rebuild all projections.

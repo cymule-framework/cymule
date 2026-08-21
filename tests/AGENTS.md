@@ -79,6 +79,11 @@
   evidence. `SIGKILL` at an API or CAS barrier does not prove SQLite VFS write,
   sync, WAL, checkpoint, torn-sector, or filesystem reorder behavior. An absent
   faithful test VFS is unsupported coverage, never a skipped-as-passed lane.
+- Store reopen complexity fixtures must add malformed unreachable objects and
+  prove they are neither read nor treated as authority. Directory GC fixtures
+  cover the durable publish-before-delete phases; SQLite statement triggers
+  prove transaction rollback only, while the existing process-death suite owns
+  real CAS-level SIGKILL evidence.
 - Use `ManagedChild` for shared process-death tests. Its Drop path must kill and
   wait even when the caller forgets explicit termination; keep an independent
   leak probe in the live-process suite.

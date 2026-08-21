@@ -36,6 +36,10 @@
 - `MachineSnapshot::command_digests` exposes only stable validation evidence for
   durable exact-delta checks. Keep the private command-record representation and
   reduction semantics inside this core.
+- `MachineDelta` is the only durable incremental Machine representation. It
+  retains command records privately, permits only additive canonical inputs or
+  one exact cumulative compaction cut, and applies to a live `Machine` without
+  replaying its retained Event history.
 - A compacted Machine snapshot may replace only a causally closed Event prefix
   with an authenticated base projection plus exact compacted Event identities.
   Resume replays the full retained suffix from that base, command receipts keep

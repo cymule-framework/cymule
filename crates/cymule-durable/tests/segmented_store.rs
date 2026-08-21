@@ -117,6 +117,54 @@ fn automatic_materialized_bases_bound_manifest_recovery() {
     );
 }
 
+#[test]
+fn memory_gc_resets_manifest_depth_and_accepts_the_next_increment() {
+    let mut store = MemoryStore::new();
+    let initial = StoreBatch::initialize(DurableState::new(Machine::new().snapshot()))
+        .expect("initial batch");
+    store
+        .compare_and_commit(None, &initial)
+        .expect("initial commit");
+    let mut current = store.load().expect("loads").expect("state");
+    for index in 0..MAX_HOT_SEGMENTS {
+        let delta = DurableDelta::new(vec![DurableOperation::AppendJournal {
+            journal_id: "journal:memory-gc".to_owned(),
+            records: vec![
+                JournalRecord::new(
+                    format!("record:{index}"),
+                    "test.memory-gc/1",
+                    json!({"index": index}),
+                )
+                .expect("record"),
+            ],
+        }])
+        .expect("delta");
+        let batch = StoreBatch::transition(&current, delta).expect("transition");
+        let commit = store
+            .compare_and_commit(Some(&current.head), &batch)
+            .expect("commit");
+        batch
+            .apply_committed(&mut current, &commit)
+            .expect("projection advances");
+    }
+    assert!(current.head.checkpoint_depth > 0);
+    store.reclaim_cold(&current.head).expect("memory GC");
+    let reclaimed = store.load().expect("loads after GC").expect("state");
+    assert_eq!(reclaimed.head.checkpoint_depth, 0);
+    let delta = DurableDelta::new(vec![DurableOperation::AppendJournal {
+        journal_id: "journal:memory-gc".to_owned(),
+        records: vec![
+            JournalRecord::new("record:after", "test.memory-gc/1", json!({"after": true}))
+                .expect("record"),
+        ],
+    }])
+    .expect("delta");
+    let batch = StoreBatch::transition(&reclaimed, delta).expect("post-GC transition");
+    store
+        .compare_and_commit(Some(&reclaimed.head), &batch)
+        .expect("post-GC commit");
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(4))]
 

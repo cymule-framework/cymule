@@ -1,7 +1,7 @@
 //! `SQLite` realization of Cymule's segmented durable head CAS.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -219,11 +219,17 @@ impl SqliteStore {
         Ok(receipts)
     }
 
-    fn read(&self) -> DurableResult<Option<StoredState>> {
-        let Some(head) = read_head(&self.connection, &self.domain)? else {
+    fn read(&mut self) -> DurableResult<Option<StoredState>> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(sqlite_error)?;
+        let Some(head) = read_head(&transaction, &self.domain)? else {
+            transaction.commit().map_err(sqlite_error)?;
             return Ok(None);
         };
-        let (stored, reopened) = restore_sql(&self.connection, &self.domain, &head)?;
+        let (stored, reopened) = restore_sql(&transaction, &self.domain, &head)?;
+        transaction.commit().map_err(sqlite_error)?;
         self.last_reopened.set(reopened);
         Ok(Some(stored))
     }
@@ -324,6 +330,7 @@ impl DurableStore for SqliteStore {
         for id in list_ids(&transaction, "cymule_segments", &self.domain)? {
             reclaimed.insert(id);
         }
+        reclaimed.remove(&checkpoint.checkpoint_id);
         transaction
             .execute(
                 "DELETE FROM cymule_checkpoints WHERE domain = ?1",
@@ -441,37 +448,42 @@ fn restore_sql(
     head: &StoreHead,
 ) -> DurableResult<(StoredState, u32)> {
     verify_gc_receipt(connection, domain, head)?;
-    let mut checkpoints = BTreeMap::new();
-    for id in list_ids(connection, "cymule_checkpoints", domain)? {
-        let value: StateCheckpoint = read_object(connection, "cymule_checkpoints", domain, &id)?
-            .ok_or_else(|| {
-                DurableError::NotFound(format!("durable checkpoint {id} does not exist"))
-            })?;
-        if value.checkpoint_id != id {
-            return Err(DurableError::Validation(
-                "SQLite checkpoint locator does not match its content identity".to_owned(),
-            ));
-        }
-        checkpoints.insert(id, value);
-    }
-    let mut values = BTreeMap::new();
-    for id in list_ids(connection, "cymule_segments", domain)? {
-        let value: StateSegment = read_object(connection, "cymule_segments", domain, &id)?
-            .ok_or_else(|| {
-                DurableError::NotFound(format!("durable segment {id} does not exist"))
-            })?;
-        if value.segment_id != id {
-            return Err(DurableError::Validation(
-                "SQLite segment locator does not match its content identity".to_owned(),
-            ));
-        }
-        values.insert(id, value);
-    }
     restore(
         head,
-        |id| checkpoints.get(id).cloned(),
-        |id| values.get(id).cloned(),
+        |id| read_checkpoint(connection, domain, id),
+        |id| read_segment(connection, domain, id),
     )
+}
+
+fn read_checkpoint(
+    connection: &Connection,
+    domain: &str,
+    id: &str,
+) -> DurableResult<Option<StateCheckpoint>> {
+    let value: Option<StateCheckpoint> = read_object(connection, "cymule_checkpoints", domain, id)?;
+    if value
+        .as_ref()
+        .is_some_and(|value| value.checkpoint_id != id)
+    {
+        return Err(DurableError::Validation(
+            "SQLite checkpoint locator does not match its content identity".to_owned(),
+        ));
+    }
+    Ok(value)
+}
+
+fn read_segment(
+    connection: &Connection,
+    domain: &str,
+    id: &str,
+) -> DurableResult<Option<StateSegment>> {
+    let value: Option<StateSegment> = read_object(connection, "cymule_segments", domain, id)?;
+    if value.as_ref().is_some_and(|value| value.segment_id != id) {
+        return Err(DurableError::Validation(
+            "SQLite segment locator does not match its content identity".to_owned(),
+        ));
+    }
+    Ok(value)
 }
 
 fn verify_gc_receipt(connection: &Connection, domain: &str, head: &StoreHead) -> DurableResult<()> {

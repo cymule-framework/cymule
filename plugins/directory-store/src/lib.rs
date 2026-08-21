@@ -5,7 +5,7 @@ use cymule_durable::{
 };
 use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -165,33 +165,58 @@ impl DirectoryStore {
             }
             receipt.verify_for(head)?;
         }
-        let mut checkpoints = BTreeMap::new();
-        for entry in fs::read_dir(self.root.join("checkpoints")).map_err(substrate)? {
-            let path = entry.map_err(substrate)?.path();
-            let value: StateCheckpoint = read_required(&path, "checkpoint")?;
-            if path != self.object_path("checkpoints", &value.checkpoint_id) {
-                return Err(DurableError::Validation(
-                    "directory checkpoint locator does not match its content identity".to_owned(),
-                ));
-            }
-            checkpoints.insert(value.checkpoint_id.clone(), value);
-        }
-        let mut values = BTreeMap::new();
-        for entry in fs::read_dir(self.root.join("segments")).map_err(substrate)? {
-            let path = entry.map_err(substrate)?.path();
-            let value: StateSegment = read_required(&path, "segment")?;
-            if path != self.object_path("segments", &value.segment_id) {
-                return Err(DurableError::Validation(
-                    "directory segment locator does not match its content identity".to_owned(),
-                ));
-            }
-            values.insert(value.segment_id.clone(), value);
-        }
         restore(
             head,
-            |id| checkpoints.get(id).cloned(),
-            |id| values.get(id).cloned(),
+            |id| self.read_checkpoint(id),
+            |id| self.read_segment(id),
         )
+    }
+
+    fn read_checkpoint(&self, id: &str) -> DurableResult<Option<StateCheckpoint>> {
+        let path = self.object_path("checkpoints", id);
+        let value: Option<StateCheckpoint> = read_optional(&path)?;
+        if value
+            .as_ref()
+            .is_some_and(|value| value.checkpoint_id != id)
+        {
+            return Err(DurableError::Validation(
+                "directory checkpoint locator does not match its content identity".to_owned(),
+            ));
+        }
+        Ok(value)
+    }
+
+    fn read_segment(&self, id: &str) -> DurableResult<Option<StateSegment>> {
+        let path = self.object_path("segments", id);
+        let value: Option<StateSegment> = read_optional(&path)?;
+        if value.as_ref().is_some_and(|value| value.segment_id != id) {
+            return Err(DurableError::Validation(
+                "directory segment locator does not match its content identity".to_owned(),
+            ));
+        }
+        Ok(value)
+    }
+
+    fn clean_staging_residue(&self) -> DurableResult<()> {
+        let mut root_changed = remove_if_present(&self.root.join("head.next"))?;
+        for family in ["checkpoints", "segments", "gc-receipts"] {
+            let directory = self.root.join(family);
+            let mut changed = false;
+            for entry in fs::read_dir(&directory).map_err(substrate)? {
+                let path = entry.map_err(substrate)?.path();
+                if path.extension().and_then(|value| value.to_str()) == Some("next") {
+                    changed |= remove_if_present(&path)?;
+                }
+            }
+            if changed {
+                sync_directory(&directory)?;
+                root_changed = true;
+            }
+        }
+        if root_changed {
+            sync_directory(&self.root)?;
+        }
+        Ok(())
     }
     fn write_immutable<T: Serialize + DeserializeOwned + PartialEq>(
         &self,
@@ -213,11 +238,17 @@ impl DirectoryStore {
     }
 
     fn finish_reclamation(&self, receipt: &GcReceipt) -> DurableResult<()> {
+        let mut deleted = false;
         for object_id in &receipt.reclaimed_ids {
             for family in ["checkpoints", "segments"] {
                 let path = self.object_path(family, object_id);
                 match fs::remove_file(&path) {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        if !deleted {
+                            deleted = true;
+                            test_gc_boundary("gc_deletion_started")?;
+                        }
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(substrate(error)),
                 }
@@ -227,42 +258,22 @@ impl DirectoryStore {
         sync_directory(&self.root.join("segments"))?;
         Ok(())
     }
-
-    fn pending_reclamation(&self, head: &StoreHead) -> DurableResult<Option<GcReceipt>> {
-        let mut pending = Vec::new();
-        for entry in fs::read_dir(self.root.join("gc-receipts")).map_err(substrate)? {
-            let path = entry.map_err(substrate)?.path();
-            let receipt: GcReceipt = read_required(&path, "pending GC receipt")?;
-            if path != self.object_path("gc-receipts", &receipt.receipt_id) {
-                return Err(DurableError::Validation(
-                    "directory GC receipt filename does not match its content identity".to_owned(),
-                ));
-            }
-            let mut candidate = head.clone();
-            candidate
-                .checkpoint_id
-                .clone_from(&receipt.retained_checkpoint);
-            candidate.checkpoint_depth = 0;
-            candidate.suffix_head = None;
-            candidate.suffix_len = 0;
-            if receipt.verify_for(&candidate).is_ok()
-                && self
-                    .object_path("checkpoints", &receipt.retained_checkpoint)
-                    .exists()
-            {
-                pending.push(receipt);
-            }
-        }
-        pending.sort_by(|left, right| left.receipt_id.cmp(&right.receipt_id));
-        Ok(pending.into_iter().next())
-    }
 }
 impl DurableStore for DirectoryStore {
     fn load(&mut self) -> DurableResult<Option<StoredState>> {
         let _claim = self.claim()?;
-        self.read_head()?
-            .map(|head| self.read_state(&head).map(|value| value.0))
-            .transpose()
+        self.clean_staging_residue()?;
+        let Some(head) = self.read_head()? else {
+            return Ok(None);
+        };
+        let state = self.read_state(&head)?.0;
+        if let Some(receipt_id) = &head.gc_receipt {
+            let receipt: GcReceipt =
+                read_required(&self.object_path("gc-receipts", receipt_id), receipt_id)?;
+            receipt.verify_for(&head)?;
+            self.finish_reclamation(&receipt)?;
+        }
+        Ok(Some(state))
     }
     fn compare_and_commit(
         &mut self,
@@ -270,6 +281,7 @@ impl DurableStore for DirectoryStore {
         batch: &StoreBatch,
     ) -> DurableResult<StoreCommit> {
         let _claim = self.claim()?;
+        self.clean_staging_residue()?;
         let current_head = self.read_head()?;
         if current_head.as_ref() != expected {
             return Err(DurableError::Conflict {
@@ -303,28 +315,6 @@ impl DurableStore for DirectoryStore {
             self.finish_reclamation(&receipt)?;
             return Ok(receipt);
         }
-        if let Some(receipt) = self.pending_reclamation(expected)? {
-            let _claim = self.claim()?;
-            let current = self.read_head()?;
-            if current.as_ref() != Some(expected) {
-                return Err(DurableError::Conflict {
-                    expected: Some(expected.revision.clone()),
-                    current: current.map(|head| head.revision),
-                });
-            }
-            let mut recovered_head = expected.clone();
-            recovered_head
-                .checkpoint_id
-                .clone_from(&receipt.retained_checkpoint);
-            recovered_head.checkpoint_depth = 0;
-            recovered_head.suffix_head = None;
-            recovered_head.suffix_len = 0;
-            receipt.verify_for(&recovered_head)?;
-            self.finish_reclamation(&receipt)?;
-            recovered_head.gc_receipt = Some(receipt.receipt_id.clone());
-            write_atomic(&self.root, &self.head_path(), &recovered_head)?;
-            return Ok(receipt);
-        }
         let stored = self.read_state(expected)?.0;
         let checkpoint = StateCheckpoint::for_revision(
             None,
@@ -339,6 +329,7 @@ impl DurableStore for DirectoryStore {
         head.suffix_head = None;
         head.suffix_len = 0;
         let _claim = self.claim()?;
+        self.clean_staging_residue()?;
         let current = self.read_head()?;
         if current.as_ref() != Some(expected) {
             return Err(DurableError::Conflict {
@@ -358,20 +349,24 @@ impl DurableStore for DirectoryStore {
                 reclaimed.insert(object_id);
             }
         }
+        reclaimed.remove(&checkpoint.checkpoint_id);
         self.write_immutable("checkpoints", &checkpoint.checkpoint_id, &checkpoint)?;
+        test_gc_boundary("gc_checkpoint_persisted")?;
         let receipt = GcReceipt::new(&head, &reclaimed)?;
         self.write_immutable("gc-receipts", &receipt.receipt_id, &receipt)?;
-        self.finish_reclamation(&receipt)?;
+        test_gc_boundary("gc_receipt_persisted")?;
         head.gc_receipt = Some(receipt.receipt_id.clone());
         write_atomic(&self.root, &self.head_path(), &head)?;
+        test_gc_boundary("gc_head_published")?;
+        self.finish_reclamation(&receipt)?;
         Ok(receipt)
     }
     fn stats(&self) -> DurableResult<StoreStats> {
         Ok(StoreStats {
-            checkpoints: count_files(&self.root.join("checkpoints"))?,
-            segments: count_files(&self.root.join("segments"))?,
+            checkpoints: count_committed_files(&self.root.join("checkpoints"))?,
+            segments: count_committed_files(&self.root.join("segments"))?,
             reopened_segments: self.read_head()?.map_or(0, |head| head.suffix_len),
-            gc_receipts: count_files(&self.root.join("gc-receipts"))?,
+            gc_receipts: count_committed_files(&self.root.join("gc-receipts"))?,
         })
     }
 }
@@ -408,9 +403,142 @@ fn write_atomic(root: &Path, path: &Path, value: &impl Serialize) -> DurableResu
     }
     Ok(())
 }
-fn count_files(path: &Path) -> DurableResult<u64> {
-    u64::try_from(fs::read_dir(path).map_err(substrate)?.count())
-        .map_err(|error| DurableError::Validation(error.to_string()))
+fn count_committed_files(path: &Path) -> DurableResult<u64> {
+    let count = fs::read_dir(path)
+        .map_err(substrate)?
+        .try_fold(0_u64, |count, entry| {
+            let path = entry.map_err(substrate)?.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("next") {
+                Ok(count)
+            } else {
+                count
+                    .checked_add(1)
+                    .ok_or_else(|| DurableError::Validation("file count overflowed".to_owned()))
+            }
+        })?;
+    Ok(count)
+}
+
+fn remove_if_present(path: &Path) -> DurableResult<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(substrate(error)),
+    }
+}
+
+#[cfg(not(test))]
+#[allow(clippy::unnecessary_wraps)]
+fn test_gc_boundary(_boundary: &str) -> DurableResult<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+fn test_gc_boundary(boundary: &str) -> DurableResult<()> {
+    if std::env::var("CYMULE_DIRECTORY_GC_TEST_BOUNDARY").as_deref() != Ok(boundary) {
+        return Ok(());
+    }
+    let marker = std::env::var_os("CYMULE_DIRECTORY_GC_TEST_MARKER").ok_or_else(|| {
+        DurableError::Validation("directory GC test boundary requires a marker".to_owned())
+    })?;
+    let marker = PathBuf::from(marker);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&marker)
+        .map_err(substrate)?;
+    file.write_all(boundary.as_bytes()).map_err(substrate)?;
+    file.sync_all().map_err(substrate)?;
+    sync_directory(marker.parent().expect("test marker has a parent"))?;
+    loop {
+        std::thread::park();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use cymule_core::Machine;
+    use cymule_durable::{DurableDelta, DurableOperation, DurableState, JournalRecord, StoreBatch};
+    use cymule_test_world::ManagedChild;
+    use serde_json::json;
+    use std::process::Command;
+    use std::time::Duration;
+
+    fn populate(root: &Path) -> DurableResult<StoredState> {
+        let mut store = DirectoryStore::open(root)?;
+        let batch = StoreBatch::initialize(DurableState::new(Machine::new().snapshot()))?;
+        store.compare_and_commit(None, &batch)?;
+        let mut current = store.load()?.expect("initialized state");
+        for index in 0..3 {
+            let delta = DurableDelta::new(vec![DurableOperation::AppendJournal {
+                journal_id: "journal:gc-crash".to_owned(),
+                records: vec![JournalRecord::new(
+                    format!("record:{index}"),
+                    "test.gc-crash/1",
+                    json!({"index": index}),
+                )?],
+            }])?;
+            let batch = StoreBatch::transition(&current, delta)?;
+            let commit = store.compare_and_commit(Some(&current.head), &batch)?;
+            batch.apply_committed(&mut current, &commit)?;
+        }
+        Ok(current)
+    }
+
+    #[test]
+    #[ignore = "child-process worker invoked by gc_internal_sigkill_boundaries_reopen"]
+    fn gc_crash_worker() {
+        let Some(root) = std::env::var_os("CYMULE_DIRECTORY_GC_TEST_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let mut store = DirectoryStore::open(root).expect("worker opens");
+        let head = store.load().expect("worker loads").expect("state").head;
+        store
+            .reclaim_cold(&head)
+            .expect("worker reaches crash boundary");
+        panic!("worker did not stop at its requested GC boundary");
+    }
+
+    #[test]
+    fn gc_internal_sigkill_boundaries_reopen() {
+        for boundary in [
+            "gc_checkpoint_persisted",
+            "gc_receipt_persisted",
+            "gc_head_published",
+            "gc_deletion_started",
+        ] {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let expected = populate(temporary.path()).expect("store populates");
+            let marker = temporary.path().join("gc-boundary.marker");
+            let mut command = Command::new(std::env::current_exe().expect("test executable"));
+            command
+                .arg("--exact")
+                .arg("tests::gc_crash_worker")
+                .arg("--ignored")
+                .arg("--nocapture")
+                .env("CYMULE_DIRECTORY_GC_TEST_ROOT", temporary.path())
+                .env("CYMULE_DIRECTORY_GC_TEST_BOUNDARY", boundary)
+                .env("CYMULE_DIRECTORY_GC_TEST_MARKER", &marker);
+            let mut child = ManagedChild::spawn(&mut command).expect("worker spawns");
+            child
+                .wait_for_content(&marker, boundary.as_bytes(), Duration::from_secs(10))
+                .expect("worker reaches exact durable boundary");
+            child.terminate().expect("worker is killed and reaped");
+
+            let mut reopened = DirectoryStore::open(temporary.path()).expect("store reopens");
+            let recovered = reopened
+                .load()
+                .expect("ordinary load recovers")
+                .expect("state remains");
+            assert_eq!(recovered.state, expected.state, "boundary {boundary}");
+            assert_eq!(recovered.revision, expected.revision, "boundary {boundary}");
+            recovered.verify().expect("recovered state verifies");
+        }
+    }
 }
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> DurableResult<()> {

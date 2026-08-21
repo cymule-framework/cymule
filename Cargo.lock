@@ -458,9 +458,11 @@ version = "0.2.0"
 dependencies = [
  "cymule-core",
  "cymule-durable",
+ "cymule-test-world",
  "fs4",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -17,6 +17,10 @@
 - Reopen, stale writer, busy writer, committed-receipt loss, and corrupted-row
   tests are required. SQLite WAL and synchronous-full durability are adapter
   configuration, not framework semantics.
+- One deferred read transaction owns head observation plus every reachable
+  checkpoint, segment, and GC receipt read. Reopen never enumerates unrelated
+  rows. SQL-trigger rollback tests prove statement/transaction boundaries;
+  they do not claim SQLite VFS, torn-sector, or physical power-loss coverage.
 - Real process-death sweeps use the workspace-private `TestWorld` temporary
   domain and `ManagedChild` barrier/reap lifecycle. Do not reintroduce local
   child guards or wall-clock race polling.

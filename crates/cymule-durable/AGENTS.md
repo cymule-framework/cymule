@@ -6,6 +6,10 @@
   compare-and-swaps a small head. The head authenticates a complete checkpoint
   plus a bounded suffix; adapters must not acknowledge a partial segment/head
   transition or rewrite the complete `DurableState` on each mutation.
+- `cymule.durable-segment/2` carries `cymule.machine-delta/1`, never a complete
+  Machine replacement. A coordinator restores the semantic Machine once on
+  open, validates later deltas against that live projection, and advances the
+  cache only after the exact store receipt commits.
 - Manifest rotation is bounded twice: at most `MAX_HOT_SEGMENTS` deltas per
   pack and at most `MAX_CHECKPOINT_PACKS` packs per materialized base. Build a
   new base outside provider writer exclusion at that boundary; reopen never

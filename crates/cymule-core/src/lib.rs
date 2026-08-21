@@ -18,7 +18,7 @@ pub use ir::{
 };
 pub use machine::{
     CompactedEventEvidence, ExecutionFrameLocation, Machine, MachineBaseSnapshot,
-    MachineCompaction, MachineSnapshot,
+    MachineCompaction, MachineDelta, MachineSnapshot,
 };
 pub use model::{
     ARTIFACT_IDENTITY_VERSION, ArtifactRecord, ArtifactRef, AttemptProjection, COMMAND_VERSION,
