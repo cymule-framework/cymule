@@ -270,7 +270,8 @@ fn checkpoint_rotation_bounds_reopen_and_cold_gc_preserves_state() {
     }
     let expected = coordinator.state().expect("state").clone();
     let mut store = coordinator.into_store();
-    let head = store.load().expect("loads").expect("state").head;
+    let stored = store.load().expect("loads").expect("state");
+    let head = stored.head.clone();
     assert!(store.stats().expect("stats").checkpoints >= 2);
     assert!(
         store
@@ -310,31 +311,13 @@ fn pending_gc_manifest_recovers_after_partial_deletion() {
             .expect("delta commits");
     }
     let mut store = coordinator.into_store();
-    let head = store.load().expect("loads").expect("state").head;
+    let stored = store.load().expect("loads").expect("state");
+    let head = stored.head.clone();
     let object_path = |family: &str, id: &str| {
         directory
             .join(family)
             .join(cymule_core::sha256_bytes(id.as_bytes()))
     };
-    let checkpoint: StateCheckpoint = cymule_core::decode_json(
-        &fs::read(object_path("checkpoints", &head.checkpoint_id)).expect("checkpoint bytes read"),
-    )
-    .expect("checkpoint decodes");
-    let mut hot = BTreeSet::new();
-    let mut cursor = if head.suffix_len == 0 {
-        checkpoint.covered_segment.clone()
-    } else {
-        head.suffix_head.clone()
-    };
-    while cursor.as_deref() != checkpoint.covered_segment.as_deref() {
-        let id = cursor.expect("suffix connects");
-        let segment: StateSegment = cymule_core::decode_json(
-            &fs::read(object_path("segments", &id)).expect("segment bytes read"),
-        )
-        .expect("segment decodes");
-        cursor = segment.parent_segment;
-        hot.insert(id);
-    }
     let mut reclaimed = BTreeSet::new();
     let mut paths = BTreeMap::new();
     for entry in fs::read_dir(directory.join("checkpoints")).expect("checkpoints list") {
@@ -342,23 +325,39 @@ fn pending_gc_manifest_recovers_after_partial_deletion() {
         let value: StateCheckpoint =
             cymule_core::decode_json(&fs::read(&path).expect("checkpoint reads"))
                 .expect("checkpoint decodes");
-        if value.checkpoint_id != head.checkpoint_id {
-            paths.insert(value.checkpoint_id.clone(), path);
-            reclaimed.insert(value.checkpoint_id);
-        }
+        paths.insert(value.checkpoint_id.clone(), path);
+        reclaimed.insert(value.checkpoint_id);
     }
     for entry in fs::read_dir(directory.join("segments")).expect("segments list") {
         let path = entry.expect("segment entry").path();
         let value: StateSegment =
             cymule_core::decode_json(&fs::read(&path).expect("segment reads"))
                 .expect("segment decodes");
-        if !hot.contains(&value.segment_id) {
-            paths.insert(value.segment_id.clone(), path);
-            reclaimed.insert(value.segment_id);
-        }
+        paths.insert(value.segment_id.clone(), path);
+        reclaimed.insert(value.segment_id);
     }
     assert!(!reclaimed.is_empty());
-    let receipt = GcReceipt::new(&head, &reclaimed).expect("pending receipt constructs");
+    let checkpoint = StateCheckpoint::for_revision(
+        None,
+        None,
+        head.sequence,
+        head.revision.clone(),
+        Some(stored.state),
+    )
+    .expect("materialized checkpoint constructs");
+    fs::write(
+        object_path("checkpoints", &checkpoint.checkpoint_id),
+        cymule_core::canonical_bytes(&checkpoint).expect("checkpoint bytes"),
+    )
+    .expect("materialized checkpoint writes");
+    let mut recovered_head = head.clone();
+    recovered_head
+        .checkpoint_id
+        .clone_from(&checkpoint.checkpoint_id);
+    recovered_head.checkpoint_depth = 0;
+    recovered_head.suffix_head = None;
+    recovered_head.suffix_len = 0;
+    let receipt = GcReceipt::new(&recovered_head, &reclaimed).expect("pending receipt constructs");
     fs::write(
         object_path("gc-receipts", &receipt.receipt_id),
         cymule_core::canonical_bytes(&receipt).expect("receipt bytes"),

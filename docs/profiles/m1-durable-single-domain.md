@@ -12,8 +12,9 @@ Status: implemented for one production single-domain authority.
   repeated compaction lineage, old-command replay, tamper rejection, and
   lost-acknowledgement reopen;
 - provider-neutral segmented `DurableStore`: small CAS head, immutable
-  content-addressed deltas, checkpoint rotation at a fixed suffix bound,
-  authenticated reopen, and receipt-backed cold reclamation;
+  typed content-addressed deltas, incremental revision hash chain, fixed-size
+  checkpoint manifests at a fixed pack bound, authenticated reopen, and
+  explicit receipt-backed cold base compaction;
 - multi-Run domain creation: the first Run initializes the durable state and
   every later Run atomically appends its exact Plan, input, start/attempt
   Events, command receipts, and initial Continuation without resetting existing

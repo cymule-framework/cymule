@@ -4,10 +4,10 @@ use cymule_core::{
 };
 
 use crate::{
-    AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableError,
-    DurableResult, DurableState, DurableStore, EffectDispatch, HISTORY_COMPACTION_VERSION,
-    HistoryCompactionReceipt, JournalBatch, JournalRecord, OutboxState, SnapshotRecord, StoreBatch,
-    StoredState, WaitActivation, WaitCondition, WaitKind, WaitState,
+    AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableDelta,
+    DurableError, DurableOperation, DurableResult, DurableState, DurableStore, EffectDispatch,
+    HISTORY_COMPACTION_VERSION, HistoryCompactionReceipt, JournalBatch, JournalRecord, OutboxState,
+    SnapshotRecord, StoreBatch, StoredState, WaitActivation, WaitCondition, WaitKind, WaitState,
 };
 
 /// Transactional coordinator over one provider-neutral durable store.
@@ -42,10 +42,13 @@ impl<S: DurableStore> DurableCoordinator<S> {
         let state = DurableState::new(machine.snapshot());
         let batch = StoreBatch::initialize(state)?;
         let commit = self.store.compare_and_commit(None, &batch)?;
-        let checkpoint = batch.checkpoint.expect("initial batch has checkpoint");
+        let checkpoint = batch
+            .checkpoint()
+            .cloned()
+            .expect("initial batch has checkpoint");
         self.stored = Some(StoredState {
             revision: commit.revision.clone(),
-            state: checkpoint.state,
+            state: checkpoint.state.expect("initial checkpoint has state"),
             head: commit.head,
             checkpoint_covered_segment: checkpoint.covered_segment,
         });
@@ -80,10 +83,13 @@ impl<S: DurableStore> DurableCoordinator<S> {
         state.validate()?;
         let batch = StoreBatch::initialize(state)?;
         let commit = self.store.compare_and_commit(None, &batch)?;
-        let checkpoint = batch.checkpoint.expect("initial batch has checkpoint");
+        let checkpoint = batch
+            .checkpoint()
+            .cloned()
+            .expect("initial batch has checkpoint");
         self.stored = Some(StoredState {
             revision: commit.revision.clone(),
-            state: checkpoint.state,
+            state: checkpoint.state.expect("initial checkpoint has state"),
             head: commit.head,
             checkpoint_covered_segment: checkpoint.covered_segment,
         });
@@ -116,19 +122,14 @@ impl<S: DurableStore> DurableCoordinator<S> {
         }
         let next_machine = machine.snapshot();
         ensure_run_start_machine(&self.state()?.machine, &next_machine, &continuation)?;
-        self.mutate_checked(|state| {
-            if state.continuations.contains_key(&continuation.run_id) {
-                return Err(DurableError::IllegalTransition(format!(
-                    "Run {} already has a durable Continuation",
-                    continuation.run_id
-                )));
-            }
-            state.machine = next_machine;
-            state
-                .continuations
-                .insert(continuation.run_id.clone(), continuation);
-            Ok(())
-        })
+        self.commit_operations(vec![
+            DurableOperation::PutMachine {
+                machine: next_machine,
+            },
+            DurableOperation::PutContinuation {
+                value: continuation,
+            },
+        ])
     }
 
     /// Current verified state.
@@ -199,23 +200,20 @@ impl<S: DurableStore> DurableCoordinator<S> {
         };
         receipt.verify()?;
         let snapshot = machine.snapshot();
-        self.mutate_checked(|state| {
-            state.machine = snapshot;
-            state
-                .history_compactions
-                .insert(compaction_id.to_owned(), receipt.clone());
-            Ok(())
-        })?;
+        self.commit_operations(vec![
+            DurableOperation::PutMachine { machine: snapshot },
+            DurableOperation::PutHistoryCompaction {
+                value: receipt.clone(),
+            },
+        ])?;
         Ok(receipt)
     }
 
     /// Insert or replace a continuation at a semantic safe point.
     pub fn put_continuation(&mut self, continuation: Continuation) -> DurableResult<String> {
-        self.mutate(|state| {
-            state
-                .continuations
-                .insert(continuation.run_id.clone(), continuation);
-        })
+        self.commit_operations(vec![DurableOperation::PutContinuation {
+            value: continuation,
+        }])
     }
 
     /// Atomically persist a Machine safe point, Continuation, and optional
@@ -227,52 +225,55 @@ impl<S: DurableStore> DurableCoordinator<S> {
         occurrence: Option<ComponentOccurrence>,
     ) -> DurableResult<String> {
         let machine_snapshot = machine.snapshot();
-        self.mutate_checked(|state| {
-            let artifacts = machine_snapshot
-                .artifacts
-                .iter()
-                .map(|record| record.reference.clone())
-                .collect();
-            let events = ensure_canonical_machine_delta(
-                &state.machine,
-                &machine_snapshot,
-                &artifacts,
-                "semantic checkpoint",
-            )?;
-            if events.iter().any(|event| {
-                matches!(
-                    event.payload,
-                    EventPayload::EffectProposed { .. }
-                        | EventPayload::EffectTransitioned { .. }
-                )
-            }) {
-                return Err(DurableError::Validation(
-                    "semantic checkpoint cannot persist an Effect transition outside its atomic outbox boundary"
-                        .to_owned(),
-                ));
-            }
-            state.machine = machine_snapshot.clone();
-            if let Some(occurrence) = occurrence {
-                match state.component_occurrences.get(&occurrence.occurrence_id) {
-                    Some(existing) if existing == &occurrence => {}
-                    Some(_) => {
-                        return Err(DurableError::IllegalTransition(format!(
-                            "component occurrence {} has conflicting content",
-                            occurrence.occurrence_id
-                        )));
-                    }
-                    None => {
-                        state
-                            .component_occurrences
-                            .insert(occurrence.occurrence_id.clone(), occurrence);
-                    }
+        let artifacts = machine_snapshot
+            .artifacts
+            .iter()
+            .map(|record| record.reference.clone())
+            .collect();
+        let events = ensure_canonical_machine_delta(
+            &self.state()?.machine,
+            &machine_snapshot,
+            &artifacts,
+            "semantic checkpoint",
+        )?;
+        if events.iter().any(|event| {
+            matches!(
+                event.payload,
+                EventPayload::EffectProposed { .. } | EventPayload::EffectTransitioned { .. }
+            )
+        }) {
+            return Err(DurableError::Validation(
+                "semantic checkpoint cannot persist an Effect transition outside its atomic outbox boundary"
+                    .to_owned(),
+            ));
+        }
+        let mut operations = vec![
+            DurableOperation::PutMachine {
+                machine: machine_snapshot,
+            },
+            DurableOperation::PutContinuation {
+                value: continuation,
+            },
+        ];
+        if let Some(occurrence) = occurrence {
+            match self
+                .state()?
+                .component_occurrences
+                .get(&occurrence.occurrence_id)
+            {
+                Some(existing) if existing == &occurrence => {}
+                Some(_) => {
+                    return Err(DurableError::IllegalTransition(format!(
+                        "component occurrence {} has conflicting content",
+                        occurrence.occurrence_id
+                    )));
+                }
+                None => {
+                    operations.push(DurableOperation::PutComponentOccurrence { value: occurrence });
                 }
             }
-            state
-                .continuations
-                .insert(continuation.run_id.clone(), continuation);
-            Ok(())
-        })
+        }
+        self.commit_operations(operations)
     }
 
     /// Atomically persist an admitted/prepared Effect and its outbox entry.
@@ -283,36 +284,41 @@ impl<S: DurableStore> DurableCoordinator<S> {
         dispatch: EffectDispatch,
     ) -> DurableResult<String> {
         let machine_snapshot = machine.snapshot();
-        self.mutate_checked(|state| {
-            match state.outbox.get(&dispatch.intent_id) {
-                Some(existing) if existing == &dispatch => {
-                    if state.machine != machine_snapshot
-                        || state.continuations.get(&continuation.run_id) != Some(&continuation)
-                    {
-                        return Err(DurableError::IllegalTransition(format!(
-                            "effect {} enqueue replay does not match current durable state",
-                            dispatch.intent_id
-                        )));
-                    }
-                    return Ok(());
-                }
-                Some(_) => {
+        match self.state()?.outbox.get(&dispatch.intent_id) {
+            Some(existing) if existing == &dispatch => {
+                if self.state()?.machine != machine_snapshot
+                    || self.state()?.continuations.get(&continuation.run_id) != Some(&continuation)
+                {
                     return Err(DurableError::IllegalTransition(format!(
-                        "effect {} already has a different outbox entry",
+                        "effect {} enqueue replay does not match current durable state",
                         dispatch.intent_id
                     )));
                 }
-                None => {
-                    ensure_effect_enqueue_machine(&state.machine, &machine_snapshot, &dispatch)?;
-                    state.machine = machine_snapshot.clone();
-                    state.outbox.insert(dispatch.intent_id.clone(), dispatch);
-                }
+                return Ok(self.revision().expect("initialized").to_owned());
             }
-            state
-                .continuations
-                .insert(continuation.run_id.clone(), continuation);
-            Ok(())
-        })
+            Some(_) => {
+                return Err(DurableError::IllegalTransition(format!(
+                    "effect {} already has a different outbox entry",
+                    dispatch.intent_id
+                )));
+            }
+            None => {
+                ensure_effect_enqueue_machine(
+                    &self.state()?.machine,
+                    &machine_snapshot,
+                    &dispatch,
+                )?;
+            }
+        }
+        self.commit_operations(vec![
+            DurableOperation::PutMachine {
+                machine: machine_snapshot,
+            },
+            DurableOperation::PutOutbox { value: dispatch },
+            DurableOperation::PutContinuation {
+                value: continuation,
+            },
+        ])
     }
 
     /// Atomically persist a Machine safe point, Continuation, higher-profile
@@ -341,38 +347,44 @@ impl<S: DurableStore> DurableCoordinator<S> {
             ));
         }
         let machine_snapshot = machine.snapshot();
-        self.mutate_checked(|state| {
-            match state.outbox.get(&dispatch.intent_id) {
-                Some(existing) if existing == &dispatch => {
-                    if state.machine != machine_snapshot
-                        || state.continuations.get(&continuation.run_id) != Some(&continuation)
-                    {
-                        return Err(DurableError::IllegalTransition(format!(
-                            "effect {} enqueue replay does not match current durable state",
-                            dispatch.intent_id
-                        )));
-                    }
-                }
-                Some(_) => {
+        match self.state()?.outbox.get(&dispatch.intent_id) {
+            Some(existing) if existing == &dispatch => {
+                if self.state()?.machine != machine_snapshot
+                    || self.state()?.continuations.get(&continuation.run_id) != Some(&continuation)
+                {
                     return Err(DurableError::IllegalTransition(format!(
-                        "effect {} already has a different outbox entry",
+                        "effect {} enqueue replay does not match current durable state",
                         dispatch.intent_id
                     )));
                 }
-                None => {
-                    ensure_effect_enqueue_machine(&state.machine, &machine_snapshot, &dispatch)?;
-                    state.machine = machine_snapshot.clone();
-                    state.outbox.insert(dispatch.intent_id.clone(), dispatch);
-                }
             }
-            for record in records {
-                append_journal_record(state, journal_id, record.clone())?;
+            Some(_) => {
+                return Err(DurableError::IllegalTransition(format!(
+                    "effect {} already has a different outbox entry",
+                    dispatch.intent_id
+                )));
             }
-            state
-                .continuations
-                .insert(continuation.run_id.clone(), continuation);
-            Ok(())
-        })
+            None => {
+                ensure_effect_enqueue_machine(
+                    &self.state()?.machine,
+                    &machine_snapshot,
+                    &dispatch,
+                )?;
+            }
+        }
+        let mut operations = vec![
+            DurableOperation::PutMachine {
+                machine: machine_snapshot,
+            },
+            DurableOperation::PutOutbox { value: dispatch },
+            DurableOperation::PutContinuation {
+                value: continuation,
+            },
+        ];
+        if let Some(operation) = self.journal_append_operation(journal_id, records)? {
+            operations.push(operation);
+        }
+        self.commit_operations(operations)
     }
 
     /// Atomically persist `DispatchStarted` and the fenced outbox claim.
@@ -384,22 +396,29 @@ impl<S: DurableStore> DurableCoordinator<S> {
         lease_epoch: u64,
     ) -> DurableResult<String> {
         let machine_snapshot = machine.snapshot();
-        self.mutate_checked(|state| {
-            let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
+        let mut dispatch = self
+            .state()?
+            .outbox
+            .get(intent_id)
+            .cloned()
+            .ok_or_else(|| {
                 DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
             })?;
-            if dispatch.state != OutboxState::Pending {
-                return Err(DurableError::IllegalTransition(format!(
-                    "effect {intent_id} is not pending"
-                )));
-            }
-            ensure_effect_claim_machine(&state.machine, &machine_snapshot, dispatch)?;
-            dispatch.state = OutboxState::Claimed;
-            dispatch.claim_owner = Some(owner.to_owned());
-            dispatch.claim_epoch = lease_epoch;
-            state.machine = machine_snapshot.clone();
-            Ok(())
-        })
+        if dispatch.state != OutboxState::Pending {
+            return Err(DurableError::IllegalTransition(format!(
+                "effect {intent_id} is not pending"
+            )));
+        }
+        ensure_effect_claim_machine(&self.state()?.machine, &machine_snapshot, &dispatch)?;
+        dispatch.state = OutboxState::Claimed;
+        dispatch.claim_owner = Some(owner.to_owned());
+        dispatch.claim_epoch = lease_epoch;
+        self.commit_operations(vec![
+            DurableOperation::PutMachine {
+                machine: machine_snapshot,
+            },
+            DurableOperation::PutOutbox { value: dispatch },
+        ])
     }
 
     /// Atomically persist `DispatchStarted`, a fenced outbox claim, and the
@@ -427,28 +446,36 @@ impl<S: DurableStore> DurableCoordinator<S> {
             ));
         }
         let machine_snapshot = machine.snapshot();
-        self.mutate_checked(|state| {
-            let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
+        let mut dispatch = self
+            .state()?
+            .outbox
+            .get(intent_id)
+            .cloned()
+            .ok_or_else(|| {
                 DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
             })?;
-            if dispatch.state != OutboxState::Pending {
-                return Err(DurableError::IllegalTransition(format!(
-                    "effect {intent_id} is not pending"
-                )));
-            }
-            ensure_effect_claim_machine(&state.machine, &machine_snapshot, dispatch)?;
-            dispatch.state = OutboxState::Claimed;
-            dispatch.claim_owner = Some(owner.to_owned());
-            dispatch.claim_epoch = lease_epoch;
-            state.machine = machine_snapshot.clone();
-            for record in records {
-                append_journal_record(state, journal_id, record.clone())?;
-            }
-            state
-                .continuations
-                .insert(continuation.run_id.clone(), continuation);
-            Ok(())
-        })
+        if dispatch.state != OutboxState::Pending {
+            return Err(DurableError::IllegalTransition(format!(
+                "effect {intent_id} is not pending"
+            )));
+        }
+        ensure_effect_claim_machine(&self.state()?.machine, &machine_snapshot, &dispatch)?;
+        dispatch.state = OutboxState::Claimed;
+        dispatch.claim_owner = Some(owner.to_owned());
+        dispatch.claim_epoch = lease_epoch;
+        let mut operations = vec![
+            DurableOperation::PutMachine {
+                machine: machine_snapshot,
+            },
+            DurableOperation::PutOutbox { value: dispatch },
+            DurableOperation::PutContinuation {
+                value: continuation,
+            },
+        ];
+        if let Some(operation) = self.journal_append_operation(journal_id, records)? {
+            operations.push(operation);
+        }
+        self.commit_operations(operations)
     }
 
     /// Atomically persist an effect observation/reconciliation and outbox
@@ -463,47 +490,54 @@ impl<S: DurableStore> DurableCoordinator<S> {
         result: Option<cymule_core::ArtifactRef>,
     ) -> DurableResult<String> {
         let machine_snapshot = machine.snapshot();
-        self.mutate_checked(|state| {
-            if !matches!(
-                outcome,
-                OutboxState::Applied | OutboxState::NotApplied | OutboxState::Unknown
-            ) {
-                return Err(DurableError::Validation(
-                    "settlement must be applied, not_applied, or unknown".to_owned(),
-                ));
-            }
-            let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
+        if !matches!(
+            outcome,
+            OutboxState::Applied | OutboxState::NotApplied | OutboxState::Unknown
+        ) {
+            return Err(DurableError::Validation(
+                "settlement must be applied, not_applied, or unknown".to_owned(),
+            ));
+        }
+        let mut dispatch = self
+            .state()?
+            .outbox
+            .get(intent_id)
+            .cloned()
+            .ok_or_else(|| {
                 DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
             })?;
-            let already_settled = dispatch.state == outcome && dispatch.result == result;
-            if !already_settled
-                && !matches!(dispatch.state, OutboxState::Claimed | OutboxState::Unknown)
-                || dispatch.claim_owner.as_deref() != Some(owner)
-                || dispatch.claim_epoch != lease_epoch
-            {
-                return Err(DurableError::Conflict {
-                    expected: Some(format!("{owner}:{lease_epoch}")),
-                    current: dispatch
-                        .claim_owner
-                        .as_ref()
-                        .map(|current| format!("{current}:{}", dispatch.claim_epoch)),
-                });
-            }
-            if already_settled && state.machine == machine_snapshot {
-                return Ok(());
-            }
-            ensure_effect_settlement_machine(
-                &state.machine,
-                &machine_snapshot,
-                dispatch,
-                outcome,
-                result.as_ref(),
-            )?;
-            dispatch.state = outcome;
-            dispatch.result = result;
-            state.machine = machine_snapshot.clone();
-            Ok(())
-        })
+        let already_settled = dispatch.state == outcome && dispatch.result == result;
+        if !already_settled
+            && !matches!(dispatch.state, OutboxState::Claimed | OutboxState::Unknown)
+            || dispatch.claim_owner.as_deref() != Some(owner)
+            || dispatch.claim_epoch != lease_epoch
+        {
+            return Err(DurableError::Conflict {
+                expected: Some(format!("{owner}:{lease_epoch}")),
+                current: dispatch
+                    .claim_owner
+                    .as_ref()
+                    .map(|current| format!("{current}:{}", dispatch.claim_epoch)),
+            });
+        }
+        if already_settled && self.state()?.machine == machine_snapshot {
+            return Ok(self.revision().expect("initialized").to_owned());
+        }
+        ensure_effect_settlement_machine(
+            &self.state()?.machine,
+            &machine_snapshot,
+            &dispatch,
+            outcome,
+            result.as_ref(),
+        )?;
+        dispatch.state = outcome;
+        dispatch.result = result;
+        self.commit_operations(vec![
+            DurableOperation::PutMachine {
+                machine: machine_snapshot,
+            },
+            DurableOperation::PutOutbox { value: dispatch },
+        ])
     }
 
     /// Atomically persist an Effect observation, outbox settlement,
@@ -537,44 +571,52 @@ impl<S: DurableStore> DurableCoordinator<S> {
             ));
         }
         let machine_snapshot = machine.snapshot();
-        self.mutate_checked(|state| {
-            let dispatch = state.outbox.get_mut(intent_id).ok_or_else(|| {
+        let mut dispatch = self
+            .state()?
+            .outbox
+            .get(intent_id)
+            .cloned()
+            .ok_or_else(|| {
                 DurableError::NotFound(format!("effect {intent_id} is not in the outbox"))
             })?;
-            let already_settled = dispatch.state == outcome && dispatch.result == result;
-            if !already_settled
-                && !matches!(dispatch.state, OutboxState::Claimed | OutboxState::Unknown)
-                || dispatch.claim_owner.as_deref() != Some(owner)
-                || dispatch.claim_epoch != lease_epoch
-            {
-                return Err(DurableError::Conflict {
-                    expected: Some(format!("{owner}:{lease_epoch}")),
-                    current: dispatch
-                        .claim_owner
-                        .as_ref()
-                        .map(|current| format!("{current}:{}", dispatch.claim_epoch)),
-                });
-            }
-            if !already_settled || state.machine != machine_snapshot {
-                ensure_effect_settlement_machine(
-                    &state.machine,
-                    &machine_snapshot,
-                    dispatch,
-                    outcome,
-                    result.as_ref(),
-                )?;
-                dispatch.state = outcome;
-                dispatch.result = result;
-                state.machine = machine_snapshot.clone();
-            }
-            for record in records {
-                append_journal_record(state, journal_id, record.clone())?;
-            }
-            state
-                .continuations
-                .insert(continuation.run_id.clone(), continuation);
-            Ok(())
-        })
+        let already_settled = dispatch.state == outcome && dispatch.result == result;
+        if !already_settled
+            && !matches!(dispatch.state, OutboxState::Claimed | OutboxState::Unknown)
+            || dispatch.claim_owner.as_deref() != Some(owner)
+            || dispatch.claim_epoch != lease_epoch
+        {
+            return Err(DurableError::Conflict {
+                expected: Some(format!("{owner}:{lease_epoch}")),
+                current: dispatch
+                    .claim_owner
+                    .as_ref()
+                    .map(|current| format!("{current}:{}", dispatch.claim_epoch)),
+            });
+        }
+        if !already_settled || self.state()?.machine != machine_snapshot {
+            ensure_effect_settlement_machine(
+                &self.state()?.machine,
+                &machine_snapshot,
+                &dispatch,
+                outcome,
+                result.as_ref(),
+            )?;
+            dispatch.state = outcome;
+            dispatch.result = result;
+        }
+        let mut operations = vec![
+            DurableOperation::PutMachine {
+                machine: machine_snapshot,
+            },
+            DurableOperation::PutOutbox { value: dispatch },
+            DurableOperation::PutContinuation {
+                value: continuation,
+            },
+        ];
+        if let Some(operation) = self.journal_append_operation(journal_id, records)? {
+            operations.push(operation);
+        }
+        self.commit_operations(operations)
     }
 
     /// Atomically persist a Machine safe point, Continuation, and
@@ -592,16 +634,18 @@ impl<S: DurableStore> DurableCoordinator<S> {
         records: &[JournalRecord],
     ) -> DurableResult<String> {
         validate_journal_batch(journal_id, records)?;
-        self.mutate_checked(|state| {
-            state.machine = machine.snapshot();
-            for record in records {
-                append_journal_record(state, journal_id, record.clone())?;
-            }
-            state
-                .continuations
-                .insert(continuation.run_id.clone(), continuation);
-            Ok(())
-        })
+        let mut operations = vec![
+            DurableOperation::PutMachine {
+                machine: machine.snapshot(),
+            },
+            DurableOperation::PutContinuation {
+                value: continuation,
+            },
+        ];
+        if let Some(operation) = self.journal_append_operation(journal_id, records)? {
+            operations.push(operation);
+        }
+        self.commit_operations(operations)
     }
 
     /// Atomically persist the safe point and register its durable wait.
@@ -611,27 +655,27 @@ impl<S: DurableStore> DurableCoordinator<S> {
         mut continuation: Continuation,
         wait: WaitCondition,
     ) -> DurableResult<String> {
-        self.mutate_checked(|state| {
-            state.machine = machine.snapshot();
-            match state.waits.get(&wait.wait_id) {
-                Some(existing) if existing == &wait => {}
-                Some(_) => {
-                    return Err(DurableError::IllegalTransition(format!(
-                        "wait {} already exists with different semantics",
-                        wait.wait_id
-                    )));
-                }
-                None => {
-                    state.waits.insert(wait.wait_id.clone(), wait.clone());
-                }
+        match self.state()?.waits.get(&wait.wait_id) {
+            Some(existing) if existing == &wait => {}
+            Some(_) => {
+                return Err(DurableError::IllegalTransition(format!(
+                    "wait {} already exists with different semantics",
+                    wait.wait_id
+                )));
             }
-            continuation.wait_set.insert(wait.wait_id);
-            continuation.status = ContinuationStatus::Waiting;
-            state
-                .continuations
-                .insert(continuation.run_id.clone(), continuation);
-            Ok(())
-        })
+            None => {}
+        }
+        continuation.wait_set.insert(wait.wait_id.clone());
+        continuation.status = ContinuationStatus::Waiting;
+        self.commit_operations(vec![
+            DurableOperation::PutMachine {
+                machine: machine.snapshot(),
+            },
+            DurableOperation::PutWait { value: wait },
+            DurableOperation::PutContinuation {
+                value: continuation,
+            },
+        ])
     }
 
     /// Store a wait result artifact and ready its Continuation atomically.
@@ -641,30 +685,45 @@ impl<S: DurableStore> DurableCoordinator<S> {
         wait_id: &str,
         result: &cymule_core::ArtifactRef,
     ) -> DurableResult<String> {
-        self.mutate_checked(|state| {
-            state.machine = machine.snapshot();
-            complete_wait_state(state, wait_id, result, true)
-        })
+        let mut operations = vec![DurableOperation::PutMachine {
+            machine: machine.snapshot(),
+        }];
+        operations.extend(self.wait_completion_operations(wait_id, result)?);
+        self.commit_operations(operations)
     }
 
     /// Register an idempotent durable wait.
     pub fn register_wait(&mut self, wait: WaitCondition) -> DurableResult<String> {
-        self.mutate_checked(|state| match state.waits.get(&wait.wait_id) {
-            Some(existing) if existing == &wait => Ok(()),
+        match self.state()?.waits.get(&wait.wait_id) {
+            Some(existing) if existing == &wait => {
+                Ok(self.revision().expect("initialized").to_owned())
+            }
             Some(_) => Err(DurableError::IllegalTransition(format!(
                 "wait {} already exists with different semantics",
                 wait.wait_id
             ))),
             None => {
-                let continuation = state.continuations.get_mut(&wait.run_id).ok_or_else(|| {
-                    DurableError::NotFound(format!("continuation {} does not exist", wait.run_id))
-                })?;
+                let mut continuation = self
+                    .state()?
+                    .continuations
+                    .get(&wait.run_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        DurableError::NotFound(format!(
+                            "continuation {} does not exist",
+                            wait.run_id
+                        ))
+                    })?;
                 continuation.wait_set.insert(wait.wait_id.clone());
                 continuation.status = ContinuationStatus::Waiting;
-                state.waits.insert(wait.wait_id.clone(), wait);
-                Ok(())
+                self.commit_operations(vec![
+                    DurableOperation::PutWait { value: wait },
+                    DurableOperation::PutContinuation {
+                        value: continuation,
+                    },
+                ])
             }
-        })
+        }
     }
 
     /// Complete one wait and make the continuation ready when no waits remain.
@@ -673,7 +732,11 @@ impl<S: DurableStore> DurableCoordinator<S> {
         wait_id: &str,
         result: &cymule_core::ArtifactRef,
     ) -> DurableResult<String> {
-        self.mutate_checked(|state| complete_wait_state(state, wait_id, result, true))
+        let operations = self.wait_completion_operations(wait_id, result)?;
+        if operations.is_empty() {
+            return Ok(self.revision().expect("initialized").to_owned());
+        }
+        self.commit_operations(operations)
     }
 
     /// Atomically admit one identified signal or timer delivery, complete all
@@ -724,85 +787,121 @@ impl<S: DurableStore> DurableCoordinator<S> {
             }
         }
         let machine_snapshot = machine.snapshot();
-        self.mutate_checked(|state| {
-            let is_new = match state.wait_activations.get(&activation.activation_id) {
-                Some(existing) if existing == &activation => false,
-                Some(_) => {
-                    return Err(DurableError::IllegalTransition(format!(
-                        "wait activation {} already exists with different semantics",
-                        activation.activation_id
-                    )));
-                }
-                None => true,
-            };
-            if !is_new {
-                for batch in batches {
-                    for record in &batch.records {
-                        let existing =
-                            state
-                                .application_journals
-                                .get(&batch.journal_id)
-                                .and_then(|records| {
-                                    records
-                                        .iter()
-                                        .find(|existing| existing.record_id == record.record_id)
-                                });
-                        if existing != Some(record) {
-                            return Err(DurableError::IllegalTransition(format!(
-                                "wait activation {} was committed without journal record {}",
-                                activation.activation_id, record.record_id
-                            )));
-                        }
-                    }
-                }
-                return Ok(());
-            }
-            if machine.artifact(&activation.result).is_none() {
-                return Err(DurableError::Validation(format!(
-                    "wait activation {} result artifact is missing",
+        let is_new = match self
+            .state()?
+            .wait_activations
+            .get(&activation.activation_id)
+        {
+            Some(existing) if existing == &activation => false,
+            Some(_) => {
+                return Err(DurableError::IllegalTransition(format!(
+                    "wait activation {} already exists with different semantics",
                     activation.activation_id
                 )));
             }
-            ensure_activation_machine(
-                &state.machine,
-                &machine_snapshot,
-                &activation.result,
-                &activation.activation_id,
-            )?;
-
-            let mut consume_once_targets = 0usize;
-            for wait_id in &activation.wait_ids {
-                let wait = state.waits.get(wait_id).ok_or_else(|| {
-                    DurableError::NotFound(format!("wait {wait_id} does not exist"))
-                })?;
-                activation.source.ensure_matches(wait)?;
-                if wait.state != WaitState::Pending {
-                    return Err(DurableError::IllegalTransition(format!(
-                        "wait {wait_id} is not pending"
-                    )));
-                }
-                if wait.consume_once {
-                    consume_once_targets += 1;
-                }
-            }
-            activation
-                .source
-                .validate_target_cardinality(activation.wait_ids.len(), consume_once_targets)?;
-
-            state.machine = machine_snapshot;
-            for wait_id in &activation.wait_ids {
-                complete_wait_state(state, wait_id, &activation.result, false)?;
-            }
-            state
-                .wait_activations
-                .insert(activation.activation_id.clone(), activation);
+            None => true,
+        };
+        if !is_new {
             for batch in batches {
                 for record in &batch.records {
-                    append_journal_record(state, &batch.journal_id, record.clone())?;
+                    let existing = self
+                        .state()?
+                        .application_journals
+                        .get(&batch.journal_id)
+                        .and_then(|records| {
+                            records
+                                .iter()
+                                .find(|existing| existing.record_id == record.record_id)
+                        });
+                    if existing != Some(record) {
+                        return Err(DurableError::IllegalTransition(format!(
+                            "wait activation {} was committed without journal record {}",
+                            activation.activation_id, record.record_id
+                        )));
+                    }
                 }
             }
-            Ok(())
-        })
+            return Ok(self.revision().expect("initialized").to_owned());
+        }
+        if machine.artifact(&activation.result).is_none() {
+            return Err(DurableError::Validation(format!(
+                "wait activation {} result artifact is missing",
+                activation.activation_id
+            )));
+        }
+        ensure_activation_machine(
+            &self.state()?.machine,
+            &machine_snapshot,
+            &activation.result,
+            &activation.activation_id,
+        )?;
+
+        let mut consume_once_targets = 0usize;
+        let mut run_ids = std::collections::BTreeSet::new();
+        for wait_id in &activation.wait_ids {
+            let wait =
+                self.state()?.waits.get(wait_id).ok_or_else(|| {
+                    DurableError::NotFound(format!("wait {wait_id} does not exist"))
+                })?;
+            activation.source.ensure_matches(wait)?;
+            if wait.state != WaitState::Pending {
+                return Err(DurableError::IllegalTransition(format!(
+                    "wait {wait_id} is not pending"
+                )));
+            }
+            if wait.consume_once {
+                consume_once_targets += 1;
+            }
+            run_ids.insert(wait.run_id.clone());
+        }
+        activation
+            .source
+            .validate_target_cardinality(activation.wait_ids.len(), consume_once_targets)?;
+
+        let mut operations = vec![DurableOperation::PutMachine {
+            machine: machine_snapshot,
+        }];
+        for wait_id in &activation.wait_ids {
+            let mut wait =
+                self.state()?.waits.get(wait_id).cloned().ok_or_else(|| {
+                    DurableError::NotFound(format!("wait {wait_id} does not exist"))
+                })?;
+            wait.state = WaitState::Completed;
+            wait.result = Some(activation.result.clone());
+            operations.push(DurableOperation::PutWait { value: wait });
+        }
+        for run_id in run_ids {
+            let mut continuation = self
+                .state()?
+                .continuations
+                .get(&run_id)
+                .cloned()
+                .ok_or_else(|| {
+                    DurableError::NotFound(format!("continuation {run_id} does not exist"))
+                })?;
+            for wait_id in &activation.wait_ids {
+                if let Some(wait) = self
+                    .state()?
+                    .waits
+                    .get(wait_id)
+                    .filter(|wait| wait.run_id == run_id)
+                {
+                    apply_wait_result(wait, &activation.result, &mut continuation)?;
+                }
+            }
+            operations.push(DurableOperation::PutContinuation {
+                value: continuation,
+            });
+        }
+        operations.push(DurableOperation::PutWaitActivation { value: activation });
+        for batch in batches {
+            if let Some(operation) =
+                self.journal_append_operation(&batch.journal_id, &batch.records)?
+            {
+                operations.push(operation);
+            }
+        }
+        self.commit_operations(operations)
     }
 
     /// Acquire or renew one fenced lease using caller-supplied logical time.
@@ -813,14 +912,11 @@ impl<S: DurableStore> DurableCoordinator<S> {
         now: u64,
         ttl: u64,
     ) -> DurableResult<AuthorityLease> {
-        let mut acquired = None;
-        self.mutate_checked(|state| {
-            let lease = proposed_lease(state, resource, owner, now, ttl)?;
-            state.leases.insert(resource.to_owned(), lease.clone());
-            acquired = Some(lease);
-            Ok(())
-        })?;
-        acquired.ok_or_else(|| DurableError::Encoding("lease result disappeared".to_owned()))
+        let lease = proposed_lease(self.state()?, resource, owner, now, ttl)?;
+        self.commit_operations(vec![DurableOperation::PutLease {
+            value: lease.clone(),
+        }])?;
+        Ok(lease)
     }
 
     /// Preview the exact lease a successful CAS would acquire without mutating
@@ -865,61 +961,62 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 )));
             }
         }
-        self.mutate_checked(|state| {
-            let expected = proposed_lease(state, &lease.resource, &lease.owner, now, ttl)?;
-            if expected != *lease {
-                return Err(DurableError::Conflict {
-                    expected: Some(format!("{}:{}", lease.owner, lease.epoch)),
-                    current: state
-                        .leases
-                        .get(&lease.resource)
-                        .map(|current| format!("{}:{}", current.owner, current.epoch)),
-                });
+        let expected = proposed_lease(self.state()?, &lease.resource, &lease.owner, now, ttl)?;
+        if expected != *lease {
+            return Err(DurableError::Conflict {
+                expected: Some(format!("{}:{}", lease.owner, lease.epoch)),
+                current: self
+                    .state()?
+                    .leases
+                    .get(&lease.resource)
+                    .map(|current| format!("{}:{}", current.owner, current.epoch)),
+            });
+        }
+        let mut operations = vec![DurableOperation::PutLease {
+            value: lease.clone(),
+        }];
+        for batch in batches {
+            if let Some(operation) =
+                self.journal_append_operation(&batch.journal_id, &batch.records)?
+            {
+                operations.push(operation);
             }
-            for batch in batches {
-                for record in &batch.records {
-                    append_journal_record(state, &batch.journal_id, record.clone())?;
-                }
-            }
-            state.leases.insert(lease.resource.clone(), lease.clone());
-            Ok(())
-        })
+        }
+        self.commit_operations(operations)
     }
 
     /// Record one component result exactly once for execution replay.
     pub fn record_component(&mut self, occurrence: ComponentOccurrence) -> DurableResult<String> {
-        self.mutate_checked(|state| {
-            match state.component_occurrences.get(&occurrence.occurrence_id) {
-                Some(existing) if existing == &occurrence => Ok(()),
-                Some(_) => Err(DurableError::IllegalTransition(format!(
-                    "component occurrence {} has conflicting content",
-                    occurrence.occurrence_id
-                ))),
-                None => {
-                    state
-                        .component_occurrences
-                        .insert(occurrence.occurrence_id.clone(), occurrence);
-                    Ok(())
-                }
+        match self
+            .state()?
+            .component_occurrences
+            .get(&occurrence.occurrence_id)
+        {
+            Some(existing) if existing == &occurrence => {
+                Ok(self.revision().expect("initialized").to_owned())
             }
-        })
+            Some(_) => Err(DurableError::IllegalTransition(format!(
+                "component occurrence {} has conflicting content",
+                occurrence.occurrence_id
+            ))),
+            None => self.commit_operations(vec![DurableOperation::PutComponentOccurrence {
+                value: occurrence,
+            }]),
+        }
     }
 
     /// Publish portable snapshot metadata.
     pub fn publish_snapshot(&mut self, snapshot: SnapshotRecord) -> DurableResult<String> {
-        self.mutate_checked(|state| match state.snapshots.get(&snapshot.snapshot_id) {
-            Some(existing) if existing == &snapshot => Ok(()),
+        match self.state()?.snapshots.get(&snapshot.snapshot_id) {
+            Some(existing) if existing == &snapshot => {
+                Ok(self.revision().expect("initialized").to_owned())
+            }
             Some(_) => Err(DurableError::IllegalTransition(format!(
                 "snapshot {} has conflicting content",
                 snapshot.snapshot_id
             ))),
-            None => {
-                state
-                    .snapshots
-                    .insert(snapshot.snapshot_id.clone(), snapshot);
-                Ok(())
-            }
-        })
+            None => self.commit_operations(vec![DurableOperation::PutSnapshot { value: snapshot }]),
+        }
     }
 
     /// Read one higher-profile journal in durable append order.
@@ -944,7 +1041,26 @@ impl<S: DurableStore> DurableCoordinator<S> {
             ));
         }
         record.verify()?;
-        self.mutate_checked(|state| append_journal_record(state, journal_id, record))
+        match self
+            .journal_records(journal_id)?
+            .iter()
+            .find(|current| current.record_id == record.record_id)
+        {
+            Some(existing) if existing == &record => {
+                return Ok(self.revision().expect("initialized").to_owned());
+            }
+            Some(_) => {
+                return Err(DurableError::IllegalTransition(format!(
+                    "application journal {journal_id} record {} has conflicting content",
+                    record.record_id
+                )));
+            }
+            None => {}
+        }
+        self.commit_operations(vec![DurableOperation::AppendJournal {
+            journal_id: journal_id.to_owned(),
+            records: vec![record],
+        }])
     }
 
     /// Atomically append records to multiple higher-profile journals.
@@ -975,14 +1091,43 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 )));
             }
         }
-        self.mutate_checked(|state| {
-            for batch in batches {
-                for record in &batch.records {
-                    append_journal_record(state, &batch.journal_id, record.clone())?;
+        let mut operations = Vec::with_capacity(batches.len());
+        for batch in batches {
+            for record in &batch.records {
+                if let Some(existing) = self
+                    .journal_records(&batch.journal_id)?
+                    .iter()
+                    .find(|current| current.record_id == record.record_id)
+                    && existing != record
+                {
+                    return Err(DurableError::IllegalTransition(format!(
+                        "application journal {} record {} has conflicting content",
+                        batch.journal_id, record.record_id
+                    )));
                 }
             }
-            Ok(())
-        })
+            let existing = self.journal_records(&batch.journal_id)?;
+            let records = batch
+                .records
+                .iter()
+                .filter(|record| {
+                    !existing
+                        .iter()
+                        .any(|current| current.record_id == record.record_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if !records.is_empty() {
+                operations.push(DurableOperation::AppendJournal {
+                    journal_id: batch.journal_id.clone(),
+                    records,
+                });
+            }
+        }
+        if operations.is_empty() {
+            return Ok(self.revision().expect("initialized").to_owned());
+        }
+        self.commit_operations(operations)
     }
 
     /// Atomically persist exact new Artifacts and higher-profile journal
@@ -1019,21 +1164,23 @@ impl<S: DurableStore> DurableCoordinator<S> {
             }
         }
         let machine_snapshot = machine.snapshot();
-        self.mutate_checked(|state| {
-            ensure_artifact_machine(
-                &state.machine,
-                &machine_snapshot,
-                artifacts,
-                "Artifact journal checkpoint",
-            )?;
-            for batch in batches {
-                for record in &batch.records {
-                    append_journal_record(state, &batch.journal_id, record.clone())?;
-                }
+        ensure_artifact_machine(
+            &self.state()?.machine,
+            &machine_snapshot,
+            artifacts,
+            "Artifact journal checkpoint",
+        )?;
+        let mut operations = vec![DurableOperation::PutMachine {
+            machine: machine_snapshot,
+        }];
+        for batch in batches {
+            if let Some(operation) =
+                self.journal_append_operation(&batch.journal_id, &batch.records)?
+            {
+                operations.push(operation);
             }
-            state.machine = machine_snapshot;
-            Ok(())
-        })
+        }
+        self.commit_operations(operations)
     }
 
     /// Atomically publish one input Artifact, complete its wait, and append
@@ -1060,22 +1207,24 @@ impl<S: DurableStore> DurableCoordinator<S> {
             }
         }
         let machine_snapshot = machine.snapshot();
-        self.mutate_checked(|state| {
-            ensure_artifact_machine(
-                &state.machine,
-                &machine_snapshot,
-                &std::collections::BTreeSet::from([result.clone()]),
-                "input wait checkpoint",
-            )?;
-            complete_wait_state(state, wait_id, result, true)?;
-            for batch in batches {
-                for record in &batch.records {
-                    append_journal_record(state, &batch.journal_id, record.clone())?;
-                }
+        ensure_artifact_machine(
+            &self.state()?.machine,
+            &machine_snapshot,
+            &std::collections::BTreeSet::from([result.clone()]),
+            "input wait checkpoint",
+        )?;
+        let mut operations = vec![DurableOperation::PutMachine {
+            machine: machine_snapshot,
+        }];
+        operations.extend(self.wait_completion_operations(wait_id, result)?);
+        for batch in batches {
+            if let Some(operation) =
+                self.journal_append_operation(&batch.journal_id, &batch.records)?
+            {
+                operations.push(operation);
             }
-            state.machine = machine_snapshot;
-            Ok(())
-        })
+        }
+        self.commit_operations(operations)
     }
 
     /// Atomically append higher-profile records and register one durable wait.
@@ -1091,31 +1240,38 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 "new journal checkpoint wait must be pending without a result".to_owned(),
             ));
         }
-        self.mutate_checked(|state| {
-            for record in records {
-                append_journal_record(state, journal_id, record.clone())?;
+        match self.state()?.waits.get(&wait.wait_id) {
+            Some(existing) if existing == wait => {}
+            Some(_) => {
+                return Err(DurableError::IllegalTransition(format!(
+                    "wait {} already exists with different semantics",
+                    wait.wait_id
+                )));
             }
-            match state.waits.get(&wait.wait_id) {
-                Some(existing) if existing == wait => {}
-                Some(_) => {
-                    return Err(DurableError::IllegalTransition(format!(
-                        "wait {} already exists with different semantics",
-                        wait.wait_id
-                    )));
-                }
-                None => {
-                    state
-                        .waits
-                        .insert(wait.wait_id.clone(), WaitCondition::clone(wait));
-                }
-            }
-            let continuation = state.continuations.get_mut(&wait.run_id).ok_or_else(|| {
+            None => {}
+        }
+        let mut continuation = self
+            .state()?
+            .continuations
+            .get(&wait.run_id)
+            .cloned()
+            .ok_or_else(|| {
                 DurableError::NotFound(format!("continuation {} does not exist", wait.run_id))
             })?;
-            continuation.wait_set.insert(wait.wait_id.clone());
-            continuation.status = ContinuationStatus::Waiting;
-            Ok(())
-        })
+        continuation.wait_set.insert(wait.wait_id.clone());
+        continuation.status = ContinuationStatus::Waiting;
+        let mut operations = vec![
+            DurableOperation::PutWait {
+                value: wait.clone(),
+            },
+            DurableOperation::PutContinuation {
+                value: continuation,
+            },
+        ];
+        if let Some(operation) = self.journal_append_operation(journal_id, records)? {
+            operations.push(operation);
+        }
+        self.commit_operations(operations)
     }
 
     /// Atomically complete one durable wait and append higher-profile records.
@@ -1127,12 +1283,14 @@ impl<S: DurableStore> DurableCoordinator<S> {
         result: &cymule_core::ArtifactRef,
     ) -> DurableResult<String> {
         validate_journal_batch(journal_id, records)?;
-        self.mutate_checked(|state| {
-            for record in records {
-                append_journal_record(state, journal_id, record.clone())?;
-            }
-            complete_wait_state(state, wait_id, result, true)
-        })
+        let mut operations = self.wait_completion_operations(wait_id, result)?;
+        if let Some(operation) = self.journal_append_operation(journal_id, records)? {
+            operations.push(operation);
+        }
+        if operations.is_empty() {
+            return Ok(self.revision().expect("initialized").to_owned());
+        }
+        self.commit_operations(operations)
     }
 
     /// Consume the store after coordination.
@@ -1140,80 +1298,65 @@ impl<S: DurableStore> DurableCoordinator<S> {
         self.store
     }
 
-    fn mutate(&mut self, update: impl FnOnce(&mut DurableState)) -> DurableResult<String> {
-        self.mutate_checked(|state| {
-            update(state);
-            Ok(())
-        })
-    }
-
-    fn mutate_checked(
-        &mut self,
-        update: impl FnOnce(&mut DurableState) -> DurableResult<()>,
-    ) -> DurableResult<String> {
+    fn commit_operations(&mut self, operations: Vec<DurableOperation>) -> DurableResult<String> {
         let stored = self
             .stored
             .as_ref()
             .ok_or_else(|| DurableError::NotFound("durable state is not initialized".to_owned()))?;
         let expected = stored.head.clone();
-        let mut next = stored.state.clone();
-        update(&mut next)?;
-        let next_state = next.clone();
-        let Some(batch) = StoreBatch::transition(stored, next)? else {
-            let observed = self.store.load()?.ok_or_else(|| DurableError::Conflict {
-                expected: Some(expected.revision.clone()),
-                current: None,
-            })?;
-            if observed.head != expected {
-                return Err(DurableError::Conflict {
-                    expected: Some(expected.revision.clone()),
-                    current: Some(observed.revision),
-                });
-            }
-            return Ok(stored.revision.clone());
-        };
-        let checkpoint_covered_segment = batch.checkpoint.as_ref().map_or_else(
-            || stored.checkpoint_covered_segment.clone(),
-            |checkpoint| checkpoint.covered_segment.clone(),
-        );
+        let delta = DurableDelta::new(operations)?;
+        delta.validate_against(&stored.state)?;
+        let batch = StoreBatch::transition(stored, delta.clone())?;
         let commit = self.store.compare_and_commit(Some(&expected), &batch)?;
-        let revision = commit.revision;
-        self.stored = Some(StoredState {
-            revision: revision.clone(),
-            state: next_state,
-            head: commit.head,
-            checkpoint_covered_segment,
-        });
-        Ok(revision)
+        let stored = self.stored.as_mut().expect("initialized state remains");
+        batch.apply_committed(stored, &commit)?;
+        Ok(commit.revision)
     }
-}
 
-fn ensure_direct_wait_completion(wait: &WaitCondition) -> DurableResult<()> {
-    if !matches!(wait.kind, WaitKind::Input { .. }) {
-        return Err(DurableError::Validation(format!(
-            "wait {} requires an identified signal or timer activation",
-            wait.wait_id
-        )));
-    }
-    Ok(())
-}
-
-fn complete_wait_state(
-    state: &mut DurableState,
-    wait_id: &str,
-    result: &cymule_core::ArtifactRef,
-    require_input: bool,
-) -> DurableResult<()> {
-    let (run_id, owner) = {
-        let wait = state
-            .waits
-            .get_mut(wait_id)
-            .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
-        if require_input {
-            ensure_direct_wait_completion(wait)?;
+    fn journal_append_operation(
+        &self,
+        journal_id: &str,
+        records: &[JournalRecord],
+    ) -> DurableResult<Option<DurableOperation>> {
+        let existing = self.journal_records(journal_id)?;
+        let mut appended = Vec::new();
+        for record in records {
+            match existing
+                .iter()
+                .find(|value| value.record_id == record.record_id)
+            {
+                Some(value) if value == record => {}
+                Some(_) => {
+                    return Err(DurableError::IllegalTransition(format!(
+                        "application journal {journal_id} record {} has conflicting content",
+                        record.record_id
+                    )));
+                }
+                None => appended.push(record.clone()),
+            }
         }
-        if wait.state == WaitState::Completed && wait.result.as_ref() == Some(result) {
-            return Ok(());
+        Ok(
+            (!appended.is_empty()).then(|| DurableOperation::AppendJournal {
+                journal_id: journal_id.to_owned(),
+                records: appended,
+            }),
+        )
+    }
+
+    fn wait_completion_operations(
+        &self,
+        wait_id: &str,
+        result: &cymule_core::ArtifactRef,
+    ) -> DurableResult<Vec<DurableOperation>> {
+        let mut wait = self
+            .state()?
+            .waits
+            .get(wait_id)
+            .cloned()
+            .ok_or_else(|| DurableError::NotFound(format!("wait {wait_id} does not exist")))?;
+        ensure_direct_wait_completion(&wait)?;
+        if wait.state == WaitState::Completed && wait.result.as_ref() == Some(&result) {
+            return Ok(Vec::new());
         }
         if wait.state != WaitState::Pending {
             return Err(DurableError::IllegalTransition(format!(
@@ -1222,42 +1365,70 @@ fn complete_wait_state(
         }
         wait.state = WaitState::Completed;
         wait.result = Some(result.clone());
-        (wait.run_id.clone(), wait.owner.clone())
-    };
-    let continuation = state
-        .continuations
-        .get_mut(&run_id)
-        .ok_or_else(|| DurableError::NotFound(format!("continuation {run_id} does not exist")))?;
+        let mut continuation = self
+            .state()?
+            .continuations
+            .get(&wait.run_id)
+            .cloned()
+            .ok_or_else(|| {
+                DurableError::NotFound(format!("continuation {} does not exist", wait.run_id))
+            })?;
+        apply_wait_result(&wait, result, &mut continuation)?;
+        Ok(vec![
+            DurableOperation::PutWait { value: wait },
+            DurableOperation::PutContinuation {
+                value: continuation,
+            },
+        ])
+    }
+}
+
+fn apply_wait_result(
+    wait: &WaitCondition,
+    result: &cymule_core::ArtifactRef,
+    continuation: &mut Continuation,
+) -> DurableResult<()> {
     let frame = continuation
         .frames
         .iter_mut()
         .find(|frame| {
-            frame.invocation_id == owner.invocation_id
-                && frame.definition_id == owner.definition_id
-                && frame.region_path == owner.region_path
+            frame.invocation_id == wait.owner.invocation_id
+                && frame.definition_id == wait.owner.definition_id
+                && frame.region_path == wait.owner.region_path
         })
         .ok_or_else(|| {
             DurableError::Validation(format!(
-                "wait {wait_id} owning frame {} is missing",
-                owner.invocation_id
+                "wait {} owning frame {} is missing",
+                wait.wait_id, wait.owner.invocation_id
             ))
         })?;
-    if let Some(bind) = owner.bind {
-        match frame.locals.get(&bind) {
+    if let Some(bind) = &wait.owner.bind {
+        match frame.locals.get(bind) {
             Some(existing) if existing == result => {}
             Some(_) => {
                 return Err(DurableError::IllegalTransition(format!(
-                    "wait {wait_id} owner bind {bind} already has a different Artifact"
+                    "wait {} owner bind {bind} already has a different Artifact",
+                    wait.wait_id
                 )));
             }
             None => {
-                frame.locals.insert(bind, result.clone());
+                frame.locals.insert(bind.clone(), result.clone());
             }
         }
     }
-    continuation.wait_set.remove(wait_id);
+    continuation.wait_set.remove(&wait.wait_id);
     if continuation.wait_set.is_empty() {
         continuation.status = ContinuationStatus::Ready;
+    }
+    Ok(())
+}
+
+fn ensure_direct_wait_completion(wait: &WaitCondition) -> DurableResult<()> {
+    if !matches!(wait.kind, WaitKind::Input { .. }) {
+        return Err(DurableError::Validation(format!(
+            "wait {} requires an identified signal or timer activation",
+            wait.wait_id
+        )));
     }
     Ok(())
 }
@@ -1713,29 +1884,4 @@ fn validate_journal_batch(journal_id: &str, records: &[JournalRecord]) -> Durabl
         record.verify()?;
     }
     Ok(())
-}
-
-fn append_journal_record(
-    state: &mut DurableState,
-    journal_id: &str,
-    record: JournalRecord,
-) -> DurableResult<()> {
-    let records = state
-        .application_journals
-        .entry(journal_id.to_owned())
-        .or_default();
-    match records
-        .iter()
-        .find(|existing| existing.record_id == record.record_id)
-    {
-        Some(existing) if existing == &record => Ok(()),
-        Some(_) => Err(DurableError::IllegalTransition(format!(
-            "journal record {} already has different content",
-            record.record_id
-        ))),
-        None => {
-            records.push(record);
-            Ok(())
-        }
-    }
 }

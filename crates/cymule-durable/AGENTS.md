@@ -6,6 +6,10 @@
   compare-and-swaps a small head. The head authenticates a complete checkpoint
   plus a bounded suffix; adapters must not acknowledge a partial segment/head
   transition or rewrite the complete `DurableState` on each mutation.
+- Manifest rotation is bounded twice: at most `MAX_HOT_SEGMENTS` deltas per
+  pack and at most `MAX_CHECKPOINT_PACKS` packs per materialized base. Build a
+  new base outside provider writer exclusion at that boundary; reopen never
+  depends on an operator running GC first.
 - Every Run creation includes its Plan/input/start Events and initial
   Continuation in one state CAS. The first Run initializes the domain; later
   Runs append an exact Machine delta under the same authority. Both pre-commit
@@ -136,8 +140,10 @@
   typed provenance uses `checkpoint_input_wait_journals`; Artifact, journal
   records, input wait, and Continuation readiness must never split across CAS.
 - Checkpoint rotation occurs at the provider-neutral suffix bound. Cold
-  checkpoints and segments are reclaimable only behind an authenticated GC
-  receipt; reopen cost must remain bounded after arbitrary mutation count.
+  manifests contain only fixed-size lineage pointers; they never clone a full
+  projection. Cold checkpoints and segments are reclaimable only when explicit
+  GC first materializes a new base outside the CAS critical section and records
+  an authenticated receipt.
 - Reference in-memory synchronization is adapter-local and non-blocking.
   Contention must surface as a CAS conflict rather than waiting on a mutex.
 - Concrete storage belongs under `plugins/` and must pass this crate's shared

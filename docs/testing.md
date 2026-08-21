@@ -289,6 +289,12 @@ interface, and runs the same integrity probe. This permanently regresses the
 split initialization window where a Run could previously become durable without
 its first Continuation.
 
+The segmented-store complexity witness appends 128 fixed-size typed journal
+records across several manifest rotations. It asserts zero projection loads on
+the hot path and a history-independent bound on segment, manifest, and head
+bytes; explicit GC is measured separately because it deliberately materializes
+the cold base outside writer exclusion.
+
 The production SQLite witness repeats that automatically discovered boundary
 set with real child-process death on both CAS sides. A separate SQLite provider
 ledger counts dispatch and reconciliation independently of Cymule state. Every

@@ -66,10 +66,11 @@ Use this precedence order when guidance conflicts:
   one CAS. Never create canonical work that cannot be resumed after a lost
   acknowledgement.
 - M1 storage moves one small CAS head over immutable content-addressed deltas.
-  Reopen authenticates one checkpoint plus a suffix shorter than
-  `MAX_HOT_SEGMENTS`; checkpoint rotation and cold-object reclamation retain
-  exact lineage and receipts. Never restore per-mutation whole-state rewrite
-  authority or add an implicit/mixed legacy-format fallback.
+  Coordinators emit closed typed operations and revisions form an incremental
+  hash chain. Rotation writes fixed-size parent/covered-segment manifests; only
+  explicit GC materializes a new base outside the writer lock. Never restore
+  per-mutation whole-state clone/diff/hash authority, provider projection reads
+  under CAS, arbitrary head/GC injection, or mixed legacy fallback.
 - Machine history compaction replaces only a causally closed Event prefix with
   an authenticated base projection and exact identities. Retain the complete
   suffix and command receipts; CAS lineage and replay must survive stale writes

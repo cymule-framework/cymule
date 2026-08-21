@@ -178,9 +178,14 @@ SDKs. It exposes start, resume, wait admission, explicit effect release, and
 read-only Run/domain queries. The Rust `DurableRuntimeControl` is the only
 reducer; clients do not reconstruct Continuations or outbox transitions.
 
-The suffix rotates into an authenticated complete projection at 32 segments,
-so reopen reads at most 31 deltas. Older checkpoints and segments form a cold
-archive until explicit reclamation records an immutable receipt. The repository
+The suffix rotates into a fixed-size authenticated manifest at 32 segments;
+each manifest points to its parent and covered segment pack, so hot writes never
+clone or hash the accumulated projection. After 32 packs the coordinator builds
+a new materialized base outside provider writer exclusion, bounding reopen to
+1,024 packed deltas plus the current suffix. Revisions are an incremental hash
+chain over the exact typed delta. Explicit reclamation uses the same outside-lock
+materialization before atomically installing a fresh base and GC receipt.
+The repository
 provides a non-blocking shared-memory reference store, an atomic local directory
 adapter, and a SQLite adapter with immediate
 transactions, WAL, synchronous-full persistence, and zero-timeout contention.

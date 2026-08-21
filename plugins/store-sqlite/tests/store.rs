@@ -1,8 +1,8 @@
 //! `SQLite` segmented-store reopen, migration, fencing, and complexity tests.
 use cymule_core::Machine;
 use cymule_durable::{
-    DurableError, DurableState, DurableStore, JournalRecord, MAX_HOT_SEGMENTS, StoreBatch,
-    StoreHead, StoredState,
+    DurableDelta, DurableError, DurableOperation, DurableState, DurableStore, JournalRecord,
+    MAX_CHECKPOINT_PACKS, MAX_HOT_SEGMENTS, StoreBatch, StoreHead, StoredState,
 };
 use cymule_store_sqlite::SqliteStore;
 use rusqlite::Connection;
@@ -21,21 +21,18 @@ fn initialize(store: &mut impl DurableStore) -> StoredState {
     store.load().expect("loads").expect("state exists")
 }
 fn append(store: &mut impl DurableStore, current: &StoredState, index: usize) -> StoredState {
-    let mut next = current.state.clone();
-    next.application_journals
-        .entry("journal:test".to_owned())
-        .or_default()
-        .push(
-            JournalRecord::new(
-                format!("record:{index}"),
-                "test.record/1",
-                json!({"index": index}),
-            )
-            .expect("record"),
-        );
-    let batch = StoreBatch::transition(current, next)
-        .expect("transition")
-        .expect("changed batch");
+    let record = JournalRecord::new(
+        format!("record:{index}"),
+        "test.record/1",
+        json!({"index": index}),
+    )
+    .expect("record");
+    let delta = DurableDelta::new(vec![DurableOperation::AppendJournal {
+        journal_id: "journal:test".to_owned(),
+        records: vec![record],
+    }])
+    .expect("delta");
+    let batch = StoreBatch::transition(current, delta).expect("transition");
     store
         .compare_and_commit(Some(&current.head), &batch)
         .expect("delta commits");
@@ -51,14 +48,17 @@ fn sqlite_reopens_authenticated_suffix_and_rejects_stale_head() {
     let initial = initialize(&mut writer);
     let stale_view = stale.load().expect("stale view loads").expect("state");
     let next = append(&mut writer, &initial, 1);
-    let mut stale_state = stale_view.state.clone();
-    stale_state.application_journals.insert(
-        "journal:stale".to_owned(),
-        vec![JournalRecord::new("stale", "test.record/1", json!(null)).expect("record")],
-    );
-    let stale_batch = StoreBatch::transition(&stale_view, stale_state)
-        .expect("transition")
-        .expect("batch");
+    let stale_batch = StoreBatch::transition(
+        &stale_view,
+        DurableDelta::new(vec![DurableOperation::AppendJournal {
+            journal_id: "journal:stale".to_owned(),
+            records: vec![
+                JournalRecord::new("stale", "test.record/1", json!(null)).expect("record"),
+            ],
+        }])
+        .expect("delta"),
+    )
+    .expect("transition");
     assert!(matches!(
         stale.compare_and_commit(Some(&stale_view.head), &stale_batch),
         Err(DurableError::Conflict { .. })
@@ -87,7 +87,7 @@ fn suffix_reopen_is_bounded_and_cold_objects_are_reclaimable() {
         .expect("loads")
         .expect("state");
     let before = store.stats().expect("stats");
-    assert!(before.reopened_segments < MAX_HOT_SEGMENTS);
+    assert!(before.reopened_segments < MAX_HOT_SEGMENTS * MAX_CHECKPOINT_PACKS);
     assert!(before.checkpoints >= 2);
     let database = Connection::open(&path).expect("complexity observer opens");
     let largest_segment: i64 = database
@@ -181,14 +181,15 @@ fn read_only_observer_reads_but_cannot_commit() {
         observer.load().expect("reads").expect("state").revision,
         retained.revision
     );
-    let mut next = retained.state.clone();
-    next.application_journals.insert(
-        "journal:x".to_owned(),
-        vec![JournalRecord::new("x", "x/1", json!(null)).expect("record")],
-    );
-    let batch = StoreBatch::transition(&retained, next)
-        .expect("transition")
-        .expect("batch");
+    let batch = StoreBatch::transition(
+        &retained,
+        DurableDelta::new(vec![DurableOperation::AppendJournal {
+            journal_id: "journal:x".to_owned(),
+            records: vec![JournalRecord::new("x", "x/1", json!(null)).expect("record")],
+        }])
+        .expect("delta"),
+    )
+    .expect("transition");
     assert!(
         matches!(observer.compare_and_commit(Some(&retained.head), &batch), Err(DurableError::Validation(message)) if message.contains("read-only"))
     );

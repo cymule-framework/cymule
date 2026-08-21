@@ -4,35 +4,45 @@
   "title": "Cymule Durable Storage Records",
   "$defs": {
     "identity": { "type": "string", "minLength": 1 },
-    "json_delta": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": { "op": { "const": "replace" }, "value": true },
-          "required": ["op", "value"],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "op": { "const": "object" },
-            "fields": { "type": "object", "additionalProperties": { "$ref": "#/$defs/json_delta" } },
-            "removed": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
-          },
-          "required": ["op", "fields", "removed"],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "op": { "const": "append" },
-            "base_len": { "type": "integer", "minimum": 0 },
-            "values": { "type": "array" }
-          },
-          "required": ["op", "base_len", "values"],
-          "additionalProperties": false
+    "durable_delta": {
+      "type": "object",
+      "properties": {
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": { "op": { "const": "put_machine" }, "machine": { "type": "object" } },
+                "required": ["op", "machine"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "enum": ["put_continuation", "put_wait", "put_wait_activation", "put_lease", "put_outbox", "put_component_occurrence", "put_snapshot", "put_history_compaction"] },
+                  "value": { "type": "object" }
+                },
+                "required": ["op", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "append_journal" },
+                  "journal_id": { "$ref": "#/$defs/identity" },
+                  "records": { "type": "array", "minItems": 1, "items": { "type": "object" } }
+                },
+                "required": ["op", "journal_id", "records"],
+                "additionalProperties": false
+              }
+            ]
+          }
         }
-      ]
+      },
+      "required": ["operations"],
+      "additionalProperties": false
     },
     "head": {
       "type": "object",
@@ -40,12 +50,13 @@
         "head_version": { "const": "cymule.durable-head/1" },
         "revision": { "$ref": "#/$defs/identity" },
         "checkpoint_id": { "$ref": "#/$defs/identity" },
+        "checkpoint_depth": { "type": "integer", "minimum": 0, "maximum": 31 },
         "suffix_head": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
         "suffix_len": { "type": "integer", "minimum": 0, "maximum": 31 },
         "sequence": { "type": "integer", "minimum": 0 },
         "gc_receipt": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] }
       },
-      "required": ["head_version", "revision", "checkpoint_id", "suffix_head", "suffix_len", "sequence", "gc_receipt"],
+      "required": ["head_version", "revision", "checkpoint_id", "checkpoint_depth", "suffix_head", "suffix_len", "sequence", "gc_receipt"],
       "additionalProperties": false
     },
     "segment": {
@@ -57,7 +68,7 @@
         "parent_segment": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
         "base_revision": { "$ref": "#/$defs/identity" },
         "revision": { "$ref": "#/$defs/identity" },
-        "delta": { "$ref": "#/$defs/json_delta" }
+        "delta": { "$ref": "#/$defs/durable_delta" }
       },
       "required": ["segment_version", "segment_id", "sequence", "parent_segment", "base_revision", "revision", "delta"],
       "additionalProperties": false
@@ -71,7 +82,7 @@
         "covered_segment": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
         "sequence": { "type": "integer", "minimum": 0 },
         "revision": { "$ref": "#/$defs/identity" },
-        "state": { "type": "object" }
+        "state": { "oneOf": [{ "type": "object" }, { "type": "null" }] }
       },
       "required": ["checkpoint_version", "checkpoint_id", "parent_checkpoint", "covered_segment", "sequence", "revision", "state"],
       "additionalProperties": false

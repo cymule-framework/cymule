@@ -265,7 +265,7 @@ impl DurableState {
     }
 }
 
-fn validate_continuation_artifacts(
+pub(crate) fn validate_continuation_artifacts(
     machine: &Machine,
     continuation: &Continuation,
 ) -> DurableResult<()> {
@@ -398,7 +398,7 @@ fn validate_continuation_artifacts(
     Ok(())
 }
 
-fn validate_wait_artifacts(
+pub(crate) fn validate_wait_artifacts(
     machine: &Machine,
     continuation: &Continuation,
     wait: &WaitCondition,
@@ -513,7 +513,10 @@ fn region_at_path<'a>(root: &'a Region, path: &[usize]) -> DurableResult<&'a Reg
     Ok(region)
 }
 
-fn validate_dispatch_artifacts(machine: &Machine, dispatch: &EffectDispatch) -> DurableResult<()> {
+pub(crate) fn validate_dispatch_artifacts(
+    machine: &Machine,
+    dispatch: &EffectDispatch,
+) -> DurableResult<()> {
     match dispatch.state {
         OutboxState::Pending
         | OutboxState::Claimed
@@ -536,7 +539,11 @@ fn validate_dispatch_artifacts(machine: &Machine, dispatch: &EffectDispatch) -> 
     Ok(())
 }
 
-fn require_artifact(machine: &Machine, reference: &ArtifactRef, owner: &str) -> DurableResult<()> {
+pub(crate) fn require_artifact(
+    machine: &Machine,
+    reference: &ArtifactRef,
+    owner: &str,
+) -> DurableResult<()> {
     reference
         .validate()
         .map_err(|error| DurableError::Validation(format!("{owner}: {error}")))?;
@@ -672,11 +679,11 @@ impl StoredState {
     /// Validate that the revision matches the complete state.
     pub fn verify(&self) -> DurableResult<()> {
         self.head.verify()?;
-        let expected = self.state.revision()?;
-        if self.revision != expected || self.head.revision != expected {
+        self.state.validate()?;
+        if self.revision != self.head.revision {
             return Err(DurableError::Validation(format!(
-                "stored revision {} does not match {expected}",
-                self.revision
+                "stored revision {} does not match head {}",
+                self.revision, self.head.revision
             )));
         }
         Ok(())

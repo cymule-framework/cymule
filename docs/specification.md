@@ -279,14 +279,16 @@ safe point expressible by the frozen sequential/nested IR. The Embedded profile
 does not claim this persistence because it deliberately uses one-shot memory.
 
 The M1 store MUST persist each non-empty transition as an immutable
-content-addressed `cymule.durable-segment/1` and atomically move one
+content-addressed `cymule.durable-segment/1` containing closed typed operations and atomically move one
 `cymule.durable-head/1`. The head MUST authenticate the semantic revision, one
 `cymule.durable-checkpoint/1`, the latest suffix segment, its exact length, and
 a monotonic physical sequence. A store MUST reconstruct and validate the
-checkpoint plus suffix before exposing state, MUST rotate before the suffix can
-reach `MAX_HOT_SEGMENTS`, and MUST NOT rewrite a complete projection for every
-mutation. Reclaiming cold checkpoint/segment objects MUST preserve the current
-checkpoint and suffix and emit a content-addressed
+checkpoint-manifest chain plus bounded packs before exposing state, MUST rotate
+before a pack can exceed `MAX_HOT_SEGMENTS`, MUST create a materialized base
+before the manifest chain reaches `MAX_CHECKPOINT_PACKS`, and MUST NOT clone, diff, validate,
+or hash the complete projection on a normal mutation. Providers MUST verify and
+move only the small head under writer exclusion. Reclaiming cold objects MUST
+materialize a new base before its CAS and emit a content-addressed
 `cymule.durable-gc-receipt/1`. Physical storage migrations are explicit and
 offline; runtime open MUST NOT mix or implicitly fall back to an older format.
 

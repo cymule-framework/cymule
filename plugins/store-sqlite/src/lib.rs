@@ -177,16 +177,15 @@ impl SqliteStore {
                 "cymule_checkpoints",
                 &domain,
                 &batch
-                    .checkpoint
-                    .as_ref()
+                    .checkpoint()
                     .expect("initial checkpoint")
                     .checkpoint_id,
-                batch.checkpoint.as_ref().expect("initial checkpoint"),
+                batch.checkpoint().expect("initial checkpoint"),
             )?;
             transaction
                 .execute(
                     "INSERT INTO cymule_heads(domain, head_json) VALUES (?1, ?2)",
-                    params![domain, canonical(&batch.head)?],
+                    params![domain, canonical(&batch.head())?],
                 )
                 .map_err(sqlite_error)?;
             let receipt_id = cymule_core::content_id(
@@ -194,14 +193,14 @@ impl SqliteStore {
                 &(
                     domain.as_str(),
                     revision.as_str(),
-                    batch.head.checkpoint_id.as_str(),
+                    batch.head().checkpoint_id.as_str(),
                 ),
             )?;
             let receipt = LegacyMigrationReceipt {
                 migration_version: "cymule.sqlite-v1-migration/1".to_owned(),
                 domain: domain.clone(),
                 legacy_revision: revision,
-                checkpoint_id: batch.head.checkpoint_id,
+                checkpoint_id: batch.head().checkpoint_id.clone(),
                 receipt_id,
             };
             transaction
@@ -253,12 +252,8 @@ impl DurableStore for SqliteStore {
         if current_head.as_ref() != expected {
             return Err(conflict(expected, current_head.as_ref()));
         }
-        let current = match &current_head {
-            Some(head) => Some(restore_sql(&transaction, &self.domain, head)?.0),
-            None => None,
-        };
-        batch.verify_against(current.as_ref())?;
-        if let Some(segment) = &batch.segment {
+        batch.verify_against(current_head.as_ref())?;
+        if let Some(segment) = batch.segment() {
             insert_json(
                 &transaction,
                 "cymule_segments",
@@ -267,7 +262,7 @@ impl DurableStore for SqliteStore {
                 segment,
             )?;
         }
-        if let Some(checkpoint) = &batch.checkpoint {
+        if let Some(checkpoint) = batch.checkpoint() {
             insert_json(
                 &transaction,
                 "cymule_checkpoints",
@@ -280,13 +275,13 @@ impl DurableStore for SqliteStore {
             .execute(
                 "INSERT INTO cymule_heads(domain, head_json) VALUES (?1, ?2)
              ON CONFLICT(domain) DO UPDATE SET head_json = excluded.head_json",
-                params![self.domain, canonical(&batch.head)?],
+                params![self.domain, canonical(&batch.head())?],
             )
             .map_err(sqlite_error)?;
         transaction.commit().map_err(sqlite_error)?;
         Ok(StoreCommit {
-            revision: batch.head.revision.clone(),
-            head: batch.head.clone(),
+            revision: batch.head().revision.clone(),
+            head: batch.head().clone(),
         })
     }
 
@@ -296,6 +291,24 @@ impl DurableStore for SqliteStore {
                 "read-only SQLite stores cannot reclaim cold objects".to_owned(),
             ));
         }
+        let stored = self.read()?.ok_or_else(|| {
+            DurableError::NotFound("SQLite durable domain is not initialized".to_owned())
+        })?;
+        if &stored.head != expected {
+            return Err(conflict(Some(expected), Some(&stored.head)));
+        }
+        let checkpoint = StateCheckpoint::for_revision(
+            None,
+            None,
+            expected.sequence,
+            expected.revision.clone(),
+            Some(stored.state),
+        )?;
+        let mut head = expected.clone();
+        head.checkpoint_id.clone_from(&checkpoint.checkpoint_id);
+        head.checkpoint_depth = 0;
+        head.suffix_head = None;
+        head.suffix_len = 0;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -304,38 +317,33 @@ impl DurableStore for SqliteStore {
         if current.as_ref() != Some(expected) {
             return Err(conflict(Some(expected), current.as_ref()));
         }
-        let checkpoint: StateCheckpoint = read_object(
+        let mut reclaimed = BTreeSet::new();
+        for id in list_ids(&transaction, "cymule_checkpoints", &self.domain)? {
+            reclaimed.insert(id);
+        }
+        for id in list_ids(&transaction, "cymule_segments", &self.domain)? {
+            reclaimed.insert(id);
+        }
+        transaction
+            .execute(
+                "DELETE FROM cymule_checkpoints WHERE domain = ?1",
+                [&self.domain],
+            )
+            .map_err(sqlite_error)?;
+        transaction
+            .execute(
+                "DELETE FROM cymule_segments WHERE domain = ?1",
+                [&self.domain],
+            )
+            .map_err(sqlite_error)?;
+        insert_json(
             &transaction,
             "cymule_checkpoints",
             &self.domain,
-            &expected.checkpoint_id,
-        )?
-        .ok_or_else(|| DurableError::NotFound("current SQLite checkpoint is missing".to_owned()))?;
-        let suffix = collect_suffix(&transaction, &self.domain, expected, &checkpoint)?;
-        let mut reclaimed = BTreeSet::new();
-        for id in list_ids(&transaction, "cymule_checkpoints", &self.domain)? {
-            if id != expected.checkpoint_id {
-                transaction
-                    .execute(
-                        "DELETE FROM cymule_checkpoints WHERE domain = ?1 AND object_id = ?2",
-                        params![self.domain, id],
-                    )
-                    .map_err(sqlite_error)?;
-                reclaimed.insert(id);
-            }
-        }
-        for id in list_ids(&transaction, "cymule_segments", &self.domain)? {
-            if !suffix.contains(&id) {
-                transaction
-                    .execute(
-                        "DELETE FROM cymule_segments WHERE domain = ?1 AND object_id = ?2",
-                        params![self.domain, id],
-                    )
-                    .map_err(sqlite_error)?;
-                reclaimed.insert(id);
-            }
-        }
-        let receipt = GcReceipt::new(expected, &reclaimed)?;
+            &checkpoint.checkpoint_id,
+            &checkpoint,
+        )?;
+        let receipt = GcReceipt::new(&head, &reclaimed)?;
         insert_json(
             &transaction,
             "cymule_gc_receipts",
@@ -343,7 +351,6 @@ impl DurableStore for SqliteStore {
             &receipt.receipt_id,
             &receipt,
         )?;
-        let mut head = expected.clone();
         head.gc_receipt = Some(receipt.receipt_id.clone());
         transaction
             .execute(
@@ -434,40 +441,35 @@ fn restore_sql(
     head: &StoreHead,
 ) -> DurableResult<(StoredState, u32)> {
     verify_gc_receipt(connection, domain, head)?;
-    let checkpoint: StateCheckpoint = read_object(
-        connection,
-        "cymule_checkpoints",
-        domain,
-        &head.checkpoint_id,
-    )?
-    .ok_or_else(|| {
-        DurableError::NotFound(format!(
-            "durable checkpoint {} does not exist",
-            head.checkpoint_id
-        ))
-    })?;
-    if checkpoint.checkpoint_id != head.checkpoint_id {
-        return Err(DurableError::Validation(
-            "SQLite checkpoint locator does not match its content identity".to_owned(),
-        ));
+    let mut checkpoints = BTreeMap::new();
+    for id in list_ids(connection, "cymule_checkpoints", domain)? {
+        let value: StateCheckpoint = read_object(connection, "cymule_checkpoints", domain, &id)?
+            .ok_or_else(|| {
+                DurableError::NotFound(format!("durable checkpoint {id} does not exist"))
+            })?;
+        if value.checkpoint_id != id {
+            return Err(DurableError::Validation(
+                "SQLite checkpoint locator does not match its content identity".to_owned(),
+            ));
+        }
+        checkpoints.insert(id, value);
     }
-    let segments = collect_suffix(connection, domain, head, &checkpoint)?;
     let mut values = BTreeMap::new();
-    for id in &segments {
-        let value: StateSegment = read_object(connection, "cymule_segments", domain, id)?
+    for id in list_ids(connection, "cymule_segments", domain)? {
+        let value: StateSegment = read_object(connection, "cymule_segments", domain, &id)?
             .ok_or_else(|| {
                 DurableError::NotFound(format!("durable segment {id} does not exist"))
             })?;
-        if value.segment_id != *id {
+        if value.segment_id != id {
             return Err(DurableError::Validation(
                 "SQLite segment locator does not match its content identity".to_owned(),
             ));
         }
-        values.insert(id.clone(), value);
+        values.insert(id, value);
     }
     restore(
         head,
-        |id| (id == checkpoint.checkpoint_id).then(|| checkpoint.clone()),
+        |id| checkpoints.get(id).cloned(),
         |id| values.get(id).cloned(),
     )
 }
@@ -484,47 +486,6 @@ fn verify_gc_receipt(connection: &Connection, domain: &str, head: &StoreHead) ->
         ));
     }
     receipt.verify_for(head)
-}
-
-fn collect_suffix(
-    connection: &Connection,
-    domain: &str,
-    head: &StoreHead,
-    checkpoint: &StateCheckpoint,
-) -> DurableResult<BTreeSet<String>> {
-    if head.suffix_len == 0 {
-        return Ok(BTreeSet::new());
-    }
-    let mut ids = BTreeSet::new();
-    let mut cursor = head.suffix_head.clone();
-    while cursor.as_deref() != checkpoint.covered_segment.as_deref() {
-        if ids.len() >= cymule_durable::MAX_HOT_SEGMENTS as usize {
-            return Err(DurableError::Validation(
-                "SQLite suffix exceeds reopen bound".to_owned(),
-            ));
-        }
-        let id = cursor.ok_or_else(|| {
-            DurableError::Validation("SQLite suffix does not connect to checkpoint".to_owned())
-        })?;
-        let value: StateSegment = read_object(connection, "cymule_segments", domain, &id)?
-            .ok_or_else(|| {
-                DurableError::NotFound(format!("durable segment {id} does not exist"))
-            })?;
-        if value.segment_id != id {
-            return Err(DurableError::Validation(
-                "SQLite segment locator does not match its content identity".to_owned(),
-            ));
-        }
-        value.verify()?;
-        cursor = value.parent_segment;
-        ids.insert(id);
-    }
-    if ids.len() != head.suffix_len as usize {
-        return Err(DurableError::Validation(
-            "SQLite suffix length does not match head".to_owned(),
-        ));
-    }
-    Ok(ids)
 }
 
 fn read_head(connection: &Connection, domain: &str) -> DurableResult<Option<StoreHead>> {

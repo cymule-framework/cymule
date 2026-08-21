@@ -29,9 +29,10 @@ pub use retry::{
     RetryDisposition, RetryFailure, RetryPolicy, RetryStopReason, RetryStream,
 };
 pub use store::{
-    DurableStore, GC_RECEIPT_VERSION, GcReceipt, JsonDelta, MAX_HOT_SEGMENTS, MemoryStore,
-    STATE_CHECKPOINT_VERSION, STATE_SEGMENT_VERSION, STORE_HEAD_VERSION, StateCheckpoint,
-    StateSegment, StoreBatch, StoreCommit, StoreHead, StoreStats, restore,
+    DurableDelta, DurableOperation, DurableStore, GC_RECEIPT_VERSION, GcReceipt,
+    MAX_CHECKPOINT_PACKS, MAX_HOT_SEGMENTS, MemoryStore, STATE_CHECKPOINT_VERSION,
+    STATE_SEGMENT_VERSION, STORE_HEAD_VERSION, StateCheckpoint, StateSegment, StoreBatch,
+    StoreCommit, StoreHead, StoreStats, restore,
 };
 pub use wait_source::{
     MAX_WAIT_DELIVERY_TARGETS, ParkedWaitIndex, SignalKeyPage, WaitDelivery, WaitSelection,

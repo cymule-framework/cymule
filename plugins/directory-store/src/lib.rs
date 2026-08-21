@@ -94,15 +94,15 @@ impl DirectoryStore {
         }
         let batch = StoreBatch::initialize(legacy.state)?;
         if let Some(head) = store.read_head()?
-            && head != batch.head
+            && head != *batch.head()
         {
             return Err(DurableError::Validation(
                 "mixed directory head does not match the legacy import".to_owned(),
             ));
         }
-        let checkpoint = batch.checkpoint.as_ref().expect("initial checkpoint");
+        let checkpoint = batch.checkpoint().expect("initial checkpoint");
         store.write_immutable("checkpoints", &checkpoint.checkpoint_id, checkpoint)?;
-        write_atomic(&store.root, &store.head_path(), &batch.head)?;
+        write_atomic(&store.root, &store.head_path(), batch.head())?;
         let receipt_id = cymule_core::content_id(
             "cymule.directory-v1-migration/1",
             &(legacy.revision.as_str(), checkpoint.checkpoint_id.as_str()),
@@ -165,47 +165,31 @@ impl DirectoryStore {
             }
             receipt.verify_for(head)?;
         }
-        let checkpoint: StateCheckpoint = read_required(
-            &self.object_path("checkpoints", &head.checkpoint_id),
-            &head.checkpoint_id,
-        )?;
-        if checkpoint.checkpoint_id != head.checkpoint_id {
-            return Err(DurableError::Validation(
-                "directory checkpoint locator does not match its content identity".to_owned(),
-            ));
-        }
-        let mut values = BTreeMap::new();
-        let mut cursor = if head.suffix_len == 0 {
-            checkpoint.covered_segment.clone()
-        } else {
-            head.suffix_head.clone()
-        };
-        while cursor.as_deref() != checkpoint.covered_segment.as_deref() {
-            if values.len() >= cymule_durable::MAX_HOT_SEGMENTS as usize {
+        let mut checkpoints = BTreeMap::new();
+        for entry in fs::read_dir(self.root.join("checkpoints")).map_err(substrate)? {
+            let path = entry.map_err(substrate)?.path();
+            let value: StateCheckpoint = read_required(&path, "checkpoint")?;
+            if path != self.object_path("checkpoints", &value.checkpoint_id) {
                 return Err(DurableError::Validation(
-                    "directory suffix exceeds reopen bound".to_owned(),
+                    "directory checkpoint locator does not match its content identity".to_owned(),
                 ));
             }
-            let id = cursor
-                .as_ref()
-                .ok_or_else(|| {
-                    DurableError::Validation(
-                        "directory suffix does not connect to checkpoint".to_owned(),
-                    )
-                })?
-                .clone();
-            let value: StateSegment = read_required(&self.object_path("segments", &id), &id)?;
-            if value.segment_id != id {
+            checkpoints.insert(value.checkpoint_id.clone(), value);
+        }
+        let mut values = BTreeMap::new();
+        for entry in fs::read_dir(self.root.join("segments")).map_err(substrate)? {
+            let path = entry.map_err(substrate)?.path();
+            let value: StateSegment = read_required(&path, "segment")?;
+            if path != self.object_path("segments", &value.segment_id) {
                 return Err(DurableError::Validation(
                     "directory segment locator does not match its content identity".to_owned(),
                 ));
             }
-            cursor.clone_from(&value.parent_segment);
-            values.insert(id, value);
+            values.insert(value.segment_id.clone(), value);
         }
         restore(
             head,
-            |id| (id == checkpoint.checkpoint_id).then(|| checkpoint.clone()),
+            |id| checkpoints.get(id).cloned(),
             |id| values.get(id).cloned(),
         )
     }
@@ -254,7 +238,18 @@ impl DirectoryStore {
                     "directory GC receipt filename does not match its content identity".to_owned(),
                 ));
             }
-            if receipt.verify_for(head).is_ok() {
+            let mut candidate = head.clone();
+            candidate
+                .checkpoint_id
+                .clone_from(&receipt.retained_checkpoint);
+            candidate.checkpoint_depth = 0;
+            candidate.suffix_head = None;
+            candidate.suffix_len = 0;
+            if receipt.verify_for(&candidate).is_ok()
+                && self
+                    .object_path("checkpoints", &receipt.retained_checkpoint)
+                    .exists()
+            {
                 pending.push(receipt);
             }
         }
@@ -282,32 +277,20 @@ impl DurableStore for DirectoryStore {
                 current: current_head.map(|head| head.revision),
             });
         }
-        let current = current_head
-            .as_ref()
-            .map(|head| self.read_state(head).map(|value| value.0))
-            .transpose()?;
-        batch.verify_against(current.as_ref())?;
-        if let Some(segment) = &batch.segment {
+        batch.verify_against(current_head.as_ref())?;
+        if let Some(segment) = batch.segment() {
             self.write_immutable("segments", &segment.segment_id, segment)?;
         }
-        if let Some(checkpoint) = &batch.checkpoint {
+        if let Some(checkpoint) = batch.checkpoint() {
             self.write_immutable("checkpoints", &checkpoint.checkpoint_id, checkpoint)?;
         }
-        write_atomic(&self.root, &self.head_path(), &batch.head)?;
+        write_atomic(&self.root, &self.head_path(), batch.head())?;
         Ok(StoreCommit {
-            revision: batch.head.revision.clone(),
-            head: batch.head.clone(),
+            revision: batch.head().revision.clone(),
+            head: batch.head().clone(),
         })
     }
     fn reclaim_cold(&mut self, expected: &StoreHead) -> DurableResult<GcReceipt> {
-        let _claim = self.claim()?;
-        let current = self.read_head()?;
-        if current.as_ref() != Some(expected) {
-            return Err(DurableError::Conflict {
-                expected: Some(expected.revision.clone()),
-                current: current.map(|head| head.revision),
-            });
-        }
         if let Some(receipt_id) = &expected.gc_receipt {
             let receipt: GcReceipt =
                 read_required(&self.object_path("gc-receipts", receipt_id), receipt_id)?;
@@ -321,56 +304,64 @@ impl DurableStore for DirectoryStore {
             return Ok(receipt);
         }
         if let Some(receipt) = self.pending_reclamation(expected)? {
+            let _claim = self.claim()?;
+            let current = self.read_head()?;
+            if current.as_ref() != Some(expected) {
+                return Err(DurableError::Conflict {
+                    expected: Some(expected.revision.clone()),
+                    current: current.map(|head| head.revision),
+                });
+            }
+            let mut recovered_head = expected.clone();
+            recovered_head
+                .checkpoint_id
+                .clone_from(&receipt.retained_checkpoint);
+            recovered_head.checkpoint_depth = 0;
+            recovered_head.suffix_head = None;
+            recovered_head.suffix_len = 0;
+            receipt.verify_for(&recovered_head)?;
             self.finish_reclamation(&receipt)?;
-            let mut head = expected.clone();
-            head.gc_receipt = Some(receipt.receipt_id.clone());
-            write_atomic(&self.root, &self.head_path(), &head)?;
+            recovered_head.gc_receipt = Some(receipt.receipt_id.clone());
+            write_atomic(&self.root, &self.head_path(), &recovered_head)?;
             return Ok(receipt);
         }
-        let checkpoint: StateCheckpoint = read_required(
-            &self.object_path("checkpoints", &expected.checkpoint_id),
-            &expected.checkpoint_id,
+        let stored = self.read_state(expected)?.0;
+        let checkpoint = StateCheckpoint::for_revision(
+            None,
+            None,
+            expected.sequence,
+            expected.revision.clone(),
+            Some(stored.state),
         )?;
-        let mut hot = BTreeSet::new();
-        let mut cursor = if expected.suffix_len == 0 {
-            checkpoint.covered_segment.clone()
-        } else {
-            expected.suffix_head.clone()
-        };
-        while cursor.as_deref() != checkpoint.covered_segment.as_deref() {
-            let id = cursor.ok_or_else(|| {
-                DurableError::Validation(
-                    "directory suffix does not connect to checkpoint".to_owned(),
-                )
-            })?;
-            let value: StateSegment = read_required(&self.object_path("segments", &id), &id)?;
-            cursor = value.parent_segment;
-            hot.insert(self.object_path("segments", &id));
+        let mut head = expected.clone();
+        head.checkpoint_id.clone_from(&checkpoint.checkpoint_id);
+        head.checkpoint_depth = 0;
+        head.suffix_head = None;
+        head.suffix_len = 0;
+        let _claim = self.claim()?;
+        let current = self.read_head()?;
+        if current.as_ref() != Some(expected) {
+            return Err(DurableError::Conflict {
+                expected: Some(expected.revision.clone()),
+                current: current.map(|head| head.revision),
+            });
         }
-        let retained_checkpoint = self.object_path("checkpoints", &expected.checkpoint_id);
         let mut reclaimed = BTreeSet::new();
         for family in ["checkpoints", "segments"] {
             for entry in fs::read_dir(self.root.join(family)).map_err(substrate)? {
                 let path = entry.map_err(substrate)?.path();
-                let keep = if family == "checkpoints" {
-                    path == retained_checkpoint
+                let object_id = if family == "checkpoints" {
+                    read_required::<StateCheckpoint>(&path, "cold checkpoint")?.checkpoint_id
                 } else {
-                    hot.contains(&path)
+                    read_required::<StateSegment>(&path, "cold segment")?.segment_id
                 };
-                if !keep {
-                    let object_id = if family == "checkpoints" {
-                        read_required::<StateCheckpoint>(&path, "cold checkpoint")?.checkpoint_id
-                    } else {
-                        read_required::<StateSegment>(&path, "cold segment")?.segment_id
-                    };
-                    reclaimed.insert(object_id);
-                }
+                reclaimed.insert(object_id);
             }
         }
-        let receipt = GcReceipt::new(expected, &reclaimed)?;
+        self.write_immutable("checkpoints", &checkpoint.checkpoint_id, &checkpoint)?;
+        let receipt = GcReceipt::new(&head, &reclaimed)?;
         self.write_immutable("gc-receipts", &receipt.receipt_id, &receipt)?;
         self.finish_reclamation(&receipt)?;
-        let mut head = expected.clone();
         head.gc_receipt = Some(receipt.receipt_id.clone());
         write_atomic(&self.root, &self.head_path(), &head)?;
         Ok(receipt)
