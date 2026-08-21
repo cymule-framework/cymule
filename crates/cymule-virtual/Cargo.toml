@@ -17,6 +17,11 @@ cymule-durable.workspace = true
 cymule-resource.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+cymule-resource-fs = { path = "../../plugins/resource-fs" }
+tempfile = "3.27.0"

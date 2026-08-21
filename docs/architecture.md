@@ -240,20 +240,21 @@ idempotently, and reject conflicting ID reuse without adding Resource semantics
 to M1 storage.
 
 When the consumer is already parked on a matching input wait, the controller
-can activate it atomically: canonical Resource Handle bytes become an Artifact,
+can activate it atomically: the producer's typed Resource Handle Artifact
 the transfer and activation records enter separate typed journals, the wait
 completes, and its Continuation becomes ready in one M1 revision. This is a
 generic input-delivery seam, not a queue or Agent message model.
 
 Listable content uses canonical sorted JSON-lines manifests. The semantic
 descriptor retains byte digest/size, entry count, and Merkle root; each bounded
-page supplies contiguous per-entry inclusion paths. This borrows only the
+page binds mathematical index paths plus its request/next cursor chain. This borrows only the
 content-descriptor principle used by OCI: media type, digest, size, immutable
 content, and independent retrieval. Cymule does not import an OCI registry,
 repository, tag, platform, distribution, or credential model.
 
-`ResourceLifecycleLedger` is the provider-neutral pin/release/GC/delete receipt
-authority. Store plugins own physical deletion and must verify exact absence.
+The M1 Resource lifecycle journal is the pin/release/GC/delete authority. It
+commits a delete fence before physical I/O; store plugins reconcile that intent
+idempotently and must verify exact absence.
 Filesystem and object-store uploads likewise return verified cleanup receipts
 after removing every owned staging/chunk object; a best-effort delete is not a
 terminal state.
@@ -331,15 +332,15 @@ the exact occurrence manifest, derives its semantic Resource descriptor, and
 asks the adapter to idempotently store those bytes. The adapter may realize any
 immutable storage substrate, but it cannot author the
 `VirtualCompactionCertificate`.
-After manifest readback, one M1 journal CAS replaces hot occurrence payloads
-with a bounded summary, certificate, semantic cold descriptor, and small
+After range readback, one M1 journal CAS replaces hot occurrence payloads with
+a bounded summary, certificate, semantic cold descriptor, proof root, and small
 per-work terminal fence index. A failed CAS leaves at most an unreferenced
 immutable manifest in the adapter. Cold bytes never enter the hot Machine
 Artifact map.
 
 Partial rehydration is explicit rather than an implicit cache miss. A typed
-command fixes the certificate and exact occurrence IDs. The controller reads
-the manifest through its pinned binding, verifies content identity and every
-certificate digest, then checkpoints only those records. This keeps archive
+command fixes the certificate and exact occurrence IDs. The controller obtains
+an index-bound Merkle proof, reads only each selected occurrence byte range,
+verifies it against the certificate root, then checkpoints only those records. This keeps archive
 latency and provider behavior outside scheduling authority while preserving old
 control receipt and debugging paths on demand.

@@ -5,13 +5,14 @@ use crate::{ResourceError, ResourceHandle, ResourceResult};
 /// Frozen content manifest version.
 pub const RESOURCE_MANIFEST_VERSION: &str = "cymule.resource-manifest/1";
 /// Frozen bounded list proof version.
-pub const RESOURCE_LIST_PROOF_VERSION: &str = "cymule.resource-list-proof/1";
+pub const RESOURCE_LIST_PROOF_VERSION: &str = "cymule.resource-list-proof/2";
 /// Canonical JSON-lines media type used for Resource manifests.
 pub const RESOURCE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.cymule.resource-manifest+jsonl";
 
 const MANIFEST_LEAF_DOMAIN: &str = "cymule.resource-manifest-leaf/1";
 const MANIFEST_NODE_DOMAIN: &str = "cymule.resource-manifest-node/1";
 const MANIFEST_EMPTY_DOMAIN: &str = "cymule.resource-manifest-empty/1";
+const MANIFEST_CURSOR_DOMAIN: &str = "cymule.resource-manifest-cursor/1";
 
 /// Semantic descriptor for one exact listable Resource manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +84,10 @@ pub struct ResourceListProof {
     pub entry_count: u64,
     /// First entry index represented by this page.
     pub start_index: u64,
+    /// Digest of the exact opaque cursor supplied for this page.
+    pub request_cursor_digest: String,
+    /// Digest of the exact opaque cursor returned for the following page.
+    pub next_cursor_digest: String,
     /// One inclusion path for every returned entry, in order.
     pub inclusions: Vec<ManifestInclusionProof>,
 }
@@ -162,7 +167,13 @@ impl SealedResourceManifest {
     }
 
     /// Build the exact inclusion proof for one bounded contiguous page.
-    pub fn proof(&self, start_index: u64, count: usize) -> ResourceResult<ResourceListProof> {
+    pub fn proof(
+        &self,
+        start_index: u64,
+        count: usize,
+        request_cursor: Option<&str>,
+        next_cursor: Option<&str>,
+    ) -> ResourceResult<ResourceListProof> {
         let start = usize::try_from(start_index).map_err(|_| {
             ResourceError::Validation("manifest page index exceeds platform bounds".to_owned())
         })?;
@@ -180,6 +191,8 @@ impl SealedResourceManifest {
             manifest_digest: self.descriptor.digest.clone(),
             entry_count: self.descriptor.entry_count,
             start_index,
+            request_cursor_digest: cursor_digest(request_cursor)?,
+            next_cursor_digest: cursor_digest(next_cursor)?,
             inclusions,
         })
     }
@@ -220,12 +233,16 @@ impl ResourceListProof {
         &self,
         descriptor: &ResourceManifestDescriptor,
         entries: &[ResourceManifestEntry],
+        request_cursor: Option<&str>,
+        next_cursor: Option<&str>,
     ) -> ResourceResult<()> {
         descriptor.verify()?;
         if self.proof_version != RESOURCE_LIST_PROOF_VERSION
             || self.manifest_digest != descriptor.digest
             || self.entry_count != descriptor.entry_count
             || self.inclusions.len() != entries.len()
+            || self.request_cursor_digest != cursor_digest(request_cursor)?
+            || self.next_cursor_digest != cursor_digest(next_cursor)?
         {
             return Err(ResourceError::Integrity(
                 "Resource list proof does not match its manifest descriptor or page".to_owned(),
@@ -330,12 +347,36 @@ fn verify_inclusion(
     entry.resource.verify()?;
     validate_name(&entry.name)?;
     let mut digest = leaf_digest(entry)?;
+    let mut position = proof.index;
+    let mut width = descriptor.entry_count;
     for step in &proof.path {
+        if width <= 1 {
+            return Err(ResourceError::Integrity(
+                "manifest inclusion path is longer than the retained tree".to_owned(),
+            ));
+        }
         validate_digest("manifest proof node", &step.digest)?;
+        let expected_side = if position.is_multiple_of(2) {
+            MerkleSide::Right
+        } else {
+            MerkleSide::Left
+        };
+        if step.side != expected_side {
+            return Err(ResourceError::Integrity(
+                "manifest inclusion path does not match its retained entry index".to_owned(),
+            ));
+        }
         digest = match step.side {
             MerkleSide::Left => node_digest(&step.digest, &digest)?,
             MerkleSide::Right => node_digest(&digest, &step.digest)?,
         };
+        position /= 2;
+        width = width.div_ceil(2);
+    }
+    if width != 1 {
+        return Err(ResourceError::Integrity(
+            "manifest inclusion path is shorter than the retained tree".to_owned(),
+        ));
     }
     if digest != descriptor.root_digest {
         return Err(ResourceError::Integrity(
@@ -343,6 +384,15 @@ fn verify_inclusion(
         ));
     }
     Ok(())
+}
+
+fn cursor_digest(cursor: Option<&str>) -> ResourceResult<String> {
+    #[derive(Serialize)]
+    struct CursorIdentity<'a> {
+        cursor: Option<&'a str>,
+    }
+    cymule_core::content_id(MANIFEST_CURSOR_DOMAIN, &CursorIdentity { cursor })
+        .map_err(|error| ResourceError::Validation(error.to_string()))
 }
 
 fn validate_digest(kind: &str, digest: &str) -> ResourceResult<()> {

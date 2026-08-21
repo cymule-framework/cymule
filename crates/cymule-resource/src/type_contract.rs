@@ -309,10 +309,10 @@ pub fn framework_artifact_contract(
             ("cymule.framework-resource-manifest/1", "manifestDescriptor")
         }
         FrameworkArtifactType::ResourceListProof => {
-            ("cymule.framework-resource-list-proof/1", "listProof")
+            ("cymule.framework-resource-list-proof/2", "listProof")
         }
         FrameworkArtifactType::ResourceHandoff => {
-            ("cymule.framework-resource-handoff/2", "resourceHandoff")
+            ("cymule.framework-resource-handoff/3", "resourceHandoff")
         }
         FrameworkArtifactType::ResourceLifecycleReceipt => (
             "cymule.framework-resource-lifecycle-receipt/1",
@@ -419,12 +419,14 @@ fn list_proof_schema() -> Value {
         "$schema": JSON_SCHEMA_DIALECT,
         "type": "object",
         "additionalProperties": false,
-        "required": ["proof_version", "manifest_digest", "entry_count", "start_index", "inclusions"],
+        "required": ["proof_version", "manifest_digest", "entry_count", "start_index", "request_cursor_digest", "next_cursor_digest", "inclusions"],
         "properties": {
             "proof_version": {"const": crate::RESOURCE_LIST_PROOF_VERSION},
             "manifest_digest": digest_schema(),
             "entry_count": {"type": "integer", "minimum": 0},
             "start_index": {"type": "integer", "minimum": 0},
+            "request_cursor_digest": digest_schema(),
+            "next_cursor_digest": digest_schema(),
             "inclusions": {
                 "type": "array",
                 "items": {
@@ -470,7 +472,7 @@ fn resource_handoff_schema() -> Value {
             },
             "to_run": non_empty_schema(),
             "slot": non_empty_schema(),
-            "resource": resource_handle_schema()
+            "resource": artifact_ref_schema()
         }
     })
 }

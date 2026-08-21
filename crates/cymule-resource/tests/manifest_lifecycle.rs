@@ -34,16 +34,18 @@ proptest! {
         let sealed = SealedResourceManifest::seal(entries.clone()).expect("manifest seals");
         let start = if entries.is_empty() { 0 } else { requested_start % (entries.len() + 1) };
         let count = requested_count.min(entries.len() - start);
-        let proof = sealed.proof(start as u64, count).expect("proof builds");
+        let request = (start > 0).then(|| start.to_string());
+        let next = (start + count < entries.len()).then(|| (start + count).to_string());
+        let proof = sealed.proof(start as u64, count, request.as_deref(), next.as_deref()).expect("proof builds");
         proof
-            .verify_page(&sealed.descriptor, &entries[start..start + count])
+            .verify_page(&sealed.descriptor, &entries[start..start + count], request.as_deref(), next.as_deref())
             .expect("exact page verifies");
 
         if count > 0 {
             let mut changed = entries[start..start + count].to_vec();
             changed[0].name.push_str("-changed");
             prop_assert!(matches!(
-                proof.verify_page(&sealed.descriptor, &changed),
+                proof.verify_page(&sealed.descriptor, &changed, request.as_deref(), next.as_deref()),
                 Err(ResourceError::Integrity(_))
             ));
         }
@@ -54,26 +56,45 @@ proptest! {
 fn manifest_proof_rejects_wrong_root_index_and_descriptor() {
     let entries = entries(&[1, 2, 3, 4, 5]);
     let sealed = SealedResourceManifest::seal(entries.clone()).expect("manifest seals");
-    let proof = sealed.proof(1, 3).expect("proof builds");
+    let proof = sealed
+        .proof(1, 3, Some("1"), Some("4"))
+        .expect("proof builds");
 
     let mut wrong_root = sealed.descriptor.clone();
     wrong_root.root_digest = format!("sha256:{}", "0".repeat(64));
     assert!(matches!(
-        proof.verify_page(&wrong_root, &entries[1..4]),
+        proof.verify_page(&wrong_root, &entries[1..4], Some("1"), Some("4")),
         Err(ResourceError::Integrity(_))
     ));
 
     let mut wrong_index = proof.clone();
     wrong_index.inclusions[1].index += 1;
     assert!(matches!(
-        wrong_index.verify_page(&sealed.descriptor, &entries[1..4]),
+        wrong_index.verify_page(&sealed.descriptor, &entries[1..4], Some("1"), Some("4")),
         Err(ResourceError::Integrity(_))
     ));
 
     let mut wrong_manifest = proof;
     wrong_manifest.manifest_digest = format!("sha256:{}", "f".repeat(64));
     assert!(matches!(
-        wrong_manifest.verify_page(&sealed.descriptor, &entries[1..4]),
+        wrong_manifest.verify_page(&sealed.descriptor, &entries[1..4], Some("1"), Some("4")),
+        Err(ResourceError::Integrity(_))
+    ));
+
+    let mut wrong_path = sealed
+        .proof(1, 1, Some("1"), Some("2"))
+        .expect("proof builds");
+    wrong_path.inclusions[0].path[0].side = cymule_resource::MerkleSide::Right;
+    assert!(matches!(
+        wrong_path.verify_page(&sealed.descriptor, &entries[1..2], Some("1"), Some("2")),
+        Err(ResourceError::Integrity(_))
+    ));
+
+    assert!(matches!(
+        sealed
+            .proof(1, 3, Some("1"), Some("4"))
+            .expect("proof builds")
+            .verify_page(&sealed.descriptor, &entries[1..4], Some("0"), Some("4")),
         Err(ResourceError::Integrity(_))
     ));
 }
@@ -120,6 +141,25 @@ fn pin_release_gc_delete_receipts_are_exact_and_replayable() {
         ledger.record_delete("delete:no-readback", &eligible, "store:test/1", 8, false),
         Err(ResourceError::Integrity(_))
     ));
+    let publication = cymule_resource::ResourcePublication {
+        resource: ResourceCandidate::text("retained")
+            .seal()
+            .expect("Resource seals"),
+        locators: cymule_resource::ResourceLocatorSet {
+            locator_version: cymule_resource::RESOURCE_LOCATOR_VERSION.to_owned(),
+            resource_id: resource_id.clone(),
+            resolver_binding: "store:test/1".to_owned(),
+            locations: Vec::new(),
+        },
+    };
+    ledger
+        .begin_delete(
+            "delete:verified",
+            &eligible.gc_id,
+            &publication,
+            "store:test/1",
+        )
+        .expect("delete intent records");
     let deleted = ledger
         .record_delete("delete:verified", &eligible, "store:test/1", 8, true)
         .expect("verified delete records");

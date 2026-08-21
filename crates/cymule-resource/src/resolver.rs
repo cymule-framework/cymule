@@ -258,7 +258,8 @@ impl<R: ArtifactResolver> ResourceClient<R> {
                 "exact Resource listing requires a content-addressed manifest".to_owned(),
             )
         })?;
-        page.proof.verify_page(manifest, &page.entries)?;
+        page.proof
+            .verify_page(manifest, &page.entries, cursor, page.next_cursor.as_deref())?;
         if cursor.is_none() && page.proof.start_index != 0 {
             return Err(ResourceError::Substrate(
                 "first Resource list page does not start at manifest entry zero".to_owned(),

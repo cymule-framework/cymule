@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use cymule_core::seal_plan;
 use cymule_core::{
@@ -15,13 +15,15 @@ use cymule_durable::{
     WaitKind, WaitState,
 };
 use cymule_resource::{
-    ArtifactResolver, ArtifactStore, InlineData, RESOURCE_CLEANUP_RECEIPT_VERSION,
-    RESOURCE_LOCATOR_VERSION, ResourceCandidate, ResourceChunk, ResourceCleanupReceipt,
-    ResourceClient, ResourceError, ResourceHandle, ResourceHandoff, ResourceHandoffController,
-    ResourceIntegrity, ResourceLocation, ResourceLocatorSet, ResourceManifestEntry,
-    ResourceObservation, ResourcePage, ResourceProducerProvenance, ResourcePublication,
-    ResourceReplayClass, ResourceShape, ResourceWriteIntent, ResourceWriteSession, ResourceWriter,
-    SealedResourceManifest,
+    ArtifactResolver, ArtifactStore, ArtifactTypeRegistry, FrameworkArtifactType, InlineData,
+    RESOURCE_CLEANUP_RECEIPT_VERSION, RESOURCE_LOCATOR_VERSION, ResourceCandidate, ResourceChunk,
+    ResourceCleanupReceipt, ResourceClient, ResourceDeleteIntent, ResourceDeleter,
+    ResourceDeletionObservation, ResourceError, ResourceHandle, ResourceHandoff,
+    ResourceHandoffController, ResourceIntegrity, ResourceLifecycleController, ResourceLocation,
+    ResourceLocatorSet, ResourceManifestEntry, ResourceObservation, ResourcePage,
+    ResourceProducerProvenance, ResourcePublication, ResourceReplayClass, ResourceShape,
+    ResourceWriteIntent, ResourceWriteSession, ResourceWriter, SealedResourceManifest,
+    framework_artifact_contract,
 };
 use serde_json::json;
 
@@ -29,6 +31,29 @@ use serde_json::json;
 struct LostHandoffReceiptStore {
     inner: MemoryStore,
     armed: Arc<AtomicBool>,
+}
+
+struct CountingDeleter {
+    binding: String,
+    calls: Arc<AtomicUsize>,
+}
+
+impl ResourceDeleter for CountingDeleter {
+    fn binding(&self) -> &str {
+        &self.binding
+    }
+
+    fn delete_resource(
+        &mut self,
+        intent: &ResourceDeleteIntent,
+    ) -> cymule_resource::ResourceResult<ResourceDeletionObservation> {
+        intent.verify()?;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ResourceDeletionObservation {
+            removed_bytes: 7,
+            verified_absent: true,
+        })
+    }
 }
 
 impl DurableStore for LostHandoffReceiptStore {
@@ -96,6 +121,73 @@ fn object(bytes: &[u8]) -> ResourcePublication {
             reference: "object:fixture".to_owned(),
         }],
     )
+}
+
+#[test]
+fn durable_lifecycle_delete_reconciles_lost_receipt_without_redispatch() {
+    let armed = Arc::new(AtomicBool::new(false));
+    let store = LostHandoffReceiptStore {
+        inner: MemoryStore::new(),
+        armed: armed.clone(),
+    };
+    let mut coordinator = DurableCoordinator::open(store)
+        .expect("store opens")
+        .initialize(&Machine::new())
+        .expect("domain initializes");
+    let publication = object(b"deleted");
+    let resource_id = publication.resource.resource_id.clone();
+    let pin = ResourceLifecycleController::pin(
+        &mut coordinator,
+        "pin:output",
+        &resource_id,
+        "run:consumer",
+    )
+    .expect("pin commits");
+    ResourceLifecycleController::release(&mut coordinator, "release:output", &pin.pin_id)
+        .expect("release commits");
+    let gc =
+        ResourceLifecycleController::garbage_collect(&mut coordinator, "gc:output", &resource_id)
+            .expect("GC commits");
+    ResourceLifecycleController::begin_delete(
+        &mut coordinator,
+        "delete:output",
+        &gc.gc_id,
+        &publication,
+        "binding:memory-resolver/1",
+    )
+    .expect("delete intent commits");
+    assert!(matches!(
+        ResourceLifecycleController::pin(
+            &mut coordinator,
+            "pin:too-late",
+            &resource_id,
+            "run:late"
+        ),
+        Err(ResourceError::Conflict(_))
+    ));
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut deleter = CountingDeleter {
+        binding: "binding:memory-resolver/1".to_owned(),
+        calls: calls.clone(),
+    };
+    armed.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        ResourceLifecycleController::reconcile_delete(
+            &mut coordinator,
+            "delete:output",
+            &mut deleter
+        ),
+        Err(ResourceError::Persistence(_))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let store = coordinator.into_store();
+    let mut reopened = DurableCoordinator::open(store).expect("domain reopens");
+    let receipt =
+        ResourceLifecycleController::reconcile_delete(&mut reopened, "delete:output", &mut deleter)
+            .expect("committed deletion receipt replays");
+    assert!(receipt.verified_absent);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -287,10 +379,11 @@ impl ArtifactResolver for MemoryResolver {
         let end = self.entries.len().min(start.saturating_add(limit as usize));
         let sealed = SealedResourceManifest::seal(self.entries.clone())?;
         let entries = self.entries[start..end].to_vec();
+        let next_cursor = (end < self.entries.len()).then(|| end.to_string());
         Ok(ResourcePage {
-            proof: sealed.proof(start as u64, entries.len())?,
+            proof: sealed.proof(start as u64, entries.len(), cursor, next_cursor.as_deref())?,
             entries,
-            next_cursor: (end < self.entries.len()).then(|| end.to_string()),
+            next_cursor,
         })
     }
 }
@@ -548,9 +641,20 @@ fn machine_with_runs() -> (Machine, cymule_core::ArtifactRef) {
     machine
         .put_artifact("test/input", b"resource input".to_vec())
         .expect("input stores");
+    let handle = ResourceCandidate::text("producer output")
+        .seal()
+        .expect("Resource seals");
+    let contract = framework_artifact_contract(FrameworkArtifactType::ResourceHandle)
+        .expect("Resource Handle contract builds");
+    let mut registry = ArtifactTypeRegistry::new();
+    let contract_id = contract.contract_id.clone();
+    registry.register(contract).expect("contract registers");
+    let typed = registry
+        .put_canonical_json(&contract_id, &handle)
+        .expect("typed Resource Handle seals");
     let result = machine
-        .put_artifact("example.producer-result/1", b"producer output".to_vec())
-        .expect("producer result stores");
+        .put_artifact(typed.reference.kind, typed.bytes)
+        .expect("producer Resource Handle stores");
     (machine, result)
 }
 
@@ -596,7 +700,7 @@ fn run_to_run_handoff_is_idempotent_conflict_checked_and_reopenable() {
         producer: producer_provenance(&producer_result),
         to_run: "run:consumer".to_owned(),
         slot: "input.dataset".to_owned(),
-        resource: ResourceCandidate::text("producer output").seal().unwrap(),
+        resource: producer_result.clone(),
     };
     ResourceHandoffController::transfer(&mut coordinator, &handoff).expect("handoff commits");
     assert!(matches!(
@@ -606,10 +710,11 @@ fn run_to_run_handoff_is_idempotent_conflict_checked_and_reopenable() {
     ResourceHandoffController::transfer(&mut coordinator, &handoff)
         .expect("handoff retry is idempotent");
     let mut conflicting = handoff.clone();
-    conflicting.resource = ResourceCandidate::text("different output").seal().unwrap();
+    conflicting.resource = cymule_core::artifact_ref("example.other/1", b"different output")
+        .expect("conflicting reference derives");
     assert!(matches!(
         ResourceHandoffController::transfer(&mut coordinator, &conflicting),
-        Err(ResourceError::Integrity(_))
+        Err(ResourceError::Validation(_))
     ));
     let mut competing_slot = handoff.clone();
     competing_slot.transfer_id = "transfer:competing-producer".to_owned();
@@ -695,9 +800,7 @@ fn resource_handoff_atomically_activates_matching_input_wait() {
         producer: producer_provenance(&producer_result),
         to_run: "run:consumer".to_owned(),
         slot: "input.dataset".to_owned(),
-        resource: ResourceCandidate::text("producer output")
-            .seal()
-            .expect("Resource seals"),
+        resource: producer_result.clone(),
     };
     armed.store(true, Ordering::SeqCst);
     let lost = ResourceHandoffController::activate_input(
@@ -741,10 +844,13 @@ fn resource_handoff_atomically_activates_matching_input_wait() {
         .artifact(&activation.result)
         .expect("input Artifact exists")
         .clone();
-    assert_eq!(
-        serde_json::from_slice::<ResourceHandle>(&artifact.bytes).expect("Resource Handle decodes"),
-        handoff.resource
-    );
+    assert_eq!(artifact.reference, handoff.resource);
+    let registry =
+        ArtifactTypeRegistry::with_framework_contracts().expect("framework contracts build");
+    let decoded: ResourceHandle = registry
+        .decode_typed(&artifact)
+        .expect("Resource Handle decodes");
+    decoded.verify().expect("Resource Handle verifies");
     assert_eq!(
         ResourceHandoffController::activate_input(
             &mut coordinator,

@@ -121,7 +121,7 @@ Version decision: segmented storage uses independent
 contracts. Segment v2 replaces whole-Machine operations with the closed
 `cymule.machine-delta/1` transition and has no v1 reader or dual authority.
 This does not change `cymule.durable-state/2`. Terminal Resources replace the pre-release descriptor and
-handoff domains with `cymule.resource/2` and `cymule.resource-handoff/2`.
+handoff domains with `cymule.resource/2` and `cymule.resource-handoff/3`.
 There is no `/1` compatibility reader or dual authority. Locator sets,
 manifests/list proofs, and lifecycle receipts use independent `/1` domains.
 Identified signal/timer admission introduces

@@ -639,8 +639,11 @@ dependencies = [
  "cymule-core",
  "cymule-durable",
  "cymule-resource",
+ "cymule-resource-fs",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

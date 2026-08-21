@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use cymule_durable::{DurableCoordinator, DurableStore, JournalRecord};
+
 use crate::{ResourceError, ResourcePublication, ResourceResult};
 
 /// Frozen pin receipt version.
@@ -14,6 +16,12 @@ pub const RESOURCE_GC_RECEIPT_VERSION: &str = "cymule.resource-gc-receipt/1";
 pub const RESOURCE_DELETE_RECEIPT_VERSION: &str = "cymule.resource-delete-receipt/1";
 /// Frozen upload-cleanup receipt version.
 pub const RESOURCE_CLEANUP_RECEIPT_VERSION: &str = "cymule.resource-cleanup-receipt/1";
+/// Frozen delete-intent version.
+pub const RESOURCE_DELETE_INTENT_VERSION: &str = "cymule.resource-delete-intent/1";
+/// Frozen lifecycle journal domain.
+pub const RESOURCE_LIFECYCLE_JOURNAL_VERSION: &str = "cymule.resource-lifecycle/1";
+
+const RESOURCE_LIFECYCLE_JOURNAL_ID: &str = "cymule.resource-lifecycle";
 
 /// Durable evidence retaining one exact Resource pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +117,33 @@ pub struct ResourceCleanupReceipt {
     pub verified_absent: bool,
 }
 
+/// Durable fence authorizing one exact provider deletion attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceDeleteIntent {
+    /// Intent wire version.
+    pub intent_version: String,
+    /// Stable caller-supplied delete identity.
+    pub delete_id: String,
+    /// Exact eligible GC operation authorizing deletion.
+    pub gc_id: String,
+    /// Exact semantic Resource identity to remove.
+    pub resource_id: String,
+    /// Immutable store binding admitted for deletion.
+    pub store_binding: String,
+    /// Provider-neutral publication used by the admitted deleter.
+    pub publication: ResourcePublication,
+}
+
+/// Provider observation returned after an idempotent deletion attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceDeletionObservation {
+    /// Number of bytes removed by this call; zero on absence replay.
+    pub removed_bytes: u64,
+    /// Exact provider readback proved the content object absent.
+    pub verified_absent: bool,
+}
+
 /// Provider-neutral lifecycle operations with exact idempotency receipts.
 pub trait ResourceLifecycle {
     /// Retain one Resource under a stable owner pin.
@@ -143,22 +178,24 @@ pub trait ResourceLifecycle {
 
 /// Physical deletion boundary gated by one exact eligible GC receipt.
 pub trait ResourceDeleter {
+    /// Immutable implementation binding owned by this deleter.
+    fn binding(&self) -> &str;
+
     /// Delete one exact published content object and return provider readback.
     fn delete_resource(
         &mut self,
-        delete_id: &str,
-        gc: &ResourceGcReceipt,
-        publication: &ResourcePublication,
-    ) -> ResourceResult<ResourceDeleteReceipt>;
+        intent: &ResourceDeleteIntent,
+    ) -> ResourceResult<ResourceDeletionObservation>;
 }
 
 /// Deterministic lifecycle authority suitable for durable journal embedding.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceLifecycleLedger {
     pins: BTreeMap<String, ResourcePinReceipt>,
     releases: BTreeMap<String, ResourceReleaseReceipt>,
     gc_receipts: BTreeMap<String, ResourceGcReceipt>,
+    delete_intents: BTreeMap<String, ResourceDeleteIntent>,
     delete_receipts: BTreeMap<String, ResourceDeleteReceipt>,
 }
 
@@ -169,6 +206,7 @@ impl ResourceLifecycleLedger {
             pins: BTreeMap::new(),
             releases: BTreeMap::new(),
             gc_receipts: BTreeMap::new(),
+            delete_intents: BTreeMap::new(),
             delete_receipts: BTreeMap::new(),
         }
     }
@@ -211,9 +249,27 @@ impl ResourceLifecycleLedger {
                     gc.resource_id != receipt.resource_id
                         || gc.disposition != ResourceGcDisposition::Eligible
                 })
+                || self.delete_intents.get(delete_id).is_none_or(|intent| {
+                    intent.gc_id != receipt.gc_id
+                        || intent.resource_id != receipt.resource_id
+                        || intent.store_binding != receipt.store_binding
+                })
             {
                 return Err(ResourceError::Integrity(
                     "Resource delete receipt lost its eligible GC authority".to_owned(),
+                ));
+            }
+        }
+        for (delete_id, intent) in &self.delete_intents {
+            intent.verify()?;
+            if delete_id != &intent.delete_id
+                || self.gc_receipts.get(&intent.gc_id).is_none_or(|gc| {
+                    gc.resource_id != intent.resource_id
+                        || gc.disposition != ResourceGcDisposition::Eligible
+                })
+            {
+                return Err(ResourceError::Integrity(
+                    "Resource delete intent lost its eligible GC authority".to_owned(),
                 ));
             }
         }
@@ -227,6 +283,301 @@ impl ResourceLifecycleLedger {
                 .values()
                 .any(|release| release.pin_id == pin_id)
     }
+
+    /// Fence one exact provider deletion after a retained zero-pin GC decision.
+    pub fn begin_delete(
+        &mut self,
+        delete_id: &str,
+        gc_id: &str,
+        publication: &ResourcePublication,
+        store_binding: &str,
+    ) -> ResourceResult<ResourceDeleteIntent> {
+        validate_identity("delete", delete_id)?;
+        validate_identity("GC", gc_id)?;
+        validate_identity("store binding", store_binding)?;
+        publication.verify()?;
+        let gc = self
+            .gc_receipts
+            .get(gc_id)
+            .ok_or_else(|| ResourceError::NotFound(format!("Resource GC {gc_id}")))?;
+        if gc.disposition != ResourceGcDisposition::Eligible
+            || gc.active_pin_count != 0
+            || publication.resource.resource_id != gc.resource_id
+            || publication.locators.resolver_binding != store_binding
+            || self
+                .pins
+                .values()
+                .any(|pin| pin.resource_id == gc.resource_id && self.pin_is_active(&pin.pin_id))
+        {
+            return Err(ResourceError::Conflict(
+                "Resource delete intent requires a current zero-pin GC decision and exact provider binding"
+                    .to_owned(),
+            ));
+        }
+        let intent = ResourceDeleteIntent {
+            intent_version: RESOURCE_DELETE_INTENT_VERSION.to_owned(),
+            delete_id: delete_id.to_owned(),
+            gc_id: gc_id.to_owned(),
+            resource_id: gc.resource_id.clone(),
+            store_binding: store_binding.to_owned(),
+            publication: publication.clone(),
+        };
+        intent.verify()?;
+        if let Some(existing) = self.delete_intents.get(delete_id) {
+            return if existing == &intent {
+                Ok(existing.clone())
+            } else {
+                Err(ResourceError::Conflict(format!(
+                    "Resource delete {delete_id} was reused with different semantics"
+                )))
+            };
+        }
+        self.delete_intents
+            .insert(delete_id.to_owned(), intent.clone());
+        Ok(intent)
+    }
+}
+
+/// M1-backed lifecycle authority for pins, releases, collection, and deletion.
+pub struct ResourceLifecycleController;
+
+impl ResourceLifecycleController {
+    /// Durably retain one exact Resource pin.
+    pub fn pin<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        pin_id: &str,
+        resource_id: &str,
+        owner: &str,
+    ) -> ResourceResult<ResourcePinReceipt> {
+        let mut ledger = Self::load(coordinator)?;
+        let receipt = ledger.pin(pin_id, resource_id, owner)?;
+        append(
+            coordinator,
+            "pin",
+            pin_id,
+            RESOURCE_PIN_RECEIPT_VERSION,
+            &receipt,
+        )?;
+        Ok(receipt)
+    }
+
+    /// Durably release one exact pin.
+    pub fn release<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        release_id: &str,
+        pin_id: &str,
+    ) -> ResourceResult<ResourceReleaseReceipt> {
+        let mut ledger = Self::load(coordinator)?;
+        let receipt = ledger.release(release_id, pin_id)?;
+        append(
+            coordinator,
+            "release",
+            release_id,
+            RESOURCE_RELEASE_RECEIPT_VERSION,
+            &receipt,
+        )?;
+        Ok(receipt)
+    }
+
+    /// Durably evaluate zero-pin collection eligibility.
+    pub fn garbage_collect<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        gc_id: &str,
+        resource_id: &str,
+    ) -> ResourceResult<ResourceGcReceipt> {
+        let mut ledger = Self::load(coordinator)?;
+        let receipt = ledger.garbage_collect(gc_id, resource_id)?;
+        append(
+            coordinator,
+            "gc",
+            gc_id,
+            RESOURCE_GC_RECEIPT_VERSION,
+            &receipt,
+        )?;
+        Ok(receipt)
+    }
+
+    /// Commit the durable fence before any provider deletion is attempted.
+    pub fn begin_delete<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        delete_id: &str,
+        gc_id: &str,
+        publication: &ResourcePublication,
+        store_binding: &str,
+    ) -> ResourceResult<ResourceDeleteIntent> {
+        let mut ledger = Self::load(coordinator)?;
+        let intent = ledger.begin_delete(delete_id, gc_id, publication, store_binding)?;
+        append(
+            coordinator,
+            "delete-intent",
+            delete_id,
+            RESOURCE_DELETE_INTENT_VERSION,
+            &intent,
+        )?;
+        Ok(intent)
+    }
+
+    /// Reconcile one durable delete intent against its exact provider.
+    pub fn reconcile_delete<S: DurableStore>(
+        coordinator: &mut DurableCoordinator<S>,
+        delete_id: &str,
+        deleter: &mut impl ResourceDeleter,
+    ) -> ResourceResult<ResourceDeleteReceipt> {
+        let mut ledger = Self::load(coordinator)?;
+        if let Some(receipt) = ledger.delete_receipts.get(delete_id) {
+            return Ok(receipt.clone());
+        }
+        let intent = ledger
+            .delete_intents
+            .get(delete_id)
+            .cloned()
+            .ok_or_else(|| ResourceError::NotFound(format!("Resource delete {delete_id}")))?;
+        if deleter.binding() != intent.store_binding {
+            return Err(ResourceError::Conflict(
+                "selected Resource deleter does not match the durable delete intent".to_owned(),
+            ));
+        }
+        let observation = deleter.delete_resource(&intent)?;
+        let gc = ledger
+            .gc_receipts
+            .get(&intent.gc_id)
+            .cloned()
+            .ok_or_else(|| {
+                ResourceError::Integrity("delete intent lost its GC receipt".to_owned())
+            })?;
+        let receipt = ledger.record_delete(
+            delete_id,
+            &gc,
+            &intent.store_binding,
+            observation.removed_bytes,
+            observation.verified_absent,
+        )?;
+        append(
+            coordinator,
+            "delete",
+            delete_id,
+            RESOURCE_DELETE_RECEIPT_VERSION,
+            &receipt,
+        )?;
+        Ok(receipt)
+    }
+
+    /// Rebuild and authenticate the complete lifecycle ledger from M1.
+    pub fn load<S: DurableStore>(
+        coordinator: &DurableCoordinator<S>,
+    ) -> ResourceResult<ResourceLifecycleLedger> {
+        let records = coordinator
+            .journal_records(RESOURCE_LIFECYCLE_JOURNAL_ID)
+            .map_err(|error| ResourceError::Persistence(error.to_string()))?;
+        let mut ledger = ResourceLifecycleLedger::new();
+        for record in records {
+            record
+                .verify()
+                .map_err(|error| ResourceError::Persistence(error.to_string()))?;
+            match record.schema.as_str() {
+                RESOURCE_PIN_RECEIPT_VERSION => {
+                    let receipt: ResourcePinReceipt = decode(record)?;
+                    if ledger.pin(&receipt.pin_id, &receipt.resource_id, &receipt.owner)? != receipt
+                    {
+                        return Err(ResourceError::Integrity(
+                            "Resource pin replay changed".to_owned(),
+                        ));
+                    }
+                }
+                RESOURCE_RELEASE_RECEIPT_VERSION => {
+                    let receipt: ResourceReleaseReceipt = decode(record)?;
+                    if ledger.release(&receipt.release_id, &receipt.pin_id)? != receipt {
+                        return Err(ResourceError::Integrity(
+                            "Resource release replay changed".to_owned(),
+                        ));
+                    }
+                }
+                RESOURCE_GC_RECEIPT_VERSION => {
+                    let receipt: ResourceGcReceipt = decode(record)?;
+                    if ledger.garbage_collect(&receipt.gc_id, &receipt.resource_id)? != receipt {
+                        return Err(ResourceError::Integrity(
+                            "Resource GC replay changed".to_owned(),
+                        ));
+                    }
+                }
+                RESOURCE_DELETE_INTENT_VERSION => {
+                    let intent: ResourceDeleteIntent = decode(record)?;
+                    if ledger.begin_delete(
+                        &intent.delete_id,
+                        &intent.gc_id,
+                        &intent.publication,
+                        &intent.store_binding,
+                    )? != intent
+                    {
+                        return Err(ResourceError::Integrity(
+                            "Resource delete intent replay changed".to_owned(),
+                        ));
+                    }
+                }
+                RESOURCE_DELETE_RECEIPT_VERSION => {
+                    let receipt: ResourceDeleteReceipt = decode(record)?;
+                    let gc = ledger
+                        .gc_receipts
+                        .get(&receipt.gc_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            ResourceError::Integrity(
+                                "Resource delete receipt precedes its GC".to_owned(),
+                            )
+                        })?;
+                    if ledger.record_delete(
+                        &receipt.delete_id,
+                        &gc,
+                        &receipt.store_binding,
+                        receipt.removed_bytes,
+                        receipt.verified_absent,
+                    )? != receipt
+                    {
+                        return Err(ResourceError::Integrity(
+                            "Resource deletion replay changed".to_owned(),
+                        ));
+                    }
+                }
+                schema => {
+                    return Err(ResourceError::Integrity(format!(
+                        "unsupported Resource lifecycle journal schema {schema}"
+                    )));
+                }
+            }
+        }
+        ledger.verify()?;
+        Ok(ledger)
+    }
+}
+
+fn append<S: DurableStore, T: Serialize>(
+    coordinator: &mut DurableCoordinator<S>,
+    kind: &str,
+    identity: &str,
+    schema: &str,
+    value: &T,
+) -> ResourceResult<()> {
+    let record = JournalRecord::new(
+        format!("{kind}:{identity}"),
+        schema,
+        serde_json::to_value(value)
+            .map_err(|error| ResourceError::Persistence(error.to_string()))?,
+    )
+    .map_err(|error| ResourceError::Persistence(error.to_string()))?;
+    coordinator
+        .append_journal_record(RESOURCE_LIFECYCLE_JOURNAL_ID, record)
+        .map_err(|error| match error {
+            cymule_durable::DurableError::IllegalTransition(message) => {
+                ResourceError::Conflict(message)
+            }
+            other => ResourceError::Persistence(other.to_string()),
+        })?;
+    Ok(())
+}
+
+fn decode<T: for<'de> Deserialize<'de>>(record: &JournalRecord) -> ResourceResult<T> {
+    serde_json::from_value(record.payload.clone())
+        .map_err(|error| ResourceError::Integrity(error.to_string()))
 }
 
 impl ResourceLifecycle for ResourceLifecycleLedger {
@@ -261,6 +612,15 @@ impl ResourceLifecycle for ResourceLifecycleLedger {
         {
             return Err(ResourceError::Conflict(
                 "a deleted Resource cannot receive a historical pin".to_owned(),
+            ));
+        }
+        if self
+            .delete_intents
+            .values()
+            .any(|intent| intent.resource_id == resource_id)
+        {
+            return Err(ResourceError::Conflict(
+                "a delete-fenced Resource cannot receive a new pin".to_owned(),
             ));
         }
         self.pins.insert(pin_id.to_owned(), receipt.clone());
@@ -368,6 +728,19 @@ impl ResourceLifecycle for ResourceLifecycleLedger {
                     .to_owned(),
             ));
         }
+        let intent = self.delete_intents.get(delete_id).ok_or_else(|| {
+            ResourceError::Conflict(
+                "Resource deletion requires a prior durable delete intent".to_owned(),
+            )
+        })?;
+        if intent.gc_id != gc.gc_id
+            || intent.resource_id != gc.resource_id
+            || intent.store_binding != store_binding
+        {
+            return Err(ResourceError::Conflict(
+                "Resource deletion observation does not match its durable intent".to_owned(),
+            ));
+        }
         let receipt = ResourceDeleteReceipt {
             receipt_version: RESOURCE_DELETE_RECEIPT_VERSION.to_owned(),
             delete_id: delete_id.to_owned(),
@@ -389,6 +762,27 @@ impl ResourceLifecycle for ResourceLifecycleLedger {
         self.delete_receipts
             .insert(delete_id.to_owned(), receipt.clone());
         Ok(receipt)
+    }
+}
+
+impl ResourceDeleteIntent {
+    /// Verify the durable delete fence and publication.
+    pub fn verify(&self) -> ResourceResult<()> {
+        require_version(&self.intent_version, RESOURCE_DELETE_INTENT_VERSION)?;
+        validate_identity("delete", &self.delete_id)?;
+        validate_identity("GC", &self.gc_id)?;
+        validate_digest(&self.resource_id)?;
+        validate_identity("store binding", &self.store_binding)?;
+        self.publication.verify()?;
+        if self.publication.resource.resource_id != self.resource_id
+            || self.publication.locators.resolver_binding != self.store_binding
+        {
+            return Err(ResourceError::Validation(
+                "Resource delete intent publication does not match its identity or binding"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 

@@ -3,13 +3,10 @@ use cymule_durable::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    ArtifactTypeRegistry, FrameworkArtifactType, ResourceError, ResourceHandle, ResourceIntegrity,
-    ResourceResult, framework_artifact_contract,
-};
+use crate::{ArtifactTypeRegistry, ResourceError, ResourceHandle, ResourceResult};
 
 /// Frozen Run-to-Run handoff record version.
-pub const RESOURCE_HANDOFF_VERSION: &str = "cymule.resource-handoff/2";
+pub const RESOURCE_HANDOFF_VERSION: &str = "cymule.resource-handoff/3";
 /// Frozen handoff-to-input activation record version.
 pub const RESOURCE_HANDOFF_ACTIVATION_VERSION: &str = "cymule.resource-handoff-activation/1";
 
@@ -39,8 +36,8 @@ pub struct ResourceHandoff {
     pub to_run: String,
     /// Stable target state/output slot.
     pub slot: String,
-    /// Provider-neutral resource handle.
-    pub resource: ResourceHandle,
+    /// Exact typed Resource Handle Artifact produced by the occurrence.
+    pub resource: cymule_core::ArtifactRef,
 }
 
 /// Durable evidence that one handoff completed one target input wait.
@@ -97,7 +94,16 @@ impl ResourceHandoff {
                 "resource handoff requires distinct source and target Runs".to_owned(),
             ));
         }
-        self.resource.verify()
+        self.resource
+            .validate()
+            .map_err(|error| ResourceError::Validation(error.to_string()))?;
+        if self.resource != self.producer.result {
+            return Err(ResourceError::Validation(
+                "resource handoff must transfer the producer's exact typed Resource Handle Artifact"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -142,7 +148,7 @@ impl ResourceHandoffController {
         handoff: &ResourceHandoff,
         wait_id: &str,
     ) -> ResourceResult<ResourceHandoffActivation> {
-        let mut machine = ensure_admissible(coordinator, handoff)?;
+        let machine = ensure_admissible(coordinator, handoff)?;
         let wait = coordinator
             .state()
             .map_err(|error| persistence(&error))?
@@ -172,19 +178,7 @@ impl ResourceHandoffController {
                 "resource handoff input wait is cancelled".to_owned(),
             ));
         }
-        let contract = framework_artifact_contract(FrameworkArtifactType::ResourceHandle)?;
-        let contract_id = contract.contract_id.clone();
-        let mut registry = ArtifactTypeRegistry::new();
-        registry.register(contract)?;
-        let typed = registry.put_canonical_json(&contract_id, &handoff.resource)?;
-        let result = machine
-            .put_artifact(typed.reference.kind.clone(), typed.bytes)
-            .map_err(|error| ResourceError::Persistence(error.to_string()))?;
-        if result != typed.reference {
-            return Err(ResourceError::Persistence(
-                "Resource handoff typed Artifact identity changed".to_owned(),
-            ));
-        }
+        let result = handoff.resource.clone();
         let activation = ResourceHandoffActivation {
             activation_version: RESOURCE_HANDOFF_ACTIVATION_VERSION.to_owned(),
             activation_id: format!("activation:{}:{wait_id}", handoff.transfer_id),
@@ -302,21 +296,9 @@ fn ensure_admissible<S: DurableStore>(
             "resource handoff producer result Artifact is missing from the Machine".to_owned(),
         )
     })?;
-    match (
-        &handoff.resource.integrity,
-        handoff.resource.inline.as_ref(),
-    ) {
-        (ResourceIntegrity::Inline, Some(inline)) if inline.bytes()? == result.bytes => {}
-        (ResourceIntegrity::Content { digest, size }, None)
-            if digest == &format!("sha256:{}", cymule_core::sha256_bytes(&result.bytes))
-                && *size == result.bytes.len() as u64 => {}
-        _ => {
-            return Err(ResourceError::Integrity(
-                "resource handoff descriptor does not represent the exact producer result bytes"
-                    .to_owned(),
-            ));
-        }
-    }
+    let registry = ArtifactTypeRegistry::with_framework_contracts()?;
+    let resource: ResourceHandle = registry.decode_typed(result)?;
+    resource.verify()?;
     let target = &machine.projection().runs[&handoff.to_run];
     if !matches!(
         target.status,

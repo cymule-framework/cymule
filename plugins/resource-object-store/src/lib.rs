@@ -6,9 +6,10 @@ use std::sync::Arc;
 use cymule_resource::{
     ArtifactResolver, ArtifactStore, MAX_WRITE_CHUNK, RESOURCE_CLEANUP_RECEIPT_VERSION,
     RESOURCE_LOCATOR_VERSION, ResourceCandidate, ResourceChunk, ResourceCleanupReceipt,
-    ResourceError, ResourceHandle, ResourceIntegrity, ResourceLocation, ResourceLocatorSet,
-    ResourceObservation, ResourcePage, ResourcePublication, ResourceResult, ResourceShape,
-    ResourceWriteIntent, ResourceWriteSession,
+    ResourceDeleteIntent, ResourceDeleter, ResourceDeletionObservation, ResourceError,
+    ResourceHandle, ResourceIntegrity, ResourceLocation, ResourceLocatorSet, ResourceObservation,
+    ResourcePage, ResourcePublication, ResourceResult, ResourceShape, ResourceWriteIntent,
+    ResourceWriteSession,
 };
 use futures_util::StreamExt;
 use object_store::path::Path;
@@ -27,8 +28,16 @@ const PART_SIZE: usize = 8 * 1024 * 1024;
 #[serde(rename_all = "snake_case")]
 enum UploadState {
     Open,
+    Publishing,
     Committed,
     Aborted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ChunkState {
+    Planned,
+    Acknowledged,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -36,6 +45,8 @@ enum UploadState {
 struct ChunkRecord {
     offset: u64,
     size: usize,
+    digest: String,
+    state: ChunkState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,9 +140,32 @@ impl ObjectResourceStore {
     }
 
     fn upload_key(upload_id: &str) -> ResourceResult<&str> {
-        upload_id.strip_prefix("upload:").ok_or_else(|| {
+        let key = upload_id.strip_prefix("upload:").ok_or_else(|| {
             ResourceError::Validation("invalid object-store upload identity".to_owned())
-        })
+        })?;
+        if key.len() != 64
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ResourceError::Validation(
+                "object-store upload identity must be an exact lowercase SHA-256 key".to_owned(),
+            ));
+        }
+        Ok(key)
+    }
+
+    fn validate_session(&self, session: &ResourceWriteSession) -> ResourceResult<()> {
+        if session.store_binding != self.binding
+            || session.upload_id != Self::upload_id(&session.write_id)
+        {
+            return Err(ResourceError::Conflict(
+                "object-store upload session is not authenticated by its write ID and binding"
+                    .to_owned(),
+            ));
+        }
+        let _ = Self::upload_key(&session.upload_id)?;
+        Ok(())
     }
 
     fn record_path(&self, upload_id: &str) -> ResourceResult<Path> {
@@ -229,7 +263,11 @@ impl ObjectResourceStore {
         let digest = reference.strip_prefix("sha256:").ok_or_else(|| {
             ResourceError::Validation("object-store reference is not SHA-256".to_owned())
         })?;
-        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
             return Err(ResourceError::Validation(
                 "object-store digest reference is malformed".to_owned(),
             ));
@@ -249,6 +287,11 @@ impl ObjectResourceStore {
         if bytes.len() != chunk.size {
             return Err(ResourceError::Integrity(
                 "object-store chunk size changed".to_owned(),
+            ));
+        }
+        if format!("sha256:{}", hex_digest(&Sha256::digest(&bytes))) != chunk.digest {
+            return Err(ResourceError::Integrity(
+                "object-store chunk digest changed".to_owned(),
             ));
         }
         Ok(bytes.to_vec())
@@ -389,15 +432,13 @@ impl ArtifactStore for ObjectResourceStore {
         offset: u64,
         bytes: &[u8],
     ) -> ResourceResult<()> {
-        if session.store_binding != self.binding
-            || bytes.is_empty()
-            || bytes.len() > MAX_WRITE_CHUNK
-        {
+        self.validate_session(session)?;
+        if bytes.is_empty() || bytes.len() > MAX_WRITE_CHUNK {
             return Err(ResourceError::Validation(
                 "object-store session or chunk is invalid".to_owned(),
             ));
         }
-        let (mut record, version) = self.load_record(&session.upload_id)?;
+        let (mut record, mut version) = self.load_record(&session.upload_id)?;
         if record.intent.write_id != session.write_id || record.state != UploadState::Open {
             return Err(ResourceError::Conflict(
                 "object-store upload is not open for this write".to_owned(),
@@ -410,7 +451,11 @@ impl ArtifactStore for ObjectResourceStore {
             let chunk = record
                 .chunks
                 .iter()
-                .find(|chunk| chunk.offset == offset && chunk.size == bytes.len())
+                .find(|chunk| {
+                    chunk.offset == offset
+                        && chunk.size == bytes.len()
+                        && chunk.state == ChunkState::Acknowledged
+                })
                 .ok_or_else(|| {
                     ResourceError::Conflict(
                         "object-store chunk overlaps the retained frontier".to_owned(),
@@ -430,6 +475,29 @@ impl ArtifactStore for ObjectResourceStore {
                 record.next_offset
             )));
         }
+        let digest = format!("sha256:{}", hex_digest(&Sha256::digest(bytes)));
+        let chunk_index = if let Some((index, planned)) = record
+            .chunks
+            .iter()
+            .enumerate()
+            .find(|(_, chunk)| chunk.offset == offset)
+        {
+            if planned.size != bytes.len() || planned.digest != digest {
+                return Err(ResourceError::Conflict(
+                    "object-store planned chunk changed bytes".to_owned(),
+                ));
+            }
+            index
+        } else {
+            record.chunks.push(ChunkRecord {
+                offset,
+                size: bytes.len(),
+                digest: digest.clone(),
+                state: ChunkState::Planned,
+            });
+            version = self.put_record(&record, PutMode::Update(version))?;
+            record.chunks.len() - 1
+        };
         let path = self.chunk_path(&session.upload_id, offset)?;
         let payload = bytes.to_vec();
         let store = Arc::clone(&self.store);
@@ -448,26 +516,24 @@ impl ArtifactStore for ObjectResourceStore {
             Ok(_) | Err(ObjectError::AlreadyExists { .. }) => {}
             Err(error) => return Err(object_error(error)),
         }
-        let chunk = ChunkRecord {
-            offset,
-            size: bytes.len(),
-        };
-        if self.chunk_bytes(&session.upload_id, &chunk)? != bytes {
+        if self.chunk_bytes(&session.upload_id, &record.chunks[chunk_index])? != bytes {
             return Err(ResourceError::Conflict(
                 "object-store chunk identity retained different bytes".to_owned(),
             ));
         }
         record.next_offset = end;
-        record.chunks.push(chunk);
+        record.chunks[chunk_index].state = ChunkState::Acknowledged;
         match self.put_record(&record, PutMode::Update(version)) {
             Ok(_) => Ok(()),
             Err(ResourceError::Conflict(_)) => {
                 let (reopened, _) = self.load_record(&session.upload_id)?;
                 if reopened.next_offset >= end
-                    && reopened
-                        .chunks
-                        .iter()
-                        .any(|chunk| chunk.offset == offset && chunk.size == bytes.len())
+                    && reopened.chunks.iter().any(|chunk| {
+                        chunk.offset == offset
+                            && chunk.size == bytes.len()
+                            && chunk.digest == digest
+                            && chunk.state == ChunkState::Acknowledged
+                    })
                 {
                     Ok(())
                 } else {
@@ -484,16 +550,34 @@ impl ArtifactStore for ObjectResourceStore {
         &mut self,
         session: &ResourceWriteSession,
     ) -> ResourceResult<ResourcePublication> {
-        let (mut record, version) = self.load_record(&session.upload_id)?;
-        if record.intent.write_id != session.write_id || session.store_binding != self.binding {
+        self.validate_session(session)?;
+        let (mut record, mut version) = self.load_record(&session.upload_id)?;
+        if record.intent.write_id != session.write_id {
             return Err(ResourceError::Conflict(
                 "object-store commit identity changed".to_owned(),
             ));
         }
         if let Some(publication) = &record.publication {
             publication.verify()?;
+            let destination = self.resource_path(&publication.resource, &publication.locators)?;
+            if record.state == UploadState::Publishing && self.is_absent(&destination)? {
+                let staging = self.staging_path(&session.upload_id)?;
+                if self.is_absent(&staging)? {
+                    return Err(ResourceError::Integrity(
+                        "object-store publishing inventory lost both staging and destination"
+                            .to_owned(),
+                    ));
+                }
+                let store = Arc::clone(&self.store);
+                let from = staging;
+                let to = destination.clone();
+                match self.block_on(async move { store.copy_if_not_exists(&from, &to).await })? {
+                    Ok(()) | Err(ObjectError::AlreadyExists { .. }) => {}
+                    Err(error) => return Err(object_error(error)),
+                }
+            }
             self.verify_object(
-                &self.resource_path(&publication.resource, &publication.locators)?,
+                &destination,
                 publication
                     .resource
                     .integrity
@@ -515,12 +599,29 @@ impl ArtifactStore for ObjectResourceStore {
                         )
                     })?,
             )?;
+            if record.state == UploadState::Publishing {
+                record.state = UploadState::Committed;
+                self.put_record(&record, PutMode::Update(version))?;
+            } else if record.state != UploadState::Committed {
+                return Err(ResourceError::Integrity(
+                    "object-store publication exists outside publishing state".to_owned(),
+                ));
+            }
             self.cleanup_upload(session, &record.chunks)?;
             return Ok(publication.clone());
         }
         if record.state != UploadState::Open {
             return Err(ResourceError::Conflict(
                 "object-store upload cannot commit from its current state".to_owned(),
+            ));
+        }
+        if record
+            .chunks
+            .iter()
+            .any(|chunk| chunk.state != ChunkState::Acknowledged)
+        {
+            return Err(ResourceError::Conflict(
+                "object-store upload has an unacknowledged planned chunk".to_owned(),
             ));
         }
         let mut hasher = Sha256::new();
@@ -560,14 +661,6 @@ impl ArtifactStore for ObjectResourceStore {
         }
         let hex = hex_digest(&hasher.finalize());
         let destination = self.key(&format!("objects/{hex}"))?;
-        let store = Arc::clone(&self.store);
-        let from = staging.clone();
-        let to = destination.clone();
-        match self.block_on(async move { store.copy_if_not_exists(&from, &to).await })? {
-            Ok(()) | Err(ObjectError::AlreadyExists { .. }) => {}
-            Err(error) => return Err(object_error(error)),
-        }
-        self.verify_object(&destination, &hex, observed_size)?;
         let resource = ResourceCandidate {
             resource_version: cymule_resource::RESOURCE_VERSION.to_owned(),
             shape: ResourceShape::Object,
@@ -593,20 +686,19 @@ impl ArtifactStore for ObjectResourceStore {
             resource,
         };
         publication.verify()?;
-        record.state = UploadState::Committed;
+        record.state = UploadState::Publishing;
         record.publication = Some(publication.clone());
-        match self.put_record(&record, PutMode::Update(version)) {
-            Ok(_) => {}
-            Err(ResourceError::Conflict(_)) => {
-                let (reopened, _) = self.load_record(&session.upload_id)?;
-                if reopened.publication.as_ref() != Some(&publication) {
-                    return Err(ResourceError::Conflict(
-                        "object-store commit receipt changed".to_owned(),
-                    ));
-                }
-            }
-            Err(error) => return Err(error),
+        version = self.put_record(&record, PutMode::Update(version))?;
+        let store = Arc::clone(&self.store);
+        let from = staging.clone();
+        let to = destination.clone();
+        match self.block_on(async move { store.copy_if_not_exists(&from, &to).await })? {
+            Ok(()) | Err(ObjectError::AlreadyExists { .. }) => {}
+            Err(error) => return Err(object_error(error)),
         }
+        self.verify_object(&destination, &hex, observed_size)?;
+        record.state = UploadState::Committed;
+        self.put_record(&record, PutMode::Update(version))?;
         self.cleanup_upload(session, &record.chunks)?;
         Ok(publication)
     }
@@ -615,13 +707,21 @@ impl ArtifactStore for ObjectResourceStore {
         &mut self,
         session: &ResourceWriteSession,
     ) -> ResourceResult<ResourceCleanupReceipt> {
+        self.validate_session(session)?;
         let (mut record, version) = self.load_record(&session.upload_id)?;
-        if record.intent.write_id != session.write_id || session.store_binding != self.binding {
+        if record.intent.write_id != session.write_id {
             return Err(ResourceError::Conflict(
                 "object-store abort identity changed".to_owned(),
             ));
         }
-        if record.state == UploadState::Committed {
+        if matches!(
+            record.state,
+            UploadState::Publishing | UploadState::Committed
+        ) {
+            if record.state == UploadState::Publishing {
+                let _ = self.commit_write(session)?;
+                record = self.load_record(&session.upload_id)?.0;
+            }
             return self.cleanup_upload(session, &record.chunks);
         }
         record.state = UploadState::Aborted;
@@ -697,6 +797,40 @@ impl ArtifactResolver for ObjectResourceStore {
         Err(ResourceError::Validation(
             "initial object-store plugin supports object Resources only".to_owned(),
         ))
+    }
+}
+
+impl ResourceDeleter for ObjectResourceStore {
+    fn binding(&self) -> &str {
+        &self.binding
+    }
+
+    fn delete_resource(
+        &mut self,
+        intent: &ResourceDeleteIntent,
+    ) -> ResourceResult<ResourceDeletionObservation> {
+        intent.verify()?;
+        if intent.store_binding != self.binding {
+            return Err(ResourceError::Conflict(
+                "object-store deleter does not own the durable delete intent".to_owned(),
+            ));
+        }
+        let path =
+            self.resource_path(&intent.publication.resource, &intent.publication.locators)?;
+        let removed_bytes = {
+            let store = Arc::clone(&self.store);
+            let probe = path.clone();
+            match self.block_on(async move { store.head(&probe).await })? {
+                Ok(metadata) => metadata.size,
+                Err(ObjectError::NotFound { .. }) => 0,
+                Err(error) => return Err(object_error(error)),
+            }
+        };
+        let _ = self.delete_if_present(&path)?;
+        Ok(ResourceDeletionObservation {
+            removed_bytes,
+            verified_absent: self.is_absent(&path)?,
+        })
     }
 }
 

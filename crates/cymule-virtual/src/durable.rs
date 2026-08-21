@@ -5,6 +5,7 @@ use cymule_durable::{
     AuthorityLease, DurableCoordinator, DurableStore, JournalBatch, JournalRecord, WaitActivation,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     ClaimedWork, CompactedWorkIndex, FrontierLimits, ParkedWork, RegionMigrationCommand,
@@ -878,32 +879,11 @@ impl DurableVirtualController {
         }
         let scheduler_before = scheduler.clone();
         let receipt = scheduler.compact(archive, command)?;
-        let bytes = match archive.get(&receipt.certificate.rehydration_manifest) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                *scheduler = scheduler_before;
-                return Err(error);
-            }
-        };
-        let manifest: crate::VirtualArchiveManifest = match cymule_core::decode_json(&bytes) {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                *scheduler = scheduler_before;
-                return Err(VirtualError::Source(error.to_string()));
-            }
-        };
-        let object = match crate::virtual_archive_record(&manifest) {
-            Ok(object) => object,
-            Err(error) => {
-                *scheduler = scheduler_before;
-                return Err(error);
-            }
-        };
-        if object.descriptor != receipt.certificate.rehydration_manifest || object.bytes != bytes {
+        if let Err(error) =
+            verify_archive_descriptor(archive, &receipt.certificate.rehydration_manifest)
+        {
             *scheduler = scheduler_before;
-            return Err(VirtualError::Source(
-                "archive manifest changed before its durable checkpoint".to_owned(),
-            ));
+            return Err(error);
         }
         let checkpoint = match compaction_checkpoint_record(
             coordinator,
@@ -2106,6 +2086,41 @@ fn validate_checkpoint_receipt(
                 record.record_id
             )));
         }
+    }
+    Ok(())
+}
+
+fn verify_archive_descriptor(
+    archive: &mut impl VirtualArchive,
+    descriptor: &cymule_resource::ResourceHandle,
+) -> VirtualResult<()> {
+    let cymule_resource::ResourceIntegrity::Content { digest, size } = &descriptor.integrity else {
+        return Err(VirtualError::Source(
+            "archive descriptor is not content addressed".to_owned(),
+        ));
+    };
+    let mut offset = 0_u64;
+    let mut hasher = Sha256::new();
+    while offset < *size {
+        let limit = (*size - offset).min(u64::from(crate::MAX_VIRTUAL_ARCHIVE_CHUNK)) as u32;
+        let bytes = archive.read_range(descriptor, offset, limit)?;
+        if bytes.is_empty() || bytes.len() > limit as usize {
+            return Err(VirtualError::Source(
+                "archive range verification made no bounded progress".to_owned(),
+            ));
+        }
+        hasher.update(&bytes);
+        offset += bytes.len() as u64;
+    }
+    let mut observed = String::from("sha256:");
+    for byte in hasher.finalize() {
+        use std::fmt::Write as _;
+        write!(&mut observed, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    if offset != *size || &observed != digest {
+        return Err(VirtualError::Source(
+            "archive range verification changed content identity".to_owned(),
+        ));
     }
     Ok(())
 }

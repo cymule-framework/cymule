@@ -42,8 +42,8 @@ The following domains evolve independently:
 | Resource descriptor | `cymule.resource/2` | semantic identity excludes locator/access state |
 | Resource locator set | `cymule.resource-locators/1` | replaceable resolver records target one exact descriptor |
 | Resource manifest | `cymule.resource-manifest/1` | byte digest, size, count, and Merkle root are exact |
-| Resource list proof | `cymule.resource-list-proof/1` | bounded entries prove contiguous manifest inclusion |
-| Resource handoff | `cymule.resource-handoff/2` | transfer pins producer Run, occurrence, and result |
+| Resource list proof | `cymule.resource-list-proof/2` | index path and opaque cursor chain prove contiguous manifest inclusion |
+| Resource handoff | `cymule.resource-handoff/3` | transfer pins the producer's typed Resource Handle Artifact |
 | Resource lifecycle receipts | `cymule.resource-*-receipt/1` | pin/release/GC/delete/cleanup operations replay exactly |
 | Wait activation | `cymule.wait-activation/1` | external delivery ID fixes source, targets, and result |
 | Durable control | `cymule.durable-control/1` | closed mutations and queries delegate all admission to Rust |
@@ -53,7 +53,7 @@ The following domains evolve independently:
 | Virtual region migration | `cymule.virtual-region-migration/1` | opaque cursor coverage and retirement lineage |
 | Virtual migration control | `cymule.virtual-region-migration-control/1` | stable command ID plus verified plan |
 | Virtual archive manifest | `cymule.virtual-archive-manifest/1` | exact content-addressed occurrence history |
-| Virtual compaction certificate | `cymule.virtual-compaction-certificate/2` | cold Resource descriptor replaces hot Artifact bytes |
+| Virtual compaction certificate | `cymule.virtual-compaction-certificate/3` | cold descriptor and occurrence-proof root replace hot bytes |
 | Virtual compaction control | `cymule.virtual-compaction-control/1` | stable command ID plus pinned archive binding |
 | Virtual rehydration control | `cymule.virtual-rehydration-control/1` | stable command ID plus exact occurrence selection |
 | Virtual claim control | `cymule.virtual-claim-control/2` | stable command ID, exact Plan and ExecutionBinding pins, plus capacity-slot lease proposal |
@@ -202,7 +202,8 @@ participate in Resource ID; moving identical content MUST preserve identity.
 Read operations MUST be bounded chunks. An exact directory, collection, or
 snapshot list MUST pin canonical JSON-lines bytes by digest and size, exact
 entry count, and Merkle root. Every bounded opaque-cursor page MUST carry a
-`cymule.resource-list-proof/1` inclusion path for every contiguous entry. A
+`cymule.resource-list-proof/2` index-bound inclusion path for every contiguous
+entry and digests of both the request and next opaque cursors. A
 resolver response that exceeds the
 requested bound, repeats an unsafe entry, stalls with an empty non-terminal
 chunk, fails page inclusion, or fails content verification MUST be rejected.
@@ -210,10 +211,10 @@ Chunked stores use idempotent write IDs, exact offsets, explicit commit, and
 explicit abort. Commit convergence and abort MUST delete all owned staging and
 chunk objects, verify absence, and return an exact cleanup receipt.
 
-A Run-to-Run handoff carries one verified Resource Handle, producer Run,
-component occurrence, and exact output Artifact under a stable caller transfer
-ID and target slot. The Resource inline/content bytes MUST match the producer
-result. The handoff MUST be recorded in the target Run's
+A Run-to-Run handoff carries the exact typed Resource Handle Artifact produced
+by the named Run/component occurrence under a stable caller transfer ID and
+target slot. It never copies or wraps the external Resource bytes. The handoff
+MUST be recorded in the target Run's
 M1 application journal by segmented small-head CAS. Repeating identical semantics is
 idempotent; reusing a transfer ID with different semantics MUST fail. One target
 slot has at most one handoff; multiple values use one collection Resource.
@@ -228,9 +229,11 @@ The Resource Handle input Artifact MUST use the closed framework
 closed framework registry owns manifest descriptors, list proofs, handoffs, and
 lifecycle receipt types.
 
-Retention authority uses stable pin and release receipts. GC records the exact
-active-pin count and is deletion-eligible only at zero. Provider deletion MUST
-consume that retained eligible receipt and return verified-absent evidence.
+Retention authority is an M1 lifecycle journal of stable pin and release
+receipts. GC records the exact active-pin count and is deletion-eligible only at
+zero. A durable delete intent MUST fence later pins before provider I/O;
+reconciliation invokes only its exact store binding and commits a terminal
+receipt only after verified-absent readback.
 Historical receipt replay returns the original decision; later state does not
 rewrite it.
 
@@ -507,8 +510,9 @@ For the M1 linear virtual journal, a new durable compaction cut MUST include the
 current checkpoint head; an old command replays from its retained receipt before
 this future-head check.
 
-`cymule.virtual-compaction-certificate/2` MUST authenticate the causal cut,
+`cymule.virtual-compaction-certificate/3` MUST authenticate the causal cut,
 bounded completion summary, complete manifest digest and Resource descriptor,
+index-bound occurrence range-proof root,
 terminal work/debug index digest, retained occurrence bindings, unresolved
 obligations, replay availability, and pinned compactor revision. The current M3 compactor
 admits only a completed subtree with no unresolved obligations and `exact`

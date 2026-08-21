@@ -391,6 +391,7 @@ class VirtualCompactionCertificate(TypedDict):
     source_causal_cut: list[str]
     summary: VirtualCompletionSummary
     summary_state_digest: str
+    occurrence_root_digest: str
     unresolved_obligations: list[str]
     retained_occurrence_bindings: list[str]
     replay_availability: dict[str, Any]
@@ -783,7 +784,7 @@ class ResourceBuilder:
     ) -> dict[str, Any]:
         """Create one M1 Run-to-Run resource handoff record."""
         return {
-            "handoff_version": "cymule.resource-handoff/2",
+            "handoff_version": "cymule.resource-handoff/3",
             "transfer_id": transfer_id,
             "producer": copy.deepcopy(producer),
             "to_run": to_run,

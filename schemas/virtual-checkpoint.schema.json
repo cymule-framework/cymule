@@ -486,11 +486,11 @@
       "additionalProperties": false,
       "required": [
         "certificate_version", "certificate_id", "source_causal_cut", "summary",
-        "summary_state_digest", "unresolved_obligations", "retained_occurrence_bindings",
+        "summary_state_digest", "occurrence_root_digest", "unresolved_obligations", "retained_occurrence_bindings",
         "replay_availability", "rehydration_manifest", "compactor_binding", "compactor_revision"
       ],
       "properties": {
-        "certificate_version": { "const": "cymule.virtual-compaction-certificate/2" },
+        "certificate_version": { "const": "cymule.virtual-compaction-certificate/3" },
         "certificate_id": { "$ref": "#/$defs/nonEmpty" },
         "source_causal_cut": {
           "type": "array", "minItems": 1, "uniqueItems": true,
@@ -498,6 +498,7 @@
         },
         "summary": { "$ref": "#/$defs/completionSummary" },
         "summary_state_digest": { "$ref": "#/$defs/nonEmpty" },
+        "occurrence_root_digest": { "$ref": "#/$defs/digest" },
         "unresolved_obligations": {
           "type": "array", "uniqueItems": true,
           "items": { "$ref": "#/$defs/nonEmpty" }

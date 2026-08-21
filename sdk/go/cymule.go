@@ -237,14 +237,14 @@ type ResourceHandle struct {
 	ResourceCandidate
 }
 
-// ResourceHandoff transfers one Resource Handle between durable Runs.
+// ResourceHandoff transfers one typed Resource Handle Artifact between durable Runs.
 type ResourceHandoff struct {
 	HandoffVersion string                     `json:"handoff_version"`
 	TransferID     string                     `json:"transfer_id"`
 	Producer       ResourceProducerProvenance `json:"producer"`
 	ToRun          string                     `json:"to_run"`
 	Slot           string                     `json:"slot"`
-	Resource       ResourceHandle             `json:"resource"`
+	Resource       ArtifactRef                `json:"resource"`
 }
 
 // ResourceProducerProvenance pins the exact producer occurrence and result.
@@ -1093,6 +1093,7 @@ type VirtualCompactionCertificate struct {
 	SourceCausalCut            []string                 `json:"source_causal_cut"`
 	Summary                    VirtualCompletionSummary `json:"summary"`
 	SummaryStateDigest         string                   `json:"summary_state_digest"`
+	OccurrenceRootDigest       string                   `json:"occurrence_root_digest"`
 	UnresolvedObligations      []string                 `json:"unresolved_obligations"`
 	RetainedOccurrenceBindings []string                 `json:"retained_occurrence_bindings"`
 	ReplayAvailability         ReplayAvailability       `json:"replay_availability"`
@@ -1622,9 +1623,9 @@ func uniqueSorted(values []string) []string {
 }
 
 // NewResourceHandoff creates one M1 Run-to-Run handoff record.
-func NewResourceHandoff(transferID string, producer ResourceProducerProvenance, toRun, slot string, resource ResourceHandle) ResourceHandoff {
+func NewResourceHandoff(transferID string, producer ResourceProducerProvenance, toRun, slot string, resource ArtifactRef) ResourceHandoff {
 	return ResourceHandoff{
-		HandoffVersion: "cymule.resource-handoff/2",
+		HandoffVersion: "cymule.resource-handoff/3",
 		TransferID:     transferID,
 		Producer:       producer,
 		ToRun:          toRun,

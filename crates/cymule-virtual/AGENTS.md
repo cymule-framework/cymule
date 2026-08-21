@@ -20,8 +20,8 @@
   certificate identity, terminal fence index, retained bindings, and replay
   classification; an archive plugin only stores/loads exact immutable bytes.
 - Cold archive manifest bytes never return to the hot Machine Artifact map.
-  The compaction certificate retains only the verified semantic Resource
-  descriptor; the pinned archive binding resolves those bytes for rehydration.
+  The certificate retains the semantic Resource descriptor and occurrence-proof
+  root; provider-side catalogs resolve selected occurrence ranges.
 - Compaction failure may leave an unreferenced immutable archive object but MUST
   roll back scheduler and M1 state. Rehydration verifies bytes, Resource ID,
   manifest digest, certificate, work index, causal cut, and binding before

@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use cymule_resource::{
     ArtifactResolver, ArtifactStore, MAX_WRITE_CHUNK, RESOURCE_CLEANUP_RECEIPT_VERSION,
     RESOURCE_LOCATOR_VERSION, ResourceCandidate, ResourceChunk, ResourceCleanupReceipt,
-    ResourceEntry, ResourceError, ResourceHandle, ResourceIntegrity, ResourceLocation,
-    ResourceLocatorSet, ResourceManifestEntry, ResourceObservation, ResourcePage,
-    ResourcePublication, ResourceResult, ResourceShape, ResourceWriteIntent, ResourceWriteSession,
-    SealedResourceManifest,
+    ResourceDeleteIntent, ResourceDeleter, ResourceDeletionObservation, ResourceEntry,
+    ResourceError, ResourceHandle, ResourceIntegrity, ResourceLocation, ResourceLocatorSet,
+    ResourceManifestEntry, ResourceObservation, ResourcePage, ResourcePublication, ResourceResult,
+    ResourceShape, ResourceWriteIntent, ResourceWriteSession, SealedResourceManifest,
 };
 use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};
@@ -229,9 +229,19 @@ impl FsResourceStore {
     }
 
     fn upload_key(upload_id: &str) -> ResourceResult<&str> {
-        upload_id.strip_prefix("upload:").ok_or_else(|| {
+        let key = upload_id.strip_prefix("upload:").ok_or_else(|| {
             ResourceError::Validation("invalid filesystem upload identity".to_owned())
-        })
+        })?;
+        if key.len() != 64
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ResourceError::Validation(
+                "filesystem upload identity must be an exact lowercase SHA-256 key".to_owned(),
+            ));
+        }
+        Ok(key)
     }
 
     fn upload_id(write_id: &str) -> String {
@@ -240,6 +250,19 @@ impl FsResourceStore {
         hasher.update([0]);
         hasher.update(write_id.as_bytes());
         format!("upload:{}", hex_digest(&hasher.finalize()))
+    }
+
+    fn validate_session(&self, session: &ResourceWriteSession) -> ResourceResult<()> {
+        if session.store_binding != self.binding
+            || session.upload_id != Self::upload_id(&session.write_id)
+        {
+            return Err(ResourceError::Conflict(
+                "filesystem upload session is not authenticated by its write ID and binding"
+                    .to_owned(),
+            ));
+        }
+        let _ = Self::upload_key(&session.upload_id)?;
+        Ok(())
     }
 
     fn record_path(&self, upload_id: &str) -> ResourceResult<PathBuf> {
@@ -367,7 +390,11 @@ impl FsResourceStore {
         let digest = reference.strip_prefix("sha256:").ok_or_else(|| {
             ResourceError::Validation("filesystem reference is not a SHA-256 digest".to_owned())
         })?;
-        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
             return Err(ResourceError::Validation(
                 "filesystem reference digest is malformed".to_owned(),
             ));
@@ -416,10 +443,8 @@ impl ArtifactStore for FsResourceStore {
         offset: u64,
         bytes: &[u8],
     ) -> ResourceResult<()> {
-        if session.store_binding != self.binding
-            || bytes.is_empty()
-            || bytes.len() > MAX_WRITE_CHUNK
-        {
+        self.validate_session(session)?;
+        if bytes.is_empty() || bytes.len() > MAX_WRITE_CHUNK {
             return Err(ResourceError::Validation(
                 "filesystem write session or chunk is invalid".to_owned(),
             ));
@@ -531,11 +556,7 @@ impl ArtifactStore for FsResourceStore {
         &mut self,
         session: &ResourceWriteSession,
     ) -> ResourceResult<ResourcePublication> {
-        if session.store_binding != self.binding {
-            return Err(ResourceError::Validation(
-                "filesystem write binding changed".to_owned(),
-            ));
-        }
+        self.validate_session(session)?;
         let _claim = self.claim(&session.upload_id)?;
         let mut record = self.load_record(&session.upload_id)?;
         if record.intent.write_id != session.write_id {
@@ -654,9 +675,10 @@ impl ArtifactStore for FsResourceStore {
         &mut self,
         session: &ResourceWriteSession,
     ) -> ResourceResult<ResourceCleanupReceipt> {
+        self.validate_session(session)?;
         let _claim = self.claim(&session.upload_id)?;
         let mut record = self.load_record(&session.upload_id)?;
-        if record.intent.write_id != session.write_id || session.store_binding != self.binding {
+        if record.intent.write_id != session.write_id {
             return Err(ResourceError::Conflict(
                 "filesystem abort identity changed".to_owned(),
             ));
@@ -764,11 +786,51 @@ impl ArtifactResolver for FsResourceStore {
             .len()
             .min(start_index.saturating_add(limit as usize));
         let entries: Vec<ResourceEntry> = sealed.entries()[start_index..end].to_vec();
-        let proof = sealed.proof(start_index as u64, entries.len())?;
+        let next_cursor = (end < sealed.entries().len()).then(|| end.to_string());
+        let proof = sealed.proof(
+            start_index as u64,
+            entries.len(),
+            cursor,
+            next_cursor.as_deref(),
+        )?;
         Ok(ResourcePage {
             entries,
-            next_cursor: (end < sealed.entries().len()).then(|| end.to_string()),
+            next_cursor,
             proof,
+        })
+    }
+}
+
+impl ResourceDeleter for FsResourceStore {
+    fn binding(&self) -> &str {
+        &self.binding
+    }
+
+    fn delete_resource(
+        &mut self,
+        intent: &ResourceDeleteIntent,
+    ) -> ResourceResult<ResourceDeletionObservation> {
+        intent.verify()?;
+        if intent.store_binding != self.binding {
+            return Err(ResourceError::Conflict(
+                "filesystem deleter does not own the durable delete intent".to_owned(),
+            ));
+        }
+        let path =
+            self.resource_path(&intent.publication.resource, &intent.publication.locators)?;
+        let removed_bytes = match fs::metadata(&path) {
+            Ok(metadata) => {
+                let size = metadata.len();
+                remove_if_exists(&path)?;
+                sync_directory(&self.root.join("objects"))?;
+                size
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(substrate(error)),
+        };
+        Ok(ResourceDeletionObservation {
+            removed_bytes,
+            verified_absent: !path.exists(),
         })
     }
 }

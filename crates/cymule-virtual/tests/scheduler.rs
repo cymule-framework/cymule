@@ -20,16 +20,16 @@ use cymule_resource::ResourceHandle;
 use cymule_virtual::{
     DurableVirtualController, FrontierLimits, MAX_VIRTUAL_CHECKPOINT_DELTA_BYTES, MaterializedPage,
     ParkReason, ParkedWork, RegionMigrationCommand, RegionMigrationKind, RegionMigrationPlan,
-    RegionMigrationRequest, RegionMigrator, RegionSource, SchedulingPolicy,
-    VIRTUAL_CLAIM_CONTROL_VERSION, VIRTUAL_COMPACTION_CONTROL_VERSION,
-    VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION, VIRTUAL_RECOVERY_CONTROL_VERSION,
-    VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_VERSION,
-    VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_RUN_WEIGHT_CONTROL_VERSION,
-    VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive, VirtualCheckpoint, VirtualClaimCheckpoint,
-    VirtualClaimCommand, VirtualCompactionCommand, VirtualCursor, VirtualError,
-    VirtualLeaseRenewalCommand, VirtualRecoveryCommand, VirtualRegion, VirtualRehydrationCommand,
-    VirtualResult, VirtualRunWeightCommand, VirtualScheduler, WorkItem, WorkOccurrenceState,
-    WorkResolution, WorkResolutionCommand,
+    RegionMigrationRequest, RegionMigrator, RegionSource, ResourceArchiveCatalog,
+    ResourceBackedVirtualArchive, SchedulingPolicy, VIRTUAL_CLAIM_CONTROL_VERSION,
+    VIRTUAL_COMPACTION_CONTROL_VERSION, VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION,
+    VIRTUAL_RECOVERY_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_CONTROL_VERSION,
+    VIRTUAL_REGION_MIGRATION_VERSION, VIRTUAL_REHYDRATION_CONTROL_VERSION,
+    VIRTUAL_RUN_WEIGHT_CONTROL_VERSION, VIRTUAL_WORK_CONTROL_VERSION, VirtualArchive,
+    VirtualCheckpoint, VirtualClaimCheckpoint, VirtualClaimCommand, VirtualCompactionCommand,
+    VirtualCursor, VirtualError, VirtualLeaseRenewalCommand, VirtualRecoveryCommand, VirtualRegion,
+    VirtualRehydrationCommand, VirtualResult, VirtualRunWeightCommand, VirtualScheduler, WorkItem,
+    WorkOccurrenceState, WorkResolution, WorkResolutionCommand,
 };
 use serde_json::json;
 
@@ -49,7 +49,7 @@ struct CompletedSource;
 #[derive(Default)]
 struct MemoryArchive {
     binding: String,
-    records: BTreeMap<String, (ResourceHandle, Vec<u8>)>,
+    records: BTreeMap<String, cymule_virtual::VirtualArchiveObject>,
     calls: usize,
     fail_at: Option<usize>,
 }
@@ -262,7 +262,7 @@ impl VirtualArchive for MemoryArchive {
         &self.binding
     }
 
-    fn put(&mut self, descriptor: &ResourceHandle, bytes: &[u8]) -> VirtualResult<()> {
+    fn put(&mut self, object: &cymule_virtual::VirtualArchiveObject) -> VirtualResult<()> {
         self.calls += 1;
         if self.fail_at == Some(self.calls) {
             return Err(VirtualError::Source(format!(
@@ -270,26 +270,25 @@ impl VirtualArchive for MemoryArchive {
                 self.calls
             )));
         }
-        match self.records.get(&descriptor.resource_id) {
-            Some((existing_descriptor, existing_bytes))
-                if existing_descriptor != descriptor || existing_bytes != bytes =>
-            {
-                Err(VirtualError::Source(
-                    "archive reference already contains different bytes".to_owned(),
-                ))
-            }
+        match self.records.get(&object.descriptor.resource_id) {
+            Some(existing) if existing != object => Err(VirtualError::Source(
+                "archive reference already contains different bytes".to_owned(),
+            )),
             Some(_) => Ok(()),
             None => {
-                self.records.insert(
-                    descriptor.resource_id.clone(),
-                    (descriptor.clone(), bytes.to_vec()),
-                );
+                self.records
+                    .insert(object.descriptor.resource_id.clone(), object.clone());
                 Ok(())
             }
         }
     }
 
-    fn get(&mut self, descriptor: &ResourceHandle) -> VirtualResult<Vec<u8>> {
+    fn read_range(
+        &mut self,
+        descriptor: &ResourceHandle,
+        offset: u64,
+        max_bytes: u32,
+    ) -> VirtualResult<Vec<u8>> {
         self.calls += 1;
         if self.fail_at == Some(self.calls) {
             return Err(VirtualError::Source(format!(
@@ -299,8 +298,30 @@ impl VirtualArchive for MemoryArchive {
         }
         self.records
             .get(&descriptor.resource_id)
-            .and_then(|(retained, bytes)| (retained == descriptor).then(|| bytes.clone()))
+            .and_then(|record| {
+                (record.descriptor == *descriptor).then(|| {
+                    let start = offset as usize;
+                    let end = record
+                        .bytes
+                        .len()
+                        .min(start.saturating_add(max_bytes as usize));
+                    record.bytes.get(start..end).unwrap_or_default().to_vec()
+                })
+            })
             .ok_or_else(|| VirtualError::Source("archive record is missing".to_owned()))
+    }
+
+    fn occurrence_proof(
+        &mut self,
+        descriptor: &ResourceHandle,
+        occurrence_id: &str,
+    ) -> VirtualResult<cymule_virtual::VirtualArchiveOccurrenceProof> {
+        self.records
+            .get(&descriptor.resource_id)
+            .filter(|record| record.descriptor == *descriptor)
+            .and_then(|record| record.occurrence_proofs.get(occurrence_id))
+            .cloned()
+            .ok_or_else(|| VirtualError::Source("archive occurrence proof is missing".to_owned()))
     }
 }
 
@@ -2097,6 +2118,56 @@ fn completed_region_compacts_and_partially_rehydrates_exact_history() {
 }
 
 #[test]
+fn resource_backed_archive_reopens_and_reads_only_selected_occurrence_range() {
+    let directory = tempfile::tempdir().expect("temporary archive directory");
+    let root = directory.path().join("resources");
+    let store = cymule_resource_fs::FsResourceStore::open(&root, "fs:virtual-archive")
+        .expect("Resource store opens");
+    let mut archive = ResourceBackedVirtualArchive::open(
+        store,
+        "binding:archive/resource-fs@1",
+        ResourceArchiveCatalog::default(),
+    )
+    .expect("archive opens");
+    let (mut scheduler, occurrence_id) = completed_scheduler();
+    let command = VirtualCompactionCommand {
+        control_version: VIRTUAL_COMPACTION_CONTROL_VERSION.to_owned(),
+        command_id: "command:compact:resource-backed".to_owned(),
+        region_id: "region:completed".to_owned(),
+        source_causal_cut: BTreeSet::from(["checkpoint:completed".to_owned()]),
+        compactor_binding: "binding:archive/resource-fs@1".to_owned(),
+        compactor_revision: "sha256:resource-backed-v1".to_owned(),
+    };
+    let receipt = scheduler
+        .compact(&mut archive, &command)
+        .expect("region compacts");
+    let cold_snapshot = scheduler.snapshot();
+    let (_store, catalog) = archive.into_parts();
+    let reopened_store = cymule_resource_fs::FsResourceStore::open(&root, "fs:virtual-archive")
+        .expect("Resource store reopens");
+    let mut reopened_archive = ResourceBackedVirtualArchive::open(
+        reopened_store,
+        "binding:archive/resource-fs@1",
+        catalog,
+    )
+    .expect("archive catalog reopens");
+    let mut reopened =
+        VirtualScheduler::restore(limits(), cold_snapshot).expect("cold scheduler restores");
+    reopened
+        .rehydrate(
+            &mut reopened_archive,
+            &VirtualRehydrationCommand {
+                control_version: VIRTUAL_REHYDRATION_CONTROL_VERSION.to_owned(),
+                command_id: "command:rehydrate:resource-backed".to_owned(),
+                certificate_id: receipt.certificate.certificate_id,
+                occurrence_ids: BTreeSet::from([occurrence_id.clone()]),
+            },
+        )
+        .expect("selected occurrence range rehydrates");
+    assert!(reopened.occurrence(&occurrence_id).is_some());
+}
+
+#[test]
 fn compaction_rejects_hot_or_unanchored_history_without_archive_write() {
     let mut hot = VirtualScheduler::new(limits()).expect("scheduler creates");
     hot.register(region("region:completed", "run:completed"))
@@ -2173,13 +2244,12 @@ fn tampered_archive_bytes_fail_closed_before_rehydration() {
     let receipt = scheduler
         .compact(&mut archive, &compaction_command("command:compact:tamper"))
         .expect("region compacts");
-    archive.records.insert(
-        receipt.certificate.rehydration_manifest.resource_id.clone(),
-        (
-            receipt.certificate.rehydration_manifest.clone(),
-            br#"{"manifest_version":"tampered"}"#.to_vec(),
-        ),
-    );
+    archive
+        .records
+        .get_mut(&receipt.certificate.rehydration_manifest.resource_id)
+        .expect("archive record exists")
+        .bytes
+        .fill(b'x');
     let before = scheduler.snapshot();
     let command = VirtualRehydrationCommand {
         control_version: VIRTUAL_REHYDRATION_CONTROL_VERSION.to_owned(),

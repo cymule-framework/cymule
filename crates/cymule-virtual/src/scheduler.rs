@@ -17,7 +17,7 @@ use crate::{
     VirtualLeaseRenewalReceipt, VirtualRecoveryCommand, VirtualRecoveryReceipt, VirtualRegion,
     VirtualRehydrationCommand, VirtualRehydrationReceipt, VirtualResult, VirtualRunWeightCommand,
     VirtualRunWeightReceipt, VirtualSnapshot, WorkItem, WorkOccurrence, WorkOccurrenceState,
-    WorkResolution, virtual_archive_record,
+    WorkResolution, verify_occurrence_proof, virtual_archive_record,
 };
 
 /// Replaceable source of bounded pages for one virtual region.
@@ -1224,11 +1224,22 @@ impl VirtualScheduler {
             work_index,
         };
         let record = virtual_archive_record(&manifest)?;
-        archive.put(&record.descriptor, &record.bytes)?;
-        if archive.get(&record.descriptor)? != record.bytes {
-            return Err(VirtualError::Source(
-                "archive readback does not match the stored manifest".to_owned(),
-            ));
+        archive.put(&record)?;
+        for (index, expected) in record
+            .bytes
+            .chunks(crate::MAX_VIRTUAL_ARCHIVE_CHUNK as usize)
+            .enumerate()
+        {
+            let observed = archive.read_range(
+                &record.descriptor,
+                (index * crate::MAX_VIRTUAL_ARCHIVE_CHUNK as usize) as u64,
+                expected.len() as u32,
+            )?;
+            if observed != expected {
+                return Err(VirtualError::Source(
+                    "archive range readback does not match the stored manifest".to_owned(),
+                ));
+            }
         }
         let summary = completion_summary(&manifest)?;
         let retained_occurrence_bindings = manifest
@@ -1243,6 +1254,7 @@ impl VirtualScheduler {
             summary,
             summary_state_digest: canonical_digest(&manifest)
                 .map_err(|error| VirtualError::Validation(error.to_string()))?,
+            occurrence_root_digest: record.occurrence_root_digest,
             unresolved_obligations: BTreeSet::new(),
             retained_occurrence_bindings,
             replay_availability: ReplayAvailability::Exact,
@@ -1334,26 +1346,40 @@ impl VirtualScheduler {
                 "selected archive does not match the certificate binding".to_owned(),
             ));
         }
-        let bytes = archive.get(&certificate.rehydration_manifest)?;
-        let manifest: VirtualArchiveManifest = cymule_core::decode_json(&bytes)
-            .map_err(|error| VirtualError::Source(error.to_string()))?;
-        let record = virtual_archive_record(&manifest)?;
-        if record.descriptor != certificate.rehydration_manifest || record.bytes != bytes {
-            return Err(VirtualError::Source(
-                "archive manifest bytes do not match their content reference".to_owned(),
-            ));
-        }
-        validate_manifest_certificate(&manifest, &certificate)?;
         let mut restored = BTreeSet::new();
         for occurrence_id in &command.occurrence_ids {
-            let occurrence = manifest.occurrences.get(occurrence_id).ok_or_else(|| {
-                VirtualError::NotFound(format!(
-                    "occurrence {occurrence_id} is absent from certificate {}",
-                    certificate.certificate_id
-                ))
+            let proof =
+                archive.occurrence_proof(&certificate.rehydration_manifest, occurrence_id)?;
+            let length = u32::try_from(proof.length).map_err(|_| {
+                VirtualError::Source("archive occurrence exceeds the range bound".to_owned())
             })?;
+            let bytes =
+                archive.read_range(&certificate.rehydration_manifest, proof.offset, length)?;
+            if bytes.len() as u64 != proof.length {
+                return Err(VirtualError::Source(
+                    "archive occurrence range ended early".to_owned(),
+                ));
+            }
+            let occurrence: WorkOccurrence = cymule_core::decode_json(&bytes)
+                .map_err(|error| VirtualError::Source(error.to_string()))?;
+            verify_occurrence_proof(
+                &certificate.occurrence_root_digest,
+                certificate.summary.occurrence_count,
+                &proof,
+                &occurrence,
+            )?;
+            if occurrence.region_id != certificate.summary.region_id
+                || occurrence.run_id != certificate.summary.run_id
+                || !certificate
+                    .retained_occurrence_bindings
+                    .contains(&occurrence.occurrence_binding)
+            {
+                return Err(VirtualError::Source(
+                    "archive occurrence is outside the certified region or binding set".to_owned(),
+                ));
+            }
             match self.snapshot.occurrences.get(occurrence_id) {
-                Some(existing) if existing == occurrence => {}
+                Some(existing) if existing == &occurrence => {}
                 Some(_) => {
                     return Err(VirtualError::Conflict(format!(
                         "rehydrated occurrence {occurrence_id} conflicts with hot history"
@@ -1362,7 +1388,7 @@ impl VirtualScheduler {
                 None => {
                     self.snapshot
                         .occurrences
-                        .insert(occurrence_id.clone(), occurrence.clone());
+                        .insert(occurrence_id.clone(), occurrence);
                 }
             }
             restored.insert(occurrence_id.clone());
@@ -2298,6 +2324,7 @@ fn validate_virtual_certificate(certificate: &VirtualCompactionCertificate) -> V
         || certificate.summary.region_id.is_empty()
         || certificate.summary.run_id.is_empty()
         || certificate.summary_state_digest.is_empty()
+        || !valid_sha256(&certificate.occurrence_root_digest)
         || certificate.compactor_binding.is_empty()
         || certificate.compactor_revision.is_empty()
         || certificate.rehydration_manifest.media_type != crate::VIRTUAL_ARCHIVE_MANIFEST_KIND
@@ -2341,6 +2368,8 @@ fn validate_manifest_certificate(
             .map_err(|error| VirtualError::Validation(error.to_string()))?
             != certificate.summary_state_digest
         || virtual_archive_record(manifest)?.descriptor != certificate.rehydration_manifest
+        || virtual_archive_record(manifest)?.occurrence_root_digest
+            != certificate.occurrence_root_digest
         || archived_work_index(&manifest.occurrences)? != manifest.work_index
         || manifest.occurrences.values().any(|occurrence| {
             occurrence.region_id != manifest.region_id || occurrence.run_id != manifest.run_id
@@ -2358,6 +2387,15 @@ fn validate_manifest_certificate(
         )));
     }
     Ok(())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn is_terminal_work_state(state: WorkOccurrenceState) -> bool {

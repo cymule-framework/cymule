@@ -34,7 +34,8 @@
   Plan requirements, manifest equality, and content identities.
 - `resource.schema.json` owns `cymule.resource/2` candidates/handles, separate
   locator sets/publications, content manifests/list proofs, exact lifecycle
-  receipts, and `cymule.resource-handoff/2` producer provenance. Shape or
+  receipts, delete intents, cursor-bound list proof `/2`, and
+  `cymule.resource-handoff/3` typed-Artifact provenance. Shape or
   integrity changes require Rust semantic validation, all SDKs, fixtures, and
   cross-language Resource ID tests.
 - `wait-activation.schema.json` owns the provider-neutral
@@ -70,7 +71,7 @@
   cardinality, pinned adapter binding, coverage evidence, retirement lineage,
   and command receipts.
   Compaction definitions preserve a causal cut, bounded summary, content
-  manifest, replay classification, retained binding/debug indexes, pinned
+  manifest, occurrence-proof root, replay classification, retained binding/debug indexes, pinned
   compactor, and exact partial-rehydration selection. Concrete archive locators
   and credentials never enter this schema.
   Multi-worker scheduling definitions preserve capacity-slot identity, logical

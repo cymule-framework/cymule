@@ -5,6 +5,10 @@
 - The adapter persists write intent, exact chunk frontier, and commit receipt as
   object-store records. Chunk objects use create preconditions; metadata
   advances with e-tag/version update preconditions.
+- Persist planned chunk inventory before put and `publishing` plus the final
+  descriptor before copy. Recovery completes that exact inventory.
+- Authenticate sessions from `write_id` plus binding and accept only exact
+  lowercase digest keys before constructing object paths.
 - Commit streams retained chunks through a bounded multipart staging object,
   computes SHA-256, promotes with `copy_if_not_exists`, verifies downloaded
   bytes, and only then records the Resource publication. Commit and abort delete

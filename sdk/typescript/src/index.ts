@@ -41,12 +41,12 @@ export interface ResourceHandle extends ResourceCandidate {
 }
 
 export interface ResourceHandoff {
-  handoff_version: "cymule.resource-handoff/2";
+  handoff_version: "cymule.resource-handoff/3";
   transfer_id: string;
   producer: { run_id: string; occurrence_id: string; result: ArtifactRef };
   to_run: string;
   slot: string;
-  resource: ResourceHandle;
+  resource: ArtifactRef;
 }
 
 export interface ArtifactRef {
@@ -531,11 +531,12 @@ export interface VirtualCompletionSummary {
 }
 
 export interface VirtualCompactionCertificate {
-  certificate_version: "cymule.virtual-compaction-certificate/2";
+  certificate_version: "cymule.virtual-compaction-certificate/3";
   certificate_id: string;
   source_causal_cut: string[];
   summary: VirtualCompletionSummary;
   summary_state_digest: string;
+  occurrence_root_digest: string;
   unresolved_obligations: string[];
   retained_occurrence_bindings: string[];
   replay_availability: ReplayAvailability;
@@ -1460,10 +1461,10 @@ export class ResourceBuilder {
     producer: { run_id: string; occurrence_id: string; result: ArtifactRef },
     toRun: string,
     slot: string,
-    resource: ResourceHandle,
+    resource: ArtifactRef,
   ): ResourceHandoff {
     return {
-      handoff_version: "cymule.resource-handoff/2",
+      handoff_version: "cymule.resource-handoff/3",
       transfer_id: transferId,
       producer: structuredClone(producer),
       to_run: toRun,

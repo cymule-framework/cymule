@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use cymule_resource::{
-    ArtifactStore, ResourceClient, ResourceError, ResourceShape, ResourceWriteIntent,
+    ArtifactStore, RESOURCE_DELETE_INTENT_VERSION, ResourceClient, ResourceDeleteIntent,
+    ResourceDeleter, ResourceError, ResourceShape, ResourceWriteIntent, ResourceWriteSession,
 };
 use cymule_resource_object_store::ObjectResourceStore;
 use object_store::local::LocalFileSystem;
@@ -47,6 +48,54 @@ fn object_store_chunk_retry_commit_and_read_are_exact() {
         .copy_to(&resource, 4, &mut output)
         .expect("object copies");
     assert_eq!(output, b"hello object store");
+}
+
+#[test]
+fn object_store_rejects_forged_upload_sessions() {
+    let backend = Arc::new(InMemory::new());
+    let mut store =
+        ObjectResourceStore::new(backend, "cymule", "object:test").expect("adapter builds");
+    let forged = ResourceWriteSession {
+        write_id: "write:forged".to_owned(),
+        upload_id: "upload:../../outside".to_owned(),
+        store_binding: "object:test".to_owned(),
+    };
+    assert!(matches!(
+        store.write_chunk(&forged, 0, b"escape"),
+        Err(ResourceError::Conflict(_) | ResourceError::Validation(_))
+    ));
+}
+
+#[test]
+fn object_store_deleter_is_idempotent_and_proves_absence() {
+    let backend = Arc::new(InMemory::new());
+    let mut store =
+        ObjectResourceStore::new(backend, "cymule", "object:test").expect("adapter builds");
+    let write = ResourceWriteIntent {
+        write_id: "write:delete".to_owned(),
+        shape: ResourceShape::Object,
+        media_type: "application/octet-stream".to_owned(),
+        annotations: BTreeMap::new(),
+    };
+    let session = store.begin_write(&write).expect("write begins");
+    store
+        .write_chunk(&session, 0, b"deleted")
+        .expect("chunk writes");
+    let publication = store.commit_write(&session).expect("write commits");
+    let delete = ResourceDeleteIntent {
+        intent_version: RESOURCE_DELETE_INTENT_VERSION.to_owned(),
+        delete_id: "delete:object".to_owned(),
+        gc_id: "gc:object".to_owned(),
+        resource_id: publication.resource.resource_id.clone(),
+        store_binding: "object:test".to_owned(),
+        publication,
+    };
+    let first = store.delete_resource(&delete).expect("delete succeeds");
+    assert_eq!(first.removed_bytes, 7);
+    assert!(first.verified_absent);
+    let replay = store.delete_resource(&delete).expect("delete replays");
+    assert_eq!(replay.removed_bytes, 0);
+    assert!(replay.verified_absent);
 }
 
 #[test]

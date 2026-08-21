@@ -107,10 +107,10 @@ Use this precedence order when guidance conflicts:
 - Completed virtual history may move cold only behind an immutable byte archive
   interface. Rust computes and verifies a semantic manifest Resource descriptor,
   causal-cut certificate, summary digests, retained terminal fences/bindings,
-  and replay availability; partial rehydration restores only explicitly selected
-  exact occurrences. Archive products, locators, and credentials are plugin
-  concerns. Hot state retains the descriptor and certificate, never the cold
-  manifest bytes.
+  and replay availability; partial rehydration verifies an index-bound Merkle
+  proof and reads only the selected occurrence range. Archive locator/proof
+  catalogs and credentials are plugin concerns. Hot state retains the
+  descriptor, proof root, and certificate, never cold manifest bytes.
 - Multi-worker M3 execution uses abstract capacity-slot leases, not worker-pool
   topology. Claim and lease admission share one M1 CAS; renewal advances the
   slot fence; normal resolution carries work/lease epochs and logical time;

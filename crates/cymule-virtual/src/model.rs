@@ -15,7 +15,7 @@ pub const VIRTUAL_REGION_MIGRATION_CONTROL_VERSION: &str =
 /// Immutable cold-archive manifest version.
 pub const VIRTUAL_ARCHIVE_MANIFEST_VERSION: &str = "cymule.virtual-archive-manifest/1";
 /// Verified virtual subtree compaction certificate version.
-pub const VIRTUAL_COMPACTION_CERTIFICATE_VERSION: &str = "cymule.virtual-compaction-certificate/2";
+pub const VIRTUAL_COMPACTION_CERTIFICATE_VERSION: &str = "cymule.virtual-compaction-certificate/3";
 /// Idempotent virtual compaction command version.
 pub const VIRTUAL_COMPACTION_CONTROL_VERSION: &str = "cymule.virtual-compaction-control/1";
 /// Idempotent partial rehydration command version.
@@ -554,6 +554,8 @@ pub struct VirtualCompactionCertificate {
     pub summary: VirtualCompletionSummary,
     /// Digest of the complete archive manifest.
     pub summary_state_digest: String,
+    /// Merkle root authenticating bounded occurrence range proofs.
+    pub occurrence_root_digest: String,
     /// Unresolved external obligations retained outside this completed subtree.
     pub unresolved_obligations: BTreeSet<String>,
     /// Immutable occurrence bindings required to interpret archived history.

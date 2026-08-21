@@ -16,8 +16,9 @@ use std::thread;
 use std::time::Duration;
 
 use cymule_resource::{
-    ArtifactResolver, ArtifactStore, ResourceClient, ResourceError, ResourceIntegrity,
-    ResourceShape, ResourceWriteIntent,
+    ArtifactResolver, ArtifactStore, RESOURCE_DELETE_INTENT_VERSION, ResourceClient,
+    ResourceDeleteIntent, ResourceDeleter, ResourceError, ResourceIntegrity, ResourceShape,
+    ResourceWriteIntent, ResourceWriteSession,
 };
 use cymule_resource_fs::FsResourceStore;
 #[cfg(unix)]
@@ -60,6 +61,56 @@ fn chunk_retry_commit_and_reopen_preserve_exact_bytes() {
         .copy_to(&resource, 3, &mut bytes)
         .expect("resource copies");
     assert_eq!(bytes, b"hello cymule");
+}
+
+#[test]
+fn forged_upload_session_cannot_escape_or_cross_bindings() {
+    let directory = tempdir().expect("temporary directory");
+    let sentinel = directory.path().join("sentinel");
+    fs::write(&sentinel, b"outside").expect("sentinel writes");
+    let mut store =
+        FsResourceStore::open(directory.path().join("store"), "fs:test").expect("store opens");
+    let forged = ResourceWriteSession {
+        write_id: "write:forged".to_owned(),
+        upload_id: "upload:../../sentinel".to_owned(),
+        store_binding: "fs:test".to_owned(),
+    };
+    assert!(matches!(
+        store.write_chunk(&forged, 0, b"escape"),
+        Err(ResourceError::Conflict(_) | ResourceError::Validation(_))
+    ));
+    assert_eq!(fs::read(&sentinel).expect("sentinel reads"), b"outside");
+}
+
+#[test]
+fn filesystem_deleter_is_idempotent_and_proves_absence() {
+    let directory = tempdir().expect("temporary directory");
+    let mut store = FsResourceStore::open(directory.path(), "fs:test").expect("store opens");
+    let intent = ResourceWriteIntent {
+        write_id: "write:delete".to_owned(),
+        shape: ResourceShape::Object,
+        media_type: "application/octet-stream".to_owned(),
+        annotations: BTreeMap::new(),
+    };
+    let session = store.begin_write(&intent).expect("write begins");
+    store
+        .write_chunk(&session, 0, b"deleted")
+        .expect("chunk writes");
+    let publication = store.commit_write(&session).expect("write commits");
+    let delete = ResourceDeleteIntent {
+        intent_version: RESOURCE_DELETE_INTENT_VERSION.to_owned(),
+        delete_id: "delete:fs".to_owned(),
+        gc_id: "gc:fs".to_owned(),
+        resource_id: publication.resource.resource_id.clone(),
+        store_binding: "fs:test".to_owned(),
+        publication,
+    };
+    let first = store.delete_resource(&delete).expect("delete succeeds");
+    assert_eq!(first.removed_bytes, 7);
+    assert!(first.verified_absent);
+    let replay = store.delete_resource(&delete).expect("delete replays");
+    assert_eq!(replay.removed_bytes, 0);
+    assert!(replay.verified_absent);
 }
 
 #[test]

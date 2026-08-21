@@ -118,7 +118,7 @@ independent `cymule.virtual-region-migration/1` and
 `cymule.virtual-region-migration-control/1` domains; receipts and retired lineage
 remain in the same M3 checkpoint.
 Cold history adds independent `cymule.virtual-archive-manifest/1`,
-`cymule.virtual-compaction-certificate/2`,
+`cymule.virtual-compaction-certificate/3`,
 `cymule.virtual-compaction-control/1`, and
 `cymule.virtual-rehydration-control/1` domains. Their receipts, bounded summary,
 and terminal fence index remain in the additive

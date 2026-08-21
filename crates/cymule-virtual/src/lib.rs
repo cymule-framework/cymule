@@ -7,7 +7,9 @@ mod model;
 mod scheduler;
 
 pub use archive::{
-    VIRTUAL_ARCHIVE_MANIFEST_KIND, VirtualArchive, VirtualArchiveObject, virtual_archive_record,
+    MAX_VIRTUAL_ARCHIVE_CHUNK, ResourceArchiveCatalog, ResourceBackedVirtualArchive,
+    VIRTUAL_ARCHIVE_MANIFEST_KIND, VirtualArchive, VirtualArchiveObject,
+    VirtualArchiveOccurrenceProof, verify_occurrence_proof, virtual_archive_record,
 };
 pub use durable::{
     DurableVirtualController, MAX_VIRTUAL_CHECKPOINT_DELTA_BYTES, MapDelta, SetDelta,

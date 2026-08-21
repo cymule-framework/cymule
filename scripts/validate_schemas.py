@@ -211,7 +211,7 @@ def main() -> int:
     validate_engine_request({"type": "seal_resource", "candidate": resource_candidate})
     resource_validator.validate(
         {
-            "handoff_version": "cymule.resource-handoff/2",
+            "handoff_version": "cymule.resource-handoff/3",
             "transfer_id": "transfer:fixture",
             "producer": {
                 "run_id": "run:producer",
@@ -224,7 +224,11 @@ def main() -> int:
             },
             "to_run": "run:consumer",
             "slot": "input.resource",
-            "resource": sealed_resource,
+            "resource": {
+                "identity_version": "cymule.artifact/2",
+                "artifact_id": "sha256:" + "0" * 64,
+                "kind": "cymule.typed-json/sha256-" + "1" * 64,
+            },
         }
     )
     malformed_resource = dict(resource_candidate)

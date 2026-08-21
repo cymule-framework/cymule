@@ -9,6 +9,10 @@
   bytes fail closed. A whole-file import must also replay after publication by
   comparing every submitted chunk with the committed content; this closes the
   Resource-published/consumer-checkpoint-not-yet-acknowledged recovery window.
+- Authenticate sessions by recomputing the exact upload ID from `write_id` and
+  binding before deriving paths; upload keys are lowercase digest bytes only.
+- Deletion is idempotent content removal with synced absence readback;
+  lifecycle admission remains M1-owned.
 - Write and fsync a unique staging object before linking it into the content
   namespace. Never expose partial bytes at a committed Resource location.
 - Whether the content link is newly created or already exists, verify its exact

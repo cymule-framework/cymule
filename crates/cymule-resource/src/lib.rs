@@ -15,10 +15,13 @@ pub use handoff::{
     ResourceHandoffActivation, ResourceHandoffController, ResourceProducerProvenance,
 };
 pub use lifecycle::{
-    RESOURCE_CLEANUP_RECEIPT_VERSION, RESOURCE_DELETE_RECEIPT_VERSION, RESOURCE_GC_RECEIPT_VERSION,
-    RESOURCE_PIN_RECEIPT_VERSION, RESOURCE_RELEASE_RECEIPT_VERSION, ResourceCleanupReceipt,
-    ResourceDeleteReceipt, ResourceDeleter, ResourceGcDisposition, ResourceGcReceipt,
-    ResourceLifecycle, ResourceLifecycleLedger, ResourcePinReceipt, ResourceReleaseReceipt,
+    RESOURCE_CLEANUP_RECEIPT_VERSION, RESOURCE_DELETE_INTENT_VERSION,
+    RESOURCE_DELETE_RECEIPT_VERSION, RESOURCE_GC_RECEIPT_VERSION,
+    RESOURCE_LIFECYCLE_JOURNAL_VERSION, RESOURCE_PIN_RECEIPT_VERSION,
+    RESOURCE_RELEASE_RECEIPT_VERSION, ResourceCleanupReceipt, ResourceDeleteIntent,
+    ResourceDeleteReceipt, ResourceDeleter, ResourceDeletionObservation, ResourceGcDisposition,
+    ResourceGcReceipt, ResourceLifecycle, ResourceLifecycleController, ResourceLifecycleLedger,
+    ResourcePinReceipt, ResourceReleaseReceipt,
 };
 pub use manifest::{
     ManifestInclusionProof, MerkleSide, MerkleStep, RESOURCE_LIST_PROOF_VERSION,

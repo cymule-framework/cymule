@@ -10,6 +10,7 @@
     { "$ref": "#/$defs/resourceHandoff" },
     { "$ref": "#/$defs/manifestDescriptor" },
     { "$ref": "#/$defs/listProof" },
+    { "$ref": "#/$defs/deleteIntent" },
     { "$ref": "#/$defs/lifecycleReceipt" }
   ],
   "$defs": {
@@ -132,17 +133,20 @@
     "inclusionProof": { "type": "object", "additionalProperties": false, "required": ["index", "path"], "properties": { "index": { "type": "integer", "minimum": 0 }, "path": { "type": "array", "items": { "$ref": "#/$defs/merkleStep" } } } },
     "listProof": {
       "type": "object", "additionalProperties": false,
-      "required": ["proof_version", "manifest_digest", "entry_count", "start_index", "inclusions"],
+      "required": ["proof_version", "manifest_digest", "entry_count", "start_index", "request_cursor_digest", "next_cursor_digest", "inclusions"],
       "properties": {
-        "proof_version": { "const": "cymule.resource-list-proof/1" },
+        "proof_version": { "const": "cymule.resource-list-proof/2" },
         "manifest_digest": { "$ref": "#/$defs/digest" },
         "entry_count": { "type": "integer", "minimum": 0 },
         "start_index": { "type": "integer", "minimum": 0 },
+        "request_cursor_digest": { "$ref": "#/$defs/digest" },
+        "next_cursor_digest": { "$ref": "#/$defs/digest" },
         "inclusions": { "type": "array", "items": { "$ref": "#/$defs/inclusionProof" } }
       }
     },
     "producerProvenance": { "type": "object", "additionalProperties": false, "required": ["run_id", "occurrence_id", "result"], "properties": { "run_id": { "$ref": "#/$defs/nonEmpty" }, "occurrence_id": { "$ref": "#/$defs/nonEmpty" }, "result": { "$ref": "#/$defs/artifactRef" } } },
-    "resourceHandoff": { "type": "object", "additionalProperties": false, "required": ["handoff_version", "transfer_id", "producer", "to_run", "slot", "resource"], "properties": { "handoff_version": { "const": "cymule.resource-handoff/2" }, "transfer_id": { "$ref": "#/$defs/nonEmpty" }, "producer": { "$ref": "#/$defs/producerProvenance" }, "to_run": { "$ref": "#/$defs/nonEmpty" }, "slot": { "$ref": "#/$defs/nonEmpty" }, "resource": { "$ref": "#/$defs/resourceHandle" } } },
+    "resourceHandoff": { "type": "object", "additionalProperties": false, "required": ["handoff_version", "transfer_id", "producer", "to_run", "slot", "resource"], "properties": { "handoff_version": { "const": "cymule.resource-handoff/3" }, "transfer_id": { "$ref": "#/$defs/nonEmpty" }, "producer": { "$ref": "#/$defs/producerProvenance" }, "to_run": { "$ref": "#/$defs/nonEmpty" }, "slot": { "$ref": "#/$defs/nonEmpty" }, "resource": { "$ref": "#/$defs/artifactRef" } } },
+    "deleteIntent": { "type": "object", "additionalProperties": false, "required": ["intent_version", "delete_id", "gc_id", "resource_id", "store_binding", "publication"], "properties": { "intent_version": { "const": "cymule.resource-delete-intent/1" }, "delete_id": { "$ref": "#/$defs/nonEmpty" }, "gc_id": { "$ref": "#/$defs/nonEmpty" }, "resource_id": { "$ref": "#/$defs/digest" }, "store_binding": { "$ref": "#/$defs/nonEmpty" }, "publication": { "$ref": "#/$defs/publication" } } },
     "pinReceipt": { "type": "object", "additionalProperties": false, "required": ["receipt_version", "pin_id", "resource_id", "owner"], "properties": { "receipt_version": { "const": "cymule.resource-pin-receipt/1" }, "pin_id": { "$ref": "#/$defs/nonEmpty" }, "resource_id": { "$ref": "#/$defs/digest" }, "owner": { "$ref": "#/$defs/nonEmpty" } } },
     "releaseReceipt": { "type": "object", "additionalProperties": false, "required": ["receipt_version", "release_id", "pin_id", "resource_id"], "properties": { "receipt_version": { "const": "cymule.resource-release-receipt/1" }, "release_id": { "$ref": "#/$defs/nonEmpty" }, "pin_id": { "$ref": "#/$defs/nonEmpty" }, "resource_id": { "$ref": "#/$defs/digest" } } },
     "gcReceipt": { "type": "object", "additionalProperties": false, "required": ["receipt_version", "gc_id", "resource_id", "active_pin_count", "disposition"], "properties": { "receipt_version": { "const": "cymule.resource-gc-receipt/1" }, "gc_id": { "$ref": "#/$defs/nonEmpty" }, "resource_id": { "$ref": "#/$defs/digest" }, "active_pin_count": { "type": "integer", "minimum": 0 }, "disposition": { "enum": ["retained", "eligible"] } } },
