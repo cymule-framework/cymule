@@ -6,6 +6,7 @@ cd "$ROOT"
 
 echo "== Build shared engine and test plugin =="
 cargo build -p cymule-cli -p cymule-test-adapter
+cargo test -p cymule-cli --bin cymule
 CYMULE_BIN="$ROOT/target/debug/cymule"
 
 echo "== Frozen schemas and semantic rejection =="

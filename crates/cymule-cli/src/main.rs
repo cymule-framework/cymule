@@ -823,7 +823,7 @@ mod tests {
         )
         .expect_err("duplicate Plan member is rejected");
         assert_eq!(error.code.as_ref(), "invalid_engine_request");
-        assert!(error.message.contains("duplicate JSON object member"));
+        assert!(error.message.contains("duplicate JSON object"));
     }
 
     #[test]

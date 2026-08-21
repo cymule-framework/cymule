@@ -150,3 +150,6 @@
 - `CYMULE_RELEASE_WORKSPACE` remains an absolute immutable-tag payload root only
   for a reviewed controller executing outside that checkout. It never changes
   which manifest, catalog, source, archive, or Git identity is release authority.
+- Protocol verification runs the CLI unit tests in addition to building its
+  binary, so raw duplicate-key and shared-number ingress regressions cannot hide
+  behind successful schema fixtures.
