@@ -73,3 +73,7 @@
 - Avoid runtime dependencies unless they materially improve correctness.
 - Durable and live-evolution successes are recursively closed. Store, executor,
   migration, and shadow targets remain separate; queries send no executor.
+- Every success payload is validated recursively, including Resource Handles,
+  wait activations, durable commands, migration receipts, and mapped target
+  Continuations. Mutating response loss is an unknown-world outcome in every
+  language.

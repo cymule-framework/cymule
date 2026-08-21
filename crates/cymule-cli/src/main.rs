@@ -4,6 +4,8 @@ use std::env;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use cymule_core::{PlanCandidate, SealedPlan, decode_json, seal_plan};
 use cymule_directory_store::DirectoryStore;
@@ -142,7 +144,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let input: Value = read_path(argument_value(&arguments, "--input")?)?;
             let plugin = argument_value(&arguments, "--plugin")?;
             let run_id = argument_value(&arguments, "--run-id")?;
-            let mut runtime = local_process_runtime(plugin)?;
+            let mut runtime = local_process_runtime(plugin, None)?;
             let result = runtime.execute(plan, &input, run_id)?;
             print_json(&result)
         }
@@ -154,9 +156,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn rpc() -> Result<(), Box<dyn std::error::Error>> {
+    let cancellation = install_cancellation()?;
     let mut input = Vec::new();
     let response = match io::stdin().read_to_end(&mut input) {
-        Ok(_) => decode_and_execute_request(&input),
+        Ok(_) => decode_and_execute_request_with_cancellation(&input, Some(cancellation)),
         Err(error) => Err(EngineFailure::transport(
             "engine_read_failed",
             error.to_string(),
@@ -169,6 +172,13 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFailure> {
+    decode_and_execute_request_with_cancellation(input, None)
+}
+
+fn decode_and_execute_request_with_cancellation(
+    input: &[u8],
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Result<EngineResponse, EngineFailure> {
     validate_strict_json(input).map_err(|error| {
         let mut failure = EngineFailure::new(
             EngineFailureCategory::Validation,
@@ -245,14 +255,14 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
             EngineResponse::VerifiedLiveEvolutionCommand { command }
         }
         EngineRequest::ExecuteDurable { target, command } => EngineResponse::DurableExecuted {
-            response: execute_durable(&target, command)?,
+            response: execute_durable(&target, command, cancellation.clone())?,
         },
         EngineRequest::ExecuteLiveEvolution {
             target,
             journal_id,
             command,
         } => EngineResponse::LiveEvolutionExecuted {
-            response: execute_live_evolution(&target, &journal_id, command)?,
+            response: execute_live_evolution(&target, &journal_id, command, cancellation.clone())?,
         },
         EngineRequest::Run {
             plan,
@@ -260,7 +270,7 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
             plugin,
             run_id,
         } => {
-            let mut runtime = local_process_runtime(&plugin)
+            let mut runtime = local_process_runtime(&plugin, cancellation.clone())
                 .map_err(|error| EngineFailure::from_runtime(error, EnginePhase::ExecutePlan))?;
             EngineResponse::ExecutionBoundary {
                 execution: runtime.execute(plan, &input, run_id).map_err(|error| {
@@ -275,6 +285,7 @@ fn decode_and_execute_request(input: &[u8]) -> Result<EngineResponse, EngineFail
 fn execute_durable(
     target: &EngineDurableTarget,
     command: DurableCommand,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<DurableResponse, EngineFailure> {
     target.verify()?;
     command
@@ -295,7 +306,7 @@ fn execute_durable(
             "durable mutation requires an execution provider",
         )
     })?;
-    let runtime = local_durable_runtime(store, executor)
+    let runtime = local_durable_runtime(store, executor, cancellation)
         .map_err(|error| map_durable_error(&error, EnginePhase::ExecuteDurable))?;
     DurableRuntimeControl::new(runtime)
         .submit(command)
@@ -305,6 +316,7 @@ fn execute_durable(
 fn local_durable_runtime(
     store: CliStore,
     target: &EnginePluginTarget,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> cymule_durable::DurableResult<ResumableRuntime<CliStore, ProcessExecutor>> {
     if target.provider != ENGINE_PROCESS_EXECUTOR_PROVIDER {
         return Err(cymule_durable::DurableError::Validation(format!(
@@ -312,7 +324,9 @@ fn local_durable_runtime(
             target.provider
         )));
     }
-    let mut plugin = ProcessExecutor::new(ProcessExecutorConfig::new(&target.location))
+    let mut config = ProcessExecutorConfig::new(&target.location);
+    config.cancellation = cancellation;
+    let mut plugin = ProcessExecutor::new(config)
         .map_err(|error| cymule_durable::DurableError::Substrate(error.to_string()))?;
     if target
         .revision
@@ -336,6 +350,7 @@ fn execute_live_evolution(
     target: &EngineEvolutionTarget,
     journal_id: &str,
     command: LiveEvolutionCommand,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<LiveEvolutionResponse, EngineFailure> {
     target.verify()?;
     let store = open_store(&target.store)
@@ -344,8 +359,9 @@ fn execute_live_evolution(
         .map_err(|error| map_durable_error(&error, EnginePhase::ExecuteLiveEvolution))?;
     let mut controller = DurableLiveEvolutionController::load(&coordinator, journal_id)
         .map_err(|error| map_evolution_error(&error, EnginePhase::ExecuteLiveEvolution))?;
-    let mut migration = ProcessEvolutionPlugin::optional(target.migration.as_ref())?;
-    let mut shadow = ProcessEvolutionPlugin::optional(target.shadow.as_ref())?;
+    let mut migration =
+        ProcessEvolutionPlugin::optional(target.migration.as_ref(), cancellation.clone())?;
+    let mut shadow = ProcessEvolutionPlugin::optional(target.shadow.as_ref(), cancellation)?;
     DurableLiveEvolutionController::submit(
         &mut coordinator,
         &mut controller,
@@ -479,7 +495,10 @@ struct ProcessEvolutionPlugin {
 }
 
 impl ProcessEvolutionPlugin {
-    fn optional(target: Option<&EnginePluginTarget>) -> Result<Self, EngineFailure> {
+    fn optional(
+        target: Option<&EnginePluginTarget>,
+        cancellation: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, EngineFailure> {
         let Some(target) = target else {
             return Ok(Self { process: None });
         };
@@ -491,9 +510,11 @@ impl ProcessEvolutionPlugin {
                 format!("unsupported evolution plugin provider {}", target.provider),
             ));
         }
-        let process = ProcessExecutor::new(ProcessExecutorConfig::new(&target.location)).map_err(
-            |error| EngineFailure::from_runtime(error, EnginePhase::ExecuteLiveEvolution),
-        )?;
+        let mut config = ProcessExecutorConfig::new(&target.location);
+        config.cancellation = cancellation;
+        let process = ProcessExecutor::new(config).map_err(|error| {
+            EngineFailure::from_runtime(error, EnginePhase::ExecuteLiveEvolution)
+        })?;
         if target.revision.as_deref() != Some(process.implementation_revision()) {
             return Err(EngineFailure::new(
                 EngineFailureCategory::AdmissionDenied,
@@ -620,12 +641,22 @@ impl ShadowDriver for ProcessEvolutionPlugin {
 
 fn local_process_runtime(
     executable: impl AsRef<Path>,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> cymule_runtime::RuntimeResult<EmbeddedRuntime<ProcessExecutor>> {
-    let mut plugin = ProcessExecutor::new(ProcessExecutorConfig::new(executable))?;
+    let mut config = ProcessExecutorConfig::new(executable);
+    config.cancellation = cancellation;
+    let mut plugin = ProcessExecutor::new(config)?;
     let implementation_revision = plugin.implementation_revision().to_owned();
     let manifest = plugin.describe()?;
     let binding = ExecutionBinding::for_local_process(&manifest, implementation_revision)?;
     EmbeddedRuntime::new(plugin, binding)
+}
+
+fn install_cancellation() -> Result<Arc<AtomicBool>, Box<dyn std::error::Error>> {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, cancellation.clone())?;
+    signal_hook::flag::register(signal_hook::consts::SIGINT, cancellation.clone())?;
+    Ok(cancellation)
 }
 
 fn map_resource_error(error: &cymule_resource::ResourceError) -> EngineFailure {

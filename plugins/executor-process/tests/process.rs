@@ -1,6 +1,8 @@
 //! Process environment, protocol, output-bound, and timeout tests.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use cymule_executor_process::{ProcessExecutor, ProcessExecutorConfig};
@@ -96,6 +98,63 @@ fn process_response_rejects_duplicate_protocol_members() {
         executor.describe(),
         Err(RuntimeError::Substrate { code, .. }) if code == "invalid_plugin_response"
     ));
+}
+
+#[cfg(unix)]
+#[test]
+fn process_response_rejects_integer_outside_shared_json_domain() {
+    let script = r#"
+      request=$(/bin/cat)
+      test -n "$request" || exit 8
+      printf '%s' '{"type":"call_result","value":9007199254740992}'
+    "#;
+    let mut executor = shell(script);
+    assert!(matches!(
+        executor.invoke(PluginRequest::Call {
+            component: "test".to_owned(),
+            input: serde_json::Value::Null,
+        }),
+        Err(RuntimeError::Substrate { code, .. }) if code == "invalid_plugin_response"
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn owning_engine_cancellation_terminates_the_plugin_occurrence() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("fixture directory creates");
+    let marker = directory.path().join("escaped-marker");
+    let executable = directory.path().join("plugin.sh");
+    fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\n/bin/cat >/dev/null\n/bin/sleep 1\nprintf escaped > '{}'\n",
+            marker.display()
+        ),
+    )
+    .expect("script writes");
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).expect("script executes");
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut config = ProcessExecutorConfig::new(executable);
+    config.timeout = Duration::from_secs(5);
+    config.cancellation = Some(cancelled.clone());
+    let mut executor = ProcessExecutor::new(config).expect("executor configures");
+    let trigger = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        cancelled.store(true, Ordering::Release);
+    });
+    assert!(matches!(
+        executor.describe(),
+        Err(RuntimeError::Substrate { code, .. }) if code == "process_invocation_cancelled"
+    ));
+    trigger.join().expect("cancellation trigger joins");
+    std::thread::sleep(Duration::from_millis(1100));
+    assert!(
+        !marker.exists(),
+        "cancelled plugin occurrence must not retain execution authority"
+    );
 }
 
 #[test]

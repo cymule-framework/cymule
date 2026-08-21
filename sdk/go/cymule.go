@@ -5,14 +5,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"math/big"
+	"os"
 	"os/exec"
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -755,7 +758,7 @@ func (response LiveEvolutionResponse) validate() error {
 	case "patch_applied":
 		raw, fields = response.Edge, []string{"edge_id", "from_plan", "to_plan", "operations", "evidence"}
 	case "migrated":
-		raw, fields = response.Receipt, []string{"migration_id", "run_id", "from_plan", "to_plan", "safe_point_id", "source_epoch", "target_epoch", "source_binding", "target_binding", "adapter_id", "adapter_revision", "from_schema", "to_schema", "input_state", "output_state", "evidence"}
+		raw, fields = response.Receipt, []string{"migration_id", "run_id", "from_plan", "to_plan", "plan_edge_id", "compatibility_id", "safe_point_id", "source_epoch", "target_epoch", "source_binding", "target_binding", "adapter_id", "adapter_revision", "from_schema", "to_schema", "input_state", "output_state", "target_continuation", "evidence"}
 	case "restart_authorized":
 		raw, fields = response.Receipt, []string{"request", "target_plan"}
 	case "shadow_recorded":
@@ -777,6 +780,15 @@ func (response LiveEvolutionResponse) validate() error {
 				if err := validateArtifactRef(reference); err != nil {
 					return err
 				}
+			}
+		}
+		if response.Result == "migrated" {
+			var continuation MigrationContinuation
+			if err := validateClosedRaw(object["target_continuation"], []string{"run_id", "plan_id", "binding_context", "frames", "state", "wait_set", "scope_stack", "effect_obligations", "authority_leases", "budget", "causal_frontier", "epoch", "status"}, &continuation); err != nil {
+				return err
+			}
+			if err := validateMigrationContinuation(continuation); err != nil {
+				return err
 			}
 		}
 	}
@@ -2242,6 +2254,8 @@ func (engine CliEngine) SealResource(candidate ResourceCandidate) (ResourceHandl
 	err := engine.request(map[string]any{"type": "seal_resource", "candidate": candidate}, &response)
 	if err == nil && response.Type != "sealed_resource" {
 		err = unexpectedEngineResponse("sealed_resource", response.Type)
+	} else if err == nil {
+		err = validateResourceHandle(response.Resource)
 	}
 	return response.Resource, err
 }
@@ -2257,6 +2271,8 @@ func (engine CliEngine) VerifyWaitActivation(activation WaitActivation) (WaitAct
 	}, &response)
 	if err == nil && response.Type != "verified_wait_activation" {
 		err = unexpectedEngineResponse("verified_wait_activation", response.Type)
+	} else if err == nil {
+		err = validateWaitActivationResponse(response.Activation)
 	}
 	return response.Activation, err
 }
@@ -2272,8 +2288,66 @@ func (engine CliEngine) VerifyDurableCommand(command DurableCommand) (DurableCom
 	}, &response)
 	if err == nil && response.Type != "verified_durable_command" {
 		err = unexpectedEngineResponse("verified_durable_command", response.Type)
+	} else if err == nil {
+		err = validateDurableCommandResponse(response.Command)
 	}
 	return response.Command, err
+}
+
+func validateResourceHandle(resource ResourceHandle) error {
+	if resource.ResourceVersion != "cymule.resource/2" || resource.ResourceID == "" ||
+		!strings.HasPrefix(resource.ResourceID, "sha256:") || len(resource.ResourceID) != 71 ||
+		resource.MediaType == "" || !slices.Contains([]string{"inline", "object", "collection", "directory", "snapshot"}, resource.Shape) ||
+		!slices.Contains([]string{"inline", "content", "version", "live"}, resource.Integrity.Kind) {
+		return transportFailure("invalid_engine_response", "Resource Handle fields are invalid")
+	}
+	if resource.Shape == "inline" && resource.Inline == nil {
+		return transportFailure("invalid_engine_response", "inline Resource data is missing")
+	}
+	return nil
+}
+
+func validateWaitActivationResponse(activation WaitActivation) error {
+	if activation.ActivationVersion != "cymule.wait-activation/1" || activation.ActivationID == "" || len(activation.WaitIDs) == 0 {
+		return transportFailure("invalid_engine_response", "wait activation fields are invalid")
+	}
+	if activation.Source.Kind == "signal" {
+		if activation.Source.Key == "" || activation.Source.TimerID != "" {
+			return transportFailure("invalid_engine_response", "wait activation source is invalid")
+		}
+	} else if activation.Source.Kind == "timer" {
+		if activation.Source.TimerID == "" || activation.Source.Key != "" {
+			return transportFailure("invalid_engine_response", "wait activation source is invalid")
+		}
+	} else {
+		return transportFailure("invalid_engine_response", "wait activation source is invalid")
+	}
+	return validateArtifactRef(activation.Result)
+}
+
+func validateDurableCommandResponse(command DurableCommand) error {
+	if command.ControlVersion != "cymule.durable-control/1" {
+		return transportFailure("invalid_engine_response", "durable command version is invalid")
+	}
+	valid := false
+	switch command.Type {
+	case "start_run":
+		valid = command.RunID != "" && command.Candidate != nil && len(command.Input) != 0
+	case "resume_run":
+		valid = command.RunID != ""
+	case "activate_wait":
+		valid = command.ActivationID != "" && command.Source != nil && len(command.WaitIDs) != 0 && len(command.Value) != 0
+	case "release_effect":
+		valid = command.IntentID != ""
+	case "query_run":
+		valid = command.QueryID != "" && command.RunID != ""
+	case "query_domain":
+		valid = command.QueryID != ""
+	}
+	if !valid {
+		return transportFailure("invalid_engine_response", "durable command fields are invalid")
+	}
+	return nil
 }
 
 // VerifyEvolutionCommand validates one M4 envelope with the Rust engine.
@@ -2460,6 +2534,20 @@ func (engine CliEngine) request(request any, response any) error {
 	}
 	defer cancel()
 	command := exec.CommandContext(ctx, executable, "rpc")
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error {
+		if command.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-command.Process.Pid, syscall.SIGTERM); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
+	command.WaitDelay = 2 * time.Second
 	command.Stdin = bytes.NewReader(input)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -2469,9 +2557,16 @@ func (engine CliEngine) request(request any, response any) error {
 		if ctx.Err() != nil {
 			return interruptedFailure(request, ctx.Err())
 		}
-		return transportFailure("engine_process_failed", "engine exited without a protocol response")
+		return responseLossFailure(request, "engine_process_failed")
 	}
-	return decodeEngineResponse(stdout.Bytes(), response)
+	if err := decodeEngineResponse(stdout.Bytes(), response); err != nil {
+		var failure EngineFailure
+		if errors.As(err, &failure) && failure.Category == "transport_failure" {
+			return responseLossFailure(request, "invalid_engine_response")
+		}
+		return err
+	}
+	return nil
 }
 
 func decodeEngineResponse(input []byte, response any) error {
@@ -2663,16 +2758,7 @@ func interruptedFailure(request any, cause error) EngineFailure {
 	if cause == context.DeadlineExceeded {
 		kind = "timed_out"
 	}
-	mutating := false
-	if object, ok := request.(map[string]any); ok {
-		typeName, _ := object["type"].(string)
-		mutating = typeName == "run" || typeName == "execute_live_evolution"
-		if typeName == "execute_durable" {
-			if command, ok := object["command"].(DurableCommand); ok {
-				mutating = !strings.HasPrefix(command.Type, "query_")
-			}
-		}
-	}
+	mutating := requestIsMutating(request)
 	if mutating {
 		return EngineFailure{
 			Category: "unknown_world_outcome", Phase: "transport",
@@ -2685,6 +2771,33 @@ func interruptedFailure(request any, cause error) EngineFailure {
 		Category: kind, Phase: "transport", Code: "engine_response_" + kind,
 		Message: "the Engine response was " + kind,
 	}
+}
+
+func responseLossFailure(request any, code string) EngineFailure {
+	if requestIsMutating(request) {
+		return EngineFailure{
+			Category: "unknown_world_outcome", Phase: "transport", Code: code,
+			Message:          "the Engine response was unavailable after a mutating request began",
+			RetryDisposition: "reconcile",
+		}
+	}
+	return transportFailure(code, "the Engine response was unavailable")
+}
+
+func requestIsMutating(request any) bool {
+	object, ok := request.(map[string]any)
+	if !ok {
+		return false
+	}
+	typeName, _ := object["type"].(string)
+	if typeName == "run" || typeName == "execute_live_evolution" {
+		return true
+	}
+	if typeName != "execute_durable" {
+		return false
+	}
+	command, ok := object["command"].(DurableCommand)
+	return ok && !strings.HasPrefix(command.Type, "query_")
 }
 
 func transportFailure(code, message string) EngineFailure {

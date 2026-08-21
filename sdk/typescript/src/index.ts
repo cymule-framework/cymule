@@ -1684,6 +1684,7 @@ export class CliEngine {
       maxBuffer: 16 * 1024 * 1024,
       timeout: this.options.timeoutMs,
       signal: this.options.signal,
+      killSignal: "SIGTERM",
     });
     if (child.error !== undefined) {
       const code = (child.error as NodeJS.ErrnoException).code;
@@ -1692,16 +1693,14 @@ export class CliEngine {
       throw transportError("engine_start_failed", child.error.message);
     }
     if (child.status !== 0) {
-      throw transportError(
-        "engine_process_failed",
-        `engine exited without a protocol response (status ${child.status})`,
-      );
+      throw responseLossError(request, "engine_process_failed");
     }
     let envelope: EngineResponseEnvelope;
     try {
       envelope = parseEngineEnvelope(parseStrictJson(child.stdout));
     } catch (error) {
-      throw transportError(
+      throw responseLossError(
+        request,
         "invalid_engine_response",
         error instanceof Error ? error.message : String(error),
       );
@@ -1904,11 +1903,48 @@ function validateSuccessResponse(value: unknown): void {
     throw transportError("invalid_engine_response", "success response fields are not closed");
   }
   if (value.type === "sealed") validateSealedPlan(value.plan);
+  if (value.type === "sealed_resource") validateResourceHandle(value.resource);
+  if (value.type === "verified_wait_activation") validateWaitActivation(value.activation);
+  if (value.type === "verified_durable_command") validateDurableCommand(value.command);
   if (value.type === "execution_boundary") validateExecutionOutcome(value.execution);
   if (value.type === "verified_evolution_command") validateEvolutionCommand(value.command);
   if (value.type === "verified_live_evolution_command") validateLiveEvolutionCommand(value.command);
   if (value.type === "durable_executed") validateDurableResponse(value.response);
   if (value.type === "live_evolution_executed") validateLiveEvolutionResponse(value.response);
+}
+
+function validateResourceHandle(value: unknown): void {
+  if (!isRecord(value)) throw transportError("invalid_engine_response", "Resource Handle is invalid");
+  const allowed = new Set(["resource_id", "resource_version", "shape", "media_type", "inline", "integrity", "manifest", "annotations"]);
+  if (!Object.keys(value).every((key) => allowed.has(key)) ||
+    !["resource_id", "resource_version", "shape", "media_type", "integrity"].every((key) => key in value) ||
+    value.resource_version !== "cymule.resource/2" || !/^sha256:[0-9a-f]{64}$/.test(String(value.resource_id)) ||
+    !new Set(["inline", "object", "collection", "directory", "snapshot"]).has(String(value.shape)) || !isNonEmptyString(value.media_type) || !isRecord(value.integrity)) {
+    throw transportError("invalid_engine_response", "Resource Handle fields are invalid");
+  }
+  const integrityFields = new Map<string, string>([["inline", "kind"], ["content", "digest,kind,size"], ["version", "authority,kind,version"], ["live", "identity,kind"]]).get(String(value.integrity.kind));
+  if (integrityFields === undefined || Object.keys(value.integrity).sort().join(",") !== integrityFields) throw transportError("invalid_engine_response", "Resource integrity is not closed");
+  if (value.shape === "inline" && !isRecord(value.inline)) throw transportError("invalid_engine_response", "inline Resource data is missing");
+  if (value.annotations !== undefined && (!isRecord(value.annotations) || !Object.values(value.annotations).every((item) => typeof item === "string"))) throw transportError("invalid_engine_response", "Resource annotations are invalid");
+}
+
+function validateWaitActivation(value: unknown): void {
+  requireClosedRecord(value, ["activation_id", "activation_version", "result", "source", "wait_ids"], "wait activation");
+  if (value.activation_version !== "cymule.wait-activation/1") throw transportError("invalid_engine_response", "wait activation version is invalid");
+  requireStrings(value, ["activation_id"]); requireStringArray(value.wait_ids, "wait targets"); validateArtifactRef(value.result);
+  if (!isRecord(value.source)) throw transportError("invalid_engine_response", "wait activation source is invalid");
+  const fields = value.source.kind === "signal" ? "key,kind" : value.source.kind === "timer" ? "kind,timer_id" : undefined;
+  if (fields === undefined || Object.keys(value.source).sort().join(",") !== fields) throw transportError("invalid_engine_response", "wait activation source is not closed");
+}
+
+function validateDurableCommand(value: unknown): void {
+  if (!isRecord(value) || value.control_version !== "cymule.durable-control/1") throw transportError("invalid_engine_response", "durable command is invalid");
+  const fields = new Map<string, string>([["start_run", "candidate,control_version,input,run_id,type"], ["resume_run", "control_version,run_id,type"], ["activate_wait", "activation_id,control_version,source,type,value,wait_ids"], ["release_effect", "control_version,intent_id,type"], ["query_run", "control_version,query_id,run_id,type"], ["query_domain", "control_version,query_id,type"]]).get(String(value.type));
+  if (fields === undefined || Object.keys(value).sort().join(",") !== fields) throw transportError("invalid_engine_response", "durable command is not closed");
+  if (value.type === "activate_wait") {
+    requireStrings(value, ["activation_id"]); requireStringArray(value.wait_ids, "wait targets");
+    if (!isRecord(value.source)) throw transportError("invalid_engine_response", "durable activation source is invalid");
+  }
 }
 
 function validateExecutionOutcome(value: unknown): void {
@@ -2290,10 +2326,11 @@ function validatePlanEdge(value: unknown): void {
 }
 
 function validateMigrationReceipt(value: unknown): void {
-  requireClosedRecord(value, ["migration_id", "run_id", "from_plan", "to_plan", "safe_point_id", "source_epoch", "target_epoch", "source_binding", "target_binding", "adapter_id", "adapter_revision", "from_schema", "to_schema", "input_state", "output_state", "evidence"], "migration receipt");
-  requireStrings(value, ["migration_id", "run_id", "from_plan", "to_plan", "safe_point_id", "adapter_id", "adapter_revision", "from_schema", "to_schema"]);
+  requireClosedRecord(value, ["migration_id", "run_id", "from_plan", "to_plan", "plan_edge_id", "compatibility_id", "safe_point_id", "source_epoch", "target_epoch", "source_binding", "target_binding", "adapter_id", "adapter_revision", "from_schema", "to_schema", "input_state", "output_state", "target_continuation", "evidence"], "migration receipt");
+  requireStrings(value, ["migration_id", "run_id", "from_plan", "to_plan", "plan_edge_id", "compatibility_id", "safe_point_id", "adapter_id", "adapter_revision", "from_schema", "to_schema"]);
   requireEpoch(value.source_epoch); requireEpoch(value.target_epoch);
   for (const field of ["source_binding", "target_binding", "input_state", "output_state", "evidence"]) validateArtifactRef(value[field]);
+  validateMigrationContinuation(value.target_continuation);
 }
 
 function validateShadowComparison(value: unknown): void {
@@ -2483,6 +2520,21 @@ function interruptedError(request: EngineRequest, kind: "cancelled" | "timed_out
     code: `engine_response_${kind}`,
     message: `the Engine response was ${kind}`,
   });
+}
+
+function responseLossError(request: EngineRequest, code: string, detail = "the Engine response was unavailable"): EngineError {
+  const mutating = request.type === "run" || request.type === "execute_live_evolution" ||
+    (request.type === "execute_durable" && !request.command.type.startsWith("query_"));
+  if (mutating) {
+    return new EngineError({
+      category: "unknown_world_outcome",
+      phase: "transport",
+      code,
+      message: "the Engine response was unavailable after a mutating request began",
+      retry_disposition: "reconcile",
+    });
+  }
+  return transportError(code, detail);
 }
 
 const MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991;

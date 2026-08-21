@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -102,6 +102,15 @@ impl CliEngine {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(interrupted_failure(request, "cancelled", false));
         }
+        let encoded_request =
+            serde_json::to_vec(&EngineRequestEnvelope::new(request)).map_err(|error| {
+                EngineFailure::transport("request_encoding_failed", error.to_string())
+            })?;
+        validate_strict_json(&encoded_request)
+            .map_err(|error| EngineFailure::transport("request_encoding_failed", error))?;
+        let deadline = Instant::now().checked_add(self.timeout).ok_or_else(|| {
+            EngineFailure::transport("invalid_timeout", "timeout exceeds the clock range")
+        })?;
         let mut command = Command::new(&self.executable);
         command
             .arg("rpc")
@@ -113,59 +122,64 @@ impl CliEngine {
         let mut child = command
             .spawn()
             .map_err(|error| EngineFailure::transport("engine_start_failed", error.to_string()))?;
-        let encoded_request =
-            serde_json::to_vec(&EngineRequestEnvelope::new(request)).map_err(|error| {
-                EngineFailure::transport("request_encoding_failed", error.to_string())
-            })?;
-        validate_strict_json(&encoded_request)
-            .map_err(|error| EngineFailure::transport("request_encoding_failed", error))?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| {
-                EngineFailure::transport("engine_stdin_unavailable", "CLI stdin was not captured")
-            })?
-            .write_all(&encoded_request)
-            .map_err(|error| EngineFailure::transport("engine_write_failed", error.to_string()))?;
-        let deadline = Instant::now() + self.timeout;
-        loop {
-            if self.cancelled.load(Ordering::Acquire) {
-                terminate_engine(&mut child);
-                return Err(interrupted_failure(request, "cancelled", true));
-            }
-            if Instant::now() >= deadline {
-                terminate_engine(&mut child);
-                return Err(interrupted_failure(request, "timed_out", true));
-            }
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-                Err(error) => {
-                    return Err(EngineFailure::transport(
-                        "engine_wait_failed",
-                        error.to_string(),
-                    ));
+        let stdin = child.stdin.take().ok_or_else(|| {
+            terminate_engine(&mut child);
+            response_loss_failure(request, "engine_stdin_unavailable")
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            terminate_engine(&mut child);
+            response_loss_failure(request, "engine_stdout_unavailable")
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            terminate_engine(&mut child);
+            response_loss_failure(request, "engine_stderr_unavailable")
+        })?;
+        let (status, stdout) = std::thread::scope(|scope| {
+            let input = scope.spawn(|| write_engine_input(stdin, &encoded_request));
+            let output = scope.spawn(|| read_engine_stream(stdout));
+            let diagnostic = scope.spawn(|| read_engine_stream(stderr));
+            let status = loop {
+                if self.cancelled.load(Ordering::Acquire) {
+                    terminate_engine(&mut child);
+                    break Err(interrupted_failure(request, "cancelled", true));
                 }
+                if Instant::now() >= deadline {
+                    terminate_engine(&mut child);
+                    break Err(interrupted_failure(request, "timed_out", true));
+                }
+                match child.try_wait() {
+                    Ok(Some(status)) => break Ok(status),
+                    Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                    Err(_) => {
+                        terminate_engine(&mut child);
+                        break Err(response_loss_failure(request, "engine_wait_failed"));
+                    }
+                }
+            };
+            let input = input
+                .join()
+                .map_err(|_| ())
+                .and_then(|value| value.map_err(|_| ()));
+            let output = output
+                .join()
+                .map_err(|_| ())
+                .and_then(|value| value.map_err(|_| ()));
+            let diagnostic = diagnostic
+                .join()
+                .map_err(|_| ())
+                .and_then(|value| value.map_err(|_| ()));
+            if input.is_err() || output.is_err() || diagnostic.is_err() {
+                return Err(response_loss_failure(request, "engine_io_failed"));
             }
+            status.map(|status| (status, output.expect("checked output")))
+        })?;
+        if !status.success() {
+            return Err(response_loss_failure(request, "engine_process_failed"));
         }
-        let output = child
-            .wait_with_output()
-            .map_err(|error| EngineFailure::transport("engine_wait_failed", error.to_string()))?;
-        if !output.status.success() {
-            return Err(EngineFailure::transport(
-                "engine_process_failed",
-                format!(
-                    "engine exited without a protocol response ({})",
-                    output.status
-                ),
-            ));
-        }
-        validate_strict_json(&output.stdout)
-            .map_err(|error| EngineFailure::transport("invalid_engine_response", error))?;
-        let envelope: EngineResponseEnvelope<EngineResponse> = decode_json(&output.stdout)
-            .map_err(|error| {
-                EngineFailure::transport("invalid_engine_response", error.to_string())
-            })?;
+        validate_strict_json(&stdout)
+            .map_err(|_| response_loss_failure(request, "invalid_engine_response"))?;
+        let envelope: EngineResponseEnvelope<EngineResponse> = decode_json(&stdout)
+            .map_err(|_| response_loss_failure(request, "invalid_engine_response"))?;
         envelope.into_result()
     }
 
@@ -224,9 +238,49 @@ impl CliEngine {
     }
 }
 
+const ENGINE_STREAM_LIMIT: usize = 16 * 1024 * 1024;
+
+fn write_engine_input(mut stdin: std::process::ChildStdin, input: &[u8]) -> std::io::Result<()> {
+    stdin.write_all(input)
+}
+
+fn read_engine_stream(mut stream: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut retained = Vec::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        if retained.len() <= ENGINE_STREAM_LIMIT {
+            let remaining = ENGINE_STREAM_LIMIT
+                .saturating_add(1)
+                .saturating_sub(retained.len());
+            retained.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+    }
+    if retained.len() > ENGINE_STREAM_LIMIT {
+        return Err(std::io::Error::other(
+            "Engine stream exceeded the byte limit",
+        ));
+    }
+    Ok(retained)
+}
+
 fn terminate_engine(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
+        let _ = Command::new("/bin/kill")
+            .arg("-TERM")
+            .arg(format!("-{}", child.id()))
+            .status();
+        let grace = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < grace {
+            if child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let _ = Command::new("/bin/kill")
             .arg("-KILL")
             .arg(format!("-{}", child.id()))
@@ -236,19 +290,31 @@ fn terminate_engine(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+fn response_loss_failure(request: &EngineRequest, code: &str) -> EngineFailure {
+    if request_is_mutating(request) {
+        let mut failure = EngineFailure::new(
+            EngineFailureCategory::UnknownWorldOutcome,
+            EnginePhase::Transport,
+            code,
+            "the Engine response was unavailable after a mutating request began",
+        );
+        failure.retry_disposition = Some(cymule_runtime::EngineRetryDisposition::Reconcile);
+        failure
+    } else {
+        EngineFailure::transport(code, "the Engine response was unavailable")
+    }
+}
+
+fn request_is_mutating(request: &EngineRequest) -> bool {
+    match request {
+        EngineRequest::Run { .. } | EngineRequest::ExecuteLiveEvolution { .. } => true,
+        EngineRequest::ExecuteDurable { command, .. } => !command.is_query(),
+        _ => false,
+    }
+}
+
 fn interrupted_failure(request: &EngineRequest, kind: &str, began: bool) -> EngineFailure {
-    let mutating = matches!(
-        request,
-        EngineRequest::Run { .. }
-            | EngineRequest::ExecuteLiveEvolution { .. }
-            | EngineRequest::ExecuteDurable {
-                command: DurableCommand::StartRun { .. }
-                    | DurableCommand::ResumeRun { .. }
-                    | DurableCommand::ActivateWait { .. }
-                    | DurableCommand::ReleaseEffect { .. },
-                ..
-            }
-    );
+    let mutating = request_is_mutating(request);
     if began && mutating {
         let mut failure = EngineFailure::new(
             EngineFailureCategory::UnknownWorldOutcome,
@@ -603,17 +669,27 @@ fn unexpected_response(expected: &str, response: &EngineResponse) -> EngineFailu
 mod tests {
     use super::*;
 
-    #[test]
-    fn interruption_classification_preserves_mutation_uncertainty() {
-        let candidate = PlanCandidate {
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
+    }
+
+    fn empty_candidate() -> PlanCandidate {
+        PlanCandidate {
             ir_version: "cymule.ir/2".to_owned(),
-            name: "classification".to_owned(),
+            name: "transport".to_owned(),
             entry: "main".to_owned(),
             components: Vec::new(),
             effects: Vec::new(),
             definitions: Vec::new(),
             metadata: std::collections::BTreeMap::default(),
-        };
+        }
+    }
+
+    #[test]
+    fn interruption_classification_preserves_mutation_uncertainty() {
+        let candidate = empty_candidate();
         let mutation = EngineRequest::ExecuteDurable {
             target: EngineDurableTarget::execute(
                 EngineStoreTarget::directory("domain"),
@@ -643,6 +719,42 @@ mod tests {
         assert_eq!(
             interrupted_failure(&query, "cancelled", true).category,
             EngineFailureCategory::Cancelled
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn large_engine_response_is_drained_before_child_exit() {
+        let engine =
+            CliEngine::new(fixture("large-response-engine")).with_timeout(Duration::from_secs(2));
+        let plan = engine
+            .seal(&empty_candidate())
+            .expect("large response completes");
+        assert_eq!(plan.candidate.metadata["large"].len(), 262_144);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutating_response_loss_requires_reconciliation() {
+        let engine = CliEngine::new(fixture("response-loss-engine"));
+        let error = engine
+            .execute_durable(
+                &EngineDurableTarget::execute(
+                    EngineStoreTarget::directory("unused"),
+                    EnginePluginTarget::process("unused"),
+                ),
+                &DurableCommand::StartRun {
+                    control_version: DURABLE_CONTROL_VERSION.to_owned(),
+                    run_id: "run:response-loss".to_owned(),
+                    candidate: empty_candidate(),
+                    input: Value::Null,
+                },
+            )
+            .expect_err("missing mutating response is ambiguous");
+        assert_eq!(error.category, EngineFailureCategory::UnknownWorldOutcome);
+        assert_eq!(
+            error.retry_disposition,
+            Some(cymule_runtime::EngineRetryDisposition::Reconcile)
         );
     }
 }

@@ -22,6 +22,18 @@ func TestCliEnginePreservesPreCancellation(t *testing.T) {
 	}
 }
 
+func TestCliEngineClassifiesMutatingResponseLossAsUnknown(t *testing.T) {
+	engine := CliEngine{Executable: filepath.Join("..", "..", "tests", "fixtures", "response-loss-engine")}
+	_, err := engine.ExecuteDurable(
+		EngineDurableTarget{Store: DirectoryStore(filepath.Join(t.TempDir(), "domain"))},
+		ResumeDurableRun("run:response-loss"),
+	)
+	var failure EngineFailure
+	if !errors.As(err, &failure) || failure.Category != "unknown_world_outcome" || failure.RetryDisposition != "reconcile" {
+		t.Fatalf("expected unknown-world reconciliation, got %v", err)
+	}
+}
+
 func TestStructuredEngineFailures(t *testing.T) {
 	enginePath := os.Getenv("CYMULE_BIN")
 	pluginPath := os.Getenv("CYMULE_TEST_PLUGIN")

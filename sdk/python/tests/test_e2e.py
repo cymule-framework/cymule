@@ -22,11 +22,24 @@ from cymule import (
     VirtualWorkControlBuilder,
     WaitActivationBuilder,
     sqlite_store,
+    directory_store,
 )
 from cymule import _unique_json_object, _validate_engine_envelope
 
 
 class EndToEndTest(unittest.TestCase):
+    def test_python_classifies_mutating_response_loss_as_unknown(self) -> None:
+        engine = CliEngine(
+            os.path.join(os.getcwd(), "tests", "fixtures", "response-loss-engine")
+        )
+        with self.assertRaises(EngineError) as failure:
+            engine.execute_durable(
+                {"store": directory_store("/tmp/cymule-response-loss")},
+                DurableControlBuilder.resume_run("run:response-loss"),
+            )
+        self.assertEqual(failure.exception.failure["category"], "unknown_world_outcome")
+        self.assertEqual(failure.exception.failure["retry_disposition"], "reconcile")
+
     def test_engine_json_rejects_duplicate_object_members(self) -> None:
         with self.assertRaisesRegex(ValueError, "duplicate JSON object member"):
             json.loads(

@@ -1,0 +1,19 @@
+#!/usr/bin/python3
+import json
+import sys
+
+request = json.load(sys.stdin)["request"]
+candidate = request["candidate"]
+candidate["metadata"] = {"large": "x" * 262144}
+json.dump(
+    {
+        "engine_protocol": "cymule.engine/2",
+        "outcome": "success",
+        "response": {
+            "type": "sealed",
+            "plan": {"plan_id": "sha256:" + "0" * 64, "candidate": candidate},
+        },
+    },
+    sys.stdout,
+    separators=(",", ":"),
+)

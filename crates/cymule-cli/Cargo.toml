@@ -27,6 +27,7 @@ cymule-runtime.workspace = true
 cymule-store-sqlite = { path = "../../plugins/store-sqlite" }
 serde.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true
 
 [lints]
 workspace = true

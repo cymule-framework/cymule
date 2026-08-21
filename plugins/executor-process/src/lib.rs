@@ -5,11 +5,15 @@ use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use cymule_core::{canonical_bytes, decode_json, sha256_bytes};
-use cymule_runtime::{PluginHost, PluginRequest, PluginResponse, RuntimeError, RuntimeResult};
+use cymule_runtime::{
+    PluginHost, PluginRequest, PluginResponse, RuntimeError, RuntimeResult, validate_strict_json,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use tempfile::{Builder, TempDir};
 
@@ -45,6 +49,11 @@ pub struct ProcessExecutorConfig {
     pub message_limit: usize,
     /// Maximum total bytes captured from `working_directory`.
     pub closure_limit: usize,
+    /// Process-local cancellation authority installed by the owning Engine.
+    ///
+    /// The flag is deliberately excluded from the immutable execution-binding
+    /// identity: it controls one host process lifetime, not program meaning.
+    pub cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl ProcessExecutorConfig {
@@ -64,6 +73,7 @@ impl ProcessExecutorConfig {
             timeout: Duration::from_mins(1),
             message_limit: DEFAULT_PROCESS_MESSAGE_LIMIT,
             closure_limit: DEFAULT_PROCESS_CLOSURE_LIMIT,
+            cancellation: None,
         }
     }
 
@@ -232,6 +242,12 @@ impl ProcessExecutor {
     pub fn invoke_json<Q: Serialize, R: DeserializeOwned>(&self, request: &Q) -> RuntimeResult<R> {
         let input = serde_json::to_vec(request)?;
         let output = self.invoke_bytes(&input, false)?;
+        validate_strict_json(&output).map_err(|_| {
+            RuntimeError::substrate(
+                "invalid_process_response",
+                "sealed process returned JSON outside the shared exact domain",
+            )
+        })?;
         decode_json(&output).map_err(|_| {
             RuntimeError::substrate(
                 "invalid_process_response",
@@ -243,6 +259,13 @@ impl ProcessExecutor {
     fn invoke_process(&self, request: &PluginRequest) -> RuntimeResult<PluginResponse> {
         let input = serde_json::to_vec(request)?;
         let output = self.invoke_bytes(&input, is_dispatch(request))?;
+        validate_strict_json(&output).map_err(|_| {
+            post_start_failure(
+                request,
+                "invalid_plugin_response",
+                "process plugin returned JSON outside the shared exact domain",
+            )
+        })?;
         decode_json(&output).map_err(|_| {
             post_start_failure(
                 request,
@@ -321,6 +344,19 @@ impl ProcessExecutor {
         let mut group_closed = false;
 
         loop {
+            if self
+                .config
+                .cancellation
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+            {
+                terminate_process_tree(&mut child, process_group);
+                return Err(process_failure(
+                    ambiguous_world_effect,
+                    "process_invocation_cancelled",
+                    "the owning Engine cancelled the process occurrence",
+                ));
+            }
             if Instant::now() >= deadline {
                 terminate_process_tree(&mut child, process_group);
                 let _ = read_available(&mut stdout, &mut stdout_bytes, limit);

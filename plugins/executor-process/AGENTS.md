@@ -33,3 +33,6 @@
   plugins.
 - Adjacent closed provider protocols may reuse the same sealed, bounded JSON
   process primitive without widening `cymule.plugin/2`.
+- The owning Engine may install a process-local cancellation flag. Cancellation
+  terminates and reaps the occurrence process group; the flag is lifecycle
+  control and is excluded from the immutable execution-binding identity.

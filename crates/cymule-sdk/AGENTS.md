@@ -46,3 +46,6 @@
   omits executors for queries, and forwards CLI timeout and cancellation.
 - CLI cancellation terminates the isolated Engine process group before reaping
   the direct child so provider descendants cannot retain transport pipes.
+- All stdin/stdout/stderr work runs concurrently with the same absolute
+  deadline. Nonzero exit, malformed output, or missing output after a mutating
+  request becomes `unknown_world_outcome` with reconciliation disposition.

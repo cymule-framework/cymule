@@ -1633,7 +1633,11 @@ class CliEngine:
                 break
             time.sleep(0.01)
         if interruption is not None:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
         process.wait()
         for worker in workers:
             worker.join()
@@ -1642,18 +1646,20 @@ class CliEngine:
         if interruption is not None:
             raise _interrupted_error(request, interruption)
         if process.returncode != 0:
-            raise _transport_error(
-                "engine_process_failed",
-                f"engine exited without a protocol response (status {process.returncode})",
-            )
+            raise _response_loss_error(request, "engine_process_failed")
         stdout = streams.get("stdout")
         if not isinstance(stdout, bytes) or len(stdout) > 16 * 1024 * 1024:
-            raise _transport_error("invalid_engine_response", "Engine stdout was unavailable or oversized")
+            raise _response_loss_error(request, "invalid_engine_response")
         try:
             envelope = _strict_json_loads(stdout.decode())
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-            raise _transport_error("invalid_engine_response", str(error)) from error
-        _validate_engine_envelope(envelope)
+            raise _response_loss_error(request, "invalid_engine_response") from error
+        try:
+            _validate_engine_envelope(envelope)
+        except EngineError as error:
+            if error.failure.get("category") == "transport_failure":
+                raise _response_loss_error(request, "invalid_engine_response") from error
+            raise
         if envelope.get("engine_protocol") != ENGINE_PROTOCOL_VERSION:
             raise EngineError(
                 {
@@ -1776,6 +1782,24 @@ def _interrupted_error(request: dict[str, Any], kind: str) -> EngineError:
     )
 
 
+def _response_loss_error(request: dict[str, Any], code: str) -> EngineError:
+    mutating = request.get("type") in {"run", "execute_live_evolution"} or (
+        request.get("type") == "execute_durable"
+        and not str(request.get("command", {}).get("type", "")).startswith("query_")
+    )
+    if mutating:
+        return EngineError(
+            {
+                "category": "unknown_world_outcome",
+                "phase": "transport",
+                "code": code,
+                "message": "the Engine response was unavailable after a mutating request began",
+                "retry_disposition": "reconcile",
+            }
+        )
+    return _transport_error(code, "the Engine response was unavailable")
+
+
 _MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
 
 
@@ -1893,6 +1917,12 @@ def _validate_success_response(value: object) -> None:
         raise _transport_error("invalid_engine_response", "success response fields are not closed")
     if value["type"] == "sealed":
         _validate_sealed_plan(value["plan"])
+    elif value["type"] == "sealed_resource":
+        _validate_resource_handle(value["resource"])
+    elif value["type"] == "verified_wait_activation":
+        _validate_wait_activation_response(value["activation"])
+    elif value["type"] == "verified_durable_command":
+        _validate_durable_command_response(value["command"])
     if value["type"] == "durable_executed":
         _validate_durable_response(value["response"])
     if value["type"] == "live_evolution_executed":
@@ -1904,6 +1934,67 @@ def _validate_success_response(value: object) -> None:
         _validate_evolution_command(value["command"])
     elif value["type"] == "verified_live_evolution_command":
         _validate_live_evolution_command(value["command"])
+
+
+def _validate_resource_handle(value: object) -> None:
+    resource = _require_closed_subset(
+        value,
+        {"resource_id", "resource_version", "shape", "media_type", "integrity"},
+        {"inline", "manifest", "annotations"},
+        "Resource Handle",
+    )
+    if (
+        resource["resource_version"] != "cymule.resource/2"
+        or not isinstance(resource["resource_id"], str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", resource["resource_id"]) is None
+        or resource["shape"] not in {"inline", "object", "collection", "directory", "snapshot"}
+        or not _is_nonempty_string(resource["media_type"])
+        or not isinstance(resource["integrity"], dict)
+    ):
+        raise _transport_error("invalid_engine_response", "Resource Handle fields are invalid")
+    integrity = resource["integrity"]
+    expected = {
+        "inline": {"kind"}, "content": {"kind", "digest", "size"},
+        "version": {"kind", "authority", "version"}, "live": {"kind", "identity"},
+    }.get(integrity.get("kind"))
+    if expected is None or set(integrity) != expected:
+        raise _transport_error("invalid_engine_response", "Resource integrity is not closed")
+    if resource["shape"] == "inline" and not isinstance(resource.get("inline"), dict):
+        raise _transport_error("invalid_engine_response", "inline Resource data is missing")
+
+
+def _validate_wait_activation_response(value: object) -> None:
+    activation = _require_closed_record(value, {"activation_version", "activation_id", "source", "wait_ids", "result"}, "wait activation")
+    if activation["activation_version"] != "cymule.wait-activation/1":
+        raise _transport_error("invalid_engine_response", "wait activation version is invalid")
+    _require_strings(activation, {"activation_id"}); _require_string_list(activation["wait_ids"], "wait targets"); _validate_artifact_ref(activation["result"])
+    source = activation["source"]
+    expected = {"signal": {"kind", "key"}, "timer": {"kind", "timer_id"}}.get(source.get("kind") if isinstance(source, dict) else None)
+    if expected is None or set(source) != expected:
+        raise _transport_error("invalid_engine_response", "wait activation source is not closed")
+
+
+def _validate_durable_command_response(value: object) -> None:
+    if not isinstance(value, dict) or value.get("control_version") != "cymule.durable-control/1":
+        raise _transport_error("invalid_engine_response", "durable command is invalid")
+    expected = {
+        "start_run": {"type", "control_version", "run_id", "candidate", "input"},
+        "resume_run": {"type", "control_version", "run_id"},
+        "activate_wait": {"type", "control_version", "activation_id", "source", "wait_ids", "value"},
+        "release_effect": {"type", "control_version", "intent_id"},
+        "query_run": {"type", "control_version", "query_id", "run_id"},
+        "query_domain": {"type", "control_version", "query_id"},
+    }.get(value.get("type"))
+    if expected is None or set(value) != expected:
+        raise _transport_error("invalid_engine_response", "durable command is not closed")
+    if value["type"] == "activate_wait":
+        _require_strings(value, {"activation_id"}); _require_string_list(value["wait_ids"], "wait targets")
+
+
+def _require_closed_subset(value: object, required: set[str], optional: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not required.issubset(value) or not set(value).issubset(required | optional):
+        raise _transport_error("invalid_engine_response", f"{label} fields are not closed")
+    return value
 
 
 def _validate_execution_outcome(value: object) -> None:
@@ -2058,8 +2149,9 @@ def _validate_live_evolution_response(value: object) -> None:
         _require_strings(edge, {"edge_id", "from_plan", "to_plan"}); _validate_artifact_ref(edge["evidence"])
     elif kind == "occurrence_selected": _require_strings(response, {"plan_id"})
     elif kind == "migrated":
-        receipt = _require_closed_record(response["receipt"], {"migration_id", "run_id", "from_plan", "to_plan", "safe_point_id", "source_epoch", "target_epoch", "source_binding", "target_binding", "adapter_id", "adapter_revision", "from_schema", "to_schema", "input_state", "output_state", "evidence"}, "migration receipt")
+        receipt = _require_closed_record(response["receipt"], {"migration_id", "run_id", "from_plan", "to_plan", "plan_edge_id", "compatibility_id", "safe_point_id", "source_epoch", "target_epoch", "source_binding", "target_binding", "adapter_id", "adapter_revision", "from_schema", "to_schema", "input_state", "output_state", "target_continuation", "evidence"}, "migration receipt")
         for field in ("source_binding", "target_binding", "input_state", "output_state", "evidence"): _validate_artifact_ref(receipt[field])
+        _validate_migration_continuation(receipt["target_continuation"])
     elif kind == "restart_authorized":
         receipt = _require_closed_record(response["receipt"], {"request", "target_plan"}, "restart receipt"); _validate_sealed_plan(receipt["target_plan"])
     elif kind == "shadow_recorded":

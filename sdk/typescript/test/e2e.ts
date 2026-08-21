@@ -17,6 +17,7 @@ import {
   VirtualSchedulingControlBuilder,
   VirtualWorkControlBuilder,
   WaitActivationBuilder,
+  directoryStore,
   type EffectProfile,
   type PlanCandidate,
 } from "../src/index.js";
@@ -28,6 +29,21 @@ const profile: EffectProfile = {
   keyed_idempotency: true,
   irreversible: false,
 };
+
+test("TypeScript classifies mutating Engine response loss as unknown", () => {
+  const engine = new CliEngine(
+    join(process.cwd(), "..", "..", "tests", "fixtures", "response-loss-engine"),
+  );
+  assert.throws(
+    () => engine.executeDurable(
+      { store: directoryStore("/tmp/cymule-response-loss") },
+      DurableControlBuilder.resumeRun("run:response-loss"),
+    ),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "unknown_world_outcome"
+      && error.failure.retry_disposition === "reconcile",
+  );
+});
 
 test("TypeScript Engine ingress rejects duplicate JSON object members", () => {
   const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-"));
