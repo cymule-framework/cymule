@@ -10,8 +10,8 @@ test fixture disguised as a product example.
 - Use provider-neutral Cymule contracts in campaign code. SQLite, the local
   filesystem, and the child process are replaceable local adapters selected by
   this example.
-- Every claimed case must retain its exact linked Plan ID as the occurrence
-  binding. Evolution changes only future claims.
+- Every claimed case must retain its exact linked Plan ID separately from its
+  immutable execution-binding Artifact. Evolution changes only future claims.
 - Bind the subject and scorer as distinct runtime services with their exact
   capability properties, even when one executable implements both operations.
   The shared binary digest identifies implementation bytes; it does not replace
@@ -28,9 +28,9 @@ test fixture disguised as a product example.
   child processes, verify every phase before printing success, require no
   credentials or network services, and leave its state available for inspection.
 - The external process-kill test is Unix-only and must use a replaceable plugin
-  to create an observable window, a read-only status path, logical lease expiry,
-  and terminal identity checks. Do not add sleeps or kill hooks to semantic
-  production code.
+  to publish an exact barrier after retained progress, a read-only status path,
+  logical lease expiry, and terminal identity checks. Do not add timing races or
+  kill hooks to semantic production code.
 
 ## Validation
 

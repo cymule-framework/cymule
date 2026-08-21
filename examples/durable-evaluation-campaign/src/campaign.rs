@@ -5,8 +5,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cymule_core::{Machine, canonical_bytes, content_id, sha256_bytes};
-use cymule_durable::{DurableCoordinator, JournalBatch, JournalRecord};
+use cymule_core::{
+    ArtifactRef, COMMAND_VERSION, Command, CommandEnvelope, CommandReceiptStatus, Machine,
+    ROOT_SCOPE_ID, canonical_bytes, content_id, sha256_bytes,
+};
+use cymule_durable::{
+    Continuation, ContinuationStatus, DurableCoordinator, FrameState, JournalBatch, JournalRecord,
+};
 use cymule_evolution::{
     DurableLiveEvolutionController, LiveEvolutionController, LivePublicationCommand,
     LiveVirtualClaimCommand, RolloutMode,
@@ -202,12 +207,13 @@ struct CampaignMetadata {
 pub fn run(options: &CampaignOptions) -> CampaignResult<CampaignRun> {
     validate_options(options)?;
     fs::create_dir_all(&options.state_dir)?;
-    let (mut coordinator, mut machine) = open_coordinator(options)?;
+    let mut coordinator = open_coordinator(options)?;
     let mut resource_store =
         FsResourceStore::open(options.state_dir.join("resources"), RESOURCE_BINDING)?;
-    let (metadata, cases) =
-        load_or_initialize_suite(options, &mut coordinator, &mut machine, &mut resource_store)?;
+    let (metadata, metadata_artifact, cases) =
+        load_or_initialize_suite(options, &mut coordinator, &mut resource_store)?;
     let mut evolution = initialize_evolution(&mut coordinator)?;
+    ensure_campaign_run(&mut coordinator, &evolution, options, &metadata_artifact)?;
     let mut scheduler =
         DurableVirtualController::load(&coordinator, VIRTUAL_JOURNAL, frontier_limits())?;
     if !scheduler.snapshot().regions.contains_key(REGION_ID) {
@@ -243,7 +249,7 @@ pub fn run(options: &CampaignOptions) -> CampaignResult<CampaignRun> {
     let mut committed_this_process = 0_usize;
     loop {
         let now = logical_now(options)?;
-        recover_expired_claims(&mut coordinator, &mut scheduler, &mut machine, options, now)?;
+        recover_expired_claims(&mut coordinator, &mut scheduler, options, now)?;
 
         let claim = claim_next(
             &mut coordinator,
@@ -294,7 +300,6 @@ pub fn run(options: &CampaignOptions) -> CampaignResult<CampaignRun> {
         execute_claim(
             &mut coordinator,
             &mut scheduler,
-            &mut machine,
             &evolution,
             options,
             &claim,
@@ -318,10 +323,10 @@ pub fn run(options: &CampaignOptions) -> CampaignResult<CampaignRun> {
 /// Verify retained resources and project current campaign status without work.
 pub fn status(options: &CampaignOptions) -> CampaignResult<CampaignReport> {
     validate_options(options)?;
-    let (coordinator, _machine) = open_read_only_coordinator(options)?;
+    let coordinator = open_read_only_coordinator(options)?;
     let mut resource_store =
         FsResourceStore::open(options.state_dir.join("resources"), RESOURCE_BINDING)?;
-    let metadata = retained_metadata(&coordinator)?;
+    let (metadata, _) = retained_metadata(&coordinator)?;
     verify_metadata_run(&metadata, &options.run_id)?;
     verify_suite_resource(&metadata.suite, &mut resource_store)?;
     verify_requested_suite(options.suite_path.as_deref(), &metadata.suite)?;
@@ -334,7 +339,7 @@ pub fn status(options: &CampaignOptions) -> CampaignResult<CampaignReport> {
 /// Publish a compatible or deliberately incompatible scorer revision.
 pub fn evolve(options: &CampaignOptions, policy: &str) -> CampaignResult<EvolutionReport> {
     validate_options(options)?;
-    let (mut coordinator, _machine) = open_existing_coordinator(options)?;
+    let mut coordinator = open_existing_coordinator(options)?;
     let mut evolution = DurableLiveEvolutionController::load(&coordinator, LIVE_EVOLUTION_JOURNAL)?;
     let previous = current_plan(&evolution)?;
     let compatible = match policy {
@@ -374,9 +379,7 @@ pub fn evolve(options: &CampaignOptions, policy: &str) -> CampaignResult<Evoluti
     })
 }
 
-fn open_coordinator(
-    options: &CampaignOptions,
-) -> CampaignResult<(DurableCoordinator<SqliteStore>, Machine)> {
+fn open_coordinator(options: &CampaignOptions) -> CampaignResult<DurableCoordinator<SqliteStore>> {
     let store = SqliteStore::open(
         options.state_dir.join("campaign.sqlite"),
         format!("campaign:{}", options.run_id),
@@ -385,13 +388,13 @@ fn open_coordinator(
     if coordinator.revision().is_none() {
         coordinator.initialize_in_place(&Machine::new())?;
     }
-    let machine = coordinator.restore_machine()?;
-    Ok((coordinator, machine))
+    coordinator.restore_machine()?;
+    Ok(coordinator)
 }
 
 fn open_existing_coordinator(
     options: &CampaignOptions,
-) -> CampaignResult<(DurableCoordinator<SqliteStore>, Machine)> {
+) -> CampaignResult<DurableCoordinator<SqliteStore>> {
     let store = SqliteStore::open(
         options.state_dir.join("campaign.sqlite"),
         format!("campaign:{}", options.run_id),
@@ -400,13 +403,13 @@ fn open_existing_coordinator(
     if coordinator.revision().is_none() {
         return Err("campaign has not been initialized".into());
     }
-    let machine = coordinator.restore_machine()?;
-    Ok((coordinator, machine))
+    coordinator.restore_machine()?;
+    Ok(coordinator)
 }
 
 fn open_read_only_coordinator(
     options: &CampaignOptions,
-) -> CampaignResult<(DurableCoordinator<SqliteStore>, Machine)> {
+) -> CampaignResult<DurableCoordinator<SqliteStore>> {
     let store = SqliteStore::open_read_only(
         options.state_dir.join("campaign.sqlite"),
         format!("campaign:{}", options.run_id),
@@ -415,17 +418,23 @@ fn open_read_only_coordinator(
     if coordinator.revision().is_none() {
         return Err("campaign has not been initialized".into());
     }
-    let machine = coordinator.restore_machine()?;
-    Ok((coordinator, machine))
+    coordinator.restore_machine()?;
+    Ok(coordinator)
 }
 
 fn load_or_initialize_suite(
     options: &CampaignOptions,
     coordinator: &mut DurableCoordinator<SqliteStore>,
-    machine: &mut Machine,
     resource_store: &mut FsResourceStore,
-) -> CampaignResult<(CampaignMetadata, Vec<EvaluationCase>)> {
-    if let Ok(metadata) = retained_metadata(coordinator) {
+) -> CampaignResult<(CampaignMetadata, ArtifactRef, Vec<EvaluationCase>)> {
+    let has_retained_metadata = coordinator
+        .state()?
+        .machine
+        .artifacts
+        .iter()
+        .any(|record| record.reference.kind == SUITE_ARTIFACT_KIND);
+    if has_retained_metadata {
+        let (metadata, metadata_artifact) = retained_metadata(coordinator)?;
         verify_metadata_run(&metadata, &options.run_id)?;
         verify_requested_suite(options.suite_path.as_deref(), &metadata.suite)?;
         let bytes = verify_suite_resource(&metadata.suite, resource_store)?;
@@ -433,7 +442,7 @@ fn load_or_initialize_suite(
         if cases.len() != metadata.case_count {
             return Err("retained suite case count changed".into());
         }
-        return Ok((metadata, cases));
+        return Ok((metadata, metadata_artifact, cases));
     }
     let path = options
         .suite_path
@@ -448,6 +457,7 @@ fn load_or_initialize_suite(
         suite,
         case_count: cases.len(),
     };
+    let mut machine = coordinator.restore_machine()?;
     let metadata_artifact =
         machine.put_artifact(SUITE_ARTIFACT_KIND, canonical_bytes(&metadata)?)?;
     let record = JournalRecord::new(
@@ -456,19 +466,19 @@ fn load_or_initialize_suite(
         serde_json::to_value(&metadata)?,
     )?;
     coordinator.checkpoint_artifact_journals(
-        machine,
-        &BTreeSet::from([metadata_artifact]),
+        &machine,
+        &BTreeSet::from([metadata_artifact.clone()]),
         &[JournalBatch {
             journal_id: CAMPAIGN_METADATA_JOURNAL.to_owned(),
             records: vec![record],
         }],
     )?;
-    Ok((metadata, cases))
+    Ok((metadata, metadata_artifact, cases))
 }
 
 fn retained_metadata(
     coordinator: &DurableCoordinator<SqliteStore>,
-) -> CampaignResult<CampaignMetadata> {
+) -> CampaignResult<(CampaignMetadata, ArtifactRef)> {
     let matches: Vec<_> = coordinator
         .state()?
         .machine
@@ -484,7 +494,7 @@ fn retained_metadata(
         return Err("unsupported campaign metadata version".into());
     }
     metadata.suite.verify()?;
-    Ok(metadata)
+    Ok((metadata, record.reference.clone()))
 }
 
 fn verify_metadata_run(metadata: &CampaignMetadata, run_id: &str) -> CampaignResult<()> {
@@ -559,6 +569,159 @@ fn initialize_evolution(
     Ok(controller)
 }
 
+fn ensure_campaign_run(
+    coordinator: &mut DurableCoordinator<SqliteStore>,
+    evolution: &LiveEvolutionController,
+    options: &CampaignOptions,
+    metadata_artifact: &ArtifactRef,
+) -> CampaignResult<()> {
+    if let Some(continuation) = coordinator
+        .state()?
+        .continuations
+        .get(&options.run_id)
+        .cloned()
+    {
+        if continuation.frames.first().map(|frame| &frame.input) != Some(metadata_artifact)
+            || evolution
+                .historical_link_for(TEMPLATE_ID, &continuation.plan_id)
+                .is_none()
+        {
+            return Err("campaign Run does not match its retained suite or Plan history".into());
+        }
+        return Ok(());
+    }
+
+    let linked = current_plan(evolution)?;
+    let binding = campaign_execution_binding(options)?;
+    let mut machine = coordinator.restore_machine()?;
+    machine.insert_plan(linked.plan.clone())?;
+    let binding_ref = machine.put_artifact(
+        cymule_runtime::EXECUTION_BINDING_VERSION,
+        binding.canonical_bytes()?,
+    )?;
+    if binding_ref != binding.artifact_ref()? {
+        return Err("campaign execution binding Artifact identity changed".into());
+    }
+    submit_machine_command(
+        &mut machine,
+        &options.run_id,
+        format!("{}:start", options.run_id),
+        Command::StartRun {
+            plan_id: linked.plan.plan_id.clone(),
+            binding_context: binding_ref.artifact_id.clone(),
+        },
+    )?;
+    submit_machine_command(
+        &mut machine,
+        &options.run_id,
+        format!("{}:begin-attempt:0", options.run_id),
+        Command::BeginAttempt {
+            attempt_id: format!("attempt:{}:0", options.run_id),
+            continuation_id: format!("continuation:{}", options.run_id),
+            occurrence_binding: binding_ref.artifact_id.clone(),
+            epoch: 0,
+        },
+    )?;
+    coordinator.create_run(
+        &machine,
+        Continuation {
+            run_id: options.run_id.clone(),
+            plan_id: linked.plan.plan_id,
+            binding_context: binding_ref.artifact_id,
+            frames: vec![FrameState {
+                definition_id: linked.plan.candidate.entry.clone(),
+                invocation_id: linked.plan.candidate.entry,
+                invocation_path: Vec::new(),
+                scope_id: ROOT_SCOPE_ID.to_owned(),
+                input: metadata_artifact.clone(),
+                region_path: Vec::new(),
+                next_step: 0,
+                locals: BTreeMap::new(),
+            }],
+            state: Some(metadata_artifact.clone()),
+            wait_set: BTreeSet::new(),
+            scope_stack: vec![ROOT_SCOPE_ID.to_owned()],
+            effect_obligations: BTreeSet::new(),
+            authority_leases: BTreeSet::new(),
+            budget: BTreeMap::new(),
+            causal_frontier: BTreeSet::new(),
+            epoch: 0,
+            status: ContinuationStatus::Running,
+        },
+    )?;
+    retain_execution_binding(coordinator, &binding)?;
+    Ok(())
+}
+
+fn submit_machine_command(
+    machine: &mut Machine,
+    run_id: &str,
+    command_id: String,
+    command: Command,
+) -> CampaignResult<()> {
+    let expected_precondition = if matches!(command, Command::StartRun { .. }) {
+        None
+    } else {
+        Some(
+            machine
+                .projection()
+                .runs
+                .get(run_id)
+                .ok_or("campaign Run disappeared before command admission")?
+                .precondition_token(),
+        )
+    };
+    let receipt = machine.submit(CommandEnvelope {
+        command_version: COMMAND_VERSION.to_owned(),
+        command_id,
+        actor: "actor:durable-evaluation-campaign".to_owned(),
+        run_id: run_id.to_owned(),
+        expected_precondition,
+        command,
+    })?;
+    if receipt.status != CommandReceiptStatus::Applied {
+        return Err("campaign Machine command did not apply".into());
+    }
+    Ok(())
+}
+
+fn retain_execution_binding(
+    coordinator: &mut DurableCoordinator<SqliteStore>,
+    binding: &ExecutionBinding,
+) -> CampaignResult<ArtifactRef> {
+    let binding_ref = binding.artifact_ref()?;
+    let record = JournalRecord::new(
+        format!("binding:{}", binding_ref.artifact_id),
+        "example.execution-binding/1",
+        serde_json::to_value(&binding_ref)?,
+    )?;
+    let batch = JournalBatch {
+        journal_id: EXECUTION_BINDING_JOURNAL.to_owned(),
+        records: vec![record],
+    };
+    let mut machine = coordinator.restore_machine()?;
+    if let Some(existing) = machine.artifact(&binding_ref) {
+        if existing.bytes != binding.canonical_bytes()? {
+            return Err("retained execution binding bytes changed".into());
+        }
+        coordinator.checkpoint_journals(&[batch])?;
+        return Ok(binding_ref);
+    }
+    let retained = machine.put_artifact(
+        cymule_runtime::EXECUTION_BINDING_VERSION,
+        binding.canonical_bytes()?,
+    )?;
+    if retained != binding_ref {
+        return Err("execution binding Artifact identity changed".into());
+    }
+    coordinator.checkpoint_artifact_journals(
+        &machine,
+        &BTreeSet::from([binding_ref.clone()]),
+        &[batch],
+    )?;
+    Ok(binding_ref)
+}
+
 fn claim_next(
     coordinator: &mut DurableCoordinator<SqliteStore>,
     scheduler: &mut cymule_virtual::VirtualScheduler,
@@ -587,28 +750,7 @@ fn claim_next(
     )?;
     let selection_id = stable_id("plan-selection", &command_id)?;
     let binding = campaign_execution_binding(options)?;
-    let binding_ref = binding.artifact_ref()?;
-    let mut machine = coordinator.restore_machine()?;
-    let retained = machine.put_artifact(
-        cymule_runtime::EXECUTION_BINDING_VERSION,
-        binding.canonical_bytes()?,
-    )?;
-    if retained != binding_ref {
-        return Err("execution binding Artifact identity changed".into());
-    }
-    let record = JournalRecord::new(
-        format!("binding:{}", binding_ref.artifact_id),
-        "example.execution-binding/1",
-        serde_json::to_value(&binding_ref)?,
-    )?;
-    coordinator.checkpoint_artifact_journals(
-        &machine,
-        &BTreeSet::from([binding_ref.clone()]),
-        &[JournalBatch {
-            journal_id: EXECUTION_BINDING_JOURNAL.to_owned(),
-            records: vec![record],
-        }],
-    )?;
+    let binding_ref = retain_execution_binding(coordinator, &binding)?;
     let receipt = DurableLiveEvolutionController::claim_virtual_work_and_checkpoint(
         coordinator,
         evolution,
@@ -636,7 +778,6 @@ fn claim_next(
 fn recover_expired_claims(
     coordinator: &mut DurableCoordinator<SqliteStore>,
     scheduler: &mut cymule_virtual::VirtualScheduler,
-    machine: &mut Machine,
     options: &CampaignOptions,
     now: u64,
 ) -> CampaignResult<()> {
@@ -653,6 +794,7 @@ fn recover_expired_claims(
         )
         .into());
     }
+    let mut machine = coordinator.restore_machine()?;
     let error = machine.put_artifact(
         ERROR_ARTIFACT_KIND,
         format!(
@@ -677,7 +819,7 @@ fn recover_expired_claims(
     DurableVirtualController::recover_expired_command_and_checkpoint(
         coordinator,
         scheduler,
-        machine,
+        &machine,
         &command,
         VIRTUAL_JOURNAL,
     )?;
@@ -687,7 +829,6 @@ fn recover_expired_claims(
 fn execute_claim(
     coordinator: &mut DurableCoordinator<SqliteStore>,
     scheduler: &mut cymule_virtual::VirtualScheduler,
-    machine: &mut Machine,
     evolution: &LiveEvolutionController,
     options: &CampaignOptions,
     claim: &ClaimedWork,
@@ -735,6 +876,7 @@ fn execute_claim(
         )
         .and_then(cymule_runtime::ExecutionOutcome::into_completed);
     let now = logical_now(options)?;
+    let mut machine = coordinator.restore_machine()?;
     let resolution = match execution {
         Ok(result) => {
             let output: CaseOutput = serde_json::from_value(result.value)?;
@@ -759,7 +901,7 @@ fn execute_claim(
     DurableVirtualController::resolve_command_and_checkpoint(
         coordinator,
         scheduler,
-        machine,
+        &machine,
         &command,
         VIRTUAL_JOURNAL,
     )?;
@@ -875,7 +1017,7 @@ fn build_report(
         cases.push(CaseReport {
             case_id,
             occurrence_id: occurrence.occurrence_id.clone(),
-            plan_id: occurrence.occurrence_binding.clone(),
+            plan_id: occurrence.plan_id.clone(),
             state,
             output,
             error,

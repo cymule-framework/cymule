@@ -10,8 +10,9 @@ than a happy-path demo. The assertions below are backed by
   its size and digest before status or execution.
 - Every case ID is unique, printable, and bounded. Its Work ID and payload
   reference are deterministically derived from the pinned canonical case.
-- A claim records the exact immutable linked Plan before the process plugin is
-  invoked. An evolution command cannot reinterpret an already admitted case.
+- A claim records the exact immutable linked Plan and execution-binding
+  Artifact as separate identities before the process plugin is invoked. An
+  evolution command cannot reinterpret an already admitted case.
 - Command, checkpoint, revision, occurrence, Plan, Resource, and Artifact
   identities occupy separate domain-separated namespaces.
 
@@ -23,7 +24,7 @@ than a happy-path demo. The assertions below are backed by
 | After claim CAS, before plugin | one running fenced occurrence | no stealing before expiry; explicit retry after expiry |
 | After pure plugin, before result CAS | running occurrence, outcome unrecorded | the pure subject may be invoked again after fenced recovery |
 | After result CAS, before caller sees output | terminal occurrence and Artifact | report replays the retained result; no new occurrence |
-| External process kill during a running campaign | last complete CAS plus at most one active claim | read-only observation remains non-mutating; expiry fences one explicit retry; all cases finish once |
+| External process kill at the exact pre-invocation barrier | three terminal results plus one active claim | read-only observation remains non-mutating; expiry fences one explicit retry; all cases finish once |
 | During compatible publication | old or new complete registry checkpoint | future work uses one verified immutable head |
 | After compatible publication | earlier occurrences retain old Plan | later claims pin the new Plan |
 

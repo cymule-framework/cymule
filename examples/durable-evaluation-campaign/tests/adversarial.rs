@@ -61,6 +61,27 @@ fn report(output: &Output) -> CampaignReport {
     serde_json::from_slice(&output.stdout).expect("campaign report decodes")
 }
 
+#[cfg(unix)]
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"))
+}
+
+#[cfg(unix)]
+fn wait_for_content(path: &Path, expected: &[u8], child: &mut std::process::Child) {
+    for _ in 0..24_000 {
+        match fs::read(path) {
+            Ok(bytes) if bytes == expected => return,
+            Ok(_) | Err(_) => {}
+        }
+        assert!(
+            child.try_wait().expect("campaign polls").is_none(),
+            "campaign completed before the exact crash barrier was published"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("exact crash barrier was not published");
+}
+
 #[test]
 fn campaign_completes_and_reopens_without_new_occurrences() {
     let state = TestDir::new("complete");
@@ -320,19 +341,60 @@ fn external_process_kill_reopens_to_a_valid_frontier_and_completes_once() {
     }
     fs::write(&suite, bytes).expect("large suite writes");
     let suite_arg = suite.to_str().expect("UTF-8 path");
-    let slow_plugin = state.path().join("slow-plugin.sh");
-    let quoted_binary = format!("'{}'", binary().replace('\'', "'\"'\"'"));
+    let barrier_plugin = state.path().join("barrier-plugin.sh");
+    let invocation_count = state.path().join("plugin-invocations");
+    let barrier = state.path().join("plugin-barrier");
+    let plugin_pid = state.path().join("plugin-pid");
+    let gate = state.path().join("plugin-gate");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&gate)
+            .status()
+            .expect("mkfifo runs")
+            .success(),
+        "plugin gate creates"
+    );
     fs::write(
-        &slow_plugin,
-        format!("#!/bin/sh\n/bin/sleep 0.05\nexec {quoted_binary} __plugin\n"),
+        &barrier_plugin,
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "set -eu\n",
+                "count_file={}\n",
+                "barrier_file={}\n",
+                "pid_file={}\n",
+                "gate={}\n",
+                "count=0\n",
+                "if [ -f \"$count_file\" ]; then IFS= read -r count < \"$count_file\"; fi\n",
+                "count=$((count + 1))\n",
+                "count_tmp=\"$count_file.$$\"\n",
+                "printf '%s\\n' \"$count\" > \"$count_tmp\"\n",
+                "mv \"$count_tmp\" \"$count_file\"\n",
+                "if [ \"$count\" -eq 24 ]; then\n",
+                "  pid_tmp=\"$pid_file.$$\"\n",
+                "  printf '%s\\n' \"$$\" > \"$pid_tmp\"\n",
+                "  mv \"$pid_tmp\" \"$pid_file\"\n",
+                "  barrier_tmp=\"$barrier_file.$$\"\n",
+                "  printf 'before-plugin:24\\n' > \"$barrier_tmp\"\n",
+                "  mv \"$barrier_tmp\" \"$barrier_file\"\n",
+                "  IFS= read -r _ < \"$gate\"\n",
+                "fi\n",
+                "exec {} __plugin\n"
+            ),
+            shell_quote(&invocation_count),
+            shell_quote(&barrier),
+            shell_quote(&plugin_pid),
+            shell_quote(&gate),
+            shell_quote(Path::new(binary())),
+        ),
     )
-    .expect("slow plugin wrapper writes");
-    let mut permissions = fs::metadata(&slow_plugin)
-        .expect("slow plugin metadata reads")
+    .expect("barrier plugin wrapper writes");
+    let mut permissions = fs::metadata(&barrier_plugin)
+        .expect("barrier plugin metadata reads")
         .permissions();
     permissions.set_mode(0o755);
-    fs::set_permissions(&slow_plugin, permissions).expect("slow plugin becomes executable");
-    let slow_plugin_arg = slow_plugin.to_str().expect("UTF-8 path");
+    fs::set_permissions(&barrier_plugin, permissions).expect("barrier plugin becomes executable");
+    let barrier_plugin_arg = barrier_plugin.to_str().expect("UTF-8 path");
     let mut running = Command::new(binary())
         .args([
             "run",
@@ -345,7 +407,7 @@ fn external_process_kill_reopens_to_a_valid_frontier_and_completes_once() {
             "--worker-id",
             "worker:killed",
             "--plugin",
-            slow_plugin_arg,
+            barrier_plugin_arg,
             "--logical-now",
             "10",
             "--lease-ttl",
@@ -356,33 +418,27 @@ fn external_process_kill_reopens_to_a_valid_frontier_and_completes_once() {
         .spawn()
         .expect("campaign process starts");
 
-    let mut before_kill = None;
-    for _ in 0..400 {
-        assert!(
-            running.try_wait().expect("campaign polls").is_none(),
-            "campaign completed before the external kill boundary was observed"
-        );
-        let observed = invoke(&[
-            "status",
-            "--state",
-            state_arg,
-            "--run-id",
-            "run:process-kill",
-        ]);
-        if observed.status.success() {
-            let observed = report(&observed);
-            if observed.succeeded >= 3 {
-                before_kill = Some(observed);
-                running.kill().expect("campaign receives an external kill");
-                let killed = running.wait().expect("killed campaign reaps");
-                assert!(!killed.success());
-                break;
-            }
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-    let before_kill = before_kill.expect("durable progress becomes externally visible");
-    assert!(before_kill.succeeded < CASES);
+    wait_for_content(&barrier, b"before-plugin:24\n", &mut running);
+    let before_kill = report(&invoke(&[
+        "status",
+        "--state",
+        state_arg,
+        "--run-id",
+        "run:process-kill",
+    ]));
+    assert_eq!(before_kill.succeeded, 3);
+    assert_eq!(before_kill.total_occurrences, 4);
+    running.kill().expect("campaign receives an external kill");
+    let killed = running.wait().expect("killed campaign reaps");
+    assert!(!killed.success());
+    let plugin_pid = fs::read_to_string(&plugin_pid)
+        .expect("barrier plugin PID reads")
+        .trim()
+        .parse::<u32>()
+        .expect("barrier plugin PID parses");
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &plugin_pid.to_string()])
+        .status();
 
     let reopened = report(&invoke(&[
         "status",
@@ -391,8 +447,8 @@ fn external_process_kill_reopens_to_a_valid_frontier_and_completes_once() {
         "--run-id",
         "run:process-kill",
     ]));
-    assert!(reopened.succeeded >= before_kill.succeeded);
-    assert!(reopened.succeeded < CASES);
+    assert_eq!(reopened.succeeded, before_kill.succeeded);
+    assert_eq!(reopened.total_occurrences, 4);
     assert_eq!(reopened.failed, 0);
 
     let completed = report(&invoke(&[
@@ -413,8 +469,8 @@ fn external_process_kill_reopens_to_a_valid_frontier_and_completes_once() {
     assert_eq!(completed.succeeded, CASES);
     assert_eq!(completed.failed, 0);
     assert_eq!(completed.cases.len(), CASES);
-    assert!(completed.recovered_attempts <= 1);
-    assert!(matches!(completed.total_occurrences, CASES | 25));
+    assert_eq!(completed.recovered_attempts, 1);
+    assert_eq!(completed.total_occurrences, CASES + 1);
     assert_eq!(
         completed
             .cases

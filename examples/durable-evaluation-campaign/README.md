@@ -224,9 +224,10 @@ after exit with an active claim, refusal to steal an unexpired claim, changed
 suite bytes, retained Resource tampering, duplicate case IDs, unknown fields,
 symlink input, compatible future-only evolution, and incompatible-update
 blocking. A separate Unix black-box test runs a 24-case campaign through a
-protocol-compatible slow process plugin, observes committed progress through a
-read-only SQLite connection, sends an external process kill, reopens authority,
-recovers at most one expired claim, and proves one terminal result per case.
+protocol-compatible barrier plugin, observes exactly three retained results and
+one active claim through a read-only SQLite connection, sends an external
+process kill, reopens authority, recovers that expired claim, and proves one
+terminal result per case.
 See [ADVERSARIAL_REVIEW.md](ADVERSARIAL_REVIEW.md) for the reviewed failure
 model and remaining boundaries.
 
