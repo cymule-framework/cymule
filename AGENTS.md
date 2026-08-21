@@ -209,6 +209,10 @@ Use this precedence order when guidance conflicts:
 - Every external Action is pinned to a full immutable commit. Verification,
   exact-SHA soak, build, test, and archive staging run without OIDC; only a
   protected terminal environment grants the minimal publisher `id-token`.
+- Release bytes are independently rebuilt and closed by two no-OIDC jobs before
+  publication. The terminal OIDC job uploads only those closed bytes through an
+  exact-SHA controller; it never builds, packages, tests, or executes code
+  carried by an artifact. Registry readback runs later without OIDC.
 - The public GitHub repository never stores private-source credentials or a
   mirror controller. Private CI rewrites a public-only snapshot, preserves
   commit metadata, pushes it, and reads back the exact public tip.

@@ -28,6 +28,10 @@
   `id-token: write` only to the terminal registry job; repository verification,
   soak, compilation, tests, and archive staging run in predecessor jobs without
   an OIDC publication identity.
+- Stage and Close are independent no-OIDC builds. Publish consumes only the
+  byte-identical closed artifact and an exact-SHA controller; it never compiles,
+  packages, tests, or executes code delivered inside an artifact. Registry
+  readback and fresh consumers run in a later no-OIDC job.
 - `publish-npm.yml` is the only npm publication authority for both `cymule` and
   `@cymule/sdk`. A local npm command may run `pack --dry-run`, but never
   `publish`.
@@ -59,10 +63,16 @@
   npm packages and every crate in `scripts/crates-release.toml` match the exact
   current tag. It reruns the exact-SHA soak, verifies npm provenance and the
   complete crates.io catalog, and never publishes package bytes or moves a tag.
+  An existing GitHub Release must exactly match tag, title, changelog notes,
+  draft state, and prerelease state; existence alone is not completion.
 - `npm`, `crates-io`, and `release-finalize` environments admit protected
   branches only and require non-self approval. Active main and release-tag
   rulesets prohibit deletion and non-fast-forward mutation, require main status
   checks, and grant no broad administrator or repository-role bypass. Audit the
   live settings with `scripts/verify_github_release_settings.py`.
+- `Required CI` is the sole stable required-status context. It closes the
+  planner and every selected static lane. The default-branch ruleset is strict
+  and grants exactly one always-on bypass to the narrow mirror GitHub App
+  Integration; release tags grant no bypass.
 - Do not add private hosting URLs, internal project IDs, credentials, runner
   names, or private CI metadata under `.github/`.

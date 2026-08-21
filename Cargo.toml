@@ -47,6 +47,7 @@ cymule-evolution = { version = "0.2.0", path = "crates/cymule-evolution" }
 cymule-executor-process = { version = "0.2.0", path = "plugins/executor-process" }
 cymule-resource = { version = "0.2.0", path = "crates/cymule-resource" }
 cymule-runtime = { version = "0.2.0", path = "crates/cymule-runtime" }
+cymule-store-sqlite = { version = "0.2.0", path = "plugins/store-sqlite" }
 cymule-virtual = { version = "0.2.0", path = "crates/cymule-virtual" }
 axum = "0.8.9"
 futures-util = "0.3.34"

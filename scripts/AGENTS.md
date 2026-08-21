@@ -137,12 +137,16 @@
   immediate hard failures.
 - npm and crates release jobs consume archives staged by predecessor jobs that
   have no OIDC identity. Manifests bind every archive digest to the exact
-  verified release SHA; terminal publishers must reproduce or authenticate
-  those bytes before upload and then read registry bytes back.
+  verified release SHA. A separate no-OIDC Close job independently reproduces
+  the complete bytes before terminal upload, and a later no-OIDC job reads
+  registry bytes back. OIDC jobs do not invoke Cargo, package managers beyond
+  the terminal upload itself, compilers, tests, or artifact-carried scripts.
 - `npm_release.py` requires npm tarball SHA-1/SHA-512 equality plus a SLSA v1
-  subject digest and exact `publish-npm.yml@refs/heads/main` Git dependency.
+  subject whose purl and digest match together, plus the exact
+  `publish-npm.yml@refs/heads/main` Git dependency.
   `verify_github_release_settings.py` is the live operator check for repository
-  rulesets, default Actions permissions, and protected release environments.
+  rulesets, strict `Required CI`, the exact mirror Integration bypass, default
+  Actions permissions, and protected release environments.
 - `CYMULE_RELEASE_WORKSPACE` remains an absolute immutable-tag payload root only
   for a reviewed controller executing outside that checkout. It never changes
   which manifest, catalog, source, archive, or Git identity is release authority.

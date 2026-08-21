@@ -29,7 +29,8 @@ force-push workflow. After private verification, the source-side GitLab job
 runs `.gitlab/scripts/publish-public-mirror.sh`. That controller:
 
 1. rewrites a fresh complete source history;
-2. removes `.gitlab-ci.yml` and `.gitlab/` from every public commit;
+2. removes `.gitlab-ci.yml`, `.gitlab/`, and the retired public
+   `.github/workflows/mirror.yml` from every public commit;
 3. preserves author, committer, dates, and messages;
 4. rejects every remaining private host or project reference;
 5. no-ops when the public tip already matches;
@@ -46,16 +47,18 @@ Before dispatching a release, run:
 
 ```sh
 GITHUB_TOKEN=<administration-read-token> \
+CYMULE_GITHUB_MIRROR_INTEGRATION_ID=<github-app-integration-id> \
   python3 scripts/verify_github_release_settings.py
 ```
 
 The verifier requires:
 
 - read-only default Actions permissions and no pull-request approval grant;
-- an active default-branch ruleset with deletion, non-fast-forward, and
-  required-status-check protections;
+- an active exact-default-branch ruleset with deletion, non-fast-forward, and
+  strict `Required CI` status protection;
 - an active `v*` tag ruleset with deletion and non-fast-forward protections;
-- no broad organization-administrator or repository-role bypass; and
+- the exact narrow mirror GitHub App Integration as the default branch's only
+  bypass, and no release-tag bypass; and
 - `npm`, `crates-io`, and `release-finalize` environments restricted to
   protected branches with a required reviewer who cannot self-approve.
 
@@ -90,7 +93,7 @@ run for another SHA is not release evidence.
 ## Least-privilege publication
 
 Every external Action is pinned to a full reviewed commit SHA. Publication is
-split into three authorities:
+split into five authorities:
 
 1. **Verify** has no OIDC permission. It authenticates public main and the tag,
    runs the repository and exact-SHA soak, and carries the verified commit as a
@@ -98,22 +101,29 @@ split into three authorities:
 2. **Stage** has no OIDC permission. It checks out that exact commit, builds and
    tests, and emits short-lived archives plus a manifest binding package name,
    version, digest, and release SHA.
-3. **Publish** runs in a protected environment with `id-token: write`. It
-   downloads only the staged artifact, reauthenticates its manifest, publishes
-   a missing immutable version, and reads registry evidence back.
+3. **Close** has no OIDC permission. It independently rebuilds the exact tag,
+   requires byte-for-byte equality with Stage, and emits the immutable closed
+   artifact consumed by publication.
+4. **Publish** runs in a protected environment with `id-token: write`. It
+   checks out only the exact controller, downloads only the closed artifact,
+   and uploads a missing immutable version. It does not build, test, package,
+   or execute artifact-carried code.
+5. **Verify published** has no OIDC permission. It reads registry bytes and
+   provenance back and performs fresh-consumer compilation.
 
-For npm, the terminal job compares the local SHA-1 and SHA-512 with the registry
-distribution, downloads the tarball independently, and reads the SLSA v1
-attestation. The attestation subject digest, workflow path, `refs/heads/main`,
-repository, and resolved Git commit must all match the staged release. An
-existing version is retained only after the same checks pass.
+For npm, Close independently rebuilds both package names and compares SHA-1,
+SHA-512, and archive bytes. The terminal runs `npm_release.py` only from the
+exact checkout, never from the artifact. Verify published downloads the tarball
+and reads the SLSA v1 attestation. One subject must carry both the expected purl
+and digest; workflow path, `refs/heads/main`, repository, and resolved Git commit
+must also match.
 
-For crates.io, the stage contains every catalog archive. The terminal publisher
-repackages from the exact tag and requires byte equality with the no-OIDC stage
-before `cargo publish`. It follows catalog dependency order, accepts only the
-short-lived crates.io trusted-publisher token, compares existing registry
-checksums, waits for indexing, downloads exact bytes, then compiles a fresh
-registry consumer and installs `cymule-cli`.
+For crates.io, Stage contains every catalog archive and its Cargo Registry Web
+API upload body. Close independently regenerates both and requires byte
+equality. The terminal follows catalog dependency order and sends only those
+closed bodies with the short-lived trusted-publisher token; it never invokes
+Cargo. Verify published compares registry checksums, downloads exact bytes,
+then compiles a fresh registry consumer and installs `cymule-cli`.
 
 The only automatic crates.io retry is its exact new-crate-name 429 response with
 a parseable, bounded server retry time. Authentication failures, malformed
@@ -128,5 +138,6 @@ After both registries are complete, dispatch `finalize-release.yml` from current
 public `main`. It reruns exact-SHA soak, rebuilds both npm tarballs and verifies
 their registry bytes plus provenance, rebuilds every crate archive and compares
 the complete catalog with crates.io, verifies fresh Rust consumers, and only
-then creates the missing GitHub Release. It is idempotent and never publishes
-package bytes or moves a tag.
+then creates the missing GitHub Release. An existing Release is accepted only
+when its tag, title, notes, draft state, and prerelease state match exactly. The
+workflow is idempotent and never publishes package bytes or moves a tag.

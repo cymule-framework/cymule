@@ -437,3 +437,62 @@ jobs:
           name: test-harness-workbench
           path: .cache/test-harness/workbench.json
           if-no-files-found: warn
+
+  required:
+    name: Required CI
+    if: always()
+    needs:
+      - plan
+      - meta
+      - rust-static
+      - rust-semantic
+      - rust-durable
+      - rust-plugins
+      - rust-package
+      - protocol
+      - sdk-rust
+      - sdk-typescript
+      - sdk-python
+      - sdk-go
+      - package-typescript
+      - workbench
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Close every selected verification lane
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          if needs["plan"]["result"] != "success":
+              raise SystemExit("verification planner did not succeed")
+          lanes = {
+              "meta": "meta",
+              "rust-static": "rust_static",
+              "rust-semantic": "rust_semantic",
+              "rust-durable": "rust_durable",
+              "rust-plugins": "rust_plugins",
+              "rust-package": "rust_package",
+              "protocol": "protocol",
+              "sdk-rust": "sdk_rust",
+              "sdk-typescript": "sdk_typescript",
+              "sdk-python": "sdk_python",
+              "sdk-go": "sdk_go",
+              "package-typescript": "package_typescript",
+              "workbench": "workbench",
+          }
+          outputs = needs["plan"]["outputs"]
+          for job, output in lanes.items():
+              selected = bool(outputs.get(output, ""))
+              expected = "success" if selected else "skipped"
+              observed = needs[job]["result"]
+              if observed != expected:
+                  raise SystemExit(
+                      f"{job} result {observed!r}, expected {expected!r} "
+                      f"for selected={selected}"
+                  )
+          print("closed every selected verification lane")
+          PY

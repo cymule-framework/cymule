@@ -7,6 +7,8 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+import tarfile
+import io
 import sys
 import tempfile
 import tomllib
@@ -113,18 +115,31 @@ class ReleaseStageTests(unittest.TestCase):
             entries = []
             for crate in crates:
                 archive = directory / f"{crate.name}-0.2.0.crate"
-                archive.write_bytes(crate.name.encode())
+                manifest = (
+                    f'[package]\nname = "{crate.name}"\nversion = "0.2.0"\n'
+                    'edition = "2024"\nlicense = "MIT"\n'
+                ).encode()
+                with tarfile.open(archive, "w:gz") as bundle:
+                    info = tarfile.TarInfo(f"{crate.name}-0.2.0/Cargo.toml")
+                    info.size = len(manifest)
+                    bundle.addfile(info, io.BytesIO(manifest))
+                upload = directory / f"{crate.name}-0.2.0.publish"
+                crates_release.write_upload_body(archive, crate.name, "0.2.0", upload)
                 entries.append(
                     {
                         "name": crate.name,
                         "archive": archive.name,
                         "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                        "upload": upload.name,
+                        "upload_sha256": hashlib.sha256(
+                            upload.read_bytes()
+                        ).hexdigest(),
                     }
                 )
             directory.joinpath("manifest.json").write_text(
                 json.dumps(
                     {
-                        "schema": "cymule.crates-release-stage/1",
+                        "schema": "cymule.crates-release-stage/2",
                         "version": "0.2.0",
                         "release_sha": release_sha,
                         "crates": entries,
@@ -133,15 +148,12 @@ class ReleaseStageTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(
-                set(
-                    crates_release.load_stage(
-                        directory, crates, "0.2.0", release_sha
-                    )
-                ),
+                set(crates_release.load_stage(directory, crates, "0.2.0", release_sha)),
                 {"cymule-core", "cymule-durable"},
             )
             with self.assertRaisesRegex(ValueError, "another version or commit"):
                 crates_release.load_stage(directory, crates, "0.2.0", "b" * 40)
+
 
 if __name__ == "__main__":
     unittest.main()

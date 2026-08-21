@@ -37,6 +37,10 @@ domains described in `docs/specification.md`.
   failures, deadlines, cancellation, and unknown-world reconciliation.
 - Publish the TypeScript API under both `cymule` and `@cymule/sdk`, and add
   installed-package quick starts plus four-language package witnesses.
+- Close npm and crates.io bytes through independent no-OIDC builds, reduce
+  terminal publishers to exact-byte upload, authenticate Release metadata, and
+  remove the retired public mirror controller from the complete exported
+  history.
 
 ## [0.1.4] - 2026-08-18
 

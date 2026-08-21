@@ -24,7 +24,7 @@ cymule-evolution.workspace = true
 cymule-executor-process.workspace = true
 cymule-resource.workspace = true
 cymule-runtime.workspace = true
-cymule-store-sqlite = { path = "../../plugins/store-sqlite" }
+cymule-store-sqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true

@@ -144,6 +144,24 @@ def load_stage(
     return manifest, archive
 
 
+def compare_stages(candidate_path: pathlib.Path, reference_path: pathlib.Path) -> None:
+    """Require two independently built stages to contain identical release bytes."""
+
+    candidate_sha = json.loads(candidate_path.read_text(encoding="utf-8")).get(
+        "release_sha"
+    )
+    if not isinstance(candidate_sha, str):
+        raise ValueError("candidate npm stage omits its release SHA")
+    candidate, candidate_archive = load_stage(candidate_path, candidate_sha)
+    reference, reference_archive = load_stage(reference_path, candidate_sha)
+    if candidate != reference:
+        raise ValueError(
+            "independent npm stages do not describe identical release bytes"
+        )
+    if candidate_archive.read_bytes() != reference_archive.read_bytes():
+        raise ValueError("independent npm archives differ despite their manifests")
+
+
 def request_json(url: str) -> dict[str, object]:
     request = urllib.request.Request(
         url,
@@ -184,7 +202,10 @@ def verify_provenance(
     if not isinstance(attestations, list):
         raise ValueError("npm registry omitted provenance attestations")
     for attestation in attestations:
-        if not isinstance(attestation, dict) or attestation.get("predicateType") != SLSA_PROVENANCE:
+        if (
+            not isinstance(attestation, dict)
+            or attestation.get("predicateType") != SLSA_PROVENANCE
+        ):
             continue
         envelope = attestation.get("bundle", {}).get("dsseEnvelope", {})
         encoded = envelope.get("payload")
@@ -192,12 +213,6 @@ def verify_provenance(
             continue
         statement = json.loads(base64.b64decode(encoded, validate=True))
         subjects = statement.get("subject", [])
-        if not any(
-            isinstance(subject, dict)
-            and subject.get("digest", {}).get("sha512") == sha512
-            for subject in subjects
-        ):
-            continue
         predicate = statement.get("predicate", {})
         build = predicate.get("buildDefinition", {})
         workflow = build.get("externalParameters", {}).get("workflow", {})
@@ -214,12 +229,11 @@ def verify_provenance(
             for dependency in dependencies
         ):
             continue
-        expected_purl = (
-            f"pkg:npm/{urllib.parse.quote(package, safe='/')}@{version}"
-        )
+        expected_purl = f"pkg:npm/{urllib.parse.quote(package, safe='/')}@{version}"
         if not any(
             isinstance(subject, dict)
             and subject.get("name") == expected_purl
+            and subject.get("digest", {}).get("sha512") == sha512
             for subject in subjects
         ):
             continue
@@ -235,14 +249,19 @@ def verify_registry(manifest_path: pathlib.Path, release_sha: str) -> None:
     dist = metadata.get("dist")
     if not isinstance(dist, dict):
         raise ValueError("npm registry omitted the immutable distribution record")
-    if dist.get("shasum") != manifest["sha1"] or dist.get("integrity") != manifest["integrity"]:
+    if (
+        dist.get("shasum") != manifest["sha1"]
+        or dist.get("integrity") != manifest["integrity"]
+    ):
         raise ValueError(
             f"immutable npm version {manifest['package']}@{manifest['version']} has other bytes"
         )
     tarball = dist.get("tarball")
     if not isinstance(tarball, str) or not tarball.startswith(f"{REGISTRY}/"):
         raise ValueError("npm tarball URL is outside the registry authority")
-    request = urllib.request.Request(tarball, headers={"User-Agent": "cymule-release/2"})
+    request = urllib.request.Request(
+        tarball, headers={"User-Agent": "cymule-release/2"}
+    )
     downloaded = hashlib.sha512()
     with urllib.request.urlopen(request, timeout=60) as response:
         for chunk in iter(lambda: response.read(1024 * 1024), b""):
@@ -296,6 +315,9 @@ def parse_args() -> argparse.Namespace:
         verify_parser = subparsers.add_parser(command)
         verify_parser.add_argument("--manifest", type=pathlib.Path, required=True)
         verify_parser.add_argument("--release-sha", required=True)
+    compare_parser = subparsers.add_parser("compare-stages")
+    compare_parser.add_argument("--candidate", type=pathlib.Path, required=True)
+    compare_parser.add_argument("--reference", type=pathlib.Path, required=True)
     return parser.parse_args()
 
 
@@ -316,6 +338,9 @@ def main() -> int:
         print(f"verified staged npm archive {args.manifest}")
     elif args.command == "registry-status":
         print(registry_status(args.manifest, args.release_sha))
+    elif args.command == "compare-stages":
+        compare_stages(args.candidate, args.reference)
+        print("verified independent npm stage equality")
     else:
         verify_registry(args.manifest, args.release_sha)
     return 0
@@ -324,6 +349,12 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError, urllib.error.URLError) as error:
+    except (
+        OSError,
+        ValueError,
+        subprocess.CalledProcessError,
+        tarfile.TarError,
+        urllib.error.URLError,
+    ) as error:
         print(f"npm release verification failed: {error}", file=sys.stderr)
         sys.exit(1)

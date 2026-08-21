@@ -120,7 +120,7 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "GitHub Release $RELEASE_TAG already exists"
+            echo "GitHub Release $RELEASE_TAG already exists; exact metadata readback follows"
           else
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
@@ -128,3 +128,33 @@ jobs:
               --title "Cymule $RELEASE_VERSION" \
               --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,isDraft,isPrerelease,body \
+            > "$RUNNER_TEMP/release.json"
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          observed = json.loads(
+              pathlib.Path(os.environ["RUNNER_TEMP"], "release.json").read_text()
+          )
+          expected = {
+              "tagName": os.environ["RELEASE_TAG"],
+              "name": f"Cymule {os.environ['RELEASE_VERSION']}",
+              "isDraft": False,
+              "isPrerelease": False,
+          }
+          for key, value in expected.items():
+              if observed.get(key) != value:
+                  raise SystemExit(
+                      f"GitHub Release metadata {key}={observed.get(key)!r}, "
+                      f"expected {value!r}"
+                  )
+          notes = pathlib.Path(
+              os.environ["RUNNER_TEMP"], "release-notes.md"
+          ).read_text().rstrip("\n")
+          if observed.get("body", "").rstrip("\n") != notes:
+              raise SystemExit("GitHub Release notes differ from the exact changelog entry")
+          PY

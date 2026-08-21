@@ -112,7 +112,7 @@ behavioral suite for every Rust edit.
 | SDK conformance | one real Rust engine contract from a language projection | that SDK alone, or any shared semantic wire change |
 | User example | install-shaped success, reconciliation, crash recovery, Resource integrity, and future-only evolution | CLI, runtime, or example changes |
 | Packaging | exact public package contents without publication | TypeScript packaging or release metadata |
-| Release security | immutable Action pins, exact-SHA admission, no-OIDC staging, digest/provenance closure, and mirror separation | workflows, release scripts, version authorities, or private mirror control |
+| Release security | immutable Action pins, exact-SHA admission, independent no-OIDC byte closure, minimal terminal upload, digest/provenance closure, and whole-history mirror separation | workflows, release scripts, version authorities, or private mirror control |
 | Documentation | repository-local references resolve | authored Markdown or handbook changes |
 | Workbench | optional MLIR lowering smoke | compiler workbench changes or a complete run |
 | Coverage analysis | aggregate line/region non-regression signal | scheduled/manual semantic analysis |
