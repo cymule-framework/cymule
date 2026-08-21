@@ -42,6 +42,7 @@ STATIC_REGISTRY = "https://static.crates.io/crates"
 MAX_CRATE_BYTES = 10 * 1024 * 1024
 MAX_NEW_CRATE_RATE_LIMIT_WAIT_SECONDS = 15 * 60
 MAX_NEW_CRATE_RATE_LIMIT_RETRIES = 2
+GIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 NEW_CRATE_RATE_LIMIT_MARKERS = (
     "status 429 Too Many Requests",
     "You have published too many new crates in a short period of time.",
@@ -456,6 +457,86 @@ def require_release_checkout(version: str) -> None:
         raise ValueError(f"crate publication requires exact tag v{version}, found {tag}")
 
 
+def stage_packages(version: str, release_sha: str, output: pathlib.Path) -> None:
+    """Stage exact Cargo archives before any registry identity is granted."""
+
+    if GIT_SHA_PATTERN.fullmatch(release_sha) is None:
+        raise ValueError("release SHA must be one exact lowercase Git commit identity")
+    crates = load_catalog()
+    validate_workspace(crates, version)
+    require_release_checkout(version)
+    head = run(["git", "rev-parse", "HEAD"], capture=True).stdout.strip()
+    if head != release_sha:
+        raise ValueError(f"release checkout {head} does not match verified {release_sha}")
+    output.mkdir(parents=True, exist_ok=False)
+    with tempfile.TemporaryDirectory(prefix="cymule-crates-stage-") as temp:
+        archives = package_workspace(
+            crates,
+            version,
+            pathlib.Path(temp),
+            allow_dirty=False,
+        )
+        entries = []
+        for crate in crates:
+            destination = output / archives[crate.name].name
+            shutil.copyfile(archives[crate.name], destination)
+            entries.append(
+                {
+                    "name": crate.name,
+                    "archive": destination.name,
+                    "sha256": sha256(destination),
+                }
+            )
+    output.joinpath("manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "cymule.crates-release-stage/1",
+                "version": version,
+                "release_sha": release_sha,
+                "crates": entries,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(f"staged {len(crates)} exact crate archives for {release_sha}")
+
+
+def load_stage(
+    directory: pathlib.Path,
+    crates: list[PublicCrate],
+    version: str,
+    release_sha: str,
+) -> dict[str, str]:
+    """Authenticate the no-OIDC stage consumed by the publisher."""
+
+    manifest = json.loads(directory.joinpath("manifest.json").read_text(encoding="utf-8"))
+    if set(manifest) != {"schema", "version", "release_sha", "crates"}:
+        raise ValueError("malformed crate release stage manifest")
+    if manifest["schema"] != "cymule.crates-release-stage/1":
+        raise ValueError("unsupported crate release stage manifest")
+    if manifest["version"] != version or manifest["release_sha"] != release_sha:
+        raise ValueError("crate release stage belongs to another version or commit")
+    expected_names = [crate.name for crate in crates]
+    entries = manifest["crates"]
+    if not isinstance(entries, list) or [entry.get("name") for entry in entries] != expected_names:
+        raise ValueError("crate release stage does not match the ordered catalog")
+    hashes: dict[str, str] = {}
+    for entry in entries:
+        if set(entry) != {"name", "archive", "sha256"}:
+            raise ValueError("malformed crate release stage entry")
+        archive = directory / entry["archive"]
+        expected_archive = f"{entry['name']}-{version}.crate"
+        if archive.name != expected_archive or not archive.is_file():
+            raise ValueError(f"missing staged archive {expected_archive}")
+        observed = sha256(archive)
+        if observed != entry["sha256"]:
+            raise ValueError(f"staged archive digest changed for {entry['name']}")
+        hashes[entry["name"]] = observed
+    return hashes
+
+
 def new_crate_rate_limit_delay(output: str, *, now: float | None = None) -> int | None:
     """Return a bounded retry delay only for crates.io's explicit new-name limit."""
 
@@ -515,6 +596,13 @@ def publish(version: str) -> None:
     crates = load_catalog()
     validate_workspace(crates, version)
     require_release_checkout(version)
+    release_sha = run(["git", "rev-parse", "HEAD"], capture=True).stdout.strip()
+    stage_directory = os.environ.get("CYMULE_CRATES_STAGE")
+    if stage_directory is None or not pathlib.Path(stage_directory).is_absolute():
+        raise ValueError("CYMULE_CRATES_STAGE must name the absolute no-OIDC stage")
+    staged_hashes = load_stage(
+        pathlib.Path(stage_directory), crates, version, release_sha
+    )
     report_dir = ROOT / ".cache" / "crates-release" / version
     report_dir.mkdir(parents=True, exist_ok=True)
     outcomes: list[dict[str, str]] = []
@@ -525,6 +613,10 @@ def publish(version: str) -> None:
                 crate, version, target, allow_dirty=False, verify=True
             )
             expected = sha256(archive)
+            if staged_hashes[crate.name] != expected:
+                raise ValueError(
+                    f"publisher package bytes differ from the verified stage for {crate.name}"
+                )
             observed = registry_checksum(crate.name, version)
             if observed is None:
                 publish_crate(crate.name)
@@ -556,15 +648,26 @@ def publish(version: str) -> None:
 
 
 def verify_registry(version: str) -> None:
-    """Verify all registry bytes and compile a fresh facade consumer and CLI."""
+    """Verify registry bytes against the exact tag and compile fresh consumers."""
 
     crates = load_catalog()
     validate_workspace(crates, version)
-    for crate in crates:
-        checksum = registry_checksum(crate.name, version)
-        if checksum is None:
-            raise ValueError(f"missing {crate.name}@{version} from crates.io")
-        verify_download(crate.name, version, checksum)
+    require_release_checkout(version)
+    with tempfile.TemporaryDirectory(prefix="cymule-crates-finalize-") as temp:
+        target = pathlib.Path(temp)
+        for crate in crates:
+            archive = package_archive(
+                crate, version, target, allow_dirty=False, verify=True
+            )
+            expected = sha256(archive)
+            checksum = registry_checksum(crate.name, version)
+            if checksum is None:
+                raise ValueError(f"missing {crate.name}@{version} from crates.io")
+            if checksum != expected:
+                raise ValueError(
+                    f"immutable registry version {crate.name}@{version} has other bytes"
+                )
+            verify_download(crate.name, version, expected)
     with tempfile.TemporaryDirectory(prefix="cymule-crates-consumer-") as temp:
         consumer = pathlib.Path(temp)
         consumer.joinpath("src").mkdir()
@@ -623,6 +726,10 @@ def parse_args() -> argparse.Namespace:
     for command in ("publish", "verify-registry"):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("--version", required=True)
+    stage_parser = subparsers.add_parser("stage")
+    stage_parser.add_argument("--version", required=True)
+    stage_parser.add_argument("--release-sha", required=True)
+    stage_parser.add_argument("--output", type=pathlib.Path, required=True)
     subparsers.add_parser("list")
     return parser.parse_args()
 
@@ -637,6 +744,8 @@ def main() -> int:
         publish(args.version)
     elif args.command == "verify-registry":
         verify_registry(args.version)
+    elif args.command == "stage":
+        stage_packages(args.version, args.release_sha, args.output)
     else:
         for crate in load_catalog():
             print(crate.name)

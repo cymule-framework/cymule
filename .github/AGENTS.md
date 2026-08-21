@@ -4,6 +4,9 @@
   issues, pull requests, Actions, and security reporting.
 - Public commits must have public-only ancestry. Never push or merge a private
   source commit directly into a GitHub branch.
+- The public workflow tree never reads private source or owns mirror
+  credentials. History rewriting and force publication are private-source CI
+  responsibilities under `.gitlab/`, which is absent from every public export.
 - Keep Actions aligned with `scripts/verify.sh`; a green private pipeline does
   not replace public-repository verification.
 - `analysis.yml`, `compatibility.yml`, and `soak.yml` are independent
@@ -21,6 +24,10 @@
   repository verification, staged-byte inspection, and short-lived OIDC or the
   registry's equivalent trusted identity. Never document or add a local publish
   path or a long-lived registry token.
+- Pin every third-party Action to a reviewed full commit SHA. A release grants
+  `id-token: write` only to the terminal registry job; repository verification,
+  soak, compilation, tests, and archive staging run in predecessor jobs without
+  an OIDC publication identity.
 - `publish-npm.yml` is the only npm publication authority for both `cymule` and
   `@cymule/sdk`. A local npm command may run `pack --dry-run`, but never
   `publish`.
@@ -36,19 +43,26 @@
   fallback. A future new crate name requires a separate reviewed, temporary
   Actions change to establish ownership; configure its trusted publisher and
   remove that path before the normal release workflow can publish it.
-- Scheduled mirror runs must no-op when the rewritten source tip already equals
-  public `main`. A changed PAT-backed push emits the standard CI event; do not
-  dispatch a duplicate CI run manually.
+- Manual release controllers run only when the workflow ref and event SHA equal
+  current public `main`. A release tag is annotated, immutable, and must select
+  that same commit; arbitrary-ref dispatch and historical-tag publication are
+  rejected.
 - Manual npm release dispatch verifies the complete repository before creating
   a missing public tag. Package matrix jobs are independently retryable, skip
   immutable versions already present in npm, and create the GitHub Release only
   after both package names succeed.
-- A retry for an existing version checks out and verifies that immutable public
-  tag even when `main` has advanced. Never move a published tag merely to make a
-  workflow rerun select the current branch.
-- `finalize-release.yml` is an idempotent recovery path for release metadata
-  after both immutable npm versions already exist. It verifies the exact tag,
-  package manifest, and both registry names before creating a missing GitHub
-  Release; it never publishes package bytes or moves a tag.
+- A registry retry retains a version only after rebuilding or downloading the
+  exact staged bytes and comparing registry digests. npm additionally reads the
+  SLSA statement back and requires its subject digest and resolved Git commit to
+  match the verified release.
+- `finalize-release.yml` is an idempotent metadata recovery path only after both
+  npm packages and every crate in `scripts/crates-release.toml` match the exact
+  current tag. It reruns the exact-SHA soak, verifies npm provenance and the
+  complete crates.io catalog, and never publishes package bytes or moves a tag.
+- `npm`, `crates-io`, and `release-finalize` environments admit protected
+  branches only and require non-self approval. Active main and release-tag
+  rulesets prohibit deletion and non-fast-forward mutation, require main status
+  checks, and grant no broad administrator or repository-role bypass. Audit the
+  live settings with `scripts/verify_github_release_settings.py`.
 - Do not add private hosting URLs, internal project IDs, credentials, runner
   names, or private CI metadata under `.github/`.

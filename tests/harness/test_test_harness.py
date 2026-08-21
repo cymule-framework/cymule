@@ -176,6 +176,30 @@ class ChangeRoutingTests(unittest.TestCase):
         suites, _ = HARNESS.select_suites(["scripts/verify-soak.sh"])
         self.assertEqual(suites, ["rust-soak"])
 
+    def test_release_scripts_select_their_package_and_security_witnesses(self) -> None:
+        npm_suites, _ = HARNESS.select_suites(["scripts/npm_release.py"])
+        self.assertEqual(
+            set(npm_suites), {"package-typescript", "release-workflows"}
+        )
+        crates_suites, _ = HARNESS.select_suites(["scripts/crates_release.py"])
+        self.assertEqual(set(crates_suites), {"package-rust", "release-workflows"})
+
+    def test_shared_version_sources_select_the_complete_release_lock(self) -> None:
+        for path in (
+            "Cargo.toml",
+            "sdk/typescript/package.json",
+            "sdk/python/pyproject.toml",
+        ):
+            suites, _ = HARNESS.select_suites([path])
+            self.assertIn("package-rust", suites)
+            self.assertIn("release-workflows", suites)
+
+    def test_private_mirror_controller_does_not_select_product_suites(self) -> None:
+        suites, _ = HARNESS.select_suites(
+            [".gitlab/scripts/publish-public-mirror.sh"]
+        )
+        self.assertEqual(suites, ["release-workflows"])
+
     @staticmethod
     def _run_manifest(command: list[str], *, allow_skip: bool = False) -> dict:
         return {

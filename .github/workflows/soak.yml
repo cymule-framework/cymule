@@ -31,7 +31,7 @@ jobs:
       PROPTEST_CASES: ${{ inputs.proptest_cases || '16384' }}
       CYMULE_SOAK_REPETITIONS: ${{ inputs.repetitions || '5' }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -46,7 +46,7 @@ jobs:
           rust-soak
           --report .cache/test-harness/rust-soak.json
 
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-rust-soak

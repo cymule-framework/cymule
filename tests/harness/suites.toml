@@ -20,6 +20,7 @@ suites = [
   "rust-mutation-evolution-m4",
   "rust-mutation-plugins",
   "rust-agent-mcp-plugin",
+  "release-workflows",
 ]
 
 [execution_classes.live_process]
@@ -177,6 +178,12 @@ lane = "rust-package"
 tools = ["rust"]
 commands = [["./scripts/verify-crates-package.sh"]]
 
+[suites.release-workflows]
+description = "Validate immutable Actions pins, least-privilege publication jobs, and public/private mirror separation."
+lane = "meta"
+tools = []
+commands = [["python3", "scripts/verify_release_workflows.py"]]
+
 [suites.mlir]
 description = "Run the optional MLIR workbench smoke test when the pinned toolchain exists."
 lane = "workbench"
@@ -304,6 +311,7 @@ requires = [
   "example",
   "package-typescript",
   "package-rust",
+  "release-workflows",
   "rust-store-plugins",
   "rust-resource-plugins",
   "rust-activation-http",
@@ -366,7 +374,15 @@ suites = ["docs"]
 
 [[routes]]
 patterns = ["Cargo.toml", "Cargo.lock", "**/Cargo.toml", "scripts/crates-release.toml", "scripts/crates_release.py", "scripts/verify-crates-package.sh"]
-suites = ["package-rust"]
+suites = ["package-rust", "release-workflows"]
+
+[[routes]]
+patterns = ["sdk/typescript/package.json", "sdk/python/pyproject.toml"]
+suites = ["package-rust", "package-typescript", "release-workflows"]
+
+[[routes]]
+patterns = ["scripts/npm_release.py", "scripts/verify_release_workflows.py", "scripts/verify_github_release_settings.py"]
+suites = ["package-typescript", "release-workflows"]
 
 [[routes]]
 patterns = ["crates/cymule-core/tests/**"]
@@ -530,4 +546,8 @@ suites = ["rust-workspace"]
 
 [[routes]]
 patterns = ["scripts/verify.sh", "scripts/verify-rust.sh", ".github/workflows/**"]
-suites = ["full"]
+suites = ["full", "release-workflows"]
+
+[[routes]]
+patterns = [".gitlab-ci.yml", ".gitlab/**"]
+suites = ["release-workflows"]

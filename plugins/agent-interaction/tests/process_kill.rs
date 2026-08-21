@@ -107,6 +107,12 @@ impl LedgerHost {
     fn initialize(path: &Path) {
         let connection = Connection::open(path).expect("ledger opens");
         connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .expect("ledger enables WAL");
+        connection
+            .pragma_update(None, "synchronous", "FULL")
+            .expect("ledger enables full synchronous writes");
+        connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS agent_dispatches (
                     occurrence_key TEXT PRIMARY KEY NOT NULL,
@@ -437,6 +443,9 @@ fn every_agent_occurrence_journal_boundary_survives_real_process_death() {
             );
             assert!(child.is_reaped());
 
+            assert_sqlite_integrity(&durable_database);
+            assert_sqlite_integrity(&ledger);
+
             let store = SqliteStore::open(&durable_database, "domain:agent-kill")
                 .expect("durable store reopens");
             let mut coordinator = DurableCoordinator::open(store).expect("domain reopens");
@@ -517,6 +526,9 @@ fn every_agent_occurrence_journal_boundary_survives_real_process_death() {
             coordinator
                 .restore_machine()
                 .expect("shared M1 Machine remains replayable");
+            drop(coordinator);
+            assert_sqlite_integrity(&durable_database);
+            assert_sqlite_integrity(&ledger);
         }
     }
 }
@@ -620,6 +632,7 @@ fn verify_session_journal_kill(phase: &str, fail_at: usize, boundary_count: usiz
             ("CYMULE_AGENT_SESSION_KILL_MARKER", session_marker.as_path()),
         ],
     );
+    assert_sqlite_integrity(&session_database);
     let mut session_coordinator = DurableCoordinator::open(
         SqliteStore::open(&session_database, "domain:agent-session-kill")
             .expect("Session store reopens"),
@@ -649,6 +662,8 @@ fn verify_session_journal_kill(phase: &str, fail_at: usize, boundary_count: usiz
     session_coordinator
         .restore_machine()
         .expect("Session M1 Machine remains replayable");
+    drop(session_coordinator);
+    assert_sqlite_integrity(&session_database);
 }
 
 fn verify_stream_journal_kill(phase: &str, fail_at: usize, boundary_count: usize) {
@@ -679,6 +694,7 @@ fn verify_stream_journal_kill(phase: &str, fail_at: usize, boundary_count: usize
             ("CYMULE_AGENT_STREAM_KILL_MARKER", stream_marker.as_path()),
         ],
     );
+    assert_sqlite_integrity(&stream_database);
     let mut reopened_stream = DurableCoordinator::open(
         SqliteStore::open(&stream_database, "domain:agent-stream-kill")
             .expect("stream store reopens"),
@@ -757,6 +773,8 @@ fn verify_stream_journal_kill(phase: &str, fail_at: usize, boundary_count: usize
     reopened_stream
         .restore_machine()
         .expect("stream M1 Machine remains replayable");
+    drop(reopened_stream);
+    assert_sqlite_integrity(&stream_database);
 }
 
 fn initialize_domain(database: &Path, domain: &str) {
@@ -849,6 +867,29 @@ fn run_and_kill(
         Some(9)
     );
     assert!(child.is_reaped());
+}
+
+fn assert_sqlite_integrity(path: &Path) {
+    let connection = Connection::open(path).expect("Agent database opens for integrity probe");
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("Agent database journal mode reads");
+    assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+    let results = connection
+        .prepare("PRAGMA integrity_check")
+        .expect("Agent integrity statement prepares")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("Agent integrity check runs")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("Agent integrity rows read");
+    assert_eq!(results, ["ok"]);
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .expect("Agent WAL checkpoint completes");
+    let after_checkpoint: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("Agent post-checkpoint integrity check runs");
+    assert_eq!(after_checkpoint, "ok");
 }
 
 fn execute_replacement(coordinator: DurableCoordinator<SqliteStore>, host: LedgerHost) {

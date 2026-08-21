@@ -206,6 +206,12 @@ Use this precedence order when guidance conflicts:
   including packages, release assets, and future registry distributions. Local
   commands may build, test, stage, and inspect release bytes, but must never
   publish them or require a long-lived registry token.
+- Every external Action is pinned to a full immutable commit. Verification,
+  exact-SHA soak, build, test, and archive staging run without OIDC; only a
+  protected terminal environment grants the minimal publisher `id-token`.
+- The public GitHub repository never stores private-source credentials or a
+  mirror controller. Private CI rewrites a public-only snapshot, preserves
+  commit metadata, pushes it, and reads back the exact public tip.
 - Public Rust crates share the TypeScript release version. `cymule` is the Rust
   facade and `cymule-cli` is the binary package; profile/plugin crates publish
   in the dependency order owned by `scripts/crates-release.toml`. Retry only

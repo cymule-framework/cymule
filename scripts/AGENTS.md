@@ -76,14 +76,11 @@
 - Schema verification covers every `schemas/*.schema.json` file and must include
   positive and unknown-field rejection cases for each public protocol family.
 - Keep host-native verification reproducible and avoid container-only workflows.
-- GitHub publication builds a snapshot on top of the prior public GitHub commit.
-  Never push private source ancestry or remote configuration.
-- Public history containing workflow changes is pushed by `mirror.yml` with the
-  encrypted `RETIRED_PRIVATE_PUSH_TOKEN`, whose GitHub authorization includes
-  repository contents and workflow updates. The default Actions token cannot
-  update workflow files and must not be used as a fallback.
-- Public export removes private CI metadata and fails closed if a private host
-  or project path remains in the snapshot.
+- Public history is rewritten and published only by the private-source
+  `.gitlab/scripts/publish-public-mirror.sh` controller. Public Actions contain
+  neither source credentials nor a mirror/force-push workflow. The export
+  removes all private CI metadata, preserves commit metadata, and fails closed
+  if a private host or project path remains anywhere in history.
 - GitHub CI derives one exact change plan, groups selected suites into
   independent toolchain lanes, and uploads one JSON harness report per lane.
   A skipped lane means its risk was not selected, not that its test silently
@@ -138,7 +135,14 @@
   response with a parseable server retry timestamp. Bound both delay and retry
   count; authentication, checksum, malformed-limit, and other failures remain
   immediate hard failures.
-- `CYMULE_RELEASE_WORKSPACE` is the GitHub-only immutable-tag payload root used
-  by a newer reviewed controller. Require an absolute path and resolve every
-  catalog, manifest, package, Git check, report, and consumer operation under
-  that root; control checkout files must never become release payload bytes.
+- npm and crates release jobs consume archives staged by predecessor jobs that
+  have no OIDC identity. Manifests bind every archive digest to the exact
+  verified release SHA; terminal publishers must reproduce or authenticate
+  those bytes before upload and then read registry bytes back.
+- `npm_release.py` requires npm tarball SHA-1/SHA-512 equality plus a SLSA v1
+  subject digest and exact `publish-npm.yml@refs/heads/main` Git dependency.
+  `verify_github_release_settings.py` is the live operator check for repository
+  rulesets, default Actions permissions, and protected release environments.
+- `CYMULE_RELEASE_WORKSPACE` remains an absolute immutable-tag payload root only
+  for a reviewed controller executing outside that checkout. It never changes
+  which manifest, catalog, source, archive, or Git identity is release authority.

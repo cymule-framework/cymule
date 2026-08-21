@@ -1,107 +1,132 @@
 # Releasing Cymule
 
-Status: implemented for npm and crates.io public packages.
+Status: implemented for npm and crates.io package publication. Live GitHub
+control-plane gates must pass before a release workflow is authorized.
 
 GitHub Actions is the only publication authority. Local commands build,
-package, inspect, and test candidate bytes but never upload them. A release
-uses one version across the TypeScript packages, Python wheel, Go module
-release notes, and every public Rust crate.
+package, inspect, and test candidate bytes but never upload them. One version
+is shared by the TypeScript packages, Python wheel, Go release notes, and every
+public Rust crate.
 
 ## Public packages
 
-The TypeScript workflow publishes:
+The npm release publishes `cymule` and `@cymule/sdk` from the same source and
+version. Python `cymule` has an installed-wheel witness but no PyPI trusted
+publisher. The Go SDK is tested as an external module; public Go resolution
+still requires a reviewed Actions-owned `sdk/go/v<version>` tag before it can be
+claimed as published.
 
-- `cymule`
-- `@cymule/sdk`
+`scripts/crates-release.toml` is the executable ordered catalog for all public
+Rust crates. It starts with the semantic and runtime foundations, orders every
+durable, Resource, activation, executor, observability, and Agent adapter after
+its dependencies, and ends with the `cymule` facade and `cymule-cli`. Examples
+and the conformance adapter are never published.
 
-Python `cymule` currently has an installed-wheel dry-run but no PyPI trusted
-publisher workflow, so `0.2.0` must not be described as published on PyPI. The
-Go SDK is verified as a fresh external module consumer; public Go resolution
-requires the repository tag `sdk/go/v0.2.0` in addition to the root release
-tag. Creating that tag remains a publication gate until a reviewed GitHub
-Actions release step owns it.
+## Public mirror boundary
 
-The ordered Rust catalog in `scripts/crates-release.toml` publishes:
+The public repository contains no private-source URL, credential, reader, or
+force-push workflow. After private verification, the source-side GitLab job
+runs `.gitlab/scripts/publish-public-mirror.sh`. That controller:
 
-1. `cymule-core`
-2. `cymule-runtime`
-3. `cymule-durable`
-4. `cymule-resource`
-5. `cymule-evolution`
-6. `cymule-virtual`
-7. durable/resource/activation/executor/observability adapter crates
-8. `cymule-agent`
-9. `cymule-agent-mcp`
-10. `cymule`
-11. `cymule-cli`
+1. rewrites a fresh complete source history;
+2. removes `.gitlab-ci.yml` and `.gitlab/` from every public commit;
+3. preserves author, committer, dates, and messages;
+4. rejects every remaining private host or project reference;
+5. no-ops when the public tip already matches;
+6. force-publishes with a protected private CI credential; and
+7. reads the exact public tip back.
 
-The exact expanded list and dependency order is executable authority; read it
-from `scripts/crates-release.toml` rather than duplicating every adapter here.
+The source credential should be a narrowly installed GitHub App token. Token
+creation, installation, ruleset bypass, and rotation are external control-plane
+operations; they never enter public Git history or GitHub Actions secrets.
 
-`cymule` is the Rust user facade. `cymule-cli` owns the installable `cymule`
-binary. The conformance adapter and repository examples are never registry
-packages.
+## Required GitHub settings
+
+Before dispatching a release, run:
+
+```sh
+GITHUB_TOKEN=<administration-read-token> \
+  python3 scripts/verify_github_release_settings.py
+```
+
+The verifier requires:
+
+- read-only default Actions permissions and no pull-request approval grant;
+- an active default-branch ruleset with deletion, non-fast-forward, and
+  required-status-check protections;
+- an active `v*` tag ruleset with deletion and non-fast-forward protections;
+- no broad organization-administrator or repository-role bypass; and
+- `npm`, `crates-io`, and `release-finalize` environments restricted to
+  protected branches with a required reviewer who cannot self-approve.
+
+The private mirror identity may receive the one explicit integration bypass
+needed to update rewritten public history. Human administrator bypass is not a
+substitute.
 
 ## Candidate verification
 
-Before committing a release version:
+The release version commit updates Rust, TypeScript, and Python authorities
+together and adds its changelog entry. Before it reaches public `main`, run:
 
 ```sh
 ./scripts/verify.sh
 ```
 
-The `package-rust` leaf first runs Cargo's dependency-aware workspace
-`publish --dry-run`, including Cargo's own package builds. An ephemeral
-`[patch.crates-io]` points dependency resolution at the exact candidate
-workspace so one coordinated release can introduce inter-crate APIs before
-those versions exist in the registry. It then packages the complete workspace
-twice and requires the archive hashes to match, verifies the catalog against
-Cargo metadata, rejects dependency paths in normalized manifests, safely
-extracts the exact archives, and compiles every public library and binary plus
-a fresh `cymule` consumer through a separate local patch-registry simulation.
+The Rust package witness runs Cargo's dependency-aware publication dry-run,
+packages the complete catalog twice, rejects dependency-path leakage, compares
+archive hashes, safely extracts normalized archives, and compiles every public
+library, binary, and a fresh facade consumer.
 
-The release commit must update the workspace and TypeScript package to the same
-version, update the Python package to that version, and add a dated changelog
-entry. Mirror the reviewed private-source
-commit through `mirror.yml`; never push it directly to the public repository.
-Require public CI and the applicable independent analysis/compatibility gates
-before publication.
+Every release workflow is dispatched only from `refs/heads/main` and requires
+the event SHA to equal freshly fetched public `origin/main`. The annotated
+`v<version>` tag must select that same commit. Arbitrary-ref dispatch,
+historical-tag payloads, lightweight tags, and moved tags fail before any
+publication identity is granted.
 
-## Publication order
+Both npm and crates workflows rerun complete verification and the independent
+`rust-soak` suite for that exact commit. A stale scheduled soak or a successful
+run for another SHA is not release evidence.
 
-Dispatch `publish-npm.yml` with the version first. That workflow verifies the
-public commit, creates the missing immutable `v<version>` tag, publishes both
-npm names with provenance, and creates the GitHub Release.
+## Least-privilege publication
 
-Then dispatch `publish-crates.yml` against the same version. It checks out the
-exact annotated tag, repeats complete verification, requests a short-lived
-crates.io token through GitHub OIDC, and publishes in catalog dependency order.
-For each crate it:
+Every external Action is pinned to a full reviewed commit SHA. Publication is
+split into three authorities:
 
-1. runs Cargo's full package verification;
-2. computes the candidate archive SHA-256;
-3. retains an existing version only when crates.io reports the same checksum;
-4. waits for a new version to enter the index;
-5. downloads the registry archive and verifies its checksum.
+1. **Verify** has no OIDC permission. It authenticates public main and the tag,
+   runs the repository and exact-SHA soak, and carries the verified commit as a
+   job output.
+2. **Stage** has no OIDC permission. It checks out that exact commit, builds and
+   tests, and emits short-lived archives plus a manifest binding package name,
+   version, digest, and release SHA.
+3. **Publish** runs in a protected environment with `id-token: write`. It
+   downloads only the staged artifact, reauthenticates its manifest, publishes
+   a missing immutable version, and reads registry evidence back.
 
-The workflow keeps its reviewed release controller in a current-public-main
-checkout and all release payload in a separate exact-tag checkout. This lets a
-historical immutable release use a corrected resumability controller without
-moving its tag or changing any manifest, catalog, source, archive, or checksum.
+For npm, the terminal job compares the local SHA-1 and SHA-512 with the registry
+distribution, downloads the tarball independently, and reads the SLSA v1
+attestation. The attestation subject digest, workflow path, `refs/heads/main`,
+repository, and resolved Git commit must all match the staged release. An
+existing version is retained only after the same checks pass.
 
-After the ordered upload, the workflow builds a clean consumer of exact
-registry versions and installs `cymule-cli` from crates.io. A partial failure is
-safe to retry because every completed version must match the exact tag bytes.
-If crates.io returns its explicit new-crate-name 429 with a server retry time,
-the publisher waits only until that bounded timestamp and retries. It does not
-retry authentication, checksum, malformed-limit, or other registry failures.
+For crates.io, the stage contains every catalog archive. The terminal publisher
+repackages from the exact tag and requires byte equality with the no-OIDC stage
+before `cargo publish`. It follows catalog dependency order, accepts only the
+short-lived crates.io trusted-publisher token, compares existing registry
+checksums, waits for indexing, downloads exact bytes, then compiles a fresh
+registry consumer and installs `cymule-cli`.
 
-## New crate names
+The only automatic crates.io retry is its exact new-crate-name 429 response with
+a parseable, bounded server retry time. Authentication failures, malformed
+limits, checksum mismatches, and other errors fail immediately. A new crate name
+still requires a separate reviewed, temporary ownership bootstrap and trusted
+publisher configuration; the normal workflow has no token fallback.
 
-The normal workflow is OIDC-only and can publish only names that already trust
-repository `cymule-framework/cymule`, workflow `publish-crates.yml`, and
-environment `crates-io`. crates.io ownership for a new name must be established
-through a separate reviewed, time-bounded GitHub Actions change. Configure and
-verify its trusted publisher, revoke the temporary credential, and remove the
-temporary path before completing that release. Never add a registry-token
-fallback to `publish-crates.yml`.
+## Finalization
+
+`publish-npm.yml` and `publish-crates.yml` never create the GitHub Release.
+After both registries are complete, dispatch `finalize-release.yml` from current
+public `main`. It reruns exact-SHA soak, rebuilds both npm tarballs and verifies
+their registry bytes plus provenance, rebuilds every crate archive and compares
+the complete catalog with crates.io, verifies fresh Rust consumers, and only
+then creates the missing GitHub Release. It is idempotent and never publishes
+package bytes or moves a tag.

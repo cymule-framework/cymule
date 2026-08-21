@@ -112,6 +112,7 @@ behavioral suite for every Rust edit.
 | SDK conformance | one real Rust engine contract from a language projection | that SDK alone, or any shared semantic wire change |
 | User example | install-shaped success, reconciliation, crash recovery, Resource integrity, and future-only evolution | CLI, runtime, or example changes |
 | Packaging | exact public package contents without publication | TypeScript packaging or release metadata |
+| Release security | immutable Action pins, exact-SHA admission, no-OIDC staging, digest/provenance closure, and mirror separation | workflows, release scripts, version authorities, or private mirror control |
 | Documentation | repository-local references resolve | authored Markdown or handbook changes |
 | Workbench | optional MLIR lowering smoke | compiler workbench changes or a complete run |
 | Coverage analysis | aggregate line/region non-regression signal | scheduled/manual semantic analysis |
@@ -331,6 +332,10 @@ whose caller receipt was lost still forces the next value to advance after
 reopen and backward wall-clock movement. M4 kills both sides of unified
 publication, and the optional Agent suite discovers occurrence, Session, and
 stream CAS counts from successful baselines before killing every boundary.
+After each Agent kill it runs full SQLite integrity checks and a WAL checkpoint
+before semantic recovery, repeats both after recovery, and applies the same
+WAL/synchronous-full substrate to the host ledger used as reconciliation
+evidence.
 
 These are process-death and public-operation-boundary claims, not an emulated
 power-loss claim. `SIGKILL` leaves the kernel page cache intact. Deterministic

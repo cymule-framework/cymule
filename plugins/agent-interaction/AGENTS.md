@@ -84,3 +84,7 @@
   boundary, assert the marker's exact boundary number, and inspect Session plus
   stream closure before recovery so a split multi-journal commit cannot hide
   behind a successful retry.
+- After every Agent SIGKILL boundary, run full SQLite integrity checks and a WAL
+  checkpoint both before and after semantic recovery. The host-side test ledger
+  uses the same WAL plus synchronous-full durability so reconciliation evidence
+  is never inferred from a weaker crash substrate.

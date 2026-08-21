@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Published package version without the v prefix
+        description: Fully published package version without the v prefix
         required: true
         type: string
 
@@ -17,41 +17,90 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-24.04
+    environment: release-finalize
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: v${{ inputs.version }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-node@v7.0.0
-        with:
-          node-version: 26.7.0
-          registry-url: https://registry.npmjs.org/
-          package-manager-cache: false
-
-      - name: Verify immutable release inputs
+      - name: Admit exact current public main and immutable tag
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          package_version=$(node -p "require('./sdk/typescript/package.json').version")
-          if [ "$RELEASE_VERSION" != "$package_version" ]; then
-            echo "requested version $RELEASE_VERSION does not match package $package_version" >&2
-            exit 2
-          fi
-          tag="v$RELEASE_VERSION"
-          if [ "$(git rev-list -n 1 "$tag")" != "$(git rev-parse HEAD)" ]; then
-            echo "tag $tag does not select the checked-out commit" >&2
-            exit 2
-          fi
+          test "$GITHUB_REF" = "refs/heads/main"
+          git fetch --no-tags origin main
+          current_main=$(git rev-parse refs/remotes/origin/main)
+          test "$GITHUB_SHA" = "$current_main"
+          git fetch --force origin "refs/tags/v$RELEASE_VERSION:refs/tags/v$RELEASE_VERSION"
+          test "$(git cat-file -t "refs/tags/v$RELEASE_VERSION")" = tag
+          release_sha=$(git rev-list -n 1 "refs/tags/v$RELEASE_VERSION")
+          test "$release_sha" = "$current_main"
+          git checkout --detach "$release_sha"
+          test "$(git describe --exact-match --tags)" = "v$RELEASE_VERSION"
+          test "$(node -p "require('./sdk/typescript/package.json').version")" = "$RELEASE_VERSION"
+          echo "RELEASE_SHA=$release_sha" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.17.0
+          run_install: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26.7.0
+          registry-url: https://registry.npmjs.org/
+          cache: pnpm
+          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+
+      - name: Require a current exact-SHA soak witness
+        run: >-
+          python3 scripts/test_harness.py run
+          rust-soak
+          --report .cache/test-harness/finalize-rust-soak.json
+
+      - name: Rebuild exact npm archives
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          pnpm --dir sdk/typescript run build
+          pnpm --dir sdk/typescript test
           for package_name in cymule '@cymule/sdk'; do
-            published=$(npm view "$package_name@$RELEASE_VERSION" version)
-            if [ "$published" != "$RELEASE_VERSION" ]; then
-              echo "$package_name@$RELEASE_VERSION is not published" >&2
-              exit 2
-            fi
+            case "$package_name" in
+              cymule) stage_name=cymule ;;
+              '@cymule/sdk') stage_name=cymule-sdk ;;
+            esac
+            package_dir="$RUNNER_TEMP/package-$stage_name"
+            stage_dir="$RUNNER_TEMP/npm-stage-$stage_name"
+            node sdk/typescript/scripts/prepare-package.mjs "$package_name" "$package_dir"
+            python3 scripts/npm_release.py stage \
+              --package-dir "$package_dir" \
+              --package-name "$package_name" \
+              --version "$RELEASE_VERSION" \
+              --release-sha "$RELEASE_SHA" \
+              --output "$stage_dir"
           done
+
+      - name: Close npm bytes and provenance
+        run: |
+          for stage_name in cymule cymule-sdk; do
+            python3 scripts/npm_release.py verify-registry \
+              --manifest "$RUNNER_TEMP/npm-stage-$stage_name/manifest.json" \
+              --release-sha "$RELEASE_SHA"
+          done
+
+      - name: Close the complete crates.io catalog
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/crates_release.py verify-registry --version "$RELEASE_VERSION"
 
       - name: Prepare release notes
         env:
@@ -76,6 +125,6 @@ jobs:
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
-              --title "Cymule SDK $RELEASE_VERSION" \
+              --title "Cymule $RELEASE_VERSION" \
               --notes-file "$RUNNER_TEMP/release-notes.md"
           fi

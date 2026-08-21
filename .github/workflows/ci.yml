@@ -32,7 +32,7 @@ jobs:
       sdk_typescript: ${{ steps.plan.outputs.sdk_typescript }}
       workbench: ${{ steps.plan.outputs.workbench }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -81,7 +81,7 @@ jobs:
             --head HEAD \
             --no-worktree \
             --full-if-empty
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-plan
@@ -94,7 +94,7 @@ jobs:
     if: needs.plan.outputs.meta != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Run selected verification suites
@@ -103,7 +103,7 @@ jobs:
           ${{ needs.plan.outputs.meta }}
           --keep-going
           --report .cache/test-harness/meta.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-meta
@@ -116,7 +116,7 @@ jobs:
     if: needs.plan.outputs.rust_static != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust
@@ -129,7 +129,7 @@ jobs:
           ${{ needs.plan.outputs.rust_static }}
           --keep-going
           --report .cache/test-harness/rust-static.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-rust-static
@@ -142,7 +142,7 @@ jobs:
     if: needs.plan.outputs.rust_semantic != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust
@@ -155,7 +155,7 @@ jobs:
           ${{ needs.plan.outputs.rust_semantic }}
           --keep-going
           --report .cache/test-harness/rust-semantic.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-rust-semantic
@@ -168,7 +168,7 @@ jobs:
     if: needs.plan.outputs.rust_durable != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust
@@ -181,7 +181,7 @@ jobs:
           ${{ needs.plan.outputs.rust_durable }}
           --keep-going
           --report .cache/test-harness/rust-durable.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-rust-durable
@@ -194,7 +194,7 @@ jobs:
     if: needs.plan.outputs.rust_plugins != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust
@@ -207,7 +207,7 @@ jobs:
           ${{ needs.plan.outputs.rust_plugins }}
           --keep-going
           --report .cache/test-harness/rust-plugins.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-rust-plugins
@@ -220,7 +220,7 @@ jobs:
     if: needs.plan.outputs.rust_package != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust
@@ -233,7 +233,7 @@ jobs:
           ${{ needs.plan.outputs.rust_package }}
           --keep-going
           --report .cache/test-harness/rust-package.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-rust-package
@@ -246,14 +246,14 @@ jobs:
     if: needs.plan.outputs.protocol != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
           rustup default 1.97.1
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: 0.7.2
           enable-cache: true
@@ -264,7 +264,7 @@ jobs:
           ${{ needs.plan.outputs.protocol }}
           --keep-going
           --report .cache/test-harness/protocol.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-protocol
@@ -277,7 +277,7 @@ jobs:
     if: needs.plan.outputs.sdk_rust != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust
@@ -290,7 +290,7 @@ jobs:
           ${{ needs.plan.outputs.sdk_rust }}
           --keep-going
           --report .cache/test-harness/sdk-rust.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-sdk-rust
@@ -303,14 +303,14 @@ jobs:
     if: needs.plan.outputs.sdk_typescript != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
           rustup default 1.97.1
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 26.7.0
       - name: Install pnpm
@@ -321,7 +321,7 @@ jobs:
           ${{ needs.plan.outputs.sdk_typescript }}
           --keep-going
           --report .cache/test-harness/sdk-typescript.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-sdk-typescript
@@ -334,14 +334,14 @@ jobs:
     if: needs.plan.outputs.sdk_python != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
           rustup default 1.97.1
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: 0.7.2
           enable-cache: true
@@ -352,7 +352,7 @@ jobs:
           ${{ needs.plan.outputs.sdk_python }}
           --keep-going
           --report .cache/test-harness/sdk-python.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-sdk-python
@@ -365,14 +365,14 @@ jobs:
     if: needs.plan.outputs.sdk_go != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
           rustup default 1.97.1
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.26.5
           cache-dependency-path: sdk/go/go.mod
@@ -382,7 +382,7 @@ jobs:
           ${{ needs.plan.outputs.sdk_go }}
           --keep-going
           --report .cache/test-harness/sdk-go.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-sdk-go
@@ -395,10 +395,10 @@ jobs:
     if: needs.plan.outputs.package_typescript != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 26.7.0
       - name: Install pnpm
@@ -409,7 +409,7 @@ jobs:
           ${{ needs.plan.outputs.package_typescript }}
           --keep-going
           --report .cache/test-harness/package-typescript.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-package-typescript
@@ -422,7 +422,7 @@ jobs:
     if: needs.plan.outputs.workbench != ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Run selected verification suites
@@ -431,7 +431,7 @@ jobs:
           ${{ needs.plan.outputs.workbench }}
           --keep-going
           --report .cache/test-harness/workbench.json
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-harness-workbench

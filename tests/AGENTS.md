@@ -63,6 +63,10 @@
 - Release-script tests require crates.io rate-limit recovery to match both the
   exact new-crate 429 reason and a bounded server timestamp. Never retry an
   authentication, checksum, malformed response, or unrelated registry error.
+- Release-security tests authenticate staged npm and crate bytes, bind them to
+  the verified Git commit, validate npm provenance identity, reject broad
+  ruleset bypass, and run the static workflow verifier. Version authorities and
+  release-controller scripts must route to their package and security leaves.
 - Plugin suites remain split by store, Resource, activation, executor,
   observability, and Agent-protocol ownership. A plugin change runs its leaf;
   manifest/catalog changes additionally run package verification.
