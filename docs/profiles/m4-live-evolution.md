@@ -8,7 +8,8 @@ Status: implemented for the provider-neutral single-domain profile.
 - deterministic structural Plan diff over IR version, entry, component,
   effect, and definition contracts, lowered into reviewed patch operations;
 - exact reviewed patch admission that seals the complete target candidate and
-  rejects any declared operation list that differs from the deterministic diff;
+  rejects any declared operation list that differs from the deterministic diff,
+  including direct edge admission and restored snapshots;
 - `cymule.ir/2` reusable local definition invocation with explicit input/result
   binding in Embedded and durable runtimes plus four SDK authoring surfaces;
 - provider-neutral `DefinitionRegistry` with default `LatestCompatible`
@@ -53,6 +54,8 @@ Status: implemented for the provider-neutral single-domain profile.
 - pinned migration-adapter contracts that require total reachable-state
   coverage, failure/cancellation and budget/ownership preservation, and no
   authority/effect widening before plugin invocation;
+- mapped Continuations whose complete frame stack proves each child's exact
+  parent scope or invoke step before durable replacement and resume;
 - content-addressed migration safe-point proofs derived from and revalidated
   against ready root-scoped durable Continuations without waits, obligations,
   or authority leases;

@@ -762,21 +762,19 @@ fn wait_for_kill_barrier(child: &mut Child, marker: &Path) {
 #[test]
 fn plan_dag_impact_and_cycles_fail_closed() {
     let first = plan("1");
-    let second = plan("2");
+    let mut second_candidate = plan("2").candidate;
+    second_candidate.definitions[0].input_schema = json!({"type": "string"});
+    let second = cymule_core::seal_plan(second_candidate).expect("schema-changing Plan seals");
     let mut controller = EvolutionController::new();
     controller
         .register_plan(first.clone())
         .expect("root registers");
+    let operations = diff_plans(&first, &second).expect("exact edge diff derives");
     let edge = controller
         .add_edge(
             &first.plan_id,
             &second,
-            vec![PatchOperation {
-                kind: "replace".to_owned(),
-                target: "main:state-schema".to_owned(),
-                before: Some("schema:1".to_owned()),
-                after: Some("schema:2".to_owned()),
-            }],
+            operations,
             artifact("evidence:patch"),
         )
         .expect("edge registers");
@@ -794,10 +792,69 @@ fn plan_dag_impact_and_cycles_fail_closed() {
         controller.add_edge(
             &second.plan_id,
             &first,
-            Vec::new(),
+            diff_plans(&second, &first).expect("reverse diff derives"),
             artifact("evidence:cycle"),
         ),
         Err(EvolutionError::Conflict(_))
+    ));
+}
+
+#[test]
+fn plan_edges_reject_forged_operations_on_admission_and_restore() {
+    let first = plan("edge-a");
+    let second = plan("edge-b");
+    let mut controller = EvolutionController::new();
+    controller.register_plan(first.clone()).unwrap();
+    let forged = vec![PatchOperation {
+        kind: "replace".to_owned(),
+        target: "definition:not-the-real-diff".to_owned(),
+        before: None,
+        after: None,
+    }];
+    assert!(matches!(
+        controller.add_edge(
+            &first.plan_id,
+            &second,
+            forged.clone(),
+            artifact("evidence:forged-edge"),
+        ),
+        Err(EvolutionError::Conflict(_))
+    ));
+
+    let edge = controller
+        .add_diff_edge(&first.plan_id, &second, artifact("evidence:exact-edge"))
+        .expect("exact edge admits");
+    let mut snapshot = controller.snapshot();
+    let mut forged_edge = snapshot.edges.remove(&edge.edge_id).unwrap();
+    forged_edge.operations = forged;
+    forged_edge.edge_id = cymule_core::content_id(
+        "cymule.plan-edge/1",
+        &(
+            forged_edge.from_plan.as_str(),
+            &forged_edge.to_plan,
+            &forged_edge.operations,
+            &forged_edge.evidence,
+        ),
+    )
+    .unwrap();
+    snapshot
+        .plans
+        .get_mut(&second.plan_id)
+        .unwrap()
+        .incoming
+        .remove(&edge.edge_id);
+    snapshot
+        .plans
+        .get_mut(&second.plan_id)
+        .unwrap()
+        .incoming
+        .insert(forged_edge.edge_id.clone());
+    snapshot
+        .edges
+        .insert(forged_edge.edge_id.clone(), forged_edge);
+    assert!(matches!(
+        EvolutionController::restore(snapshot),
+        Err(EvolutionError::Validation(_))
     ));
 }
 
@@ -2105,12 +2162,7 @@ fn impact_matches_definition_frames_and_external_semantic_sites() {
         .add_edge(
             &first.plan_id,
             &second,
-            vec![PatchOperation {
-                kind: "replace".to_owned(),
-                target: "definition:main".to_owned(),
-                before: Some("definition:1".to_owned()),
-                after: Some("definition:2".to_owned()),
-            }],
+            diff_plans(&first, &second).expect("exact definition diff derives"),
             artifact("evidence:definition-impact"),
         )
         .expect("edge registers");
@@ -2126,28 +2178,12 @@ fn impact_matches_definition_frames_and_external_semantic_sites() {
             .contains("run:active")
     );
 
-    let third = plan("3");
-    let site_edge = controller
-        .add_edge(
-            &first.plan_id,
-            &third,
-            vec![PatchOperation {
-                kind: "replace".to_owned(),
-                target: "virtual:region/alpha".to_owned(),
-                before: Some("region:1".to_owned()),
-                after: Some("region:2".to_owned()),
-            }],
-            artifact("evidence:site-impact"),
-        )
-        .expect("site edge registers");
-    let external_sites = BTreeMap::from([(
-        "run:active".to_owned(),
-        BTreeSet::from(["region/alpha".to_owned()]),
-    )]);
+    let external_sites =
+        BTreeMap::from([("run:active".to_owned(), BTreeSet::from(["main".to_owned()]))]);
     assert!(
         controller
             .impact_with_sites(
-                &site_edge.edge_id,
+                &definition_edge.edge_id,
                 &[continuation(&first.plan_id)],
                 &BTreeMap::new(),
                 &external_sites,
@@ -3233,6 +3269,120 @@ fn durable_migration_resumes_the_adapter_mapped_program_counter() {
     };
     assert_eq!(result.plan_id, target.plan_id);
     assert_eq!(result.value, json!({"resumed": "mapped-target"}));
+}
+
+#[test]
+fn mapped_frame_stack_requires_the_exact_parent_scope_or_invoke_step() {
+    let empty_region = || Region {
+        steps: Vec::new(),
+        result: Expression::Literal { value: json!({}) },
+    };
+    let target = cymule_core::seal_plan(PlanCandidate {
+        ir_version: cymule_core::IR_VERSION.to_owned(),
+        name: "frame_edge_target".to_owned(),
+        entry: "main".to_owned(),
+        components: Vec::new(),
+        effects: Vec::new(),
+        definitions: vec![
+            Definition {
+                id: "main".to_owned(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                body: Region {
+                    steps: vec![
+                        cymule_core::Step {
+                            id: "scope:first".to_owned(),
+                            operation: cymule_core::Operation::Scope {
+                                mode: cymule_core::ScopeMode::Transactional,
+                                body: Box::new(empty_region()),
+                                bind: None,
+                            },
+                        },
+                        cymule_core::Step {
+                            id: "invoke:a".to_owned(),
+                            operation: cymule_core::Operation::Invoke {
+                                definition: "child_a".to_owned(),
+                                input: Expression::Input,
+                                bind: None,
+                            },
+                        },
+                        cymule_core::Step {
+                            id: "invoke:b".to_owned(),
+                            operation: cymule_core::Operation::Invoke {
+                                definition: "child_b".to_owned(),
+                                input: Expression::Input,
+                                bind: None,
+                            },
+                        },
+                    ],
+                    result: Expression::Literal { value: json!({}) },
+                },
+            },
+            Definition {
+                id: "child_a".to_owned(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                body: empty_region(),
+            },
+            Definition {
+                id: "child_b".to_owned(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                body: empty_region(),
+            },
+        ],
+        metadata: BTreeMap::new(),
+    })
+    .unwrap();
+    let mut mapped = continuation(&target.plan_id);
+    mapped.status = ContinuationStatus::Running;
+
+    mapped.frames[0].next_step = 0;
+    mapped.frames.push(FrameState {
+        definition_id: "main".to_owned(),
+        invocation_id: "main".to_owned(),
+        invocation_path: Vec::new(),
+        scope_id: "scope:child".to_owned(),
+        input: mapped.frames[0].input.clone(),
+        region_path: vec![0],
+        next_step: 0,
+        locals: BTreeMap::new(),
+    });
+    cymule_durable::validate_continuation_plan_frames(&target, &mapped)
+        .expect("exact scope edge admits");
+    mapped.frames[0].next_step = 1;
+    assert!(cymule_durable::validate_continuation_plan_frames(&target, &mapped).is_err());
+
+    mapped.frames.truncate(1);
+    mapped.frames[0].next_step = 1;
+    let invocation_path = vec![cymule_core::InvocationPathSegment {
+        site_id: "invoke:a".to_owned(),
+        region_path: Vec::new(),
+        scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+        epoch: 0,
+    }];
+    let invocation_id = cymule_core::plan_invocation_id(
+        &mapped.run_id,
+        &target.plan_id,
+        &target.candidate.entry,
+        &invocation_path,
+        0,
+    )
+    .unwrap();
+    mapped.frames.push(FrameState {
+        definition_id: "child_a".to_owned(),
+        invocation_id,
+        invocation_path,
+        scope_id: cymule_core::ROOT_SCOPE_ID.to_owned(),
+        input: mapped.frames[0].input.clone(),
+        region_path: Vec::new(),
+        next_step: 0,
+        locals: BTreeMap::new(),
+    });
+    cymule_durable::validate_continuation_plan_frames(&target, &mapped)
+        .expect("exact invoke edge admits");
+    mapped.frames[0].next_step = 2;
+    assert!(cymule_durable::validate_continuation_plan_frames(&target, &mapped).is_err());
 }
 
 #[test]

@@ -776,7 +776,10 @@ The claim MUST retain `plan_id` and `occurrence_binding` separately, and
 
 A reviewed patch carries the complete target Plan Candidate, an exact declared
 operation list, and evidence. M4 MUST seal the target, recompute the structural
-diff, and reject the patch unless the lists are identical. Impact analysis MUST
+diff, and reject the patch unless the lists are identical. Direct edge admission
+and snapshot restore MUST enforce the same exact non-empty diff; a
+content-addressed but caller-invented operation list is not review evidence.
+Impact analysis MUST
 inspect generic Continuation sites and MAY accept stable active-site identities
 from higher profiles; it MUST NOT import their domain models.
 
@@ -797,6 +800,9 @@ source binding and target Plan/binding compatibility, replace the Continuation
 Plan/state/binding, advance the Machine and Continuation epoch, fence every old
 Attempt, and create one active Attempt under the target binding. A durable
 receipt MUST NOT reference an Artifact that existed only in plugin memory.
+Every mapped target frame MUST resolve in the target Plan, and each adjacent
+frame MUST be owned by the parent's exact current scope or invoke step; path
+prefixes alone do not prove a resumable call stack.
 After acknowledgement loss, retry MUST return this retained transition without
 invoking the migration adapter again.
 

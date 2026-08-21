@@ -489,6 +489,13 @@ impl Machine {
     /// Apply one verified incremental Machine mutation without replaying the
     /// retained Event history.
     pub fn apply_delta(&mut self, delta: &MachineDelta) -> Result<()> {
+        let mut staged = self.clone();
+        staged.apply_delta_in_place(delta)?;
+        *self = staged;
+        Ok(())
+    }
+
+    fn apply_delta_in_place(&mut self, delta: &MachineDelta) -> Result<()> {
         if delta.delta_version != MachineDelta::VERSION {
             return Err(CoreError::Validation(format!(
                 "unsupported machine delta version {:?}",

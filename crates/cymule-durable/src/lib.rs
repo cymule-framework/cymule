@@ -16,6 +16,7 @@ pub use control::{
 pub use coordinator::{DurableCoordinator, RunMigrationCheckpoint};
 pub use error::{DurableError, DurableResult};
 pub use executor::{DriveOutcome, ResumableRuntime};
+pub use model::validate_continuation_plan_frames;
 pub use model::{
     AuthorityLease, ComponentOccurrence, Continuation, ContinuationStatus, DurableState,
     EffectDispatch, FrameState, HISTORY_COMPACTION_VERSION, HistoryCompactionReceipt, JournalBatch,

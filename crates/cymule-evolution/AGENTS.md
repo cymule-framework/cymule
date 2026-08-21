@@ -8,6 +8,9 @@
 - Patch and linker sealing use the single executable Plan admission path from
   `cymule-runtime`; malformed JSON Schema may not enter the evolution DAG or a
   future default head.
+- Every Plan edge, including restored lower-level reducer state, retains the
+  exact non-empty `diff_plans` result for its immutable parent and child.
+  Caller-authored edge operations are never trusted as reviewed evidence.
 - Never implement a dynamic `latest` reference inside a sealed Plan. Existing
   invocations remain pinned; yielded work changes Plan only through safe-point
   migration, and cross-version calls require checked contract adapters.
@@ -50,6 +53,9 @@
   receives the complete authenticated source Continuation and returns the
   complete target Continuation, including every mapped frame and program
   counter. Resume uses that returned mapping; copying source frames is invalid.
+- Mapped frame stacks additionally prove that each child is owned by the
+  parent's exact current scope or invoke step before the adapter result can
+  become authority.
 - Registry and unified live-controller mutations are staged values. Publish,
   relink, template registration, controller admission, and durable checkpoint
   errors leave the previously visible snapshot byte-for-byte unchanged.

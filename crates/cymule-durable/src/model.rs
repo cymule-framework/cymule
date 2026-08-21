@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cymule_core::{
-    ArtifactRef, Machine, MachineCompaction, MachineSnapshot, Operation, Region, canonical_digest,
+    ArtifactRef, Machine, MachineCompaction, MachineSnapshot, Operation, Region, SealedPlan,
+    canonical_digest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -315,6 +316,13 @@ pub(crate) fn validate_continuation_artifacts(
             &format!("Continuation {} state", continuation.run_id),
         )?;
     }
+    let plan = machine.plan(&continuation.plan_id).ok_or_else(|| {
+        DurableError::Validation(format!(
+            "Continuation {} references missing Plan {}",
+            continuation.run_id, continuation.plan_id
+        ))
+    })?;
+    validate_continuation_plan_frames(plan, continuation)?;
     let mut frame_scope = None;
     for (index, frame) in continuation.frames.iter().enumerate() {
         require_artifact(
@@ -341,30 +349,6 @@ pub(crate) fn validate_continuation_artifacts(
             scope_id: &frame.scope_id,
             next_step: frame.next_step,
         })?;
-        if index == 0 && !frame.invocation_path.is_empty() {
-            return Err(DurableError::Validation(format!(
-                "Continuation {} first frame is not the entry invocation",
-                continuation.run_id
-            )));
-        }
-        if let Some(parent) = index
-            .checked_sub(1)
-            .and_then(|parent| continuation.frames.get(parent))
-        {
-            let same_invocation = frame.invocation_path == parent.invocation_path
-                && frame.invocation_id == parent.invocation_id
-                && frame.definition_id == parent.definition_id
-                && frame.region_path.len() == parent.region_path.len() + 1
-                && frame.region_path.starts_with(&parent.region_path);
-            let invoked_child = frame.invocation_path.len() == parent.invocation_path.len() + 1
-                && frame.invocation_path.starts_with(&parent.invocation_path);
-            if !same_invocation && !invoked_child {
-                return Err(DurableError::Validation(format!(
-                    "Continuation {} frame {index} is not reachable from its parent frame",
-                    continuation.run_id
-                )));
-            }
-        }
         frame_scope = Some(scope_id);
     }
     if continuation.scope_stack.first().map(String::as_str) != Some(cymule_core::ROOT_SCOPE_ID) {
@@ -394,6 +378,127 @@ pub(crate) fn validate_continuation_artifacts(
             "Continuation {} active frame is outside its scope stack",
             continuation.run_id
         )));
+    }
+    Ok(())
+}
+
+/// Validate that every persisted frame is at an exact Plan location and that
+/// each adjacent child is owned by the parent frame's current structured step.
+pub fn validate_continuation_plan_frames(
+    plan: &SealedPlan,
+    continuation: &Continuation,
+) -> DurableResult<()> {
+    for (index, frame) in continuation.frames.iter().enumerate() {
+        let expected_invocation = match frame.invocation_path.last() {
+            Some(segment) => cymule_core::plan_invocation_id(
+                &continuation.run_id,
+                &plan.plan_id,
+                &plan.candidate.entry,
+                &frame.invocation_path,
+                segment.epoch,
+            )?,
+            None => plan.candidate.entry.clone(),
+        };
+        if frame.invocation_id != expected_invocation {
+            return Err(DurableError::Validation(format!(
+                "Continuation {} frame {index} has an invalid invocation identity",
+                continuation.run_id
+            )));
+        }
+        let definition = plan
+            .candidate
+            .definitions
+            .iter()
+            .find(|definition| definition.id == frame.definition_id)
+            .ok_or_else(|| {
+                DurableError::Validation(format!(
+                    "Continuation {} frame {index} references missing definition {}",
+                    continuation.run_id, frame.definition_id
+                ))
+            })?;
+        let region = region_at_path(&definition.body, &frame.region_path)?;
+        if frame.next_step > region.steps.len() {
+            return Err(DurableError::Validation(format!(
+                "Continuation {} frame {index} program counter is outside its Region",
+                continuation.run_id
+            )));
+        }
+        if index == 0 {
+            if frame.definition_id != plan.candidate.entry
+                || !frame.invocation_path.is_empty()
+                || frame.invocation_id != plan.candidate.entry
+                || !frame.region_path.is_empty()
+            {
+                return Err(DurableError::Validation(format!(
+                    "Continuation {} first frame is not the entry invocation",
+                    continuation.run_id
+                )));
+            }
+            continue;
+        }
+
+        let parent = &continuation.frames[index - 1];
+        let parent_definition = plan
+            .candidate
+            .definitions
+            .iter()
+            .find(|definition| definition.id == parent.definition_id)
+            .ok_or_else(|| {
+                DurableError::Validation(format!(
+                    "Continuation {} parent frame references missing definition {}",
+                    continuation.run_id, parent.definition_id
+                ))
+            })?;
+        let parent_region = region_at_path(&parent_definition.body, &parent.region_path)?;
+        let parent_step = parent_region.steps.get(parent.next_step).ok_or_else(|| {
+            DurableError::Validation(format!(
+                "Continuation {} parent frame does not point at its active child step",
+                continuation.run_id
+            ))
+        })?;
+        match &parent_step.operation {
+            Operation::Scope { .. } => {
+                let mut expected_path = parent.region_path.clone();
+                expected_path.push(parent.next_step);
+                if frame.invocation_path != parent.invocation_path
+                    || frame.invocation_id != parent.invocation_id
+                    || frame.definition_id != parent.definition_id
+                    || frame.region_path != expected_path
+                {
+                    return Err(DurableError::Validation(format!(
+                        "Continuation {} scope frame {index} is not owned by its parent step",
+                        continuation.run_id
+                    )));
+                }
+            }
+            Operation::Invoke { definition, .. } => {
+                let Some(segment) = frame.invocation_path.last() else {
+                    return Err(DurableError::Validation(format!(
+                        "Continuation {} invoked frame {index} has no call-site segment",
+                        continuation.run_id
+                    )));
+                };
+                if frame.invocation_path.len() != parent.invocation_path.len() + 1
+                    || !frame.invocation_path.starts_with(&parent.invocation_path)
+                    || segment.site_id != parent_step.id
+                    || segment.region_path != parent.region_path
+                    || segment.scope_id != parent.scope_id
+                    || frame.definition_id != *definition
+                    || !frame.region_path.is_empty()
+                {
+                    return Err(DurableError::Validation(format!(
+                        "Continuation {} invoked frame {index} is not owned by its parent step",
+                        continuation.run_id
+                    )));
+                }
+            }
+            _ => {
+                return Err(DurableError::Validation(format!(
+                    "Continuation {} parent frame points at a non-structured child step",
+                    continuation.run_id
+                )));
+            }
+        }
     }
     Ok(())
 }

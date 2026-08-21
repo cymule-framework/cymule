@@ -1539,6 +1539,20 @@ fn compacted_machine_base_rehydrates_suffix_and_command_receipts() {
     assert_eq!(epoch_delta.events.len(), 1);
     assert!(epoch_delta.plans.is_empty());
     assert!(epoch_delta.artifacts.is_empty());
+    let mut malformed_delta = epoch_delta.clone();
+    malformed_delta.events.push(epoch_delta.events[0].clone());
+    let mut atomic = Machine::restore(before_epoch.clone()).expect("delta base restores");
+    let unchanged = atomic.snapshot();
+    assert!(atomic.apply_delta(&malformed_delta).is_err());
+    assert_eq!(
+        atomic.snapshot(),
+        unchanged,
+        "a rejected incremental transition leaves no partial Event or receipt"
+    );
+    atomic
+        .apply_delta(&epoch_delta)
+        .expect("the exact transition remains retryable");
+    assert_eq!(atomic.snapshot(), epoch_snapshot);
     assert!(
         cymule_core::canonical_bytes(&epoch_delta)
             .expect("delta encodes")

@@ -89,6 +89,18 @@ impl EvolutionController {
                 "Plan edge cannot point to itself".to_owned(),
             ));
         }
+        let parent = &self
+            .snapshot
+            .plans
+            .get(from_plan)
+            .expect("parent existence checked above")
+            .plan;
+        let actual = diff_plans(parent, child)?;
+        if actual.is_empty() || operations != actual {
+            return Err(EvolutionError::Conflict(
+                "declared Plan edge does not match the deterministic structural diff".to_owned(),
+            ));
+        }
         self.register_plan(child.clone())?;
         if self.reachable(&child.plan_id, from_plan) {
             return Err(EvolutionError::Conflict(
@@ -241,12 +253,11 @@ impl EvolutionController {
             .filter(|(_, plan)| *plan == &edge.from_plan)
             .map(|(effect, _)| effect.clone())
             .collect();
+        let from_plan = &self.snapshot.plans[&edge.from_plan].plan;
+        let to_plan = &self.snapshot.plans[&edge.to_plan].plan;
         Ok(ImpactCone {
             edge_id: edge_id.to_owned(),
-            requires_migration: edge
-                .operations
-                .iter()
-                .any(|operation| operation.target.contains("schema")),
+            requires_migration: plan_schemas_changed(from_plan, to_plan),
             changed_targets,
             affected_runs,
             pinned_effects,
@@ -1080,6 +1091,14 @@ impl EvolutionController {
                     "Plan edge {edge_id} does not match its content identity"
                 )));
             }
+            let parent = &self.snapshot.plans[&edge.from_plan].plan;
+            let child = &self.snapshot.plans[&edge.to_plan].plan;
+            let actual = diff_plans(parent, child)?;
+            if actual.is_empty() || edge.operations != actual {
+                return Err(EvolutionError::Validation(format!(
+                    "Plan edge {edge_id} does not retain its exact structural diff"
+                )));
+            }
         }
         for (decision_id, decision) in &self.snapshot.rollout_decisions {
             validate_identity("rollout decision", &decision.decision_id)?;
@@ -1318,6 +1337,25 @@ impl EvolutionController {
     }
 }
 
+fn plan_schemas_changed(from: &SealedPlan, to: &SealedPlan) -> bool {
+    let schemas = |plan: &SealedPlan| {
+        plan.candidate
+            .definitions
+            .iter()
+            .map(|definition| {
+                (
+                    definition.id.clone(),
+                    (
+                        definition.input_schema.clone(),
+                        definition.output_schema.clone(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    schemas(from) != schemas(to)
+}
+
 fn validate_execution_binding_ref(reference: &ArtifactRef) -> EvolutionResult<()> {
     reference
         .validate()
@@ -1503,51 +1541,8 @@ fn verify_target_program_counters(
     plan: &SealedPlan,
     continuation: &Continuation,
 ) -> EvolutionResult<()> {
-    for (index, frame) in continuation.frames.iter().enumerate() {
-        let definition = plan
-            .candidate
-            .definitions
-            .iter()
-            .find(|definition| definition.id == frame.definition_id)
-            .ok_or_else(|| {
-                EvolutionError::Validation(format!(
-                    "migration target frame {} references a missing definition",
-                    frame.definition_id
-                ))
-            })?;
-        let mut region = &definition.body;
-        for step_index in &frame.region_path {
-            let step = region.steps.get(*step_index).ok_or_else(|| {
-                EvolutionError::Validation(format!(
-                    "migration target frame {} has an invalid Region path",
-                    frame.definition_id
-                ))
-            })?;
-            let cymule_core::Operation::Scope { body, .. } = &step.operation else {
-                return Err(EvolutionError::Validation(format!(
-                    "migration target frame {} crosses a non-scope step",
-                    frame.definition_id
-                )));
-            };
-            region = body;
-        }
-        if frame.next_step > region.steps.len() {
-            return Err(EvolutionError::Validation(format!(
-                "migration target frame {} program counter is outside its Region",
-                frame.definition_id
-            )));
-        }
-        if index == 0
-            && (frame.definition_id != plan.candidate.entry
-                || !frame.invocation_path.is_empty()
-                || frame.invocation_id != plan.candidate.entry)
-        {
-            return Err(EvolutionError::Validation(
-                "migration target entry frame is not the target Plan entry invocation".to_owned(),
-            ));
-        }
-    }
-    Ok(())
+    cymule_durable::validate_continuation_plan_frames(plan, continuation)
+        .map_err(|error| EvolutionError::Validation(error.to_string()))
 }
 
 impl Default for EvolutionController {

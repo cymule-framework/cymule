@@ -150,6 +150,10 @@
   Continuation Plan/state/ExecutionBinding replacement, epoch advance, new
   Attempt, and owning journals. It rejects Plan IDs as bindings and any
   incompatible active frame.
+- A persisted frame stack proves every adjacent structural edge. A scope child
+  is the exact Region owned by the parent's current scope step; an invoked child
+  pins the exact current invoke site, Region, scope, definition, and derived
+  invocation identity. Prefix reachability alone is not admission.
 - A higher-profile input delivery that also publishes its Artifact and records
   typed provenance uses `checkpoint_input_wait_journals`; Artifact, journal
   records, input wait, and Continuation readiness must never split across CAS.

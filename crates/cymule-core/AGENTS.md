@@ -39,7 +39,9 @@
 - `MachineDelta` is the only durable incremental Machine representation. It
   retains command records privately, permits only additive canonical inputs or
   one exact cumulative compaction cut, and applies to a live `Machine` without
-  replaying its retained Event history.
+  replaying its retained Event history. Application is transactional: validate
+  the complete delta on staged state and publish no Plan, Artifact, Event,
+  compaction, or command receipt when any later check fails.
 - A compacted Machine snapshot may replace only a causally closed Event prefix
   with an authenticated base projection plus exact compacted Event identities.
   Resume replays the full retained suffix from that base, command receipts keep
