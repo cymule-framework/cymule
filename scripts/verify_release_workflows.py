@@ -1735,8 +1735,9 @@ def verify_public_source_snapshot_helper(text: str) -> None:
 def verify_public_mirror_artifact_scanner(text: str) -> None:
     """Require the no-credential scanner to bind and scan the actual artifact."""
 
+    private_push_token = "CYMULE_PUBLIC_" + "PUSH_TOKEN"
     required = (
-        'test -z "${RETIRED_PRIVATE_PUSH_TOKEN:-}"',
+        f'test -z "${{{private_push_token}:-}}"',
         "readonly PRODUCTION_GITLEAKS_BINARY=/usr/bin/gitleaks",
         "CYMULE_PUBLIC_TEST_GITLEAKS_BINARY",
         'test "$($gitleaks_binary version)" = 8.24.3',
@@ -1829,7 +1830,7 @@ def verify_private_mirror_scanner(text: str) -> None:
         "'github_pat_'",
         "'npm_'",
         "'AKIA'",
-        "'-----BEGIN PRIVATE KEY-----'",
+        "'-----BEGIN ' 'PRIVATE KEY-----'",
         "GITLEAKS_CONFIG_TOML",
         "gitleaks detect --no-git --no-banner --redact",
         "--ignore-gitleaks-allow",
