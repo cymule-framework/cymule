@@ -1334,7 +1334,15 @@ preallocate the bounded table in the parent, enumerate the exact inherited open
 set with one `proc_pidinfo(PROC_PIDLISTFDS)` kernel-wrapper call, preserve
 existing descriptor flags when adding close-on-exec, and reject malformed,
 duplicate, out-of-domain, truncated, or misaligned table results before plugin
-execution.
+execution. The spawning parent thread MUST block all signals before watchdog
+fork and restore its exact prior mask on every returning path. Exactly one
+parent-side `setpgid` transition MUST establish watchdog group authority and
+publish the group gate while the parent remains masked, before the child can
+advance. The child MUST inherit the blocked mask, consume that fixed
+parent-established group gate, verify its PID equals its process group, and
+never race a second `setpgid`. Every failure before readiness MUST emit one
+fixed, allocation-free stage code that the parent maps to a stable typed
+diagnostic.
 
 Changing a default MUST NOT rewrite an admitted occurrence. If its original
 binding is unavailable, the occurrence enters an explicit unavailable or

@@ -86,12 +86,21 @@ descriptors, and authenticates the root inode before final removal.
 
 The Engine retains one endpoint of a private liveness channel. A minimal
 fork-only watchdog leads the occurrence process group and monitors the other
-endpoint using only async-signal-safe syscalls. It also binds the exact
-fork-time Engine PID. The parent establishes the watchdog's exact process group
-before readiness or descriptor enumeration, and the child repeats that
-assignment before its Apple kernel query, so deadline termination has authority
-even if the query blocks. The watchdog verifies on each short poll tick that
-the Engine is still its direct parent. Engine exit or `SIGKILL` therefore closes the group
+endpoint through the reviewed no-userspace-state syscall boundary, including
+Apple's single-call private libproc wrapper. It also binds the exact
+fork-time Engine PID. The spawning parent thread blocks every signal across
+`fork`, establishes the watchdog's exact process group as the only `setpgid`
+writer, publishes a fixed group gate over the liveness socket while still
+masked, and then restores its exact prior mask. The child inherits the fully
+blocked mask and cannot enumerate
+descriptors or publish readiness until it consumes that gate and verifies its
+PID equals its process group. Fixed stage bytes distinguish group-gate,
+group-verification, descriptor-table, descriptor-close, retained-channel, and
+ready-write failures inside the child, while parent signal-mask and group-write
+failures retain their own typed errors. Deadline termination therefore has
+authority even if a later query blocks. The watchdog verifies on each short
+poll tick that the Engine is still its direct parent. Engine exit or `SIGKILL`
+therefore closes the group
 even if multiple children are simultaneously blocked before exec while holding
 one another's inherited channel descriptors. Normal completion, timeout,
 cancellation, and I/O failure also terminate the whole group and reap both

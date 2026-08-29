@@ -119,14 +119,20 @@
   limit. Every post-fork table byte count, alignment, descriptor order/domain,
   duplicate, and retained-channel check fails closed. These branches may use
   only the reviewed descriptor-close/CLOEXEC, Apple `proc_pidinfo` syscall
-  wrapper, `clock_gettime`, `poll`, `pause`, `sigfillset`, `sigprocmask`,
-  `setpgid`, `write`, `read`, `getpid`, `getppid`, `getpgrp`, `kill`, and
-  `_exit` operations; they must never return to Rust, allocate, lock, run
+  wrapper, `clock_gettime`, `poll`, `pause`, `write`, `read`, `getpid`,
+  `getppid`, `getpgrp`, `kill`, and `_exit` operations; they must never return
+  to Rust, allocate, lock, run
   destructors, read a descriptor directory, or call plugin code before exec,
-  `_exit`, or `SIGKILL`. The parent establishes the exact watchdog process group
-  immediately after `fork` and before readiness or any descriptor query; the
-  child repeats that assignment before enumeration. A blocked query is
-  therefore always killable by the retained deadline authority. The watchdog
-  binds the exact fork-time parent PID and checks the direct-parent relation on
-  each short poll tick, so mutually inherited pre-exec liveness writers cannot
-  keep groups alive after Engine death.
+  `_exit`, or `SIGKILL`. The spawning parent thread saves its exact signal mask
+  and blocks every signal before `fork`; the watchdog inherits that closed mask
+  before any handler can run. The parent is the sole `setpgid` authority and
+  publishes one fixed group-established byte over the liveness socket while
+  signals remain blocked, then restores its prior mask on every returning path.
+  The child cannot enumerate descriptors or publish readiness
+  until it consumes that byte and verifies `getpid() == getpgrp()`; it never
+  races a second `setpgid`. Each pre-readiness failure publishes one fixed stage
+  byte, and the parent maps that byte to a stable typed diagnostic. A blocked
+  query is therefore always killable by the retained deadline authority. The
+  watchdog binds the exact fork-time parent PID and checks the direct-parent
+  relation on each short poll tick, so mutually inherited pre-exec liveness
+  writers cannot keep groups alive after Engine death.

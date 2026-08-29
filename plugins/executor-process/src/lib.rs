@@ -65,6 +65,26 @@ static PRE_EXEC_READY_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::Atom
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const APPLE_DESCRIPTOR_QUERY_SLACK_ENTRIES: usize = 16;
+#[cfg(unix)]
+const WATCHDOG_READY: u8 = 1;
+#[cfg(unix)]
+const WATCHDOG_CHILD_GROUP_FAILED: u8 = 3;
+#[cfg(unix)]
+const WATCHDOG_GROUP_GATE_FAILED: u8 = 8;
+#[cfg(unix)]
+const WATCHDOG_DESCRIPTOR_TABLE_INVALID: u8 = 4;
+#[cfg(unix)]
+const WATCHDOG_DESCRIPTOR_CLOSE_FAILED: u8 = 5;
+#[cfg(unix)]
+const WATCHDOG_DESCRIPTOR_KEEP_MISSING: u8 = 6;
+#[cfg(unix)]
+const WATCHDOG_READY_WRITE_FAILED: u8 = 7;
+#[cfg(unix)]
+const WATCHDOG_DESCRIPTOR_ISOLATED: u8 = 0;
+#[cfg(unix)]
+const WATCHDOG_GROUP_ESTABLISHED: u8 = 0xa5;
+#[cfg(unix)]
+const WATCHDOG_EXITED_WITHOUT_STAGE: u8 = 9;
 
 #[cfg(unix)]
 struct ChildDescriptorAuthority {
@@ -1739,7 +1759,7 @@ impl ProcessGroupSupervisor {
                 "process Engine identity could not be observed",
             ));
         }
-        let (watchdog_liveness, engine_liveness) = UnixStream::pair().map_err(|_| {
+        let (watchdog_liveness, mut engine_liveness) = UnixStream::pair().map_err(|_| {
             RuntimeError::substrate(
                 "process_supervisor_start_failed",
                 "process parent-liveness channel could not be created",
@@ -1767,13 +1787,16 @@ impl ProcessGroupSupervisor {
         launch.check_pre_start(deadline)?;
 
         let watchdog_liveness_fd = watchdog_liveness.as_raw_fd();
+        let engine_liveness_fd = engine_liveness.as_raw_fd();
         let watchdog_ready_fd = watchdog_ready.as_raw_fd();
+        let signal_mask = block_all_signals_for_fork()?;
         // SAFETY: the forked branch never returns to Rust. It executes only the
         // reviewed no-userspace-state syscall boundary (including Apple's
         // single-call libproc wrapper) over parent-created storage and
         // descriptors before terminating via SIGKILL or `_exit`.
         let watchdog_pid = unsafe { nix::libc::fork() };
         if watchdog_pid < 0 {
+            restore_parent_signal_mask(&signal_mask)?;
             return Err(RuntimeError::substrate(
                 "process_supervisor_start_failed",
                 "process parent-liveness supervisor could not be forked",
@@ -1784,6 +1807,7 @@ impl ProcessGroupSupervisor {
             unsafe {
                 run_parent_liveness_watchdog(
                     watchdog_liveness_fd,
+                    engine_liveness_fd,
                     watchdog_ready_fd,
                     watchdog_deadline,
                     watchdog_descriptor_authority,
@@ -1792,24 +1816,37 @@ impl ProcessGroupSupervisor {
                 )
             }
         }
-
-        // Establish the exact process group from the parent before any ready,
-        // deadline, or cleanup path can try to signal it. The child repeats the
-        // same idempotent assignment before descriptor discovery, but parent
-        // authority closes the scheduling gap where that child has not run.
+        // Establish the exact process group from the single parent authority
+        // while the spawning thread still has every signal blocked. The child
+        // cannot advance until the parent later publishes the group gate.
         if unsafe { nix::libc::setpgid(watchdog_pid, watchdog_pid) } != 0 {
+            let category = setpgid_error_category(nix::errno::Errno::last_raw());
             // SAFETY: `watchdog_pid` is the exact child returned by fork. This
             // error path signals and reaps only that child before returning.
-            unsafe {
-                nix::libc::kill(watchdog_pid, nix::libc::SIGKILL);
-                while nix::libc::waitpid(watchdog_pid, std::ptr::null_mut(), 0) < 0
-                    && nix::errno::Errno::last_raw() == nix::libc::EINTR
-                {}
-            }
+            unsafe { terminate_failed_watchdog(watchdog_pid) };
+            restore_parent_signal_mask(&signal_mask)?;
             return Err(RuntimeError::substrate(
-                "process_supervisor_start_failed",
-                "process parent-liveness group could not be established",
+                "process_supervisor_parent_group_failed",
+                format!("process parent-liveness group could not be established ({category})"),
             ));
+        }
+        let group_gate = [WATCHDOG_GROUP_ESTABLISHED; 1];
+        if !matches!(engine_liveness.write(&group_gate), Ok(1)) {
+            // SAFETY: `watchdog_pid` is the exact child returned by fork. The
+            // parent group exists, but a missing gate must not let this child
+            // advance to descriptor discovery or readiness.
+            unsafe { terminate_failed_watchdog(watchdog_pid) };
+            restore_parent_signal_mask(&signal_mask)?;
+            return Err(RuntimeError::substrate(
+                "process_supervisor_parent_group_publish_failed",
+                "process parent-liveness group authority could not be published",
+            ));
+        }
+        if let Err(error) = restore_parent_signal_mask(&signal_mask) {
+            // SAFETY: `watchdog_pid` is the exact group leader returned by fork;
+            // no plugin child can exist before `start` returns.
+            unsafe { terminate_failed_watchdog(watchdog_pid) };
+            return Err(error);
         }
 
         drop(watchdog_liveness);
@@ -1905,6 +1942,85 @@ impl ProcessGroupSupervisor {
 }
 
 #[cfg(unix)]
+struct ParentSignalMask {
+    previous: nix::libc::sigset_t,
+}
+
+#[cfg(unix)]
+fn block_all_signals_for_fork() -> RuntimeResult<ParentSignalMask> {
+    let mut blocked = std::mem::MaybeUninit::<nix::libc::sigset_t>::uninit();
+    let mut previous = std::mem::MaybeUninit::<nix::libc::sigset_t>::uninit();
+    // SAFETY: both values are parent-thread stack storage. `pthread_sigmask`
+    // affects only the spawning thread and returns its exact previous mask.
+    if unsafe { nix::libc::sigfillset(blocked.as_mut_ptr()) } != 0
+        || unsafe {
+            nix::libc::pthread_sigmask(
+                nix::libc::SIG_SETMASK,
+                blocked.as_ptr(),
+                previous.as_mut_ptr(),
+            )
+        } != 0
+    {
+        return Err(RuntimeError::substrate(
+            "process_supervisor_parent_signal_mask_failed",
+            "process parent thread could not block signals before fork",
+        ));
+    }
+    // SAFETY: pthread_sigmask initialized `previous` after success.
+    Ok(ParentSignalMask {
+        previous: unsafe { previous.assume_init() },
+    })
+}
+
+#[cfg(unix)]
+fn restore_parent_signal_mask(mask: &ParentSignalMask) -> RuntimeResult<()> {
+    // SAFETY: `mask.previous` is the exact mask returned for this spawning
+    // thread and remains live for this synchronous restore.
+    if unsafe {
+        nix::libc::pthread_sigmask(
+            nix::libc::SIG_SETMASK,
+            &raw const mask.previous,
+            std::ptr::null_mut(),
+        )
+    } != 0
+    {
+        return Err(RuntimeError::substrate(
+            "process_supervisor_parent_signal_restore_failed",
+            "process parent thread could not restore its pre-fork signal mask",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+const fn setpgid_error_category(error: i32) -> &'static str {
+    match error {
+        nix::libc::EACCES => "eacces",
+        nix::libc::EINVAL => "einval",
+        nix::libc::EPERM => "eperm",
+        nix::libc::ESRCH => "esrch",
+        _ => "other",
+    }
+}
+
+#[cfg(unix)]
+unsafe fn terminate_failed_watchdog(watchdog_pid: i32) {
+    unsafe {
+        let _ = nix::libc::kill(watchdog_pid, nix::libc::SIGKILL);
+        loop {
+            let waited = nix::libc::waitpid(watchdog_pid, std::ptr::null_mut(), 0);
+            if waited == watchdog_pid {
+                return;
+            }
+            if waited < 0 && nix::errno::Errno::last_raw() == nix::libc::EINTR {
+                continue;
+            }
+            return;
+        }
+    }
+}
+
+#[cfg(unix)]
 impl Drop for ProcessGroupSupervisor {
     fn drop(&mut self) {
         self.terminate();
@@ -1921,14 +2037,12 @@ fn wait_for_supervisor_ready(
     loop {
         launch.check_pre_start(deadline)?;
         match readiness.read(&mut byte) {
-            Ok(1) if byte[0] == 1 => {
+            Ok(1) if byte[0] == WATCHDOG_READY => {
                 return launch.check_pre_start(deadline);
             }
+            Ok(1) => return Err(watchdog_stage_error(byte[0])),
             Ok(0) => {
-                return Err(RuntimeError::substrate(
-                    "process_supervisor_start_failed",
-                    "process parent-liveness supervisor exited before readiness",
-                ));
+                return Err(watchdog_stage_error(WATCHDOG_EXITED_WITHOUT_STAGE));
             }
             Ok(_) => {
                 return Err(RuntimeError::substrate(
@@ -1951,8 +2065,48 @@ fn wait_for_supervisor_ready(
 }
 
 #[cfg(unix)]
+fn watchdog_stage_error(stage: u8) -> RuntimeError {
+    let (code, message) = match stage {
+        WATCHDOG_CHILD_GROUP_FAILED => (
+            "process_supervisor_child_group_failed",
+            "process parent-liveness supervisor could not confirm its process group",
+        ),
+        WATCHDOG_GROUP_GATE_FAILED => (
+            "process_supervisor_group_gate_failed",
+            "process parent-liveness supervisor did not receive its parent-established group gate",
+        ),
+        WATCHDOG_DESCRIPTOR_TABLE_INVALID => (
+            "process_supervisor_descriptor_table_invalid",
+            "process parent-liveness supervisor received an invalid descriptor table",
+        ),
+        WATCHDOG_DESCRIPTOR_CLOSE_FAILED => (
+            "process_supervisor_descriptor_close_failed",
+            "process parent-liveness supervisor could not close an inherited descriptor",
+        ),
+        WATCHDOG_DESCRIPTOR_KEEP_MISSING => (
+            "process_supervisor_descriptor_keep_missing",
+            "process parent-liveness supervisor descriptor table omitted a retained channel",
+        ),
+        WATCHDOG_READY_WRITE_FAILED => (
+            "process_supervisor_ready_write_failed",
+            "process parent-liveness supervisor could not publish readiness",
+        ),
+        WATCHDOG_EXITED_WITHOUT_STAGE => (
+            "process_supervisor_exited_without_stage",
+            "process parent-liveness supervisor exited before publishing a diagnostic stage",
+        ),
+        _ => (
+            "process_supervisor_stage_invalid",
+            "process parent-liveness supervisor returned an invalid stage",
+        ),
+    };
+    RuntimeError::substrate(code, message)
+}
+
+#[cfg(unix)]
 unsafe fn run_parent_liveness_watchdog(
     watchdog_liveness_fd: i32,
+    engine_liveness_fd: i32,
     watchdog_ready_fd: i32,
     deadline: nix::libc::timespec,
     descriptor_authority: ChildDescriptorAuthorityView,
@@ -1964,38 +2118,38 @@ unsafe fn run_parent_liveness_watchdog(
     // by the parent. Process-group authority is established before the Apple
     // descriptor query, so a blocked kernel query remains deadline-killable.
     unsafe {
-        let mut blocked_signals = std::mem::MaybeUninit::<nix::libc::sigset_t>::uninit();
-        if nix::libc::sigfillset(blocked_signals.as_mut_ptr()) != 0
-            || nix::libc::sigprocmask(
-                nix::libc::SIG_SETMASK,
-                blocked_signals.as_ptr(),
-                std::ptr::null_mut(),
-            ) != 0
+        if nix::libc::close(engine_liveness_fd) != 0 {
+            watchdog_stage_exit(watchdog_ready_fd, WATCHDOG_DESCRIPTOR_CLOSE_FAILED);
+        }
+        let mut group_gate = [0_u8; 1];
+        if nix::libc::read(
+            watchdog_liveness_fd,
+            group_gate.as_mut_ptr().cast::<nix::libc::c_void>(),
+            group_gate.len(),
+        ) != 1
+            || group_gate[0] != WATCHDOG_GROUP_ESTABLISHED
         {
-            nix::libc::close(watchdog_ready_fd);
-            nix::libc::_exit(127);
+            watchdog_stage_exit(watchdog_ready_fd, WATCHDOG_GROUP_GATE_FAILED);
         }
-        if nix::libc::setpgid(0, 0) != 0 {
-            nix::libc::close(watchdog_ready_fd);
-            nix::libc::_exit(127);
+        if nix::libc::getpid() != nix::libc::getpgrp() {
+            watchdog_stage_exit(watchdog_ready_fd, WATCHDOG_CHILD_GROUP_FAILED);
         }
-        if !close_unrelated_descriptors(
+        let descriptor_stage = close_unrelated_descriptors(
             watchdog_liveness_fd,
             watchdog_ready_fd,
             descriptor_authority,
-        ) {
-            nix::libc::close(watchdog_ready_fd);
-            nix::libc::_exit(127);
+        );
+        if descriptor_stage != WATCHDOG_DESCRIPTOR_ISOLATED {
+            watchdog_stage_exit(watchdog_ready_fd, descriptor_stage);
         }
-        let ready = [1_u8; 1];
+        let ready = [WATCHDOG_READY; 1];
         if nix::libc::write(
             watchdog_ready_fd,
             ready.as_ptr().cast::<nix::libc::c_void>(),
             ready.len(),
         ) != 1
         {
-            nix::libc::close(watchdog_ready_fd);
-            nix::libc::_exit(127);
+            watchdog_stage_exit(watchdog_ready_fd, WATCHDOG_READY_WRITE_FAILED);
         }
         nix::libc::close(watchdog_ready_fd);
 
@@ -2004,6 +2158,20 @@ unsafe fn run_parent_liveness_watchdog(
         if process_group > 0 {
             nix::libc::kill(-process_group, nix::libc::SIGKILL);
         }
+        nix::libc::_exit(127);
+    }
+}
+
+#[cfg(unix)]
+unsafe fn watchdog_stage_exit(watchdog_ready_fd: i32, stage: u8) -> ! {
+    unsafe {
+        let diagnostic = [stage; 1];
+        let _ = nix::libc::write(
+            watchdog_ready_fd,
+            diagnostic.as_ptr().cast::<nix::libc::c_void>(),
+            diagnostic.len(),
+        );
+        nix::libc::close(watchdog_ready_fd);
         nix::libc::_exit(127);
     }
 }
@@ -2134,26 +2302,31 @@ unsafe fn close_unrelated_descriptors(
     first_keep: i32,
     second_keep: i32,
     _descriptor_authority: ChildDescriptorAuthorityView,
-) -> bool {
+) -> u8 {
     let (lower, upper) = if first_keep < second_keep {
         (first_keep, second_keep)
     } else {
         (second_keep, first_keep)
     };
     if lower < 0 || lower == upper {
-        return false;
+        return WATCHDOG_DESCRIPTOR_KEEP_MISSING;
     }
     let Some(middle_first) = lower.checked_add(1) else {
-        return false;
+        return WATCHDOG_DESCRIPTOR_KEEP_MISSING;
     };
     let Some(middle_last) = upper.checked_sub(1) else {
-        return false;
+        return WATCHDOG_DESCRIPTOR_KEEP_MISSING;
     };
     let after_upper = upper.checked_add(1);
-    unsafe {
+    let closed = unsafe {
         (lower == 0 || close_linux_descriptor_range(0, (lower - 1) as u32))
             && close_linux_descriptor_range(middle_first as u32, middle_last as u32)
             && after_upper.is_none_or(|first| close_linux_descriptor_range(first as u32, u32::MAX))
+    };
+    if closed {
+        WATCHDOG_DESCRIPTOR_ISOLATED
+    } else {
+        WATCHDOG_DESCRIPTOR_CLOSE_FAILED
     }
 }
 
@@ -2170,18 +2343,18 @@ unsafe fn close_unrelated_descriptors(
     first_keep: i32,
     second_keep: i32,
     descriptor_authority: ChildDescriptorAuthorityView,
-) -> bool {
+) -> u8 {
     if first_keep < 0
         || second_keep < 0
         || first_keep == second_keep
         || first_keep >= descriptor_authority.descriptor_domain_exclusive
         || second_keep >= descriptor_authority.descriptor_domain_exclusive
     {
-        return false;
+        return WATCHDOG_DESCRIPTOR_KEEP_MISSING;
     }
     let Some(descriptor_count) = (unsafe { apple_open_descriptor_count(descriptor_authority) })
     else {
-        return false;
+        return WATCHDOG_DESCRIPTOR_TABLE_INVALID;
     };
     let descriptors = std::ptr::with_exposed_provenance::<nix::libc::proc_fdinfo>(
         descriptor_authority.buffer_address,
@@ -2197,10 +2370,14 @@ unsafe fn close_unrelated_descriptors(
         } else if descriptor == second_keep {
             saw_second = true;
         } else if unsafe { nix::libc::close(descriptor) } != 0 {
-            return false;
+            return WATCHDOG_DESCRIPTOR_CLOSE_FAILED;
         }
     }
-    saw_first && saw_second
+    if saw_first && saw_second {
+        WATCHDOG_DESCRIPTOR_ISOLATED
+    } else {
+        WATCHDOG_DESCRIPTOR_KEEP_MISSING
+    }
 }
 
 #[cfg(all(
@@ -2213,17 +2390,22 @@ unsafe fn close_unrelated_descriptors(
     first_keep: i32,
     second_keep: i32,
     descriptor_authority: ChildDescriptorAuthorityView,
-) -> bool {
+) -> u8 {
     let descriptor_limit = descriptor_authority.descriptor_limit;
     if descriptor_limit < 3 {
-        return false;
+        return WATCHDOG_DESCRIPTOR_TABLE_INVALID;
     }
     for descriptor in 0..descriptor_limit {
-        if descriptor != first_keep && descriptor != second_keep {
-            unsafe { nix::libc::close(descriptor) };
+        if descriptor == first_keep || descriptor == second_keep {
+            continue;
+        }
+        if unsafe { nix::libc::close(descriptor) } != 0
+            && nix::errno::Errno::last_raw() != nix::libc::EBADF
+        {
+            return WATCHDOG_DESCRIPTOR_CLOSE_FAILED;
         }
     }
-    true
+    WATCHDOG_DESCRIPTOR_ISOLATED
 }
 
 #[cfg(not(unix))]
@@ -3625,6 +3807,60 @@ mod tests {
         assert_eq!(checked_bounded_end(8, 1, 8), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn watchdog_stage_bytes_have_stable_typed_diagnostics() {
+        use super::{
+            WATCHDOG_CHILD_GROUP_FAILED, WATCHDOG_DESCRIPTOR_CLOSE_FAILED,
+            WATCHDOG_DESCRIPTOR_KEEP_MISSING, WATCHDOG_DESCRIPTOR_TABLE_INVALID,
+            WATCHDOG_EXITED_WITHOUT_STAGE, WATCHDOG_GROUP_GATE_FAILED, WATCHDOG_READY_WRITE_FAILED,
+            watchdog_stage_error,
+        };
+        use cymule_runtime::RuntimeError;
+
+        let cases = [
+            (
+                WATCHDOG_GROUP_GATE_FAILED,
+                "process_supervisor_group_gate_failed",
+            ),
+            (
+                WATCHDOG_CHILD_GROUP_FAILED,
+                "process_supervisor_child_group_failed",
+            ),
+            (
+                WATCHDOG_DESCRIPTOR_TABLE_INVALID,
+                "process_supervisor_descriptor_table_invalid",
+            ),
+            (
+                WATCHDOG_DESCRIPTOR_CLOSE_FAILED,
+                "process_supervisor_descriptor_close_failed",
+            ),
+            (
+                WATCHDOG_DESCRIPTOR_KEEP_MISSING,
+                "process_supervisor_descriptor_keep_missing",
+            ),
+            (
+                WATCHDOG_READY_WRITE_FAILED,
+                "process_supervisor_ready_write_failed",
+            ),
+            (
+                WATCHDOG_EXITED_WITHOUT_STAGE,
+                "process_supervisor_exited_without_stage",
+            ),
+        ];
+        for (stage, expected) in cases {
+            assert!(matches!(
+                watchdog_stage_error(stage),
+                RuntimeError::Substrate { code, .. } if code == expected
+            ));
+        }
+        assert!(matches!(
+            watchdog_stage_error(u8::MAX),
+            RuntimeError::Substrate { code, .. }
+                if code == "process_supervisor_stage_invalid"
+        ));
+    }
+
     #[test]
     fn chunk_end_is_exact_at_the_address_space_boundary() {
         assert_eq!(
@@ -3791,6 +4027,152 @@ mod tests {
             "the exact watchdog PID is already its process-group authority"
         );
         supervisor.terminate();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_watchdogs_use_one_parent_group_authority() {
+        use super::{ProcessCancellation, ProcessGroupSupervisor};
+        use std::sync::{Arc, Barrier};
+        use std::time::{Duration, Instant};
+
+        const WORKERS: usize = 18;
+        const ROUNDS: usize = 3;
+
+        for round in 0..ROUNDS {
+            let gate = Arc::new(Barrier::new(WORKERS + 1));
+            std::thread::scope(|scope| {
+                let handles = (0..WORKERS)
+                    .map(|_| {
+                        let gate = gate.clone();
+                        scope.spawn(move || {
+                            let cancellation = ProcessCancellation::new()?;
+                            let launch = cancellation.register_launch()?;
+                            gate.wait();
+                            let mut supervisor = ProcessGroupSupervisor::start(
+                                Instant::now() + Duration::from_secs(10),
+                                &launch,
+                            )?;
+                            supervisor.terminate();
+                            Ok::<(), cymule_runtime::RuntimeError>(())
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                gate.wait();
+                for (worker, handle) in handles.into_iter().enumerate() {
+                    let result = handle.join().expect("watchdog worker joins");
+                    assert!(
+                        result.is_ok(),
+                        "watchdog worker {worker} round {round} failed: {result:?}"
+                    );
+                }
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_signal_and_parent_mask_survive_watchdog_fork() {
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("unit test executable resolves"),
+        )
+        .arg("--exact")
+        .arg("tests::pending_signal_and_parent_mask_helper")
+        .env("CYMULE_TEST_PENDING_SIGNAL", "1")
+        .status()
+        .expect("pending-signal helper starts");
+        assert!(status.success(), "pending-signal helper failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_signal_and_parent_mask_helper() {
+        use super::{ProcessCancellation, ProcessGroupSupervisor};
+        use std::time::{Duration, Instant};
+
+        if std::env::var_os("CYMULE_TEST_PENDING_SIGNAL").is_none() {
+            return;
+        }
+        let mut blocked = std::mem::MaybeUninit::<nix::libc::sigset_t>::uninit();
+        // SAFETY: the mask is helper-owned stack storage. SIGUSR1 remains
+        // blocked until this isolated helper exits, so its default action never
+        // runs while the pending-state assertion is active.
+        unsafe {
+            assert_eq!(nix::libc::sigemptyset(blocked.as_mut_ptr()), 0);
+            assert_eq!(
+                nix::libc::sigaddset(blocked.as_mut_ptr(), nix::libc::SIGUSR1),
+                0
+            );
+            assert_eq!(
+                nix::libc::pthread_sigmask(
+                    nix::libc::SIG_BLOCK,
+                    blocked.as_ptr(),
+                    std::ptr::null_mut(),
+                ),
+                0
+            );
+            assert_eq!(nix::libc::raise(nix::libc::SIGUSR1), 0);
+        }
+        // SAFETY: sigemptyset initialized `blocked` above.
+        let blocked = unsafe { blocked.assume_init() };
+        let mut before = std::mem::MaybeUninit::<nix::libc::sigset_t>::uninit();
+        // SAFETY: this query initializes helper-owned stack storage.
+        unsafe {
+            assert_eq!(
+                nix::libc::pthread_sigmask(
+                    nix::libc::SIG_SETMASK,
+                    std::ptr::null(),
+                    before.as_mut_ptr(),
+                ),
+                0
+            );
+        }
+        // SAFETY: pthread_sigmask initialized `before` after success.
+        let before = unsafe { before.assume_init() };
+        let cancellation = ProcessCancellation::new().expect("cancellation authority creates");
+        let launch = cancellation
+            .register_launch()
+            .expect("launch authority registers");
+        let mut supervisor =
+            ProcessGroupSupervisor::start(Instant::now() + Duration::from_secs(2), &launch)
+                .expect("watchdog starts with a pending parent signal");
+        supervisor.terminate();
+
+        let mut current = std::mem::MaybeUninit::<nix::libc::sigset_t>::uninit();
+        let mut pending = std::mem::MaybeUninit::<nix::libc::sigset_t>::uninit();
+        // SAFETY: these queries initialize helper-owned stack storage.
+        unsafe {
+            assert_eq!(
+                nix::libc::pthread_sigmask(
+                    nix::libc::SIG_SETMASK,
+                    std::ptr::null(),
+                    current.as_mut_ptr(),
+                ),
+                0
+            );
+            assert_eq!(nix::libc::sigpending(pending.as_mut_ptr()), 0);
+            assert_eq!(
+                nix::libc::sigismember(current.as_ptr(), nix::libc::SIGUSR1),
+                1,
+                "the spawning thread's pre-fork mask is restored exactly"
+            );
+            assert_eq!(
+                nix::libc::sigismember(pending.as_ptr(), nix::libc::SIGUSR1),
+                1,
+                "a pending parent signal cannot enter the fork-only child"
+            );
+            assert_eq!(
+                nix::libc::sigismember(&raw const blocked, nix::libc::SIGUSR1),
+                1
+            );
+            for signal in 1..32 {
+                assert_eq!(
+                    nix::libc::sigismember(&raw const before, signal),
+                    nix::libc::sigismember(current.as_ptr(), signal),
+                    "signal {signal} mask membership changed across watchdog fork"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
