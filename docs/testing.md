@@ -6,7 +6,7 @@ change must prove the Rust transition, frozen wire form, and every language
 projection together. The checked-in harness selects the smallest conservative
 set and escalates an unknown path to the complete suite.
 
-Implementation status: the terminal Engine v4/live-evolution commit matrix and
+Implementation status: the terminal Engine v5/live-evolution commit matrix and
 complete branch-wide catalog must be rerun after final source freeze. No prior
 partial run is current evidence for version authority, SDKs, process death,
 packages, release workflows, or MLIR.
@@ -89,7 +89,7 @@ Rust transport tests also inject explicit `null` into omission-only request,
 success-response, and nested failure-issue members, then prove typed
 reserialization detects the erased presence before execution or response
 admission. A required-nullable Run query result remains a positive control.
-Each successful Engine v4 `execute_live_evolution` response must be one
+Each successful Engine v5 `execute_live_evolution` response must be one
 `EvolutionCommit`. Its observed revision is a valid StateRoot identity, its
 `committed_revision` member is present with either an exact revision or `null`,
 and its semantic receipt matches the exact `evolution_id` and complete command
@@ -163,7 +163,7 @@ behavioral suite for every Rust edit.
 | Workbench | optional MLIR lowering smoke | compiler workbench changes or a complete run |
 | Coverage analysis | aggregate line/region non-regression signal | scheduled/manual semantic analysis |
 | Mutation analysis | whether core tests detect injected wrong semantics | scheduled/manual `cymule-core` analysis |
-| Platform portability | filesystem CAS and recovery across supported hosts | scheduled/manual Linux/macOS matrix |
+| Platform portability | filesystem CAS and recovery across supported hosts, plus the explicit non-Unix DirectoryStore boundary | scheduled/manual Linux/macOS matrix and native Windows witness |
 
 The manifest at `tests/harness/suites.toml` is the suite and route inventory.
 Commands are argument arrays, not shell fragments. The harness validates every
@@ -224,6 +224,13 @@ python3 scripts/test_harness.py run rust-mutation-evolution-m4
 python3 scripts/test_harness.py run rust-mutation-plugins
 python3 scripts/test_harness.py run rust-portability
 ```
+
+The portability harness runs the portable core, durable, and DirectoryStore
+suites on Linux and macOS. The same scheduled/manual Compatibility workflow has
+an independent native `windows-2025` PowerShell job which installs the pinned
+MSVC Rust toolchain and executes the exact cfg(non-Unix) DirectoryStore unit.
+That job verifies one test actually passed, so a filtered zero-test run cannot
+stand in for non-Unix behavior. Neither portability path is Required CI.
 
 Coverage currently gates the measured four-crate semantic baseline at 72% line
 and 78% region coverage. These are non-regression floors, not a claim that a

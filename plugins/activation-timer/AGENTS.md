@@ -25,7 +25,8 @@
   must redeliver the identical activation ID, timer ID, target, and value.
 - Redeliver retained due selections before selecting new timer sources. An
   earlier-due unselected timer or its view error must not block an already
-  selected delivery; due-time and target bounds still apply to redelivery.
+  selected delivery. Due-time and the framework target maximum still apply to
+  redelivery; a later caller limit does not reinterpret a retained selection.
 - `acknowledge` must transactionally verify that durable target selection
   already exists. A scheduled but never selected timer cannot be acknowledged.
 - SQLite contention uses a zero busy timeout and surfaces as a conflict. Tests

@@ -9,7 +9,7 @@ forged_response = json.loads(
 json.dump(
     {
         "outcome": "success",
-        "engine_protocol": "cymule.engine/4",
+        "engine_protocol": "cymule.engine/5",
         "request": request,
         "response": forged_response,
     },

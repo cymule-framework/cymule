@@ -34,15 +34,15 @@
   and shadow targets use the exact 16 MiB Evolution message limit; both reject
   narrower and wider values before process spawn. Runtime-closure values are
   lowercase SHA-256 content identities rather than compatibility labels.
-- CLI-backed clients accept only `cymule.engine/4`; a v3 envelope is malformed
+- CLI-backed clients accept only `cymule.engine/5`; a v4 envelope is malformed
   transport and must not enter a compatibility decoder.
 - After typed response-envelope decoding and before failure, echo, or payload
   admission, compare the strict raw response with typed reserialization and
-  reject an explicit `null` erased from an omission-only optional member.
+  reject every explicit member erased by omission-only/defaulted serialization.
   Classify this as an invalid transport response for reads and
   `unknown_world_outcome/reconcile` for mutations; required nullable members
   remain admitted.
-- A typed v4 failure is authoritative only after `EngineFailure::verify`
+- A typed v5 failure is authoritative only after `EngineFailure::verify`
   succeeds. Preserve a valid remote failure exactly. A semantically invalid
   failure is an invalid transport response for a read and
   `unknown_world_outcome/reconcile` after a mutation; never return the
@@ -53,10 +53,13 @@
   Plan/Resource/Clock/rollout identity or compare a pre-serialization host
   value. Preserve raw JSON member presence: omitted and explicit `null` do not
   match, even if typed decoding maps both to `None`. Failure has no request echo
-  because request decoding may not have completed; an older v4 success without
+  because request decoding may not have completed; a predecessor success without
   the echo fails closed. Classify invalid echo from a mutating request as
   `unknown_world_outcome/reconcile`; a non-mutating request receives an invalid
   response without inferred replay safety.
+- Clock issuance returns the typed `ClockObservationResult`. The Durable facade
+  verifies its exact Run and source generation before exposing the nested
+  observation; SDK code never recomputes the opaque Clock scope.
 - Serialization, strict-JSON admission, and typed round-trip failure before
   process spawn are local `validation/correct_and_retry`, never transport loss.
   Mathematical integer tokens normalize before typed admission; lexical

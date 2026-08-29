@@ -48,26 +48,33 @@
   evidence counting, and durable promotion remain `cymule-evolution` authority.
 - Write only the response JSON to stdout. Diagnostics go to stderr.
 - RPC domain failures return a successful process transport containing one
-  `cymule.engine/4` failure envelope. A nonzero process status is reserved for
+  `cymule.engine/5` failure envelope. A nonzero process status is reserved for
   failure to carry the protocol itself; never duplicate a semantic failure on
   stderr or emit an unversioned success payload.
-- Engine v4 is the sole accepted transport generation. Reject every v3 request
+- Engine v5 is the sole accepted transport generation. Reject every v4 request
   and response without probing a legacy shape or synthesizing an outcome-only
   live-evolution success.
 - After strict decoding, retain the exact complete inner `EngineRequest` that is
   executed and echo it in every success beside the response. Never rebuild the
   echo from an operation-specific subset. Failures carry no request because
-  envelope or request decoding itself may have failed. An older v4 success with
+  envelope or request decoding itself may have failed. A predecessor success with
   only `response` is invalid.
 - Before any request execution or provider/store I/O, compare the retained raw
-  request with its typed reserialization and reject any explicit `null` erased
-  from an omission-only optional member as request validation with
+  request with its typed reserialization and reject every explicit member
+  erased by omission-only/defaulted serialization as request validation with
   `correct_and_retry`.
 - Normalize every safe mathematically integral JSON number, including `1.0`
   and `1e0`, before typed request decoding. A success echoes the normalized
   typed request (`1`); finite fractional values remain legal only where the
   selected typed field accepts them, and unsafe integral values fail before
   authority I/O.
+- `clock_observed` returns one typed `ClockObservationResult { run_id,
+  observation }`. Construct it only through Durable Protocol's verifier, which
+  binds the opaque scope to that Run; clients compare the returned Run with the
+  exact request and never rederive the scope.
+- Direct file/stdin commands use the same duplicate-free, exact-number and
+  lossless typed member-presence gate as RPC. Explicit nulls and empty defaults
+  that typed serialization omits are invalid wires.
 - Embedded Run Plan/input/Run-ID and complete `EnginePluginTarget` admission
   precede process construction and describe. Embedded and durable process paths
   copy the exact arguments, explicit environment, working directory, runtime
@@ -132,6 +139,10 @@
 - RPC SIGINT/SIGTERM uses the executor's lock-free shared cancellation token.
   Do not restore a heap-only signal flag or polling helper thread: forked launch
   decisions use the same retained pre-start/post-start receipt as Runtime errors.
+- RPC stdin is Unix-only, uses cancellation-aware bounded polling, and admits at
+  most 64 MiB including the Engine envelope. The reader terminates on max plus
+  one before JSON allocation; non-Unix cancellation construction fails before
+  stdin is read.
 - The package is `cymule-cli` and installs the `cymule` binary. Keep binary
   rustdoc disabled so it cannot collide with the public `cymule` facade library;
   user API documentation belongs to the facade and profile crates.

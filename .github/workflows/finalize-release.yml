@@ -23,6 +23,9 @@ jobs:
       controller_sha: ${{ steps.identity.outputs.controller_sha }}
       release_sha: ${{ steps.identity.outputs.release_sha }}
       release_tag_sha: ${{ steps.identity.outputs.release_tag_sha }}
+      private_source_sha: ${{ steps.mirror.outputs.private_source_sha }}
+      mirror_receipt_tag_sha: ${{ steps.mirror.outputs.mirror_receipt_tag_sha }}
+      public_source_snapshot_digest: ${{ steps.mirror.outputs.public_source_snapshot_digest }}
       version: ${{ steps.identity.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -92,6 +95,18 @@ jobs:
           package_version=$(python3 -c \
             'import json, pathlib; print(json.loads(pathlib.Path("release-payload/sdk/typescript/package.json").read_text())["version"])')
           test "$package_version" = "$RELEASE_VERSION"
+
+      - name: Authenticate the private-to-public mirror receipt
+        id: mirror
+        env:
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          RELEASE_SHA: ${{ steps.identity.outputs.release_sha }}
+        run: |
+          receipt_ref="refs/tags/cymule-mirror/$RELEASE_SHA"
+          git -C release-payload fetch --force origin "$receipt_ref:$receipt_ref"
+          python3 scripts/finalize_release.py verify-mirror-receipt \
+            --public-source-sha "$RELEASE_SHA" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Install Rust
         run: |
@@ -239,6 +254,9 @@ jobs:
           RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
           RELEASE_TAG: v${{ needs.verify.outputs.version }}
           RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}
+          PRIVATE_SOURCE_SHA: ${{ needs.verify.outputs.private_source_sha }}
+          MIRROR_RECEIPT_TAG_SHA: ${{ needs.verify.outputs.mirror_receipt_tag_sha }}
+          PUBLIC_SOURCE_SNAPSHOT_DIGEST: ${{ needs.verify.outputs.public_source_snapshot_digest }}
         run: |
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- \
@@ -255,6 +273,14 @@ jobs:
           test "$remote_tag_sha" = "$RELEASE_TAG_SHA"
           test "$remote_release_sha" = "$RELEASE_SHA"
           test "$(git -C release-payload rev-parse HEAD)" = "$RELEASE_SHA"
+          receipt_ref="refs/tags/cymule-mirror/$RELEASE_SHA"
+          git -C release-payload fetch --force origin "$receipt_ref:$receipt_ref"
+          CYMULE_RELEASE_WORKSPACE="$GITHUB_WORKSPACE/release-payload" \
+            python3 scripts/finalize_release.py verify-mirror-receipt \
+              --public-source-sha "$RELEASE_SHA" \
+              --expected-tag-sha "$MIRROR_RECEIPT_TAG_SHA" \
+              --expected-private-source-sha "$PRIVATE_SOURCE_SHA" \
+              --expected-source-snapshot-digest "$PUBLIC_SOURCE_SNAPSHOT_DIGEST"
 
       - name: Verify exact payload version authority without executing payload code
         env:
@@ -282,6 +308,7 @@ jobs:
           CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
           RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
           RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+          PRIVATE_SOURCE_SHA: ${{ needs.verify.outputs.private_source_sha }}
         run: |
           test "$(node --version)" = v26.7.0
           test "$(npm --version)" = 11.19.0
@@ -299,7 +326,7 @@ jobs:
             --stage "$RUNNER_TEMP/release-evidence/crates" \
             --output "$evidence_dir/crates.json"
           uv run --project sdk/python --frozen python scripts/version_domains.py bom \
-            --source-sha "$RELEASE_SHA" \
+            --source-sha "$PRIVATE_SOURCE_SHA" \
             --public-source-sha "$RELEASE_SHA" \
             --publications "$evidence_dir/npm-cymule.json" \
             --publications "$evidence_dir/npm-cymule-sdk.json" \
@@ -313,6 +340,9 @@ jobs:
           RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
           RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}
           RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+          PRIVATE_SOURCE_SHA: ${{ needs.verify.outputs.private_source_sha }}
+          MIRROR_RECEIPT_TAG_SHA: ${{ needs.verify.outputs.mirror_receipt_tag_sha }}
+          PUBLIC_SOURCE_SNAPSHOT_DIGEST: ${{ needs.verify.outputs.public_source_snapshot_digest }}
         run: |
           bom_name="cymule-$RELEASE_VERSION-version-domain-bom.json"
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
@@ -321,6 +351,9 @@ jobs:
             --version "$RELEASE_VERSION" \
             --release-sha "$RELEASE_SHA" \
             --release-tag-sha "$RELEASE_TAG_SHA" \
+            --private-source-sha "$PRIVATE_SOURCE_SHA" \
+            --mirror-receipt-tag-sha "$MIRROR_RECEIPT_TAG_SHA" \
+            --public-source-snapshot-digest "$PUBLIC_SOURCE_SNAPSHOT_DIGEST" \
             --controller-sha "$CONTROLLER_SHA" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             --asset "$RUNNER_TEMP/$bom_name" \
@@ -352,6 +385,7 @@ jobs:
         with:
           ref: ${{ needs.verify.outputs.release_sha }}
           path: release-authority
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -372,6 +406,9 @@ jobs:
           RELEASE_TAG: v${{ needs.verify.outputs.version }}
           RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}
           RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+          PRIVATE_SOURCE_SHA: ${{ needs.verify.outputs.private_source_sha }}
+          MIRROR_RECEIPT_TAG_SHA: ${{ needs.verify.outputs.mirror_receipt_tag_sha }}
+          PUBLIC_SOURCE_SNAPSHOT_DIGEST: ${{ needs.verify.outputs.public_source_snapshot_digest }}
         run: |
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           git fetch --no-tags origin main
@@ -383,11 +420,22 @@ jobs:
           test "$remote_tag_sha" = "$RELEASE_TAG_SHA"
           test "$remote_release_sha" = "$RELEASE_SHA"
           test "$(git -C release-authority rev-parse HEAD)" = "$RELEASE_SHA"
+          receipt_ref="refs/tags/cymule-mirror/$RELEASE_SHA"
+          git -C release-authority fetch --force origin "$receipt_ref:$receipt_ref"
+          CYMULE_RELEASE_WORKSPACE="$GITHUB_WORKSPACE/release-authority" \
+            python3 scripts/finalize_release.py verify-mirror-receipt \
+              --public-source-sha "$RELEASE_SHA" \
+              --expected-tag-sha "$MIRROR_RECEIPT_TAG_SHA" \
+              --expected-private-source-sha "$PRIVATE_SOURCE_SHA" \
+              --expected-source-snapshot-digest "$PUBLIC_SOURCE_SNAPSHOT_DIGEST"
           bom_path=$(uv run --project sdk/python --frozen python3 scripts/finalize_release.py verify-stage \
             --repository "$GITHUB_REPOSITORY" \
             --version "$RELEASE_VERSION" \
             --release-sha "$RELEASE_SHA" \
             --release-tag-sha "$RELEASE_TAG_SHA" \
+            --private-source-sha "$PRIVATE_SOURCE_SHA" \
+            --mirror-receipt-tag-sha "$MIRROR_RECEIPT_TAG_SHA" \
+            --public-source-snapshot-digest "$PUBLIC_SOURCE_SNAPSHOT_DIGEST" \
             --controller-sha "$CONTROLLER_SHA" \
             --stage "$RUNNER_TEMP/release-finalization")
           test -f "$bom_path"
@@ -445,6 +493,9 @@ jobs:
           RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
           RELEASE_TAG: v${{ needs.verify.outputs.version }}
           RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}
+          PRIVATE_SOURCE_SHA: ${{ needs.verify.outputs.private_source_sha }}
+          MIRROR_RECEIPT_TAG_SHA: ${{ needs.verify.outputs.mirror_receipt_tag_sha }}
+          PUBLIC_SOURCE_SNAPSHOT_DIGEST: ${{ needs.verify.outputs.public_source_snapshot_digest }}
         run: |
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/verify_github_release_settings.py
@@ -456,6 +507,12 @@ jobs:
           remote_release_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG^{}" '$2 == ref {print $1}')
           test "$remote_tag_sha" = "$RELEASE_TAG_SHA"
           test "$remote_release_sha" = "$RELEASE_SHA"
+          mirror_receipt_ref="refs/tags/cymule-mirror/$RELEASE_SHA"
+          remote_mirror_receipt=$(git ls-remote origin "$mirror_receipt_ref")
+          test "$(printf '%s\n' "$remote_mirror_receipt" | grep -c .)" -eq 1
+          remote_mirror_receipt_tag_sha=$(printf '%s\n' "$remote_mirror_receipt" \
+            | awk -v ref="$mirror_receipt_ref" '$2 == ref {print $1}')
+          test "$remote_mirror_receipt_tag_sha" = "$MIRROR_RECEIPT_TAG_SHA"
           mkdir "$RUNNER_TEMP/release-control-plane"
           GITHUB_TOKEN="$CONTROL_PLANE_TOKEN" \
             python3 scripts/verify_github_release_settings.py \
@@ -470,7 +527,10 @@ jobs:
               --run-attempt "$GITHUB_RUN_ATTEMPT" \
               --controller-sha "$CONTROLLER_SHA" \
               --release-sha "$RELEASE_SHA" \
-              --release-tag-sha "$RELEASE_TAG_SHA"
+              --release-tag-sha "$RELEASE_TAG_SHA" \
+              --private-source-sha "$PRIVATE_SOURCE_SHA" \
+              --mirror-receipt-tag-sha "$MIRROR_RECEIPT_TAG_SHA" \
+              --public-source-snapshot-digest "$PUBLIC_SOURCE_SNAPSHOT_DIGEST"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -495,6 +555,9 @@ jobs:
           RELEASE_TAG: v${{ needs.verify.outputs.version }}
           RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}
           RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+          PRIVATE_SOURCE_SHA: ${{ needs.verify.outputs.private_source_sha }}
+          MIRROR_RECEIPT_TAG_SHA: ${{ needs.verify.outputs.mirror_receipt_tag_sha }}
+          PUBLIC_SOURCE_SNAPSHOT_DIGEST: ${{ needs.verify.outputs.public_source_snapshot_digest }}
         run: |
           controller_dir="$RUNNER_TEMP/release-controller"
           authority_dir="$RUNNER_TEMP/release-authority"
@@ -510,9 +573,11 @@ jobs:
           git -C "$controller_dir" checkout --detach "$CONTROLLER_SHA"
           git init "$authority_dir"
           git -C "$authority_dir" remote add origin "$repository_url"
-          git -C "$authority_dir" fetch --no-tags --depth=1 origin "$RELEASE_SHA"
+          git -C "$authority_dir" fetch --no-tags origin "$RELEASE_SHA"
           test "$(git -C "$authority_dir" rev-parse FETCH_HEAD)" = "$RELEASE_SHA"
           git -C "$authority_dir" checkout --detach "$RELEASE_SHA"
+          receipt_ref="refs/tags/cymule-mirror/$RELEASE_SHA"
+          git -C "$authority_dir" fetch --force origin "$receipt_ref:$receipt_ref"
 
           mkdir "$stage_dir" "$attestation_dir" "$control_plane_dir"
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
@@ -540,6 +605,9 @@ jobs:
             --version "$RELEASE_VERSION" \
             --release-sha "$RELEASE_SHA" \
             --release-tag-sha "$RELEASE_TAG_SHA" \
+            --private-source-sha "$PRIVATE_SOURCE_SHA" \
+            --mirror-receipt-tag-sha "$MIRROR_RECEIPT_TAG_SHA" \
+            --public-source-snapshot-digest "$PUBLIC_SOURCE_SNAPSHOT_DIGEST" \
             --controller-sha "$CONTROLLER_SHA" \
             --stage "$stage_dir" \
             --attestation-bundle "$attestation_dir/bundle.json" \

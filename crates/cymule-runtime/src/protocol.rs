@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::RuntimeError;
 
 /// Current Engine transport protocol.
-pub const ENGINE_PROTOCOL_VERSION: &str = "cymule.engine/4";
+pub const ENGINE_PROTOCOL_VERSION: &str = "cymule.engine/5";
 
 /// Official directory-store provider identity understood by the CLI Engine.
 pub const ENGINE_DIRECTORY_STORE_PROVIDER: &str = "cymule.directory-store/5";
@@ -975,7 +975,7 @@ impl EngineFailure {
             EngineFailureCategory::PluginDefect,
             EnginePhase::Transport,
             "engine_failure_projection_invalid",
-            "the Engine could not project its internal failure into cymule.engine/4",
+            "the Engine could not project its internal failure into cymule.engine/5",
         );
         failure.retry_disposition = Some(EngineRetryDisposition::Never);
         failure
@@ -1978,10 +1978,10 @@ mod tests {
     }
 
     #[test]
-    fn engine_v4_rejects_v3_envelopes() {
+    fn engine_v5_rejects_v4_envelopes() {
         let legacy = serde_json::json!({
             "outcome": "success",
-            "engine_protocol": "cymule.engine/3",
+            "engine_protocol": "cymule.engine/4",
             "request": {"type": "verify"},
             "response": {"verified": true}
         });

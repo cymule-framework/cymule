@@ -377,7 +377,7 @@ class VersionDomainTests(unittest.TestCase):
                     payload_registry,
                     "a" * 40,
                     "b" * 40,
-                    publication_fixture(catalog, "a" * 40),
+                    publication_fixture(catalog, "b" * 40),
                     catalog=catalog,
                 )
             package_manifests = {
@@ -601,11 +601,19 @@ class VersionDomainTests(unittest.TestCase):
             ).stdout.strip()
             current = version_domains.current_source_snapshot_digest(root)
             self.assertEqual(
+                version_domains.commit_source_snapshot_digest(head, root=root),
+                current,
+            )
+            self.assertEqual(
                 dict(version_domains.source_snapshot_history(root))[head], current
             )
             tool.chmod(0o755)
             executable_snapshot = version_domains.current_source_snapshot_digest(root)
             self.assertNotEqual(current, executable_snapshot)
+            self.assertEqual(
+                version_domains.commit_source_snapshot_digest(head, root=root),
+                current,
+            )
             tool.chmod(0o644)
             root.joinpath("tool-link").unlink()
             root.joinpath("tool-link").write_text("tool.sh")
@@ -619,6 +627,12 @@ class VersionDomainTests(unittest.TestCase):
             self.assertNotEqual(next_head, head)
             self.assertEqual(history[0][0], next_head)
             self.assertEqual(dict(history)[next_head], version_domains.current_source_snapshot_digest(root))
+            self.assertEqual(
+                version_domains.commit_source_snapshot_digest(next_head, root=root),
+                version_domains.current_source_snapshot_digest(root),
+            )
+            with self.assertRaisesRegex(ValueError, "exact lowercase Git commit"):
+                version_domains.commit_source_snapshot_digest("HEAD", root=root)
             history.clear()
             self.assertEqual(version_domains.source_snapshot_history(root)[0][0], next_head)
 
@@ -805,7 +819,7 @@ suites = ["protocol"]
         engine = next(
             domain
             for domain in malformed["domains"]
-            if domain["version"] == "cymule.engine/4"
+            if domain["version"] == "cymule.engine/5"
         )
         engine["depends_on"].remove("cymule.resource/3")
         engine["embeds"].remove("cymule.resource/3")
@@ -814,7 +828,7 @@ suites = ["protocol"]
 
     def test_root_schema_owned_fragments_require_direct_dependency_edges(self) -> None:
         by_version = {domain["version"]: domain for domain in self.registry["domains"]}
-        engine = by_version["cymule.engine/4"]
+        engine = by_version["cymule.engine/5"]
         direct = {
             "cymule.durable-state/7",
             "cymule.effect-intent/2",
@@ -827,7 +841,7 @@ suites = ["protocol"]
         engine = next(
             domain
             for domain in malformed["domains"]
-            if domain["version"] == "cymule.engine/4"
+            if domain["version"] == "cymule.engine/5"
         )
         engine["embeds"].remove("cymule.wait/2")
         engine["depends_on"].remove("cymule.wait/2")
@@ -867,6 +881,16 @@ suites = ["protocol"]
         self.assertNotIn("cymule.live-evolution-checkpoint/4", production)
         self.assertNotIn("cymule.resource-lifecycle/1", production)
         self.assertIn(".github/workflows/*.yml", version_domains.PRODUCTION_IDENTITY_GLOBS)
+        self.assertIn(
+            "scripts/release_contracts.py", version_domains.PRODUCTION_IDENTITY_GLOBS
+        )
+        self.assertNotIn(
+            "scripts/finalize_release.py", version_domains.PRODUCTION_IDENTITY_GLOBS
+        )
+        self.assertNotIn(
+            "scripts/verify_github_release_settings.py",
+            version_domains.PRODUCTION_IDENTITY_GLOBS,
+        )
         self.assertFalse(
             any(pattern.startswith(".gitlab") for pattern in version_domains.PRODUCTION_IDENTITY_GLOBS)
         )
@@ -1177,12 +1201,12 @@ fn quotes(bytes: &[u8]) -> bool {
             "MachineSnapshot::VERSION",
         )
         self.assertEqual(
-            by_version["cymule.agent/5"]["sources"][0]["symbol"],
+            by_version["cymule.agent/6"]["sources"][0]["symbol"],
             "$token:/title",
         )
         malformed = copy.deepcopy(self.registry)
         agent = next(
-            domain for domain in malformed["domains"] if domain["version"] == "cymule.agent/5"
+            domain for domain in malformed["domains"] if domain["version"] == "cymule.agent/6"
         )
         agent["sources"][0]["symbol"] = "/type"
         with self.assertRaisesRegex(ValueError, "source anchor"):
@@ -1232,7 +1256,7 @@ fn quotes(bytes: &[u8]) -> bool {
 
         malformed = copy.deepcopy(self.registry)
         engine = next(
-            domain for domain in malformed["domains"] if domain["version"] == "cymule.engine/4"
+            domain for domain in malformed["domains"] if domain["version"] == "cymule.engine/5"
         )
         del engine["defined_at_source_snapshot_digest"]
         with self.assertRaisesRegex(
@@ -1242,18 +1266,18 @@ fn quotes(bytes: &[u8]) -> bool {
 
         malformed = copy.deepcopy(self.registry)
         engine = next(
-            domain for domain in malformed["domains"] if domain["version"] == "cymule.engine/4"
+            domain for domain in malformed["domains"] if domain["version"] == "cymule.engine/5"
         )
         engine["defined_at_source_snapshot_digest"] = malformed["source_generation"][
             "baseline_source_snapshot_digest"
         ]
-        with self.assertRaisesRegex(ValueError, "engine/4 requires explicit null"):
+        with self.assertRaisesRegex(ValueError, "engine/5 requires explicit null"):
             version_domains.verify_registry(malformed)
 
     def test_tracked_plugin_schema_requires_fragment_owned_digest(self) -> None:
         malformed = copy.deepcopy(self.registry)
         agent = next(
-            domain for domain in malformed["domains"] if domain["version"] == "cymule.agent/5"
+            domain for domain in malformed["domains"] if domain["version"] == "cymule.agent/6"
         )
         agent["schemas"] = []
         with self.assertRaisesRegex(ValueError, "agent-protocol.schema.json requires exactly one root owner"):
@@ -1489,7 +1513,7 @@ fn quotes(bytes: &[u8]) -> bool {
         ):
             self.assertIn("cymule.resource-retention-key/1", by_version[version]["depends_on"])
         expected_sources = {
-            "cymule.resource-fs-layout/1": ("PHYSICAL_LAYOUT_VERSION", "persistence_discriminator"),
+            "cymule.resource-fs-layout/2": ("PHYSICAL_LAYOUT_VERSION", "persistence_discriminator"),
             "cymule.resource-object-store-content/1": ("OBJECT_INDEX_NAMESPACE", "catalog_namespace"),
             "cymule.resource-object-store-layout/2": ("PHYSICAL_LAYOUT_VERSION", "persistence_discriminator"),
         }
@@ -1645,7 +1669,7 @@ fn quotes(bytes: &[u8]) -> bool {
                 ],
             )
         self.assertNotIn(
-            "cymule.engine/4",
+            "cymule.engine/5",
             by_version["cymule.machine-snapshot/11"]["depends_on"],
         )
 
@@ -1704,13 +1728,13 @@ fn quotes(bytes: &[u8]) -> bool {
             ],
         )
         self.assertEqual(sqlite["compatibility_mode"], "exact-reject")
-        self.assertEqual(by_version["cymule.release-bom/2"]["kind"], "receipt")
+        self.assertEqual(by_version["cymule.release-bom/3"]["kind"], "receipt")
         self.assertEqual(
             by_version["cymule.durable-gc-receipt/2"]["schemas"][0]["fragment"],
             "#/$defs/gc_receipt",
         )
         self.assertNotIn(
-            "cymule.engine/4",
+            "cymule.engine/5",
             by_version["cymule.durable-gc-receipt/2"]["depends_on"],
         )
         self.assertIn(
@@ -1744,6 +1768,48 @@ fn quotes(bytes: &[u8]) -> bool {
             ],
         )
 
+    def test_release_control_receipts_have_one_registered_source_authority(self) -> None:
+        by_version = {
+            domain["version"]: domain for domain in self.registry["domains"]
+        }
+        expected_symbols = {
+            "cymule.github-release-control-plane-receipt/2":
+                "CONTROL_PLANE_RECEIPT_VERSION",
+            "cymule.github-release-settings-snapshot/2":
+                "CONTROL_PLANE_SETTINGS_VERSION",
+            "cymule.public-mirror-receipt/2": "MIRROR_RECEIPT_VERSION",
+            "cymule.release-finalization-stage/3": "FINALIZATION_STAGE_VERSION",
+        }
+        for version, symbol in expected_symbols.items():
+            with self.subTest(version=version):
+                domain = by_version[version]
+                self.assertEqual(domain["owner"], "release-governance")
+                self.assertEqual(domain["compatibility_mode"], "exact-reject")
+                self.assertEqual(
+                    domain["sources"],
+                    [{
+                        "path": "scripts/release_contracts.py",
+                        "symbol": symbol,
+                        "role": "release_receipt",
+                    }],
+                )
+                self.assertEqual(
+                    domain["literal_locations"], ["scripts/release_contracts.py"]
+                )
+                self.assertEqual(domain["conformance"], ["release-workflows"])
+        self.assertEqual(
+            by_version["cymule.github-release-control-plane-receipt/2"]["embeds"],
+            ["cymule.github-release-settings-snapshot/2"],
+        )
+        self.assertEqual(
+            by_version["cymule.public-mirror-receipt/2"]["migration"],
+            {
+                "mode": "unsupported",
+                "edge": None,
+                "runbook": "docs/migrations/public-mirror-receipt-carrier-v1.md",
+            },
+        )
+
     def test_terminal_source_generation_has_no_intermediate_domains(self) -> None:
         self.assertEqual(
             self.registry["source_generation"]["generation"],
@@ -1767,12 +1833,12 @@ fn quotes(bytes: &[u8]) -> bool {
             )
         )
         versions = {domain["version"] for domain in self.registry["domains"]}
-        self.assertIn("cymule.agent/5", versions)
+        self.assertIn("cymule.agent/6", versions)
         self.assertTrue(
             {
-                "cymule.agent-command/1",
-                "cymule.agent-command-receipt/1",
-                "cymule.agent-session-current/1",
+                "cymule.agent-command/2",
+                "cymule.agent-command-receipt/2",
+                "cymule.agent-session-current/2",
                 "cymule.agent-stream-key/1",
                 "cymule.agent-stream-chunk-key/1",
             }.issubset(versions)
@@ -1785,7 +1851,7 @@ fn quotes(bytes: &[u8]) -> bool {
         self.assertIn("cymule.durable-state-value/3", versions)
         self.assertIn("cymule.durable-revision/3", versions)
         self.assertIn("cymule.effect-provider-attempt/1", versions)
-        self.assertIn("cymule.engine/4", versions)
+        self.assertIn("cymule.engine/5", versions)
         self.assertIn("cymule.evolution-control/5", versions)
         self.assertIn("cymule.evolution-plugin/3", versions)
         self.assertIn("cymule.ir/3", versions)
@@ -1876,21 +1942,32 @@ fn quotes(bytes: &[u8]) -> bool {
 
     def test_release_bom_binds_source_registry_schemas_and_packages(self) -> None:
         source_sha = "a" * 40
+        public_source_sha = "b" * 40
         catalog = version_domains.release_catalog()
         bom = version_domains.build_bom(
             self.registry,
             source_sha,
-            "b" * 40,
-            publication_fixture(catalog, source_sha),
+            public_source_sha,
+            publication_fixture(catalog, public_source_sha),
         )
-        self.assertEqual(bom["bom_version"], "cymule.release-bom/2")
+        for invalid_public_source in (None, source_sha):
+            with self.subTest(
+                invalid_public_source=invalid_public_source
+            ), self.assertRaisesRegex(ValueError, "distinct exact rewritten"):
+                version_domains.build_bom(
+                    self.registry,
+                    source_sha,
+                    invalid_public_source,
+                    publication_fixture(catalog, source_sha),
+                )
+        self.assertEqual(bom["bom_version"], "cymule.release-bom/3")
         self.assertNotIn("controller_sha", bom)
         with self.assertRaisesRegex(ValueError, "open or incomplete top-level shape"):
             version_domains.validate_release_bom_projection(
                 {**bom, "controller_sha": "c" * 40},
                 registry=self.registry,
                 source_sha=source_sha,
-                public_source_sha="b" * 40,
+                public_source_sha=public_source_sha,
                 catalog=catalog,
             )
         self.assertEqual(
@@ -1920,7 +1997,7 @@ fn quotes(bytes: &[u8]) -> bool {
             sorted(domain["version"] for domain in self.registry["domains"]),
         )
 
-        swapped = publication_fixture(catalog, source_sha)
+        swapped = publication_fixture(catalog, public_source_sha)
         cargo_cymule = next(
             item for item in swapped if item["package_id"] == "cargo:cymule"
         )
@@ -1935,7 +2012,7 @@ fn quotes(bytes: &[u8]) -> bool {
             version_domains.build_bom(
                 self.registry,
                 source_sha,
-                "b" * 40,
+                public_source_sha,
                 swapped,
             )
         with self.assertRaisesRegex(ValueError, "canonical package_id order"):
@@ -1969,7 +2046,7 @@ fn quotes(bytes: &[u8]) -> bool {
                     malformed,
                     registry=self.registry,
                     source_sha=source_sha,
-                    public_source_sha="b" * 40,
+                    public_source_sha=public_source_sha,
                     catalog=catalog,
                 )
 
@@ -1980,7 +2057,7 @@ fn quotes(bytes: &[u8]) -> bool {
                 missing_package,
                 registry=self.registry,
                 source_sha=source_sha,
-                public_source_sha="b" * 40,
+                public_source_sha=public_source_sha,
                 catalog=catalog,
             )
 
@@ -1991,7 +2068,7 @@ fn quotes(bytes: &[u8]) -> bool {
                 wrong_manifest,
                 registry=self.registry,
                 source_sha=source_sha,
-                public_source_sha="b" * 40,
+                public_source_sha=public_source_sha,
                 catalog=catalog,
             )
         with self.assertRaisesRegex(ValueError, "differs from workspace authority"):
@@ -1999,7 +2076,7 @@ fn quotes(bytes: &[u8]) -> bool {
                 bom,
                 registry=self.registry,
                 source_sha=source_sha,
-                public_source_sha="b" * 40,
+                public_source_sha=public_source_sha,
                 catalog=catalog[:-1],
             )
 
@@ -2010,7 +2087,7 @@ fn quotes(bytes: &[u8]) -> bool {
                 bom,
                 registry=malformed_registry,
                 source_sha=source_sha,
-                public_source_sha="b" * 40,
+                public_source_sha=public_source_sha,
                 catalog=catalog,
             )
 
@@ -2022,7 +2099,7 @@ fn quotes(bytes: &[u8]) -> bool {
                 bom,
                 registry=malformed_registry,
                 source_sha=source_sha,
-                public_source_sha="b" * 40,
+                public_source_sha=public_source_sha,
                 catalog=catalog,
             )
 
@@ -2046,7 +2123,7 @@ fn quotes(bytes: &[u8]) -> bool {
                 bom,
                 registry=malformed_registry,
                 source_sha=source_sha,
-                public_source_sha="b" * 40,
+                public_source_sha=public_source_sha,
                 catalog=catalog,
             )
 
@@ -2070,6 +2147,7 @@ fn quotes(bytes: &[u8]) -> bool {
                 str(ROOT / "scripts/version_domains.py"),
                 "bom",
                 "--source-sha", "a" * 40,
+                "--public-source-sha", "b" * 40,
                 "--publications", "/unused-publications.json",
                 "--controller-sha", "b" * 40,
             ],

@@ -432,7 +432,7 @@ patterns = ["scripts/npm_release.py", "scripts/finalize_release.py", "scripts/ve
 suites = ["package-typescript", "release-workflows"]
 
 [[routes]]
-patterns = ["versioning/**", "scripts/version_domains.py", "tests/harness/test_version_domains.py"]
+patterns = ["versioning/**", "scripts/release_contracts.py", "scripts/version_domains.py", "tests/harness/test_version_domains.py"]
 suites = ["full"]
 
 [[routes]]
@@ -570,6 +570,10 @@ suites = ["protocol", "rust-virtual"]
 [[routes]]
 patterns = ["tests/harness/fixtures/agent-workspace-checkpoint.json"]
 suites = ["protocol", "rust-durable"]
+
+[[routes]]
+patterns = ["tests/harness/fixtures/durable-storage-state-root.json"]
+suites = ["protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go"]
 
 [[routes]]
 patterns = ["tests/harness/**"]

@@ -8,8 +8,8 @@ Status: generated from `versioning/version-domains.json`; do not edit by hand.
 | `cymule.activation-timer-store/1` | persistence | `cymule-activation-timer` | exact-reject | — | `rust-activation-timer` |
 | `cymule.agent-command-id/1` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-command-receipt-id/1` | receipt | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
-| `cymule.agent-command-receipt/1` | receipt | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
-| `cymule.agent-command/1` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
+| `cymule.agent-command-receipt/2` | receipt | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
+| `cymule.agent-command/2` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-elicitation-key/1` | persistence | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-host-binding/1` | binding | `cymule-profile-protocol` | exact-reject | `plugins/agent-interaction/schemas/agent-protocol.schema.json` | `protocol`, `rust-agent-plugin` |
 | `cymule.agent-input-completion-key/1` | persistence | `cymule-durable` | exact-reject | — | `rust-durable` |
@@ -23,7 +23,7 @@ Status: generated from `versioning/version-domains.json`; do not edit by hand.
 | `cymule.agent-occurrence-transition-id/1` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-agent-plugin` |
 | `cymule.agent-open-stream-generation/1` | persistence | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-recovery-observation/1` | persistence | `cymule-profile-protocol` | exact-reject | `plugins/agent-interaction/schemas/agent-protocol.schema.json` | `protocol`, `rust-agent-plugin`, `rust-profile-protocol` |
-| `cymule.agent-session-current/1` | persistence | `cymule-profile-protocol` | exact-reject | `plugins/agent-interaction/schemas/agent-protocol.schema.json` | `protocol`, `rust-profile-protocol` |
+| `cymule.agent-session-current/2` | persistence | `cymule-profile-protocol` | exact-reject | `plugins/agent-interaction/schemas/agent-protocol.schema.json` | `protocol`, `rust-profile-protocol` |
 | `cymule.agent-stream-chunk-head/1` | persistence | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-stream-chunk-key/1` | persistence | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-stream-final-update-id/1` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-agent-plugin` |
@@ -37,7 +37,7 @@ Status: generated from `versioning/version-domains.json`; do not edit by hand.
 | `cymule.agent-update-current/1` | persistence | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-update-key/1` | persistence | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-workspace-claim-owner-id/1` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-agent-plugin` |
-| `cymule.agent/5` | semantic | `cymule-agent` | exact-reject | `plugins/agent-interaction/schemas/agent-protocol.schema.json` | `protocol`, `rust-agent-plugin` |
+| `cymule.agent/6` | semantic | `cymule-agent` | exact-reject | `plugins/agent-interaction/schemas/agent-protocol.schema.json` | `protocol`, `rust-agent-plugin` |
 | `cymule.application-journal-prefix-replacement-authority/2` | persistence | `cymule-durable` | exact-reject | `schemas/durable-storage.schema.json` | `protocol`, `rust-durable` |
 | `cymule.application-journal-prefix-replacement-receipt/2` | receipt | `cymule-durable` | exact-reject | `schemas/durable-storage.schema.json` | `protocol`, `rust-durable`, `rust-virtual` |
 | `cymule.application-journal-prefix/1` | persistence | `cymule-durable` | exact-reject | `schemas/durable-storage.schema.json` | `protocol`, `rust-agent-plugin`, `rust-durable`, `rust-virtual` |
@@ -104,7 +104,7 @@ Status: generated from `versioning/version-domains.json`; do not edit by hand.
 | `cymule.effect-schema/1` | semantic | `cymule-core` | exact-reject | `schemas/durable-storage.schema.json` | `protocol`, `rust-agent-plugin`, `rust-core`, `rust-durable` |
 | `cymule.embedded-attempt/1` | semantic | `cymule-runtime` | exact-reject | — | `protocol` |
 | `cymule.embedded-continuation/1` | semantic | `cymule-runtime` | exact-reject | — | `protocol` |
-| `cymule.engine/4` | wire | `cymule-runtime` | exact-reject | `schemas/engine-protocol.schema.json` | `protocol` |
+| `cymule.engine/5` | wire | `cymule-runtime` | exact-reject | `schemas/engine-protocol.schema.json` | `protocol` |
 | `cymule.ephemeral-agent-revision/1` | semantic | `cymule-agent` | exact-reject | — | `rust-agent-plugin` |
 | `cymule.event/8` | semantic | `cymule-core` | exact-reject | `schemas/durable-storage.schema.json` | `protocol`, `rust-core` |
 | `cymule.evolution-command-alias-key/1` | persistence | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
@@ -128,6 +128,8 @@ Status: generated from `versioning/version-domains.json`; do not edit by hand.
 | `cymule.framework-resource-handoff/5` | semantic | `cymule-resource` | exact-reject | — | `rust-resource` |
 | `cymule.framework-resource-list-proof/5` | semantic | `cymule-resource` | exact-reject | — | `rust-resource` |
 | `cymule.framework-resource-manifest/3` | semantic | `cymule-resource` | exact-reject | — | `rust-resource` |
+| `cymule.github-release-control-plane-receipt/2` | receipt | `release-governance` | exact-reject | — | `release-workflows` |
+| `cymule.github-release-settings-snapshot/2` | receipt | `release-governance` | exact-reject | — | `release-workflows` |
 | `cymule.history-compaction/2` | persistence | `cymule-durable` | exact-reject | `schemas/durable-storage.schema.json` | `protocol`, `rust-durable` |
 | `cymule.in-memory-parked-wait-view/1` | semantic | `cymule-durable` | exact-reject | — | `rust-durable` |
 | `cymule.input/1` | semantic | `cymule-core` | exact-reject | `schemas/durable-storage.schema.json` | `protocol`, `rust-core`, `rust-durable` |
@@ -187,8 +189,10 @@ Status: generated from `versioning/version-domains.json`; do not edit by hand.
 | `cymule.process-working-directory/2` | semantic | `cymule-executor-process` | exact-reject | — | `rust-executor-plugin` |
 | `cymule.projection-root-event/1` | projection | `cymule-core` | exact-reject | — | `rust-core`, `rust-durable` |
 | `cymule.projection-root-genesis/1` | projection | `cymule-core` | exact-reject | — | `rust-core`, `rust-durable` |
+| `cymule.public-mirror-receipt/2` | receipt | `release-governance` | exact-reject | — | `release-workflows` |
 | `cymule.public-source-snapshot/1` | receipt | `release-governance` | exact-reject | — | `protocol` |
-| `cymule.release-bom/2` | receipt | `release-governance` | exact-reject | `schemas/release-bom.schema.json` | `protocol`, `release-workflows` |
+| `cymule.release-bom/3` | receipt | `release-governance` | exact-reject | `schemas/release-bom.schema.json` | `protocol`, `release-workflows` |
+| `cymule.release-finalization-stage/3` | receipt | `release-governance` | exact-reject | — | `release-workflows` |
 | `cymule.relink-compatibility/1` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-evolution` |
 | `cymule.resource-agent-stream-pin/1` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.resource-archive-pin/1` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-resource` |
@@ -203,10 +207,10 @@ Status: generated from `versioning/version-domains.json`; do not edit by hand.
 | `cymule.resource-delete-receipt/3` | receipt | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol`, `rust-resource` |
 | `cymule.resource-deletion-target/1` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.resource-fs-child-write/1` | semantic | `cymule-resource-fs` | exact-reject | — | `rust-resource-plugins` |
-| `cymule.resource-fs-layout/1` | persistence | `cymule-resource-fs` | exact-reject | — | `rust-resource-plugins` |
+| `cymule.resource-fs-layout/2` | persistence | `cymule-resource-fs` | exact-reject | — | `rust-resource-plugins` |
 | `cymule.resource-fs-manifest-index/3` | persistence | `cymule-resource-fs` | exact-reject | — | `rust-resource-plugins` |
-| `cymule.resource-fs-upload/8` | persistence | `cymule-resource-fs` | exact-reject | — | `rust-resource-plugins` |
-| `cymule.resource-fs/5` | binding | `cymule-resource-fs` | exact-reject | — | `rust-resource-plugins` |
+| `cymule.resource-fs-upload/9` | persistence | `cymule-resource-fs` | exact-reject | — | `rust-resource-plugins` |
+| `cymule.resource-fs/6` | binding | `cymule-resource-fs` | exact-reject | — | `rust-resource-plugins` |
 | `cymule.resource-gc-receipt/3` | receipt | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol`, `rust-resource` |
 | `cymule.resource-handoff-activation-index/1` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.resource-handoff-activation/3` | wire | `cymule-profile-protocol` | exact-reject | `schemas/resource.schema.json` | `protocol`, `rust-profile-protocol`, `rust-resource` |

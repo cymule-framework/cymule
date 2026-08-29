@@ -34,6 +34,7 @@ def load_script(name: str):
     return module
 
 
+release_contracts = load_script("release_contracts")
 npm_release = load_script("npm_release")
 release_workflows = load_script("verify_release_workflows")
 github_settings = load_script("verify_github_release_settings")
@@ -57,11 +58,26 @@ public_history = load_private_script("rewrite_public_history")
 
 class FinalizeReleaseTests(unittest.TestCase):
     RELEASE_TAG_SHA = "f" * 40
+    PRIVATE_SOURCE_SHA = "d" * 40
+    MIRROR_RECEIPT_TAG_SHA = "e" * 40
+
+    @staticmethod
+    def source_snapshot_digest() -> str:
+        return finalize_release.version_domains.load_registry()["source_generation"][
+            "source_snapshot_digest"
+        ]
+
+    def source_mapping_kwargs(self) -> dict[str, str]:
+        return {
+            "private_source_sha": self.PRIVATE_SOURCE_SHA,
+            "mirror_receipt_tag_sha": self.MIRROR_RECEIPT_TAG_SHA,
+            "public_source_snapshot_digest": self.source_snapshot_digest(),
+        }
 
     @staticmethod
     def settings_snapshot() -> dict[str, object]:
         return {
-            "snapshot_version": github_settings.SETTINGS_SNAPSHOT_VERSION,
+            "snapshot_version": github_settings.CONTROL_PLANE_SETTINGS_VERSION,
             "default_branch": "main",
             "authorities": {
                 "mirror_integration_id": 41,
@@ -107,6 +123,26 @@ class FinalizeReleaseTests(unittest.TestCase):
                     "enforcement": "active",
                     "target": "tag",
                     "ref": "refs/tags/v*",
+                    "rules": ["deletion", "update"],
+                    "bypass_actors": [],
+                },
+                "mirror_receipt_creation": {
+                    "enforcement": "active",
+                    "target": "tag",
+                    "ref": "refs/tags/cymule-mirror/*",
+                    "rules": ["creation"],
+                    "bypass_actors": [
+                        {
+                            "actor_id": 41,
+                            "actor_type": "Integration",
+                            "bypass_mode": "always",
+                        }
+                    ],
+                },
+                "mirror_receipt_immutable": {
+                    "enforcement": "active",
+                    "target": "tag",
+                    "ref": "refs/tags/cymule-mirror/*",
                     "rules": ["deletion", "update"],
                     "bypass_actors": [],
                 },
@@ -156,7 +192,11 @@ class FinalizeReleaseTests(unittest.TestCase):
         *,
         source_sha: str | None = None,
     ) -> dict[str, object]:
-        exact_source = release_sha if source_sha is None else source_sha
+        private_source = (
+            FinalizeReleaseTests.PRIVATE_SOURCE_SHA
+            if source_sha is None
+            else source_sha
+        )
         version_domains = finalize_release.version_domains
         catalog = version_domains.release_catalog_entries()
         publications = []
@@ -221,7 +261,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                             ),
                             "predicate_type": version_domains.NPM_SLSA_PROVENANCE,
                             "workflow_ref": "refs/heads/main",
-                            "source_sha": exact_source,
+                            "source_sha": release_sha,
                             "signer_ref": (
                                 version_domains.NPM_SIGSTORE_CERTIFICATE_IDENTITY
                             ),
@@ -232,8 +272,8 @@ class FinalizeReleaseTests(unittest.TestCase):
             )
         return version_domains.build_bom(
             version_domains.load_registry(),
-            exact_source,
-            exact_source,
+            private_source,
+            release_sha,
             publications,
             catalog=catalog,
         )
@@ -484,6 +524,9 @@ class FinalizeReleaseTests(unittest.TestCase):
             controller_sha="a" * 40,
             release_sha="b" * 40,
             release_tag_sha=self.RELEASE_TAG_SHA,
+            private_source_sha=self.PRIVATE_SOURCE_SHA,
+            mirror_receipt_tag_sha=self.MIRROR_RECEIPT_TAG_SHA,
+            public_source_snapshot_digest=self.source_snapshot_digest(),
             settings_snapshot=self.settings_snapshot(),
             observed_at=observed_at,
         )
@@ -499,6 +542,9 @@ class FinalizeReleaseTests(unittest.TestCase):
             controller_sha="a" * 40,
             release_sha="b" * 40,
             release_tag_sha=self.RELEASE_TAG_SHA,
+            private_source_sha=self.PRIVATE_SOURCE_SHA,
+            mirror_receipt_tag_sha=self.MIRROR_RECEIPT_TAG_SHA,
+            public_source_snapshot_digest=self.source_snapshot_digest(),
             now=now,
         )
 
@@ -547,6 +593,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller,
                     notes_path=notes,
                     asset_path=bom,
@@ -558,6 +605,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller,
                 )
                 stages.append(frozen)
@@ -608,6 +656,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=new_controller,
                 )
 
@@ -651,6 +700,9 @@ class FinalizeReleaseTests(unittest.TestCase):
                     controller_sha="a" * 40,
                     release_sha="b" * 40,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    private_source_sha=self.PRIVATE_SOURCE_SHA,
+                    mirror_receipt_tag_sha=self.MIRROR_RECEIPT_TAG_SHA,
+                    public_source_snapshot_digest=self.source_snapshot_digest(),
                     now=observed_at + dt.timedelta(seconds=1),
                 )
 
@@ -687,6 +739,15 @@ class FinalizeReleaseTests(unittest.TestCase):
                 receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "incomplete|default branch"):
                     self.assert_control_plane_receipt(receipt_path, now=observed_at)
+
+    def test_control_plane_requires_both_exact_mirror_receipt_rulesets(self) -> None:
+        for field in ("mirror_receipt_creation", "mirror_receipt_immutable"):
+            snapshot = self.settings_snapshot()
+            snapshot["rulesets"].pop(field)
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, "ruleset authority is not exact"
+            ):
+                finalize_release._validate_control_plane_settings(snapshot)
 
     def test_control_plane_receipt_expiry_before_publish_fails_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1050,6 +1111,7 @@ class FinalizeReleaseTests(unittest.TestCase):
         controller_sha = "a" * 40
         release_sha = "b" * 40
         tag_object = "c" * 40
+        mirror_receipt_tag = "d" * 40
 
         def invoke(arguments):
             self.assertEqual(arguments[0], "ls-remote")
@@ -1061,6 +1123,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                         f"{controller_sha}\trefs/heads/main\n",
                         f"{tag_object}\trefs/tags/v0.2.0\n",
                         f"{release_sha}\trefs/tags/v0.2.0^{{}}\n",
+                        f"{mirror_receipt_tag}\trefs/tags/cymule-mirror/{release_sha}\n",
                     )
                 ),
                 "",
@@ -1072,6 +1135,7 @@ class FinalizeReleaseTests(unittest.TestCase):
             controller_sha=controller_sha,
             release_sha=release_sha,
             release_tag_sha=tag_object,
+            mirror_receipt_tag_sha=mirror_receipt_tag,
             invoke=invoke,
         )
 
@@ -1091,6 +1155,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                 controller_sha=controller_sha,
                 release_sha=release_sha,
                 release_tag_sha=tag_object,
+                mirror_receipt_tag_sha=mirror_receipt_tag,
                 invoke=stale,
             )
 
@@ -1110,7 +1175,28 @@ class FinalizeReleaseTests(unittest.TestCase):
                 controller_sha=controller_sha,
                 release_sha=release_sha,
                 release_tag_sha=tag_object,
+                mirror_receipt_tag_sha=mirror_receipt_tag,
                 invoke=retagged,
+            )
+
+        def remapped(arguments):
+            result = invoke(arguments)
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                result.stdout.replace(mirror_receipt_tag, "e" * 40, 1),
+                "",
+            )
+
+        with self.assertRaisesRegex(ValueError, "mirror receipt moved"):
+            finalize_release.assert_remote_release_fence(
+                repository="cymule-framework/cymule",
+                tag="v0.2.0",
+                controller_sha=controller_sha,
+                release_sha=release_sha,
+                release_tag_sha=tag_object,
+                mirror_receipt_tag_sha=mirror_receipt_tag,
+                invoke=remapped,
             )
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -1135,6 +1221,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                         controller_sha=controller_sha,
                         release_sha=release_sha,
                         release_tag_sha=tag_object,
+                        mirror_receipt_tag_sha=mirror_receipt_tag,
                         invoke=retagged,
                     ),
                     assert_attestation=lambda: None,
@@ -1147,6 +1234,171 @@ class FinalizeReleaseTests(unittest.TestCase):
                     for word in (" create ", " upload ", " edit ")
                 )
             )
+
+    def test_mirror_receipt_tag_authenticates_distinct_sources_and_snapshot(self) -> None:
+        private_source_sha = "b" * 40
+        snapshot = "sha256:" + "c" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = pathlib.Path(temporary)
+            subprocess.run(
+                ["git", "init", "--quiet", "--initial-branch=main"],
+                cwd=repository,
+                check=True,
+            )
+            repository.joinpath("README.md").write_text(
+                "public source\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "add", "README.md"], cwd=repository, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Cymule Test",
+                    "-c",
+                    "user.email=test@cymule.dev",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "Add public source",
+                ],
+                cwd=repository,
+                check=True,
+            )
+            public_source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            tag_name = finalize_release.mirror_receipt_tag_name(public_source_sha)
+
+            def install_receipt(value: dict[str, object], *, target: str) -> str:
+                raw = (
+                    f"object {target}\n"
+                    "type commit\n"
+                    f"tag {tag_name}\n"
+                    "tagger Cymule Public Mirror <mirror@cymule.dev> 1 +0000\n\n"
+                ).encode("ascii") + finalize_release.version_domains.canonical_bytes(
+                    value
+                ) + b"\n"
+                tag_sha = subprocess.run(
+                    ["git", "mktag"],
+                    cwd=repository,
+                    check=True,
+                    input=raw,
+                    capture_output=True,
+                ).stdout.decode("ascii").strip()
+                subprocess.run(
+                    ["git", "update-ref", f"refs/tags/{tag_name}", tag_sha],
+                    cwd=repository,
+                    check=True,
+                )
+                return tag_sha
+
+            value = {
+                "private_source_sha": private_source_sha,
+                "public_source_sha": public_source_sha,
+                "public_source_snapshot_digest": snapshot,
+                "receipt_version": finalize_release.MIRROR_RECEIPT_VERSION,
+            }
+            tag_sha = install_receipt(value, target=public_source_sha)
+            registry = {"source_generation": {"source_snapshot_digest": snapshot}}
+            with (
+                mock.patch.object(
+                    finalize_release.version_domains,
+                    "commit_source_snapshot_digest",
+                    return_value=snapshot,
+                ),
+                mock.patch.object(
+                    finalize_release.version_domains,
+                    "load_registry",
+                    return_value=registry,
+                ),
+            ):
+                receipt = finalize_release.load_mirror_receipt(
+                    repository,
+                    public_source_sha=public_source_sha,
+                    expected_tag_sha=tag_sha,
+                )
+                self.assertEqual(receipt.private_source_sha, private_source_sha)
+                self.assertEqual(receipt.public_source_sha, public_source_sha)
+                self.assertEqual(receipt.public_source_snapshot_digest, snapshot)
+
+                with self.assertRaisesRegex(ValueError, "another mapping"):
+                    finalize_release.load_mirror_receipt(
+                        repository,
+                        public_source_sha=public_source_sha,
+                        expected_tag_sha="d" * 40,
+                    )
+
+                malformed = {**value, "unexpected": True}
+                install_receipt(malformed, target=public_source_sha)
+                with self.assertRaisesRegex(ValueError, "open or incomplete"):
+                    finalize_release.load_mirror_receipt(
+                        repository, public_source_sha=public_source_sha
+                    )
+
+                subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "user.name=Cymule Test",
+                        "-c",
+                        "user.email=test@cymule.dev",
+                        "commit",
+                        "--quiet",
+                        "--allow-empty",
+                        "-m",
+                        "Create another target",
+                    ],
+                    cwd=repository,
+                    check=True,
+                )
+                other_target = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=repository,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+                install_receipt(value, target=other_target)
+                with self.assertRaisesRegex(ValueError, "envelope is not exact"):
+                    finalize_release.load_mirror_receipt(
+                        repository, public_source_sha=public_source_sha
+                    )
+
+                same_source = {**value, "private_source_sha": public_source_sha}
+                install_receipt(same_source, target=public_source_sha)
+                with self.assertRaisesRegex(ValueError, "mapping is not exact"):
+                    finalize_release.load_mirror_receipt(
+                        repository, public_source_sha=public_source_sha
+                    )
+
+                subprocess.run(
+                    [
+                        "git",
+                        "update-ref",
+                        f"refs/tags/{tag_name}",
+                        public_source_sha,
+                    ],
+                    cwd=repository,
+                    check=True,
+                )
+                with self.assertRaisesRegex(ValueError, "annotated Git tag"):
+                    finalize_release.load_mirror_receipt(
+                        repository, public_source_sha=public_source_sha
+                    )
+
+                install_receipt(value, target=public_source_sha)
+                with mock.patch.object(
+                    finalize_release.version_domains,
+                    "commit_source_snapshot_digest",
+                    return_value="sha256:" + "0" * 64,
+                ), self.assertRaisesRegex(ValueError, "exact source snapshot"):
+                    finalize_release.load_mirror_receipt(
+                        repository, public_source_sha=public_source_sha
+                    )
 
     def test_bom_readback_is_owned_by_the_convergence_controller(self) -> None:
         workflow = (ROOT / ".github/workflows/finalize-release.yml").read_text()
@@ -1179,7 +1431,10 @@ class FinalizeReleaseTests(unittest.TestCase):
                 ),
             )
         for fragment in (
-            "FINALIZATION_STAGE_SCHEMA = 2",
+            "FINALIZATION_STAGE_VERSION,",
+            "MIRROR_RECEIPT_VERSION,",
+            "load_mirror_receipt(",
+            "version_domains.commit_source_snapshot_digest(",
             '"release_tag_sha": release_tag_sha',
             "if refs[tag_ref] != release_tag_sha:",
             '"--paginate"',
@@ -1280,6 +1535,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                 version="0.2.0",
                 release_sha=release_sha,
                 release_tag_sha=self.RELEASE_TAG_SHA,
+                **self.source_mapping_kwargs(),
                 controller_sha=controller_sha,
                 notes_path=notes,
                 asset_path=bom,
@@ -1291,6 +1547,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                 version="0.2.0",
                 release_sha=release_sha,
                 release_tag_sha=self.RELEASE_TAG_SHA,
+                **self.source_mapping_kwargs(),
                 controller_sha=controller_sha,
             )
             self.assertEqual(frozen.tag, "v0.2.0")
@@ -1299,7 +1556,10 @@ class FinalizeReleaseTests(unittest.TestCase):
 
             manifest_path = stage / finalize_release.FINALIZATION_MANIFEST_NAME
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(
+                manifest["stage_version"],
+                "cymule.release-finalization-stage/3",
+            )
             manifest["release_tag_sha"] = "e" * 40
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "release_tag_sha"):
@@ -1309,6 +1569,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                 )
             manifest["release_tag_sha"] = self.RELEASE_TAG_SHA
@@ -1323,6 +1584,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                 )
 
@@ -1335,6 +1597,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                 )
             unexpected.unlink()
@@ -1351,6 +1614,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                 )
             frozen.notes_path.unlink()
@@ -1364,6 +1628,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                 )
 
@@ -1390,6 +1655,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                     notes_path=notes,
                     asset_path=bom,
@@ -1405,6 +1671,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                     notes_path=notes,
                     asset_path=bom,
@@ -1420,6 +1687,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                     notes_path=notes,
                     asset_path=bom,
@@ -1435,6 +1703,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                     notes_path=notes,
                     asset_path=bom,
@@ -1454,6 +1723,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                     notes_path=notes,
                     asset_path=bom,
@@ -1479,13 +1749,14 @@ class FinalizeReleaseTests(unittest.TestCase):
                         version="0.2.0",
                         release_sha=release_sha,
                         release_tag_sha=self.RELEASE_TAG_SHA,
+                        **self.source_mapping_kwargs(),
                         controller_sha=controller_sha,
                         notes_path=notes,
                         asset_path=bom,
                         output=directory / f"stage-foreign-{field}",
                     )
 
-    def test_terminal_stage_schema_version_is_an_exact_integer(self) -> None:
+    def test_terminal_stage_version_is_one_exact_registered_selector(self) -> None:
         release_sha = "a" * 40
         controller_sha = "b" * 40
         with tempfile.TemporaryDirectory() as temporary:
@@ -1503,21 +1774,35 @@ class FinalizeReleaseTests(unittest.TestCase):
                 version="0.2.0",
                 release_sha=release_sha,
                 release_tag_sha=self.RELEASE_TAG_SHA,
+                **self.source_mapping_kwargs(),
                 controller_sha=controller_sha,
                 notes_path=notes,
                 asset_path=bom,
                 output=stage,
             )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest["schema_version"] = True
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "schema version is not an integer"):
+            legacy = {**manifest, "schema_version": 3}
+            manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "open or incomplete"):
                 finalize_release.load_finalization_stage(
                     stage,
                     repository="cymule-framework/cymule",
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
+                    controller_sha=controller_sha,
+                )
+            manifest["stage_version"] = "cymule.release-finalization-stage/2"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "stage_version"):
+                finalize_release.load_finalization_stage(
+                    stage,
+                    repository="cymule-framework/cymule",
+                    version="0.2.0",
+                    release_sha=release_sha,
+                    release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                 )
 
@@ -1552,6 +1837,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=release_sha,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                     notes_path=notes,
                     asset_path=bom,
@@ -1563,6 +1849,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                     version="0.2.0",
                     release_sha=release_sha,
                     release_tag_sha=self.RELEASE_TAG_SHA,
+                    **self.source_mapping_kwargs(),
                     controller_sha=controller_sha,
                     notes_path=notes_alias,
                     asset_path=bom,
@@ -2676,6 +2963,38 @@ class NpmReleaseTests(unittest.TestCase):
 
 
 class WorkflowSecurityTests(unittest.TestCase):
+    def test_release_contract_selectors_have_one_public_source(self) -> None:
+        contracts = (ROOT / "scripts/release_contracts.py").read_text()
+        release_workflows.verify_release_contract_selectors(contracts)
+        self.assertEqual(
+            finalize_release.CONTROL_PLANE_RECEIPT_VERSION,
+            release_contracts.CONTROL_PLANE_RECEIPT_VERSION,
+        )
+        self.assertEqual(
+            github_settings.CONTROL_PLANE_SETTINGS_VERSION,
+            release_contracts.CONTROL_PLANE_SETTINGS_VERSION,
+        )
+        self.assertEqual(
+            finalize_release.FINALIZATION_STAGE_VERSION,
+            release_contracts.FINALIZATION_STAGE_VERSION,
+        )
+        self.assertEqual(
+            finalize_release.MIRROR_RECEIPT_VERSION,
+            release_contracts.MIRROR_RECEIPT_VERSION,
+        )
+        for selector in (
+            "cymule.release-finalization-stage/3",
+            "cymule.github-release-control-plane-receipt/2",
+            "cymule.github-release-settings-snapshot/2",
+            "cymule.public-mirror-receipt/2",
+        ):
+            with self.subTest(selector=selector), self.assertRaisesRegex(
+                ValueError, "four exact selectors"
+            ):
+                release_workflows.verify_release_contract_selectors(
+                    contracts.replace(selector, selector.rsplit("/", 1)[0] + "/99", 1)
+                )
+
     def test_release_version_input_is_closed_before_ref_and_output_use(self) -> None:
         workflows = {
             "publish-npm-controller.yml": (
@@ -2791,6 +3110,33 @@ class WorkflowSecurityTests(unittest.TestCase):
                 ValueError, "lightweight version-domain source lane"
             ):
                 release_workflows.verify_required_ci_source_closure(
+                    workflow.replace(original, replacement, 1)
+                )
+
+    def test_required_ci_executor_path_requires_exact_sha_macos_witness(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        release_workflows.verify_required_ci_executor_macos(workflow)
+        for original, replacement in (
+            ("runs-on: macos-15", "runs-on: ubuntu-24.04"),
+            (
+                "if: contains(needs.plan.outputs.rust_plugins, 'rust-executor-plugin')",
+                "if: false",
+            ),
+            ('test "$source_sha" = "$GITHUB_SHA"', "test -n \"$source_sha\""),
+            (
+                "          ref: ${{ github.sha }}\n          fetch-depth: 0",
+                "          ref: ${{ github.sha }}\n          fetch-depth: 1",
+            ),
+            ("      - executor-macos\n", ""),
+            (
+                '!= os.environ["GITHUB_SOURCE_SHA"]',
+                '== os.environ["GITHUB_SOURCE_SHA"]',
+            ),
+        ):
+            with self.subTest(original=original), self.assertRaisesRegex(
+                ValueError, "exact-SHA macos-15 witness"
+            ):
+                release_workflows.verify_required_ci_executor_macos(
                     workflow.replace(original, replacement, 1)
                 )
 
@@ -3161,6 +3507,14 @@ jobs:
                 release_workflows.verify_finalization_controller_boundary(
                     finalize.replace(fragment, "missing-final-evidence", 1)
                 )
+        with self.assertRaisesRegex(ValueError, "does not freeze data"):
+            release_workflows.verify_finalization_controller_boundary(
+                finalize.replace(
+                    '--source-sha "$PRIVATE_SOURCE_SHA"',
+                    '--source-sha "$RELEASE_SHA"',
+                    1,
+                )
+            )
         for fragment in (
             "actions/attest@a1948c3f048ba23858d222213b7c278aabede763",
             "python3 scripts/finalize_release.py verify-stage",
@@ -3181,6 +3535,16 @@ jobs:
                     "          path: release-authority\n",
                     "          path: release-authority\n"
                     "          sparse-checkout: /Cargo.toml\n",
+                    1,
+                )
+            )
+        with self.assertRaisesRegex(
+            ValueError, "does not freeze data|complete exact workspace|attestation authority"
+        ):
+            release_workflows.verify_finalization_controller_boundary(
+                finalize.replace(
+                    "          path: release-authority\n          fetch-depth: 0\n",
+                    "          path: release-authority\n",
                     1,
                 )
             )
@@ -3500,6 +3864,46 @@ jobs:
                 finalize.replace(fragment, "missing-tag-readback", 1)
             )
 
+    def test_crates_oidc_waits_for_exact_release_macos_executor_witness(self) -> None:
+        workflow = (ROOT / ".github/workflows/publish-crates.yml").read_text()
+        release_workflows.verify_crates_controller_boundary(workflow)
+        for original, replacement in (
+            (
+                "  executor-witness:\n    needs: verify\n    runs-on: macos-15",
+                "  executor-witness:\n    needs: verify\n    runs-on: ubuntu-24.04",
+            ),
+            (
+                'test "$(git rev-parse HEAD)" = "$RELEASE_SHA"',
+                'test -n "$RELEASE_SHA"',
+            ),
+            (
+                "    needs: [verify, close, executor-witness]",
+                "    needs: [verify, close]",
+            ),
+            (
+                'test "$EXECUTOR_WITNESS_SHA" = "$RELEASE_SHA"',
+                'test -n "$EXECUTOR_WITNESS_SHA"',
+            ),
+        ):
+            with self.subTest(original=original), self.assertRaisesRegex(
+                ValueError, "macOS executor witness|current controller and tag payload"
+            ):
+                release_workflows.verify_crates_controller_boundary(
+                    workflow.replace(original, replacement, 1)
+                )
+        prefix, witness_and_publish = workflow.split("  executor-witness:\n", 1)
+        tampered_witness = witness_and_publish.replace(
+            "          ref: ${{ needs.verify.outputs.release_sha }}\n"
+            "          fetch-depth: 0",
+            "          ref: ${{ needs.verify.outputs.release_sha }}\n"
+            "          fetch-depth: 1",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "macOS executor witness"):
+            release_workflows.verify_crates_controller_boundary(
+                prefix + "  executor-witness:\n" + tampered_witness
+            )
+
     def test_privileged_release_jobs_reject_extra_actions_or_commands(self) -> None:
         npm = (
             ROOT / ".github/workflows/publish-npm-controller.yml"
@@ -3626,7 +4030,9 @@ jobs:
             "shellcheck .gitlab/scripts/compute_public_source_snapshot.sh",
             "shellcheck .gitlab/scripts/publish-public-mirror.sh",
             "shellcheck .gitlab/scripts/scan_public_mirror_artifact.sh",
+            "shellcheck .gitlab/scripts/verify_pinned_gitleaks_version.sh",
             "shellcheck .gitlab/scripts/install_pinned_pnpm.sh",
+            "verify_pinned_gitleaks_version.sh --oci-image /usr/bin/gitleaks",
             "./.gitlab/scripts/scan_public_mirror_artifact.sh",
             "CYMULE_PUBLIC_MIRROR_TEST_COMPONENT=scanner",
             "CYMULE_PUBLIC_MIRROR_TEST_COMPONENT=controller",
@@ -3735,6 +4141,9 @@ jobs:
         ).read_text(encoding="utf-8")
         release_workflows.verify_public_mirror_artifact_scanner(artifact_scanner)
         for fragment in (
+            'gitleaks_version_options=(--oci-image)',
+            'gitleaks_version_options=()',
+            '"${gitleaks_version_options[@]}" "$gitleaks_binary"',
             'test "$CI_COMMIT_SHA" = "$(scan_git -C "$CI_PROJECT_DIR" rev-parse HEAD)"',
             'mapfile -t bundle_heads < <(scan_git bundle list-heads "$bundle_path")',
             'test "${#bundle_heads[@]}" -eq 1',
@@ -3747,6 +4156,27 @@ jobs:
             ):
                 release_workflows.verify_public_mirror_artifact_scanner(
                     artifact_scanner.replace(fragment, "missing-artifact-closure", 1)
+                )
+
+        gitleaks_version_verifier = (
+            ROOT / ".gitlab/scripts/verify_pinned_gitleaks_version.sh"
+        ).read_text(encoding="utf-8")
+        release_workflows.verify_pinned_gitleaks_version_contract(
+            gitleaks_version_verifier
+        )
+        for fragment in (
+            "readonly PINNED_GITLEAKS_OCI_VERSION=v8.24.3",
+            'if test "${1:-}" = --oci-image; then',
+            '"$gitleaks_binary" version > "$version_output"',
+            '"$PINNED_GITLEAKS_VERSION" | cmp -s - "$version_output"',
+        ):
+            with self.subTest(fragment=fragment), self.assertRaisesRegex(
+                ValueError, "closed contract|open version"
+            ):
+                release_workflows.verify_pinned_gitleaks_version_contract(
+                    gitleaks_version_verifier.replace(
+                        fragment, "missing-version-contract", 1
+                    )
                 )
 
         scanner = (
@@ -3765,7 +4195,13 @@ jobs:
             'git -C "$repository" cat-file blob "$blob" > "$blob_record"',
             'reject_unsupported_blob_container "$blob" "$blob_record"',
             "readonly GIT_LFS_POINTER_HEADER_HEX=",
-            "504b0304* | 504b0506* | 504b0708*",
+            "zip_container_present()",
+            "readonly MAX_ZIP_EOCD_CANDIDATES=4096",
+            "readonly MAX_ZIP_DIRECTORY_ENTRIES=4096",
+            "grep -aob $'PK\\005\\006'",
+            'archive_base=$((eocd_offset - central_size - central_offset))',
+            'test "$(read_hex_at "$path" "$cursor" 4)" != 504b0102',
+            'test "$(read_hex_at "$path" "$local_start" 4)" != 504b0304',
             "28b52ffd* | 5[0-9a-f]2a4d18*",
             "213c617263683e0a* | 213c7468696e3e0a*",
             "tar_magic=$(od -An -v -tx1 -j 257 -N 5",
@@ -4099,6 +4535,40 @@ jobs:
             "bypass_actors": [],
             "rules": [{"type": "deletion"}, {"type": "update"}],
         }
+        mirror_receipt_creation = {
+            "id": 4,
+            "name": "mirror-receipt-creation",
+            "enforcement": "active",
+            "target": "tag",
+            "conditions": {
+                "ref_name": {
+                    "include": ["refs/tags/cymule-mirror/*"],
+                    "exclude": [],
+                }
+            },
+            "bypass_actors": [
+                {
+                    "actor_id": 41,
+                    "actor_type": "Integration",
+                    "bypass_mode": "always",
+                }
+            ],
+            "rules": [{"type": "creation"}],
+        }
+        mirror_receipt_immutable = {
+            "id": 5,
+            "name": "mirror-receipt-immutable",
+            "enforcement": "active",
+            "target": "tag",
+            "conditions": {
+                "ref_name": {
+                    "include": ["refs/tags/cymule-mirror/*"],
+                    "exclude": [],
+                }
+            },
+            "bypass_actors": [],
+            "rules": [{"type": "deletion"}, {"type": "update"}],
+        }
 
         def environment(team_id: int, *, npm: bool) -> dict[str, object]:
             return {
@@ -4130,10 +4600,12 @@ jobs:
             "github_json",
             side_effect=(
                 {"default_branch": "main"},
-                [{"id": 1}, {"id": 2}, {"id": 3}],
+                [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}],
                 main,
                 tag_creation,
                 tag_immutable,
+                mirror_receipt_creation,
+                mirror_receipt_immutable,
                 {
                     "default_workflow_permissions": "read",
                     "can_approve_pull_request_reviews": False,
@@ -4319,6 +4791,14 @@ class PublicMirrorControllerTests(unittest.TestCase):
             self.skipTest("private mirror controller is absent from the public export")
         controller_text = controller.read_text(encoding="utf-8")
         release_workflows.verify_private_mirror_controller(controller_text)
+        with self.assertRaisesRegex(ValueError, "selector differs"):
+            release_workflows.verify_private_mirror_controller(
+                controller_text.replace(
+                    "cymule.public-mirror-receipt/2",
+                    "cymule.public-mirror-receipt/99",
+                    1,
+                )
+            )
         self.assertIn("readonly GIT_BINARY=/usr/bin/git", controller_text)
         self.assertIn(
             'history_rewriter="$CI_PROJECT_DIR/.gitlab/scripts/rewrite_public_history.py"',
@@ -4353,8 +4833,11 @@ class PublicMirrorControllerTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         for fragment in (
             "published and read back public mirror",
-            "public mirror already matches",
+            "public mirror and authenticated receipt already match",
             "push response failed, but exact readback confirmed",
+            'mirror_receipt_ref="refs/tags/cymule-mirror/$published_tip"',
+            '"receipt_version":"cymule.public-mirror-receipt/2"',
+            "mirror controller did not preserve atomic branch/receipt rejection",
             "secret retained only in an old blob",
             "secret-bearing commit metadata",
             "front:0:128",
@@ -4379,7 +4862,10 @@ class PublicMirrorControllerTests(unittest.TestCase):
             "artifact-code-noop-sentinel",
             "max_blob_bytes=$((8 * 1024 * 1024))",
             "oversized-blob 'exceeds public mirror blob limit'",
-            "zip-archive 'unsupported archive/container blob (zip)'",
+            "prefixed-deflated-zip 'unsupported archive/container blob (zip)'",
+            "expect_scan_accepted ordinary-pk-bytes",
+            "for accepted_version in 8.24.3 v8.24.3",
+            "$'v8.24.3\\nextra-output'",
             "tar-archive 'unsupported archive/container blob (tar)'",
             "git-lfs-pointer 'unsupported Git LFS pointer'",
             "historical-pat-path",

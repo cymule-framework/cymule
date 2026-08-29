@@ -8,8 +8,8 @@ use cymule_core::{
 };
 use cymule_durable_protocol::{
     CLOCK_OBSERVATION_VERSION, CONTINUATION_STATE_VERSION, ClockObservation, ClockObservationRef,
-    Continuation, ContinuationExecutionClaim, ContinuationStatus, EXECUTION_CLAIM_VERSION,
-    FrameState, MAX_CONTINUATION_AGGREGATE_ITEMS, MAX_CONTINUATION_FRAMES,
+    ClockObservationResult, Continuation, ContinuationExecutionClaim, ContinuationStatus,
+    EXECUTION_CLAIM_VERSION, FrameState, MAX_CONTINUATION_AGGREGATE_ITEMS, MAX_CONTINUATION_FRAMES,
     MAX_CONTINUATION_IDENTITY_SCALARS, MAX_CONTINUATION_WIRE_BYTES, MAX_FRAME_INVOCATION_DEPTH,
     MAX_REGION_PATH_DEPTH, MAX_WAIT_DELIVERY_TARGETS, WAIT_ACTIVATION_RECEIPT_VERSION,
     WAIT_RESULT_ARTIFACT_KIND, WaitActivation, WaitActivationReceipt, WaitActivationSource,
@@ -121,7 +121,7 @@ fn ready_continuation() -> Continuation {
     Continuation {
         continuation_version: CONTINUATION_STATE_VERSION.to_owned(),
         run_id: "run-1".to_owned(),
-        plan_id: "plan-1".to_owned(),
+        plan_id: digest(2),
         binding_context: binding.artifact_id,
         frames: vec![FrameState {
             definition_id: "definition-1".to_owned(),
@@ -154,7 +154,7 @@ fn running_continuation() -> (Continuation, ClockObservation) {
         continuation_id: continuation_id(&continuation.run_id)
             .expect("Continuation identity must derive"),
         owner: "driver-1".to_owned(),
-        continuation_attempt_id: "attempt-1".to_owned(),
+        continuation_attempt_id: digest(3),
         fence: 1,
         plan_id: continuation.plan_id.clone(),
         execution_binding_ref: ArtifactRef {
@@ -211,6 +211,51 @@ fn clock_reference_validates_its_closed_shape() {
         scope: "scope-1".to_owned(),
     };
     assert!(malformed.verify().is_err());
+}
+
+#[test]
+fn clock_observation_result_binds_the_opaque_scope_to_one_run() {
+    let observation = observation(1, 2).reference();
+    let result = ClockObservationResult::new("run-1", observation.clone())
+        .expect("matching Run scope must verify");
+    assert_eq!(result.run_id, "run-1");
+    assert_eq!(result.observation, observation);
+
+    let error = ClockObservationResult::new("run-other", observation)
+        .expect_err("another Run must not claim the observation scope");
+    assert!(error.to_string().contains("does not match its Run scope"));
+}
+
+#[test]
+fn continuation_claim_requires_content_addressed_plan_and_attempt_ids() {
+    let (continuation, clock) = running_continuation();
+    continuation.verify_wire().expect("claim wire verifies");
+    continuation
+        .execution_claim
+        .as_ref()
+        .expect("running claim exists")
+        .verify(
+            &continuation,
+            &BTreeMap::from([(clock.observation_id.clone(), clock)]),
+        )
+        .expect("content-addressed claim fixture verifies");
+
+    let mut malformed_attempt = continuation.clone();
+    malformed_attempt
+        .execution_claim
+        .as_mut()
+        .expect("running claim exists")
+        .continuation_attempt_id = "attempt-1".to_owned();
+    assert!(malformed_attempt.verify_wire().is_err());
+
+    let mut malformed_plan = continuation;
+    malformed_plan.plan_id = "plan-1".to_owned();
+    malformed_plan
+        .execution_claim
+        .as_mut()
+        .expect("running claim exists")
+        .plan_id = "plan-1".to_owned();
+    assert!(malformed_plan.verify_wire().is_err());
 }
 
 #[test]

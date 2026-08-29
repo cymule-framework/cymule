@@ -7,7 +7,7 @@ candidate = dict(request["candidate"])
 candidate["metadata"] = {"large": "x" * 262144}
 json.dump(
     {
-        "engine_protocol": "cymule.engine/4",
+        "engine_protocol": "cymule.engine/5",
         "outcome": "success",
         "request": request,
         "response": {

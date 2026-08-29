@@ -3784,6 +3784,31 @@ where
         .transpose()
 }
 
+/// Load one exact typed value object already authenticated by a collection
+/// proof. Callers must obtain `value_id` from a verified map or log proof under
+/// their pinned source root; this function deliberately does not repeat the
+/// collection proof.
+pub(crate) fn load_typed_state_value<T, R>(
+    value_id: &str,
+    kind: StateRootLeafKind,
+    resolver: &mut R,
+) -> DurableResult<T>
+where
+    T: DeserializeOwned + Serialize,
+    R: StateRootResolver + ?Sized,
+{
+    let object = load_reachable_object(resolver, value_id)?;
+    let StateRootObject::Value(value) = object else {
+        return Err(DurableError::Integrity {
+            code: "state_root_reachable_value_kind_mismatch".to_owned(),
+            message: format!(
+                "authenticated collection value {value_id} resolves to a non-value object"
+            ),
+        });
+    };
+    value.value.decode(kind)
+}
+
 /// Canonical authority digest bound into an ordinary query response/cursor.
 pub(crate) fn state_map_root_digest(root: &MapRoot) -> DurableResult<String> {
     root.verify()?;
@@ -4750,6 +4775,8 @@ pub(crate) const MAX_STATE_MAP_KEY_PAGE_BYTES: usize =
 pub(crate) struct StateMapKeyPageEntry {
     pub(crate) key: String,
     pub(crate) key_hash: String,
+    /// Exact value object authenticated for this key by the range proof.
+    pub(crate) value_id: String,
 }
 
 /// Complete physical position consumed by the next hash-trie page.
@@ -4776,9 +4803,11 @@ impl StateMapTraversalPosition {
 
 /// One bounded key-only page from an exact persistent-map root.
 ///
-/// Values are intentionally not loaded while resolving the page. The caller
-/// exact-loads only the selected typed leaves, so a corrupt or unavailable
-/// unrelated value cannot widen an ordinary command or query read set.
+/// Values are intentionally not loaded while resolving the page. Each entry
+/// retains the value identity already authenticated by the range proof, so the
+/// caller can load exactly one selected typed value object without proving the
+/// same key again. A corrupt or unavailable unrelated value cannot widen an
+/// ordinary command or query read set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StateMapKeyPage {
     pub(crate) entries: Vec<StateMapKeyPageEntry>,
@@ -4806,9 +4835,10 @@ pub(crate) fn load_state_map_key_page<R: StateRootResolver + ?Sized>(
     let entries = page
         .entries()
         .iter()
-        .map(|(position, _)| StateMapKeyPageEntry {
+        .map(|(position, value_id)| StateMapKeyPageEntry {
             key: position.key().to_owned(),
             key_hash: position.key_hash().to_owned(),
+            value_id: value_id.to_owned(),
         })
         .collect();
     let next_position = page
@@ -12564,6 +12594,41 @@ fn validate_agent_session_roots<R: StateRootResolver + ?Sized>(
             ),
         });
     }
+    validate_agent_nonterminal_tools(roots, session, overlay)
+}
+
+fn validate_agent_nonterminal_tools<R: StateRootResolver + ?Sized>(
+    roots: &StateRoots,
+    session: &cymule_profile_protocol::agent::AgentSessionCurrent,
+    overlay: &mut ObjectOverlay<'_, R>,
+) -> DurableResult<()> {
+    for (tool_call_id, directory_entry) in &session.nonterminal_tools {
+        let key =
+            cymule_profile_protocol::agent::agent_tool_key(&session.session_id, tool_call_id)?;
+        let current: cymule_profile_protocol::agent::AgentToolCurrent =
+            map_get(&roots.agent_tools, &key, overlay)?
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_session_nonterminal_tool_missing".to_owned(),
+                    message: format!(
+                        "Agent Session {} non-terminal Tool {tool_call_id} is missing",
+                        session.session_id
+                    ),
+                })?
+                .decode(StateRootLeafKind::AgentToolCurrent)?;
+        current.verify()?;
+        if current.session_id != session.session_id
+            || current.tool.tool_call_id != *tool_call_id
+            || directory_entry.verify_for(&current).is_err()
+        {
+            return Err(DurableError::Integrity {
+                code: "agent_session_nonterminal_tool_mismatch".to_owned(),
+                message: format!(
+                    "Agent Session {} non-terminal Tool {tool_call_id} differs from its capacity directory",
+                    session.session_id
+                ),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -16180,6 +16245,74 @@ mod tests {
             cursor = Some(next);
         }
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn state_map_key_page_reuses_authenticated_value_ids_without_exact_reproof() {
+        let mut empty = EmptyStateRootResolver;
+        let mut overlay = ObjectOverlay::new(&mut empty);
+        let values = (0..512_u64)
+            .map(|index| {
+                let key = cymule_core::content_id("test.state-map-value-page-key/1", &index)
+                    .expect("page key derives");
+                let value = StateRootValue::encode(
+                    StateRootLeafKind::JournalRecord,
+                    &record(usize::try_from(index).expect("test index fits usize")),
+                )
+                .expect("page value encodes");
+                (key, value)
+            })
+            .collect::<Vec<_>>();
+        let root = build_value_map(values, &mut overlay).expect("page map builds");
+        let pending = std::mem::take(&mut overlay.pending);
+        drop(overlay);
+        let mut resolver = TestResolver::default();
+        resolver.insert_all(pending.into_values());
+
+        let page = load_state_map_key_page(
+            &root,
+            None,
+            256,
+            MAX_STATE_MAP_KEY_PAGE_BYTES,
+            &mut resolver,
+        )
+        .expect("maximum public query page resolves");
+        assert_eq!(page.entries.len(), 256);
+        let page_loads = resolver.loads;
+        for entry in &page.entries {
+            let value = load_typed_state_value::<crate::JournalRecord, _>(
+                &entry.value_id,
+                StateRootLeafKind::JournalRecord,
+                &mut resolver,
+            )
+            .expect("range-authenticated value loads directly");
+            value
+                .verify()
+                .expect("selected journal value remains valid");
+        }
+        assert_eq!(
+            resolver.loads - page_loads,
+            page.entries.len(),
+            "each returned item performs exactly one value-object read"
+        );
+
+        let first = page.entries.first().expect("page has an entry");
+        let kind_error = load_typed_state_value::<crate::WaitCondition, _>(
+            &first.value_id,
+            StateRootLeafKind::Wait,
+            &mut resolver,
+        )
+        .expect_err("the authenticated value cannot change closed kind");
+        assert!(matches!(kind_error, DurableError::Integrity { .. }));
+        resolver.objects.remove(&first.value_id);
+        let missing_error = load_typed_state_value::<crate::JournalRecord, _>(
+            &first.value_id,
+            StateRootLeafKind::JournalRecord,
+            &mut resolver,
+        )
+        .expect_err("a missing selected value fails closed");
+        assert!(matches!(missing_error, DurableError::Integrity { code, .. }
+            if code == "state_root_reachable_object_missing"));
     }
 
     #[test]

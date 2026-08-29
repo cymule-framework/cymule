@@ -1358,7 +1358,11 @@ impl<S: DurableStore> DurableVirtualReadControl<'_, S> {
 }
 
 impl<S: DurableStore> DurableVirtualControl<'_, S> {
-    /// Commit or exactly replay one closed Virtual persistence command.
+    /// Commit or exactly replay one closed non-Claim Virtual persistence command.
+    ///
+    /// An exact retained Claim alias may be replayed as a receipt-only commit.
+    /// A fresh Claim must use [`Self::claim`] so the caller receives the complete
+    /// [`virtual_protocol::VirtualClaimOutcome`] and its verified Plan.
     ///
     /// # Errors
     /// Returns an error for invalid command, source, binding, provider, or Clock
@@ -1367,12 +1371,8 @@ impl<S: DurableStore> DurableVirtualControl<'_, S> {
         &mut self,
         command: &virtual_protocol::VirtualPersistenceCommand,
     ) -> DurableResult<virtual_protocol::VirtualCommit> {
-        self.coordinator.commit_virtual(
-            command,
-            self.providers,
-            self.clock,
-            &self.execution_binding,
-        )
+        self.coordinator
+            .commit_virtual(command, self.providers, self.clock)
     }
 
     /// Claim work using this runtime's admitted binding and return executable
@@ -1386,7 +1386,7 @@ impl<S: DurableStore> DurableVirtualControl<'_, S> {
         command: &virtual_protocol::VirtualClaimPersistenceCommand,
     ) -> DurableResult<virtual_protocol::VirtualClaimOutcome> {
         self.coordinator
-            .claim_virtual(command, self.providers, self.clock, &self.execution_binding)
+            .claim_virtual(command, self.clock, &self.execution_binding)
     }
 
     /// Read one exact revision-pinned Virtual scalar current.

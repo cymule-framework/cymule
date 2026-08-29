@@ -99,6 +99,7 @@ struct ObservedWaitView {
     selection_requests: Vec<(WaitActivationSource, usize)>,
     page_error: Option<DurableError>,
     selection_error: Option<DurableError>,
+    selection_override: Option<WaitSelection>,
 }
 
 impl ParkedWaitView for ObservedWaitView {
@@ -110,6 +111,9 @@ impl ParkedWaitView for ObservedWaitView {
         self.selection_requests.push((source.clone(), max_targets));
         if let Some(error) = self.selection_error.take() {
             return Err(error);
+        }
+        if let Some(selection) = self.selection_override.take() {
+            return Ok(selection);
         }
         self.waits.select(source, max_targets)
     }
@@ -185,7 +189,7 @@ async fn receive_pending(
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             match driver.receive(view, 1) {
-                Ok(Some(delivery)) => return delivery,
+                Ok(Some(delivery)) => return delivery.into_delivery(),
                 Ok(None) => {}
                 Err(DurableError::Conflict {
                     expected: Some(expected),
@@ -211,7 +215,10 @@ async fn http_response_waits_for_durable_acknowledgement() {
     assert!(!response.is_finished());
     assert_eq!(delivery.activation_id, "activation:http");
     assert_eq!(
-        driver.receive(&mut index(), 1).expect("redelivers"),
+        driver
+            .receive(&mut index(), 1)
+            .expect("redelivers")
+            .map(cymule_durable::WaitSourceDelivery::into_delivery),
         Some(delivery.clone())
     );
     driver
@@ -369,7 +376,8 @@ async fn durable_ingress_reopens_with_the_exact_selected_delivery() {
     let redelivered = reopened
         .receive(&mut unavailable, 1)
         .expect("retained delivery does not require the view")
-        .expect("retained delivery exists");
+        .expect("retained delivery exists")
+        .into_delivery();
     assert_eq!(redelivered, selected);
     assert!(unavailable.page_requests.is_empty());
     assert!(unavailable.selection_requests.is_empty());
@@ -652,7 +660,7 @@ fn durable_ingress_resets_stale_cursor_and_rotates_across_signal_keys() {
     assert_ne!(first.source, second.source);
     assert_eq!(view.page_requests, vec![None, Some(expected_cursor), None]);
     assert_eq!(
-        BTreeSet::from([first.activation_id, second.activation_id]),
+        BTreeSet::from([first.activation_id.clone(), second.activation_id.clone(),]),
         BTreeSet::from(["activation:alpha".to_owned(), "activation:beta".to_owned(),])
     );
 }
@@ -813,6 +821,36 @@ fn target_selection_error_leaves_ingress_unselected_and_unacknowledged() {
     );
     assert_eq!(view.selection_requests.len(), 2);
     assert!(view.selection_requests.iter().all(|(_, limit)| *limit == 1));
+}
+
+#[test]
+fn oversized_new_selection_is_rejected_before_it_can_become_retained() {
+    let (directory, _router, mut driver) = durable_router(1);
+    let connection = Connection::open(directory.path().join("http.sqlite")).expect("spool opens");
+    insert_signal_fixture(&connection, "activation:http", "signal:http");
+    let mut view = ObservedWaitView {
+        waits: index(),
+        selection_override: Some(WaitSelection {
+            wait_ids: BTreeSet::from(["wait:first".to_owned(), "wait:second".to_owned()]),
+            remaining: 0,
+        }),
+        ..ObservedWaitView::default()
+    };
+
+    assert!(matches!(
+        driver.receive(&mut view, 1),
+        Err(DurableError::Validation(message))
+            if message == "new HTTP delivery has 2 targets outside requested bound 1"
+    ));
+    let durable_state: (bool, bool) = connection
+        .query_row(
+            "SELECT selected_wait_ids IS NULL, acknowledged
+             FROM cymule_http_signals WHERE activation_id = 'activation:http'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("selection and acknowledgement read");
+    assert_eq!(durable_state, (true, false));
 }
 
 #[test]

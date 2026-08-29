@@ -141,7 +141,11 @@ class PublishGraphTests(unittest.TestCase):
             with self.subTest(consumer=consumer):
                 self.assertIn("cymule-clock-system", by_name[consumer].dependencies)
                 self.assertLess(positions["cymule-clock-system"], positions[consumer])
-        self.assertEqual(sum(len(crate.dependencies) for crate in crates), 85)
+        for dependency in ("cymule-runtime", "cymule-store-sqlite"):
+            with self.subTest(agent_dev_dependency=dependency):
+                self.assertIn(dependency, by_name["cymule-agent"].dependencies)
+                self.assertLess(positions[dependency], positions["cymule-agent"])
+        self.assertEqual(sum(len(crate.dependencies) for crate in crates), 87)
 
     def test_versioned_dev_cycle_is_rejected_before_publication(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

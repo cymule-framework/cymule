@@ -81,5 +81,5 @@ pub use store::{
 };
 pub use wait_source::{
     ParkedWaitIndex, ParkedWaitView, SignalKeyPage, SignalKeyPageOutcome, WaitDelivery,
-    WaitSelection, WaitSourceCursor, WaitSourceDriver,
+    WaitSelection, WaitSourceCursor, WaitSourceDelivery, WaitSourceDriver,
 };

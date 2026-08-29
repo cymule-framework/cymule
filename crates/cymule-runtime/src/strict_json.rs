@@ -30,18 +30,19 @@ pub fn decode_strict_json_value(input: &[u8]) -> Result<Value, String> {
     cymule_core::decode_json(input).map_err(|error| error.to_string())
 }
 
-/// Reject an explicit `null` object member that typed serialization omits.
+/// Reject every explicit object member that typed serialization omits.
 ///
-/// Serde's optional fields commonly deserialize both an absent member and an
-/// explicit `null` to `None`, then omit `None` during serialization. Frozen
-/// Engine schemas distinguish those two wires. This comparison deliberately
-/// checks only that one lossy case: other representational differences are
-/// left to the owning typed and schema contracts.
+/// Serde's optional/defaulted fields can deserialize absent, `null`, or empty
+/// values into the same typed value and then omit that value during
+/// serialization. Frozen Engine schemas assign one legal member-presence wire,
+/// so typed admission must reject every erased member. Other representational
+/// differences, including normalized mathematical integer tokens, remain with
+/// the owning typed and schema contracts.
 ///
 /// # Errors
 ///
 /// Returns the exact JSON pointer when typed normalization erased an explicit
-/// null member that the wire contract distinguishes from omission.
+/// member that the wire contract distinguishes from omission.
 pub fn validate_json_member_presence(raw: &Value, normalized: &Value) -> Result<(), String> {
     fn pointer_member(member: &str) -> String {
         member.replace('~', "~0").replace('/', "~1")
@@ -56,12 +57,11 @@ pub fn validate_json_member_presence(raw: &Value, normalized: &Value) -> Result<
                         Some(normalized_value) => {
                             visit(raw_value, normalized_value, &member_path)?;
                         }
-                        None if raw_value.is_null() => {
+                        None => {
                             return Err(format!(
-                                "typed normalization erased explicit null object member at {member_path}"
+                                "typed normalization erased explicit object member at {member_path}"
                             ));
                         }
-                        None => {}
                     }
                 }
             }
@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn member_presence_rejects_only_erased_explicit_nulls_recursively() {
+    fn member_presence_rejects_every_erased_explicit_member_recursively() {
         let raw = serde_json::json!({
             "outer": [{
                 "erased": null,
@@ -140,7 +140,25 @@ mod tests {
                 "number": 1.0,
             }],
         });
-        validate_json_member_presence(&retained_only, &normalized)
-            .expect("required nullable members and other representations are unchanged here");
+        let error = validate_json_member_presence(&retained_only, &normalized)
+            .expect_err("an explicitly present defaulted member may not disappear");
+        assert!(error.ends_with("/outer/0/non_null_difference"));
+
+        for erased in [
+            serde_json::json!({"value": {}}),
+            serde_json::json!({"value": []}),
+            serde_json::json!({"value": ""}),
+            serde_json::json!({"value": false}),
+        ] {
+            let error = validate_json_member_presence(&erased, &serde_json::json!({}))
+                .expect_err("every explicitly present omitted default is lossy");
+            assert!(error.ends_with("/value"));
+        }
+
+        validate_json_member_presence(
+            &serde_json::json!({"retained": null, "number": 1.0}),
+            &serde_json::json!({"retained": null, "number": 1}),
+        )
+        .expect("required nullable members and normalized numbers remain present");
     }
 }

@@ -73,7 +73,7 @@ EvolutionCommand = dict[str, Any]
 LiveEvolutionCommand = dict[str, Any]
 LiveEvolutionOutcome = dict[str, Any]
 DurableCommand = dict[str, Any]
-ENGINE_PROTOCOL_VERSION = "cymule.engine/4"
+ENGINE_PROTOCOL_VERSION = "cymule.engine/5"
 
 
 EvolutionStateFamily = Literal[
@@ -226,6 +226,13 @@ class ClockObservationRef(TypedDict):
     source_id: str
     source_generation: str
     scope: str
+
+
+class ClockObservationResult(TypedDict):
+    """Engine correlation authority for one Run-scoped Clock issuance."""
+
+    run_id: str
+    observation: ClockObservationRef
 
 
 class ClockObservation(ClockObservationRef):
@@ -2169,7 +2176,7 @@ class CliEngine:
 
     def observe_clock(
         self, target: EngineClockTarget, run_id: str
-    ) -> ClockObservationRef:
+    ) -> ClockObservationResult:
         """Issue one receipt-backed logical Clock reference for a Run."""
         try:
             DurableControlBuilder._identity("Run", run_id)
@@ -2190,7 +2197,7 @@ class CliEngine:
         )
         if response.get("type") != "clock_observed":
             raise _unexpected_response("clock_observed", response)
-        return response["observation"]
+        return response["result"]
 
     def verify_evolution_command(self, command: EvolutionCommand) -> EvolutionCommand:
         """Validate one closed M4 control envelope with the Rust engine."""
@@ -2640,7 +2647,23 @@ class DurableEngine:
     def observe_clock(self, run_id: str) -> ClockObservationRef:
         if self.clock is None:
             raise ValueError("durable Clock target is missing")
-        return self.transport.observe_clock(self.clock, run_id)
+        request = {"type": "observe_clock", "target": self.clock, "run_id": run_id}
+        result = self.transport.observe_clock(self.clock, run_id)
+        try:
+            _validate_clock_observation_result(result)
+            if (
+                result["run_id"] != run_id
+                or result["observation"]["source_id"] != self.clock["source_id"]
+                or result["observation"]["source_generation"]
+                != self.clock["source_generation"]
+            ):
+                raise _transport_error(
+                    "invalid_engine_response",
+                    "Clock observation result does not match its request",
+                )
+        except (EngineError, KeyError, TypeError) as error:
+            raise _response_loss_error(request, "invalid_engine_response") from error
+        return result["observation"]
 
     def run_index_page(self, options: DurablePageQueryOptions) -> DurableQueryPage:
         response = self._submit(self._build_command(
@@ -3150,7 +3173,7 @@ def _validate_success_response(value: object) -> None:
         "sealed_resource": {"type", "resource"},
         "verified_wait_activation": {"type", "activation"},
         "verified_durable_command": {"type", "command"},
-        "clock_observed": {"type", "observation"},
+        "clock_observed": {"type", "result"},
         "verified_evolution_command": {"type", "command"},
         "verified_live_evolution_command": {"type", "command"},
         "execution_boundary": {"type", "execution"},
@@ -3169,7 +3192,7 @@ def _validate_success_response(value: object) -> None:
     elif value["type"] == "verified_durable_command":
         _validate_durable_command_response(value["command"])
     elif value["type"] == "clock_observed":
-        _validate_clock_observation_ref(value["observation"])
+        _validate_clock_observation_result(value["result"])
     if value["type"] == "durable_executed":
         _validate_durable_response(value["response"])
     if value["type"] == "live_evolution_executed":
@@ -3228,8 +3251,6 @@ def _validate_success_response_for_request(
             raise _transport_error(
                 "invalid_engine_response", "Resource seal request candidate is invalid"
             )
-        returned_candidate.setdefault("annotations", {})
-        requested_candidate.setdefault("annotations", {})
         if not _wire_json_equal(returned_candidate, requested_candidate):
             raise _transport_error(
                 "invalid_engine_response",
@@ -3238,9 +3259,11 @@ def _validate_success_response_for_request(
         return
     if request_type == "observe_clock":
         target = request.get("target")
-        observation = response["observation"]
+        result = response["result"]
+        observation = result["observation"]
         if (
             not isinstance(target, dict)
+            or result["run_id"] != request.get("run_id")
             or observation["source_id"] != target.get("source_id")
             or observation["source_generation"] != target.get("source_generation")
         ):
@@ -3595,7 +3618,7 @@ def _validate_resource_handle(value: object) -> None:
 
     if "annotations" in resource:
         annotations = resource["annotations"]
-        if not isinstance(annotations, dict):
+        if not isinstance(annotations, dict) or not annotations:
             raise _transport_error(
                 "invalid_engine_response", "Resource annotations are invalid"
             )
@@ -3942,6 +3965,14 @@ def _validate_clock_observation_ref(value: object) -> None:
         _validate_core_identity(reference[field], f"Clock observation {field}")
 
 
+def _validate_clock_observation_result(value: object) -> None:
+    result = _require_closed_record(
+        value, {"run_id", "observation"}, "Clock observation result"
+    )
+    _validate_core_identity(result["run_id"], "Clock observation Run")
+    _validate_clock_observation_ref(result["observation"])
+
+
 def _validate_engine_store_target(value: object) -> None:
     if not isinstance(value, dict) or set(value) not in (
         {"provider", "location"},
@@ -4278,6 +4309,7 @@ def _validate_continuation_execution_claim(value: object) -> None:
     _validate_content_id(
         claim["continuation_attempt_id"], "execution claim Continuation Attempt"
     )
+    _validate_content_id(claim["plan_id"], "execution claim Plan")
     _validate_artifact_ref(claim["execution_binding_ref"])
     if claim["execution_binding_ref"]["kind"] != "cymule.execution-binding/2":
         raise _transport_error(
@@ -6297,6 +6329,7 @@ def _validate_migration_continuation(value: object) -> None:
         raise _transport_error("invalid_engine_response", "migration Continuation generation is unsupported")
     _require_strings(value, {"run_id", "plan_id", "binding_context"})
     _validate_core_identity(value["run_id"], "migration Continuation Run")
+    _validate_content_id(value["plan_id"], "migration Continuation Plan")
     _validate_epoch(value["epoch"])
     _validate_epoch(value["execution_fence"])
     if value["execution_claim"] is not None or value["status"] != "ready":

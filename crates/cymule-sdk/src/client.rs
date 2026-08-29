@@ -16,8 +16,8 @@ use cymule_durable::{
     DurableRunOccurrencePage, DurableRunWaitPage, EffectResolutionCommand,
 };
 use cymule_durable_protocol::{
-    ClockObservationRef, ExecutionClaimRequest, WaitActivation, WaitActivationSource,
-    execution_clock_scope,
+    ClockObservationRef, ClockObservationResult, ExecutionClaimRequest, WaitActivation,
+    WaitActivationSource,
 };
 use cymule_evolution::{EvolutionCommand, EvolutionCommit, LiveEvolutionCommand};
 use cymule_resource::{ResourceCandidate, ResourceHandle};
@@ -111,7 +111,7 @@ pub trait Engine {
         &self,
         target: &EngineClockTarget,
         run_id: &str,
-    ) -> EngineResult<ClockObservationRef>;
+    ) -> EngineResult<ClockObservationResult>;
     /// Validate one closed, versioned M4 control envelope.
     ///
     /// # Errors
@@ -378,12 +378,12 @@ impl CliEngine {
         &self,
         target: &EngineClockTarget,
         run_id: &str,
-    ) -> EngineResult<ClockObservationRef> {
+    ) -> EngineResult<ClockObservationResult> {
         match self.request(&EngineRequest::ObserveClock {
             target: target.clone(),
             run_id: run_id.to_owned(),
         })? {
-            EngineResponse::ClockObserved { observation } => Ok(observation),
+            EngineResponse::ClockObserved { result } => Ok(result),
             response => Err(unexpected_response("clock_observed", &response)),
         }
     }
@@ -638,7 +638,7 @@ impl Engine for CliEngine {
         &self,
         target: &EngineClockTarget,
         run_id: &str,
-    ) -> EngineResult<ClockObservationRef> {
+    ) -> EngineResult<ClockObservationResult> {
         CliEngine::observe_clock(self, target, run_id)
     }
 
@@ -849,7 +849,7 @@ enum EngineResponse {
     SealedResource { resource: ResourceHandle },
     VerifiedWaitActivation { activation: WaitActivation },
     VerifiedDurableCommand { command: DurableCommand },
-    ClockObserved { observation: ClockObservationRef },
+    ClockObserved { result: ClockObservationResult },
     VerifiedEvolutionCommand { command: EvolutionCommand },
     VerifiedLiveEvolutionCommand { command: LiveEvolutionCommand },
     ExecutionBoundary { execution: ExecutionOutcome },
@@ -885,10 +885,9 @@ impl EngineResponse {
                 command.verify().map_err(|error| error.to_string())?;
                 verify_exact_payload("durable command", requested, command)
             }
-            (
-                EngineRequest::ObserveClock { target, run_id },
-                Self::ClockObserved { observation },
-            ) => verify_clock_observation(target, run_id, observation),
+            (EngineRequest::ObserveClock { target, run_id }, Self::ClockObserved { result }) => {
+                verify_clock_observation(target, run_id, result)
+            }
             (
                 EngineRequest::VerifyEvolutionCommand { command: requested },
                 Self::VerifiedEvolutionCommand { command },
@@ -1186,12 +1185,12 @@ fn verify_durable_preflight(command: &DurableCommand) -> EngineResult<()> {
 fn verify_clock_observation(
     target: &EngineClockTarget,
     run_id: &str,
-    observation: &ClockObservationRef,
+    result: &ClockObservationResult,
 ) -> Result<(), String> {
-    observation.verify().map_err(|error| error.to_string())?;
-    if observation.source_id != target.source_id
-        || observation.source_generation != target.source_generation
-        || observation.scope != execution_clock_scope(run_id).map_err(|error| error.to_string())?
+    result.verify().map_err(|error| error.to_string())?;
+    if result.run_id != run_id
+        || result.observation.source_id != target.source_id
+        || result.observation.source_generation != target.source_generation
     {
         return Err("Clock observation does not match the requested authority".to_owned());
     }
@@ -1464,10 +1463,10 @@ impl<E: Engine> DurableEngine<E> {
             failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
             failure
         })?;
-        let observation = self.transport.observe_clock(clock, run_id)?;
-        verify_clock_observation(clock, run_id, &observation)
+        let result = self.transport.observe_clock(clock, run_id)?;
+        verify_clock_observation(clock, run_id, &result)
             .map_err(|error| invalid_typed_response(true, "Clock observation reference", &error))?;
-        Ok(observation)
+        Ok(result.observation)
     }
 
     /// Start an idempotent Run and drive it to the next durable boundary.
@@ -2228,7 +2227,7 @@ mod tests {
             &self,
             _target: &EngineClockTarget,
             _run_id: &str,
-        ) -> EngineResult<ClockObservationRef> {
+        ) -> EngineResult<ClockObservationResult> {
             unreachable!("preflight probe only accepts live evolution")
         }
 
@@ -2312,7 +2311,7 @@ mod tests {
             &self,
             _target: &EngineClockTarget,
             _run_id: &str,
-        ) -> EngineResult<ClockObservationRef> {
+        ) -> EngineResult<ClockObservationResult> {
             unreachable!("durable query probe only accepts Run queries")
         }
 
@@ -2528,7 +2527,9 @@ mod tests {
                 run_id: "run:different".to_owned(),
             },
             EngineResponse::ClockObserved {
-                observation: ClockObservationRef {
+                result: ClockObservationResult {
+                    run_id: "run:echo".to_owned(),
+                    observation: ClockObservationRef {
                     clock_version: crate::CLOCK_OBSERVATION_VERSION.to_owned(),
                     observation_id:
                         "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -2538,6 +2539,7 @@ mod tests {
                     scope:
                         "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                             .to_owned(),
+                    },
                 },
             },
             EngineFailureCategory::UnknownWorldOutcome,
@@ -3360,8 +3362,8 @@ mod tests {
         );
     }
     #[test]
-    fn rust_cli_requests_use_the_runtime_engine_v4_constant() {
-        assert_eq!(cymule_runtime::ENGINE_PROTOCOL_VERSION, "cymule.engine/4");
+    fn rust_cli_requests_use_the_runtime_engine_v5_constant() {
+        assert_eq!(cymule_runtime::ENGINE_PROTOCOL_VERSION, "cymule.engine/5");
         let request = EngineRequest::Seal {
             candidate: empty_candidate(),
         };
@@ -3372,7 +3374,7 @@ mod tests {
             Value::String(cymule_runtime::ENGINE_PROTOCOL_VERSION.to_owned())
         );
         let legacy_bytes = serde_json::to_vec(&serde_json::json!({
-            "engine_protocol": "cymule.engine/3",
+            "engine_protocol": "cymule.engine/4",
             "outcome": "success",
             "request": request,
             "response": {"type": "verified"}
@@ -3382,7 +3384,7 @@ mod tests {
             .expect("closed legacy envelope decodes before version admission");
         let failure = legacy
             .into_result()
-            .expect_err("Engine v3 is not a compatible transport generation");
+            .expect_err("Engine v4 is not a compatible transport generation");
         assert_eq!(failure.code.as_ref(), "unsupported_engine_protocol");
         assert_eq!(
             failure.contract.as_deref(),
@@ -3397,7 +3399,7 @@ mod tests {
             &read,
             &read_inner,
             EngineResponseEnvelope::Success {
-                engine_protocol: "cymule.engine/3".to_owned(),
+                engine_protocol: "cymule.engine/4".to_owned(),
                 request: read_inner.clone(),
                 response: EngineResponse::Verified,
             },
@@ -3420,7 +3422,7 @@ mod tests {
         };
         let legacy_failure: EngineResponseEnvelope<Value, EngineResponse> =
             EngineResponseEnvelope::Failure {
-                engine_protocol: "cymule.engine/3".to_owned(),
+                engine_protocol: "cymule.engine/4".to_owned(),
                 error: EngineFailure::transport("legacy_failure", "legacy failure envelope"),
             };
         let failure = admit_engine_response(&mutation, &Value::Null, legacy_failure)
@@ -4213,33 +4215,39 @@ mod tests {
             run_id: "run:wire".to_owned(),
         };
         let valid_clock_response = EngineResponse::ClockObserved {
-            observation: ClockObservationRef {
-                clock_version: crate::CLOCK_OBSERVATION_VERSION.to_owned(),
-                observation_id:
-                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                        .to_owned(),
-                source_id: "clock:sdk-client-test".to_owned(),
-                source_generation:
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        .to_owned(),
-                scope: cymule_durable_protocol::execution_clock_scope("run:wire")
-                    .expect("Run Clock scope derives"),
+            result: ClockObservationResult {
+                run_id: "run:wire".to_owned(),
+                observation: ClockObservationRef {
+                    clock_version: crate::CLOCK_OBSERVATION_VERSION.to_owned(),
+                    observation_id:
+                        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                            .to_owned(),
+                    source_id: "clock:sdk-client-test".to_owned(),
+                    source_generation:
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_owned(),
+                    scope: cymule_durable_protocol::execution_clock_scope("run:wire")
+                        .expect("Run Clock scope derives"),
+                },
             },
         };
         valid_clock_response
             .verify_for(&clock_request)
             .expect("matching Clock observation verifies");
         let clock_response = EngineResponse::ClockObserved {
-            observation: ClockObservationRef {
-                clock_version: crate::CLOCK_OBSERVATION_VERSION.to_owned(),
-                observation_id:
-                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                        .to_owned(),
-                source_id: "clock:foreign".to_owned(),
-                source_generation:
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        .to_owned(),
-                scope: "run:foreign".to_owned(),
+            result: ClockObservationResult {
+                run_id: "run:foreign".to_owned(),
+                observation: ClockObservationRef {
+                    clock_version: crate::CLOCK_OBSERVATION_VERSION.to_owned(),
+                    observation_id:
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .to_owned(),
+                    source_id: "clock:foreign".to_owned(),
+                    source_generation:
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_owned(),
+                    scope: "run:foreign".to_owned(),
+                },
             },
         };
 
@@ -4584,16 +4592,20 @@ mod tests {
             target: clock_target(),
             run_id: "run:clock-scope".to_owned(),
         };
-        let response = |scope: String| EngineResponse::ClockObserved {
-            observation: ClockObservationRef {
-                clock_version: crate::CLOCK_OBSERVATION_VERSION.to_owned(),
-                observation_id: format!("sha256:{}", "d".repeat(64)),
-                source_id: "clock:sdk-client-test".to_owned(),
-                source_generation: format!("sha256:{}", "a".repeat(64)),
-                scope,
+        let response = |run_id: &str, scope: String| EngineResponse::ClockObserved {
+            result: ClockObservationResult {
+                run_id: run_id.to_owned(),
+                observation: ClockObservationRef {
+                    clock_version: crate::CLOCK_OBSERVATION_VERSION.to_owned(),
+                    observation_id: format!("sha256:{}", "d".repeat(64)),
+                    source_id: "clock:sdk-client-test".to_owned(),
+                    source_generation: format!("sha256:{}", "a".repeat(64)),
+                    scope,
+                },
             },
         };
         response(
+            "run:clock-scope",
             cymule_durable_protocol::execution_clock_scope("run:clock-scope")
                 .expect("requested Run Clock scope derives"),
         )
@@ -4601,8 +4613,9 @@ mod tests {
         .expect("exact Run Clock scope verifies");
         assert!(
             response(
+                "run:foreign",
                 cymule_durable_protocol::execution_clock_scope("run:foreign")
-                    .expect("foreign Run Clock scope derives")
+                    .expect("foreign Run Clock scope derives"),
             )
             .verify_for(&request)
             .is_err(),

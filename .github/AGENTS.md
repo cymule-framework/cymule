@@ -12,6 +12,11 @@
 - `analysis.yml`, `compatibility.yml`, and `soak.yml` are independent
   scheduled/manual witnesses. Do not add them to ordinary push CI or make a
   leaf SDK lane wait for coverage, mutation, portability, or repetition.
+- `compatibility.yml` keeps the Linux/macOS harness matrix and one independent
+  native `windows-2025` PowerShell job. That Windows job installs the exact
+  `1.97.1-x86_64-pc-windows-msvc` toolchain, runs the exact DirectoryStore
+  non-Unix unit, and fails unless the Rust harness reports exactly one passing
+  test. It remains scheduled/manual evidence and never becomes Required CI.
 - Ordinary `Required CI` may expand only the harness `full` suite. The broader
   `catalog` aggregate is explicit operator evidence and must never be selected
   by a changed path, including changes to the harness or scheduled runners.
@@ -85,6 +90,8 @@
   Every PUT outcome receives bounded exact-checksum readback; unavailable
   readback is an ambiguous outcome under the unchanged crate/version/archive
   identity, while only an exact 429 plus confirmed absence may retry.
+  Before that job receives OIDC, a no-credential `macos-15` job must run the
+  exact release SHA's executor suite and export that same SHA to the publisher.
 - Crate release recovery uses separate checkouts: current public `main` owns the
   reviewed controller script while the exact immutable tag owns every manifest,
   catalog, source file, package archive, and checksum. Never move a tag or let
@@ -157,11 +164,14 @@
 - Finalization verification and freeze have `contents: read` only. Verification
   emits only authenticated npm and Cargo stages. A fresh freeze runner executes
   the exact current-main registry verifiers against those stages, reads the
-  registries back again, and materializes notes plus `cymule.release-bom/2` as a
+  registries back again, and materializes notes plus `cymule.release-bom/3` as a
   data-only bundle bound to the release SHA, exact current-main finalizer SHA,
   raw annotated-tag object SHA, canonical names, sizes, and digests. The closed
-  finalization manifest has exact `schema_version: 2`; older bundles have no
-  reader. A protected `contents: read` attestation job reruns the complete BOM/2
+  finalization manifest has exact
+  `stage_version: cymule.release-finalization-stage/3`; older bundles have no
+  reader. It binds the private source SHA, distinct public release SHA, raw
+  immutable mirror-receipt tag, and shared source-snapshot digest. A protected
+  `contents: read` attestation job uses complete release ancestry and reruns the complete BOM/2
   workspace-derived validator and attests the exact BOM without Release write
   authority. The sole protected `contents: write` job runs no third-party
   Action: it fetches the exact controller and complete data-only release
@@ -197,7 +207,7 @@
   rulesets, protected release environments, default Actions permissions, or
   default-branch authority. Expiry requires a new workflow preflight; never
   extend the receipt or give the writer an administration token.
-- Finalization generates `cymule.release-bom/2` from the exact tag and fresh
+- Finalization generates `cymule.release-bom/3` from the exact tag and fresh
   registry readback. Every source package record has a required `publication`
   member: Cargo and npm carry closed registry identity, version, content digest,
   and provenance evidence; the unpublished Python and Go entries carry explicit
@@ -218,6 +228,12 @@
   non-fast-forward mutation and requires main status checks. One exact tag
   ruleset restricts creation to the release App Integration; an independent
   exact tag ruleset prohibits every update/deletion with no bypass. Repository
+  mirror receipts use the same split protection at exact
+  `refs/tags/cymule-mirror/*`: only the narrow mirror Integration may create,
+  and nobody may update or delete. The tag carries
+  `cymule.public-mirror-receipt/2`, targets the rewritten public
+  commit and carries the distinct private/public SHA mapping plus shared source
+  snapshot; public Actions never owns its credential.
   immutable Releases must be owner-enforced. Audit the live settings
   with `scripts/verify_github_release_settings.py`.
 - `Required CI` is the sole stable required-status context. It closes the
@@ -229,5 +245,8 @@
   control-plane receipt binds and verifies that name before interpreting
   `~DEFAULT_BRANCH`. The ruleset grants exactly one always-on bypass to the narrow mirror GitHub App
   Integration; release tags grant no bypass.
+  When the selected plan contains `rust-executor-plugin`, Required CI also
+  closes one exact-`github.sha` `macos-15` executor witness; a skipped or
+  different-SHA result fails the aggregate.
 - Do not add private hosting URLs, internal project IDs, credentials, runner
   names, or private CI metadata under `.github/`.

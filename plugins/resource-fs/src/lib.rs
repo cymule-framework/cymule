@@ -20,8 +20,9 @@ use cymule_resource::{
     ResourceListCursor, ResourceListProof, ResourceLocation, ResourceLocatorSet,
     ResourceManifestAccumulator, ResourceManifestDescriptor, ResourceManifestEntry,
     ResourceManifestStreamVerifier, ResourceObservation, ResourcePage, ResourcePublication,
-    ResourceResult, ResourceShape, ResourceWriteIntent, ResourceWriteSession,
-    canonical_manifest_entry_bytes, manifest_node_digest, resource_manifest_descriptor_id,
+    ResourceResult, ResourceRetentionFamily, ResourceShape, ResourceWriteIntent,
+    ResourceWriteSession, canonical_manifest_entry_bytes, manifest_node_digest,
+    resource_manifest_descriptor_id,
 };
 use fs4::{FileExt, TryLockError};
 use nix::dir::Dir;
@@ -32,12 +33,12 @@ use nix::unistd::{UnlinkatFlags, dup, linkat, unlinkat};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const BINDING_VERSION: &str = "cymule.resource-fs/5";
+const BINDING_VERSION: &str = "cymule.resource-fs/6";
 const CHILD_WRITE_ID_VERSION: &str = "cymule.resource-fs-child-write/1";
 const DIRECTORY_MEDIA_TYPE: &str = cymule_resource::RESOURCE_MANIFEST_MEDIA_TYPE;
-const UPLOAD_RECORD_VERSION: &str = "cymule.resource-fs-upload/8";
+const UPLOAD_RECORD_VERSION: &str = "cymule.resource-fs-upload/9";
 const MANIFEST_INDEX_VERSION: &str = "cymule.resource-fs-manifest-index/3";
-const PHYSICAL_LAYOUT_VERSION: &str = "cymule.resource-fs-layout/1";
+const PHYSICAL_LAYOUT_VERSION: &str = "cymule.resource-fs-layout/2";
 const PHYSICAL_LAYOUT_MARKER: &str = "layout.json";
 const PHYSICAL_LAYOUT_STAGING_MARKER: &str = "layout.json.initializing";
 const MAX_UPLOAD_RECORD_BYTES: u64 = 16 * 1024 * 1024;
@@ -51,6 +52,8 @@ const DIRECTORY_SORT_MERGE_FAN_IN: u64 = 8;
 
 #[cfg(test)]
 static FAIL_AFTER_DIRECTORY_SORT_RUNS: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_AFTER_DELETION_TOMBSTONE: AtomicBool = AtomicBool::new(false);
 const FIXED_DIRECTORIES: [&str; 6] = [
     "uploads",
     "objects",
@@ -66,6 +69,7 @@ enum UploadState {
     Open,
     Publishing,
     Committed,
+    Deleted,
     Aborted,
 }
 
@@ -152,6 +156,13 @@ struct StoreDirectories {
     locks: File,
     staging: File,
     manifest_indexes: File,
+}
+
+#[derive(Debug)]
+struct RetentionClaim {
+    file: File,
+    family: ResourceRetentionFamily,
+    deleted: bool,
 }
 
 /// Content-addressed local resource adapter.
@@ -359,6 +370,9 @@ impl FsResourceStore {
                 "filesystem write identity changed".to_owned(),
             ));
         }
+        if let Some(family) = self.reconcile_deleted_upload(session, &mut record)? {
+            return Err(resource_deleted(&family));
+        }
         if record.state == UploadState::Committed {
             let publication = self.publication_for_record(&record)?.ok_or_else(|| {
                 integrity(
@@ -452,7 +466,8 @@ impl FsResourceStore {
         publication: &ResourcePublication,
     ) -> ResourceResult<()> {
         publication.verify()?;
-        let object_name = self.resource_name(&publication.resource, &publication.locators)?;
+        let object_name =
+            self.resolvable_resource_name(&publication.resource, &publication.locators)?;
         let ResourceIntegrity::Content { digest, size } = &publication.resource.integrity else {
             return Err(integrity(
                 "filesystem_import_invalid",
@@ -609,6 +624,12 @@ impl FsResourceStore {
         let record = self.load_record(&session.upload_id)?;
         match record.state {
             UploadState::Publishing | UploadState::Committed => return Ok(true),
+            UploadState::Deleted => {
+                return Err(conflict(
+                    "filesystem_resource_deleted",
+                    "filesystem directory import belongs to a deleted retention family".to_owned(),
+                ));
+            }
             UploadState::Aborted => {
                 return Err(conflict(
                     "filesystem_upload_conflict",
@@ -787,6 +808,107 @@ impl FsResourceStore {
             )),
             Err(TryLockError::Error(error)) => Err(substrate(error)),
         }
+    }
+
+    fn retention_token(family: &ResourceRetentionFamily) -> ResourceResult<&str> {
+        family.verify()?;
+        family.retention_key.strip_prefix("sha256:").ok_or_else(|| {
+            integrity(
+                "filesystem_retention_family_invalid",
+                "filesystem retention family key is not SHA-256 addressed".to_owned(),
+            )
+        })
+    }
+
+    fn retention_lock_name(family: &ResourceRetentionFamily) -> ResourceResult<String> {
+        Ok(format!("retention-{}.lock", Self::retention_token(family)?))
+    }
+
+    fn claim_retention(&self, family: &ResourceRetentionFamily) -> ResourceResult<RetentionClaim> {
+        self.ensure_writable()?;
+        family.verify()?;
+        if family.store_binding != self.binding {
+            return Err(conflict(
+                "filesystem_cleanup_conflict",
+                "filesystem retention family belongs to another store binding".to_owned(),
+            ));
+        }
+        let lock_name = Self::retention_lock_name(family)?;
+        let mut file = open_regular_at(&self.directories.locks, &lock_name, true, true)?;
+        match FileExt::try_lock(&file) {
+            Ok(()) => {
+                let deleted = Self::retention_tombstone(&mut file)?;
+                Ok(RetentionClaim {
+                    file,
+                    family: family.clone(),
+                    deleted,
+                })
+            }
+            Err(TryLockError::WouldBlock) => Err(conflict(
+                "filesystem_lock_busy",
+                format!(
+                    "filesystem retention family {} has an active writer",
+                    family.retention_key
+                ),
+            )),
+            Err(TryLockError::Error(error)) => Err(substrate(error)),
+        }
+    }
+
+    fn retention_tombstone(file: &mut File) -> ResourceResult<bool> {
+        match file.metadata().map_err(substrate)?.len() {
+            0 => Ok(false),
+            1 => {
+                file.seek(SeekFrom::Start(0)).map_err(substrate)?;
+                let mut marker = [0_u8; 1];
+                file.read_exact(&mut marker).map_err(substrate)?;
+                if marker == *b"D" {
+                    Ok(true)
+                } else {
+                    Err(integrity(
+                        "filesystem_retention_family_invalid",
+                        "filesystem retention-family control contains an invalid tombstone"
+                            .to_owned(),
+                    ))
+                }
+            }
+            _ => Err(integrity(
+                "filesystem_retention_family_invalid",
+                "filesystem retention-family control has an invalid length".to_owned(),
+            )),
+        }
+    }
+
+    fn persist_deletion_tombstone(&self, claim: &mut RetentionClaim) -> ResourceResult<()> {
+        if claim.deleted {
+            claim.file.sync_all().map_err(substrate)?;
+            self.directories.locks.sync_all().map_err(substrate)?;
+            return Ok(());
+        }
+        claim.file.seek(SeekFrom::Start(0)).map_err(substrate)?;
+        claim.file.write_all(b"D").map_err(substrate)?;
+        claim.file.sync_all().map_err(substrate)?;
+        self.directories.locks.sync_all().map_err(substrate)?;
+        claim.deleted = Self::retention_tombstone(&mut claim.file)?;
+        if !claim.deleted {
+            return Err(integrity(
+                "filesystem_retention_family_invalid",
+                "filesystem deletion tombstone failed its durable readback".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn family_is_deleted(&self, family: &ResourceRetentionFamily) -> ResourceResult<bool> {
+        family.verify()?;
+        if family.store_binding != self.binding {
+            return Ok(false);
+        }
+        let lock_name = Self::retention_lock_name(family)?;
+        let Some(mut file) = open_regular_at_optional(&self.directories.locks, &lock_name)? else {
+            return Ok(false);
+        };
+        Self::retention_tombstone(&mut file)
     }
 
     fn catalog_token(namespace: &str, key: &str) -> String {
@@ -1631,7 +1753,10 @@ impl FsResourceStore {
         if plan.write_id != record.intent.write_id
             || plan.upload_id != record.upload_id
             || plan.store_binding != record.store_binding
-            || !matches!(record.state, UploadState::Committed | UploadState::Aborted)
+            || !matches!(
+                record.state,
+                UploadState::Committed | UploadState::Deleted | UploadState::Aborted
+            )
             || *plan != Self::expected_cleanup_plan(record)?
         {
             return Err(integrity(
@@ -1705,11 +1830,63 @@ impl FsResourceStore {
         mut record: UploadRecord,
         publication: ResourcePublication,
     ) -> ResourceResult<ResourcePublication> {
-        self.converge_publishing(session, &record, &publication)?;
+        let family = ResourceRetentionFamily::from_publication(&publication)?;
+        let retention_claim = self.claim_retention(&family)?;
+        if retention_claim.deleted {
+            self.close_deleted_upload(session, &mut record)?;
+            return Err(resource_deleted(&family));
+        }
+        self.converge_publishing(session, &record, &publication, &retention_claim)?;
         record.state = UploadState::Committed;
         self.store_record(&record)?;
         self.cleanup_upload_files(session, &mut record)?;
         Ok(publication)
+    }
+
+    fn close_deleted_upload(
+        &self,
+        session: &ResourceWriteSession,
+        record: &mut UploadRecord,
+    ) -> ResourceResult<()> {
+        if record.state != UploadState::Deleted {
+            record.state = UploadState::Deleted;
+            self.store_record(record)?;
+        }
+        self.cleanup_upload_files(session, record)?;
+        Ok(())
+    }
+
+    fn reconcile_deleted_upload(
+        &self,
+        session: &ResourceWriteSession,
+        record: &mut UploadRecord,
+    ) -> ResourceResult<Option<ResourceRetentionFamily>> {
+        if !matches!(
+            record.state,
+            UploadState::Publishing | UploadState::Committed | UploadState::Deleted
+        ) {
+            return Ok(None);
+        }
+        let publication = self.publication_for_record(record)?.ok_or_else(|| {
+            integrity(
+                "filesystem_upload_record_invalid",
+                "published filesystem upload has no publication".to_owned(),
+            )
+        })?;
+        let family = ResourceRetentionFamily::from_publication(&publication)?;
+        let tombstoned = self.family_is_deleted(&family)?;
+        if record.state == UploadState::Deleted && !tombstoned {
+            return Err(integrity(
+                "filesystem_upload_record_invalid",
+                "deleted filesystem upload lacks its permanent retention-family tombstone"
+                    .to_owned(),
+            ));
+        }
+        if !tombstoned {
+            return Ok(None);
+        }
+        self.close_deleted_upload(session, record)?;
+        Ok(Some(family))
     }
 
     fn converge_publishing(
@@ -1717,7 +1894,19 @@ impl FsResourceStore {
         session: &ResourceWriteSession,
         record: &UploadRecord,
         publication: &ResourcePublication,
+        retention_claim: &RetentionClaim,
     ) -> ResourceResult<()> {
+        let family = ResourceRetentionFamily::from_publication(publication)?;
+        if retention_claim.family != family {
+            return Err(integrity(
+                "filesystem_retention_family_invalid",
+                "filesystem Publishing claim does not match its physical retention family"
+                    .to_owned(),
+            ));
+        }
+        if retention_claim.deleted {
+            return Err(resource_deleted(&family));
+        }
         let retained_publication = self.publication_for_record(record)?;
         if record.state != UploadState::Publishing
             || retained_publication.as_ref() != Some(publication)
@@ -1821,7 +2010,7 @@ impl FsResourceStore {
         bytes: &[u8],
     ) -> ResourceResult<()> {
         publication.verify()?;
-        let name = self.resource_name(&publication.resource, &publication.locators)?;
+        let name = self.resolvable_resource_name(&publication.resource, &publication.locators)?;
         let ResourceIntegrity::Content { size, .. } = &publication.resource.integrity else {
             return Err(integrity(
                 "filesystem_upload_record_invalid",
@@ -1909,6 +2098,32 @@ impl FsResourceStore {
             ));
         }
         Ok(digest.to_owned())
+    }
+
+    fn retention_family(
+        resource: &ResourceHandle,
+        locators: &ResourceLocatorSet,
+    ) -> ResourceResult<ResourceRetentionFamily> {
+        ResourceRetentionFamily::from_publication(&ResourcePublication {
+            resource: resource.clone(),
+            locators: locators.clone(),
+        })
+    }
+
+    fn resolvable_resource_name(
+        &self,
+        resource: &ResourceHandle,
+        locators: &ResourceLocatorSet,
+    ) -> ResourceResult<String> {
+        let name = self.resource_name(resource, locators)?;
+        let family = Self::retention_family(resource, locators)?;
+        if self.family_is_deleted(&family)? {
+            return Err(ResourceError::NotFound(format!(
+                "Resource {} was deleted from retention family {}",
+                resource.resource_id, family.retention_key
+            )));
+        }
+        Ok(name)
     }
 }
 
@@ -2011,12 +2226,29 @@ impl ArtifactStore for FsResourceStore {
         let _claim = self.claim(&upload_id)?;
         let name = Self::record_name(&upload_id)?;
         if entry_exists(&self.directories.uploads, &name)? {
-            let record = self.load_record(&upload_id)?;
+            let mut record = self.load_record(&upload_id)?;
             if record.intent != *intent || record.state == UploadState::Aborted {
                 return Err(conflict(
                     "filesystem_upload_conflict",
                     format!("filesystem write ID {} was reused", intent.write_id),
                 ));
+            }
+            if record.state == UploadState::Deleted {
+                let session = ResourceWriteSession {
+                    write_id: intent.write_id.clone(),
+                    upload_id,
+                    store_binding: self.binding.clone(),
+                };
+                let family = self
+                    .reconcile_deleted_upload(&session, &mut record)?
+                    .ok_or_else(|| {
+                        integrity(
+                            "filesystem_upload_record_invalid",
+                            "deleted filesystem upload did not retain its physical tombstone"
+                                .to_owned(),
+                        )
+                    })?;
+                return Err(resource_deleted(&family));
             }
         } else {
             self.store_record(&candidate)?;
@@ -2059,6 +2291,9 @@ impl ArtifactStore for FsResourceStore {
                 "filesystem_upload_conflict",
                 "filesystem upload identity changed".to_owned(),
             ));
+        }
+        if let Some(family) = self.reconcile_deleted_upload(session, &mut record)? {
+            return Err(resource_deleted(&family));
         }
         if record.state == UploadState::Committed {
             let publication = self.publication_for_record(&record)?.ok_or_else(|| {
@@ -2155,15 +2390,21 @@ impl ArtifactStore for FsResourceStore {
         }
         if matches!(
             record.state,
-            UploadState::Publishing | UploadState::Committed
+            UploadState::Publishing | UploadState::Committed | UploadState::Deleted
         ) {
             if record.state == UploadState::Publishing {
                 drop(claim);
-                let _ = self.commit_write(session)?;
+                let publication = self.commit_write(session);
                 let _claim = self.claim(&session.upload_id)?;
                 record = self.load_record(&session.upload_id)?;
-                debug_assert_eq!(record.state, UploadState::Committed);
-                return self.cleanup_upload_files(session, &mut record);
+                if matches!(record.state, UploadState::Committed | UploadState::Deleted) {
+                    return self.cleanup_upload_files(session, &mut record);
+                }
+                publication?;
+                return Err(integrity(
+                    "filesystem_upload_record_invalid",
+                    "filesystem publication returned without a terminal upload state".to_owned(),
+                ));
             }
             return self.cleanup_upload_files(session, &mut record);
         }
@@ -2195,7 +2436,7 @@ impl ArtifactResolver for FsResourceStore {
         locators: &ResourceLocatorSet,
     ) -> ResourceResult<ResourceObservation> {
         resource.verify()?;
-        let name = self.resource_name(resource, locators)?;
+        let name = self.resolvable_resource_name(resource, locators)?;
         if matches!(resource.integrity, ResourceIntegrity::Content { .. }) {
             let mut file = open_regular_at(&self.directories.objects, &name, false, false)?;
             verify_resource_file(&mut file, resource)?;
@@ -2223,7 +2464,7 @@ impl ArtifactResolver for FsResourceStore {
         }
         resource.verify()?;
         locators.verify_for(resource)?;
-        let name = self.resource_name(resource, locators)?;
+        let name = self.resolvable_resource_name(resource, locators)?;
         let mut file = open_regular_at(&self.directories.objects, &name, false, false)?;
         let size = file.metadata().map_err(substrate)?.len();
         if !matches!(resource.integrity, ResourceIntegrity::Content { size: expected, .. } if expected == size)
@@ -2273,7 +2514,7 @@ impl ArtifactResolver for FsResourceStore {
                 "filesystem exact listing requires a manifest descriptor".to_owned(),
             )
         })?;
-        let manifest_name = self.resource_name(resource, locators)?;
+        let manifest_name = self.resolvable_resource_name(resource, locators)?;
         let mut manifest =
             open_regular_at(&self.directories.objects, &manifest_name, false, false)?;
         if manifest.metadata().map_err(substrate)?.len() != descriptor.size {
@@ -2364,14 +2605,26 @@ impl ResourceDeleter for FsResourceStore {
                 "filesystem deleter does not own the durable deletion target".to_owned(),
             ));
         }
+        let mut retention_claim = self.claim_retention(&target.subject.family)?;
         let name = target
             .subject
             .family
             .content_digest
             .strip_prefix("sha256:")
             .expect("verified deletion target has a SHA-256 digest");
-        if let Some(mut file) = open_regular_at_optional(&self.directories.objects, name)? {
-            verify_deletion_target_file(&mut file, target)?;
+        let mut retained = open_regular_at_optional(&self.directories.objects, name)?;
+        if let Some(file) = &mut retained {
+            verify_deletion_target_file(file, target)?;
+        }
+        self.persist_deletion_tombstone(&mut retention_claim)?;
+        #[cfg(test)]
+        if FAIL_AFTER_DELETION_TOMBSTONE.swap(false, Ordering::SeqCst) {
+            return Err(substrate_with_code(
+                "filesystem_test_interrupted_after_deletion_tombstone",
+                "injected interruption after durable deletion tombstone readback",
+            ));
+        }
+        if retained.is_some() {
             remove_file_at(&self.directories.objects, name)?;
         }
         self.directories.objects.sync_all().map_err(substrate)?;
@@ -3473,6 +3726,16 @@ fn conflict(code: &'static str, message: impl Into<String>) -> ResourceError {
     }
 }
 
+fn resource_deleted(family: &ResourceRetentionFamily) -> ResourceError {
+    conflict(
+        "filesystem_resource_deleted",
+        format!(
+            "filesystem retention family {} is permanently deleted",
+            family.retention_key
+        ),
+    )
+}
+
 fn integrity(code: &'static str, message: impl Into<String>) -> ResourceError {
     ResourceError::Integrity {
         code: code.to_owned(),
@@ -3534,6 +3797,140 @@ mod tests {
             .store_record(&record)
             .expect("Publishing intent persists");
         (session, record)
+    }
+
+    fn prepare_manifest_publishing_replay(
+        store: &mut FsResourceStore,
+        publication: &ResourcePublication,
+        manifest_bytes: &[u8],
+    ) -> (ResourceWriteSession, ResourceManifestDescriptor, String) {
+        let descriptor = publication
+            .resource
+            .manifest
+            .clone()
+            .expect("directory retains a manifest descriptor");
+        let intent = ResourceWriteIntent {
+            write_id: "write:late-manifest-publication".to_owned(),
+            shape: publication.resource.shape,
+            media_type: publication.resource.media_type.clone(),
+            annotations: publication.resource.annotations.clone(),
+        };
+        let session = store.begin_write(&intent).expect("late write begins");
+        store
+            .write_chunk(&session, 0, manifest_bytes)
+            .expect("late manifest bytes persist");
+        let mut record = store
+            .load_record(&session.upload_id)
+            .expect("late upload record reads");
+        let mut data = store
+            .open_acknowledged_upload_data(&session, record.committed_length)
+            .expect("late upload data opens");
+        assert_eq!(
+            store
+                .prepare_manifest_index(&session, &mut data)
+                .expect("late manifest index prepares"),
+            descriptor
+        );
+        record.state = UploadState::Publishing;
+        record.publication = Some(UploadPublication {
+            digest: descriptor.digest.clone(),
+            size: descriptor.size,
+            manifest: Some(descriptor.clone()),
+        });
+        store
+            .store_record(&record)
+            .expect("late Publishing intent persists");
+        let staging = FsResourceStore::manifest_index_staging_name(&session)
+            .expect("late index staging name derives");
+        assert!(
+            entry_exists(&store.directories.staging, &staging)
+                .expect("late index staging is visible")
+        );
+        (session, descriptor, staging)
+    }
+
+    #[test]
+    fn deletion_tombstone_survives_interruption_before_manifest_payload_unlink() {
+        let directory = tempdir().expect("temporary directory");
+        let root = directory.path().join("store");
+        let source = directory.path().join("source");
+        fs::create_dir(&source).expect("source directory creates");
+        fs::write(source.join("entry.txt"), b"entry").expect("source entry writes");
+        let binding = "fs:delete-interruption";
+        let mut store = FsResourceStore::open(&root, binding).expect("store opens");
+        let publication = store
+            .import_directory(&source, "import:delete-interruption")
+            .expect("directory publishes");
+        let target = ResourceDeletionTarget::from_publication(&publication)
+            .expect("manifest deletion target derives");
+        let object_name = store
+            .resource_name(&publication.resource, &publication.locators)
+            .expect("manifest object name derives");
+        let manifest_bytes = fs::read(
+            root.join("objects")
+                .join(binding_namespace(binding))
+                .join(&object_name),
+        )
+        .expect("published manifest bytes read");
+        let (late_session, descriptor, late_index_staging) =
+            prepare_manifest_publishing_replay(&mut store, &publication, &manifest_bytes);
+        let index_name =
+            FsResourceStore::manifest_index_name(&descriptor).expect("manifest index name derives");
+        let catalog_name =
+            FsResourceStore::catalog_name(MANIFEST_INDEX_VERSION, &descriptor.digest);
+
+        FAIL_AFTER_DELETION_TOMBSTONE.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            store.delete_and_verify_absent(&target),
+            Err(ResourceError::Substrate { code, .. })
+                if code == "filesystem_test_interrupted_after_deletion_tombstone"
+        ));
+        let family = &target.subject.family;
+        let control_name =
+            FsResourceStore::retention_lock_name(family).expect("retention control name derives");
+        assert_eq!(
+            fs::read(root.join("locks").join(control_name))
+                .expect("durable tombstone reads after interruption"),
+            b"D"
+        );
+        assert!(entry_exists(&store.directories.objects, &object_name).unwrap());
+        assert!(entry_exists(&store.directories.manifest_indexes, &index_name).unwrap());
+        assert!(entry_exists(&store.directories.catalog, &catalog_name).unwrap());
+        assert!(matches!(
+            store.stat(&publication.resource, &publication.locators),
+            Err(ResourceError::NotFound(_))
+        ));
+        drop(store);
+
+        let mut reopened = FsResourceStore::open(&root, binding).expect("store reopens");
+        assert!(matches!(
+            reopened.commit_write(&late_session),
+            Err(ResourceError::Conflict { code, .. }) if code == "filesystem_resource_deleted"
+        ));
+        assert!(
+            reopened
+                .cleanup_receipt(&late_session)
+                .expect("late cleanup receipt reads")
+                .is_some()
+        );
+        assert!(!entry_exists(&reopened.directories.staging, &late_index_staging).unwrap());
+        assert!(
+            !entry_exists(
+                &reopened.directories.uploads,
+                &FsResourceStore::data_name(&late_session.upload_id).unwrap()
+            )
+            .unwrap()
+        );
+        reopened
+            .delete_and_verify_absent(&target)
+            .expect("reopened deletion converges retained payload and manifest metadata");
+        assert!(!entry_exists(&reopened.directories.objects, &object_name).unwrap());
+        assert!(!entry_exists(&reopened.directories.manifest_indexes, &index_name).unwrap());
+        assert!(!entry_exists(&reopened.directories.catalog, &catalog_name).unwrap());
+        assert!(matches!(
+            reopened.stat(&publication.resource, &publication.locators),
+            Err(ResourceError::NotFound(_))
+        ));
     }
 
     #[test]
@@ -3604,8 +4001,10 @@ mod tests {
                 .unwrap()
                 .expect("Publishing retains its publication");
             if content_published {
+                let family = ResourceRetentionFamily::from_publication(&expected).unwrap();
+                let claim = store.claim_retention(&family).unwrap();
                 store
-                    .converge_publishing(&session, &record, &expected)
+                    .converge_publishing(&session, &record, &expected, &claim)
                     .expect("content publishes before the terminal head");
             }
             drop(store);
@@ -3807,8 +4206,10 @@ mod tests {
                 .expect("publication derives")
                 .expect("Publishing retains its exact publication");
             if content_published {
+                let family = ResourceRetentionFamily::from_publication(&expected).unwrap();
+                let claim = store.claim_retention(&family).unwrap();
                 store
-                    .converge_publishing(&session, &record, &expected)
+                    .converge_publishing(&session, &record, &expected, &claim)
                     .expect("content publishes before the terminal checkpoint");
             }
             drop(store);

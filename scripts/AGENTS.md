@@ -37,9 +37,9 @@
 - Every SDK also runs the same structured Engine negative fixture through that
   binary. Keep missing-envelope transport failure separate from remote semantic
   failure and assert retry disposition only where the Rust boundary proves it.
-- Protocol and SDK gates cover the required Engine v4 success request echo for
+- Protocol and SDK gates cover the required Engine v5 success request echo for
   every inner request variant. Reject missing/mismatched echoes, duplicate or
-  unknown echo fields, and the former response-only v4 success; failure carries
+  unknown echo fields, and every predecessor success shape; failure carries
   no request. Include omitted-versus-explicit-null mismatches. Correlation
   compares the actual serialized wire, including member presence, and never
   depends on an SDK reimplementation of Rust-derived identities.
@@ -105,6 +105,10 @@
   public tip before any remote read. It never executes candidate code. The
   mirror-stage barrier must include the actual scanner and every other verify
   job.
+  Static release verification also requires every Gitleaks entrypoint to use
+  the single exact pinned-version normalizer, the pinned OCI job to prove its
+  raw `v8.24.3` identity, and ZIP classification to validate an actual end
+  record/central-directory/local-header chain rather than offset-zero magic.
 - GitHub CI derives one exact change plan, groups selected suites into
   independent toolchain lanes, and uploads one JSON harness report per lane.
   A skipped lane means its risk was not selected, not that its test silently
@@ -261,11 +265,12 @@
   Action and before execution.
 - `finalize_release.py` additionally freezes the annotated tag object as the
   distinct 40-hex `release_tag_sha`. Its closed finalization manifest has exact
-  `schema_version: 2`, and the freeze job, terminal job, and controller fence
-  separately compare the raw remote ref and peeled commit before each Release
-  mutation. A replacement tag object targeting the same commit is not equivalent
-  authority and must fail before any write.
-- `version_domains.py` owns the complete BOM/2 semantic validator. It derives
+  `stage_version: cymule.release-finalization-stage/3` and additionally binds the private source SHA, raw
+  immutable mirror-receipt tag, and shared source-snapshot digest. The freeze
+  job, terminal job, and controller fence separately compare both tag
+  authorities before each Release mutation. A replacement tag object targeting
+  the same commit is not equivalent authority and must fail before any write.
+- `version_domains.py` owns the complete BOM/3 semantic validator. It derives
   the exact public Cargo catalog from payload manifests, requires both npm
   publications plus explicit Go/Python records, and exact-matches registry
   generation/digest, schema, domain, compatibility, and migration projections.
@@ -274,7 +279,7 @@
 - Before any GitHub Release mutation, `finalize_release.py` verifies both the
   exact BOM's GitHub Artifact Attestation against the current-main finalizer
   workflow/controller SHA and the unexpired same-run
-  `github-release-control-plane-receipt/1`. A separate protected
+  `cymule.github-release-control-plane-receipt/2`. A separate protected
   Administration-read plus Actions-read App job creates that receipt from live immutable-Release,
   exact-tag-ruleset, environment, default-permissions, and default-branch
   settings; the contents writer receives no administration credential. Release
@@ -282,6 +287,16 @@
   name, byte size, SHA-256 digest, and uploaded state across publication, and a
   terminal Release must be immutable. GitHub Release remains a projection of
   the attested BOM, not a second mutable authority.
+- Release BOM publication evidence binds the rewritten public SHA used by
+  GitHub/npm, while BOM `source_sha` binds the private source SHA from the
+  authenticated `cymule.public-mirror-receipt/2`. The two SHAs must differ and both
+  sides must match the same registered public source-snapshot digest; never
+  populate both fields from `RELEASE_SHA`.
+- `release_contracts.py` is the sole public source for the finalization-stage,
+  mirror-receipt, GitHub settings-snapshot, and GitHub control-plane-receipt
+  selectors. Public controllers import those constants; the private mirror
+  writer remains outside the public source inventory and is admitted only when
+  the static release verifier exact-matches its wire literal to that source.
 - Multi-write controllers repeat the authority fence at each real external
   mutation: every missing-crate PUT and rate-limit retry re-read current main
   plus the peeled tag, and Release draft creation, BOM upload, and publication
@@ -355,7 +370,7 @@
 - `finalize_release.py` runs its stage and publish commands only from the exact
   current-main controller. The read-only verify job emits authenticated package
   stages; a separate fresh read-only freeze job reruns npm and crates.io
-  registry byte/provenance readback and creates `cymule.release-bom/2`. Every
+  registry byte/provenance readback and creates `cymule.release-bom/3`. Every
   source package record has a required `publication`: closed registry evidence
   for Cargo/npm and explicit `null` for unpublished Python/Go. The BOM excludes
   mutable finalizer identity, while npm evidence preserves its immutable signed
@@ -365,7 +380,7 @@
   the exact-tag notes and BOM into a closed three-file bundle bound to repository,
   annotated-tag object, release, and controller SHAs, canonical names, sizes,
   and digests. A separate protected attestation job has `contents: read`, reruns
-  the workspace-derived complete BOM/2 semantic validator, and attests the BOM
+  the workspace-derived complete BOM/3 semantic validator, and attests the BOM
   bytes without Release mutation authority. A later protected contents-read job
   mints one repository-scoped Administration-read plus Actions-read App token, performs live
   settings readback, uploads only the same-run short-lived receipt, and then

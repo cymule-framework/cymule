@@ -181,7 +181,7 @@
         "occurrence_id": { "$ref": "#/$defs/id" },
         "template_id": { "$ref": "#/$defs/id" },
         "decision_id": { "$ref": "#/$defs/id" },
-        "plan_id": { "$ref": "#/$defs/id" },
+        "plan_id": { "$ref": "#/$defs/contentId" },
         "execution_binding": { "$ref": "#/$defs/executionBindingArtifact" },
         "selection_id": { "$ref": "#/$defs/id" }
       }
@@ -268,7 +268,7 @@
       "properties": {
         "continuation_version": { "const": "cymule.continuation-state/1" },
         "run_id": { "$ref": "#/$defs/runIdentity" },
-        "plan_id": { "$ref": "#/$defs/id" },
+        "plan_id": { "$ref": "#/$defs/contentId" },
         "binding_context": { "$ref": "#/$defs/id" },
         "frames": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/frame" } },
         "state": { "oneOf": [{ "$ref": "#/$defs/artifact" }, { "type": "null" }] },
@@ -316,7 +316,7 @@
         "observation_id": { "$ref": "#/$defs/id" },
         "decision_id": { "$ref": "#/$defs/id" },
         "occurrence_id": { "$ref": "#/$defs/id" },
-        "plan_id": { "$ref": "#/$defs/id" },
+        "plan_id": { "$ref": "#/$defs/contentId" },
         "outcome": { "enum": ["succeeded", "failed"] },
         "evidence": { "$ref": "#/$defs/artifact" }
       }

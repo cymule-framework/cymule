@@ -16,7 +16,7 @@ owned content-addressed Merkle index. Direct reads enforce the shared 8 MiB
 range bound, and an equal metadata replay re-syncs retained files and directory
 entries before returning success.
 
-Each root carries the exact `cymule.resource-fs-layout/1` physical marker.
+Each root carries the exact `cymule.resource-fs-layout/2` physical marker.
 Opening a non-empty unmarked root or another generation fails before a current
 upload can create a second authority. The root, fixed directories, generated
 entries, and recursive import children are opened beneath no-follow directory
@@ -32,7 +32,7 @@ malformed high-cardinality namespace does not first collect every name.
 Commit records the complete `Publishing` intent before linking any content
 family. Commit, abort, and reopen converge that same intent before removing
 upload data, including acknowledgement loss after content publication. Cleanup
-first persists an exact target plan in `cymule.resource-fs-upload/8`; only after
+first persists an exact target plan in `cymule.resource-fs-upload/9`; only after
 absence readback does it persist the unique plan-derived receipt, which remains
 queryable and replays byte-for-byte. Equal chunk retries re-sync the retained
 file and owning directory before success.
@@ -97,13 +97,18 @@ Lifecycle deletion is provider-bound: the adapter receives only the durable
 `ResourceDeletionTarget`, exact-matches its physical-family binding, removes
 that content family idempotently, syncs it, and succeeds only after absence
 readback. Locator paths, caller-supplied absence flags, and removed-byte counts
-are not deletion authority.
+are not deletion authority. Publication and deletion share one non-blocking
+cross-process control keyed by the binding-plus-digest retention family.
+Deletion durably marks that control before unlinking payload bytes. The marker
+is permanent non-payload metadata: resolvers treat it as absent, interrupted
+`Publishing` uploads close as `Deleted` and clean their owned staging, and a
+different write ID cannot republish the same physical family after restart.
 
 Catalog writes and reads accept only `cymule.resource-catalog-record/2` and
 enforce its protocol-owned 16 MiB canonical JSON limit before creating an entry
 or materializing provider bytes.
 
-The `cymule.resource-fs-upload/8` journal is also fixed-cardinality: it stores a
+The `cymule.resource-fs-upload/9` journal is also fixed-cardinality: it stores a
 scalar acknowledged frontier, compact publication descriptor, and the bounded
 cleanup plan/receipt, never a vector of chunks or directory entries. Before it
 acquires the cross-process writer claim or creates an upload/lock entry,

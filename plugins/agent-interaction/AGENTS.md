@@ -180,7 +180,10 @@
   response may select only a decision explicitly offered by its exact request.
 - A Tool current enters a Session only as `Pending`; every later update must
   preserve the exact `tool_call_id`, operation, and input while following the
-  closed lifecycle. A context response must echo the request's exact pinned
+  closed lifecycle. Session close exact-reads the bounded non-terminal Tool
+  capacity directory and cancels every retained Tool in the same command/CAS;
+  no generic metadata-only close or Tool-family scan exists. A context response
+  must echo the request's exact pinned
   message head and count and may cite only id/index/digest-exact messages
   actually returned through that one `PinnedAgentMessageReader`; unread or
   fabricated references fail before the response is admitted.
@@ -191,6 +194,12 @@
   Session/Tool/purpose content-ID helper before the first Pending write. Never
   concatenate a caller Tool ID into another bounded identity; the full legal
   512-scalar input must remain usable without truncation.
+- The real SQLite `/6` process-death suite derives its Agent-owned CAS count
+  from one successful terminal run, then kills a managed child immediately
+  before and after every Session/Tool, host-occurrence, and staged-stream CAS.
+  Recovery first replays the exact recorded command receipt, then uses the
+  current occurrence recovery API; it must never redispatch a retained provider
+  result. Every case checkpoints WAL and repeats SQLite integrity checks.
 - Use targeted `rustfmt` for owned Rust files. Do not run workspace-wide
   formatting in a shared worktree.
 - Run profile-protocol all-target checks and lib tests, then the complete

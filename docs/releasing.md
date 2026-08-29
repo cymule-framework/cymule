@@ -7,6 +7,9 @@ have completed
 Git tag and GitHub Release mutation remain unauthorized until
 [`github-release-authority-v1.md`](migrations/github-release-authority-v1.md)
 has been executed and read back.
+The private/public source mapping remains unauthorized until
+[`public-mirror-receipt-carrier-v1.md`](migrations/public-mirror-receipt-carrier-v1.md)
+has installed and verified its two exact receipt-tag rulesets.
 All live GitHub control-plane gates must also pass before a release workflow is
 authorized.
 
@@ -63,13 +66,17 @@ default branch:
 7. no mirror stage installs or downloads tools or dependencies at runtime;
 8. re-reads the private default branch and fails if the pipeline is stale;
 9. no-ops when the public tip already matches;
-10. publishes with a protected private CI credential and an exact
-   force-with-lease predecessor, so concurrent public movement is never
-   replaced; and
-11. always performs one bounded exact public-tip readback, even when the push
-   reports failure. The exact source tip converges successfully, a different
-   reachable tip fails, and an unavailable readback reports an ambiguous
-   outcome without changing the retry identity.
+10. deterministically constructs the registered
+    `cymule.public-mirror-receipt/2` inside the annotated
+    `cymule-mirror/<public-source-sha>` tag from the exact private SHA,
+    rewritten public SHA, and shared source-snapshot digest;
+11. atomically publishes a new main generation and its receipt tag with the
+    protected private CI credential, exact force-with-lease predecessors, and
+    a creation-only receipt-ref lease, so neither half can commit alone; and
+12. always performs bounded exact public-tip and raw receipt-tag readback, even
+    when the push reports failure. Both exact identities converge successfully,
+    any different reachable identity fails, and unavailable readback reports an
+    ambiguous outcome without changing the retry identity.
 
 Every Gitleaks invocation clears config environment variables, uses one empty
 controller-created ignore file, and passes `--ignore-gitleaks-allow`. The
@@ -94,6 +101,10 @@ GitLab `public-mirror` environment. Candidate, ShellCheck, scanner, and
 controller-test jobs intentionally fail if that variable is visible; mirror
 publication is not an applied authority until this environment-scope readback
 passes.
+GitHub must also enforce one exact `refs/tags/cymule-mirror/*` creation ruleset
+whose sole bypass is the mirror Integration and an independent update/deletion
+ruleset with no bypass. Public Actions reads this carrier without a mirror
+credential and never synthesizes a missing private SHA.
 
 ## Required GitHub settings
 
@@ -143,6 +154,9 @@ The verifier requires:
 - one active exact `v*` creation-only ruleset whose sole bypass is the release
   App Integration, plus a separate active exact `v*` update/deletion ruleset
   with no bypass actor;
+- one active exact `cymule-mirror/*` creation-only ruleset whose sole bypass is
+  the mirror App Integration, plus a separate exact update/deletion ruleset
+  with no bypass actor;
 - the exact narrow mirror GitHub App Integration as the default branch's only
   bypass, and the exact release-tag GitHub App Integration as the creation
   ruleset's only bypass;
@@ -180,6 +194,11 @@ The Rust package witness runs Cargo's dependency-aware publication dry-run,
 packages the complete catalog twice, rejects dependency-path leakage, compares
 archive hashes, safely extracts normalized archives, and compiles every public
 library, binary, and a fresh facade consumer.
+An ordinary CI plan that selects the process executor also runs
+`rust-executor-plugin` on `macos-15` at exact `github.sha`; `Required CI`
+rejects a missing, skipped, or different-SHA witness. Crates publication repeats
+that witness without credentials at the exact release SHA, and the OIDC
+publisher cannot start until it consumes the matching job output.
 
 Every new release workflow is dispatched from `refs/heads/main` and requires
 the event SHA to equal freshly fetched public `origin/main`. A new version
@@ -235,9 +254,11 @@ a tag that lacks `publish-npm-release.yml` with caller generation `/1`.
 
 `versioning/version-domains.json` is the only semantic and protocol version
 inventory. Stage manifests bind its canonical digest to the package bytes and
-exact release SHA. Finalization generates `cymule.release-bom/2` with that
+exact release SHA. Finalization generates `cymule.release-bom/3` with that
 registry digest, every registered schema digest, package-manifest digest, exact
-public source SHA, and immutable publication evidence. The exact current-main
+non-null private source SHA, distinct non-null rewritten public source SHA, and immutable
+publication evidence. The authenticated mirror receipt and exact public tree
+must agree on the shared source-snapshot digest. The exact current-main
 finalizer `controller_sha` belongs to the run's stage, signed attestation and
 control-plane receipt, not the BOM. Every
 source package has a required `publication` member: Cargo and npm records carry
@@ -371,25 +392,30 @@ crate archive, compares the complete catalog with crates.io, verifies fresh
 Rust consumers, and uploads only the authenticated npm and Cargo stages.
 
 A separate fresh credential-free freeze job checks out the exact current-main
-controller and exact tag payload in separate roots, downloads those data stages,
+controller and exact tag payload with complete ancestry in separate roots,
+downloads those data stages,
 requires the release ref to be an annotated tag object, records its exact
 `release_tag_sha` separately from the peeled `release_sha`, re-reads both remote
 identities, and reruns npm and crates.io byte/provenance readback. With exactly Node
 `v26.7.0` and npm `11.19.0`, it preserves the Fulcio-signed publisher
-`signer_ref`/`signer_sha`, then builds the closed BOM/2 and release notes into a
-three-file finalization bundle whose manifest has exact `schema_version: 2` and
-binds both Git identities plus the freeze controller SHA. The immutable BOM
+`signer_ref`/`signer_sha`, then builds the closed BOM/3 and release notes into a
+three-file finalization bundle whose manifest has exact
+`stage_version: cymule.release-finalization-stage/3` and
+binds both release-tag identities, the private source SHA, raw mirror-receipt
+tag object, shared source-snapshot digest, and freeze controller SHA. The immutable BOM
 binds the release SHA but intentionally excludes the mutable controller identity;
 the current controller is bound outside those stable bytes by the finalization
 stage, Artifact Attestation, and same-run control-plane receipt. Publication
 evidence never substitutes one authority for another.
 
-The protected attestation job has `contents: read`, rechecks that controller
+The protected attestation job has `contents: read`, uses a full-history
+`release-authority` checkout, rechecks that controller
 SHA is still public `main`, re-reads the raw remote tag ref against
 `release_tag_sha` and its peeled commit against `release_sha`, and revalidates
-the complete BOM/2 projection:
+the complete BOM/3 projection:
 release generation, registry digest, every schema/domain/migration edge, every
-public Cargo/npm publication, and the explicit Go/Python manifest records.
+public Cargo/npm publication, the explicit Go/Python manifest records, and the
+same authenticated private/public mirror mapping.
 `actions/attest` creates a GitHub Artifact Attestation for the exact BOM bytes
 without ever receiving `contents: write` and emits its bundle as an immutable
 workflow artifact.
@@ -397,11 +423,13 @@ workflow artifact.
 After attestation, a separately protected `contents: read` control-plane job
 mints one repository-scoped installation token with only Administration read
 and Actions read. It reads
-immutable-Release owner enforcement, both exact tag rulesets, the default
+immutable-Release owner enforcement, all four exact release/receipt tag
+rulesets, the default
 Actions permission ceiling, the default-branch rule authority, and all three
 protected environments from GitHub. The current controller closes that
-observation into `github-release-control-plane-receipt/1`: a self-digested,
-15-minute receipt bound to repository, workflow run and attempt, controller,
+observation into `cymule.github-release-control-plane-receipt/2`: a self-digested,
+15-minute receipt whose closed settings projection is
+`cymule.github-release-settings-snapshot/2`, bound to repository, workflow run and attempt, controller,
 release commit, raw annotated-tag object, observation/expiry times, and the
 normalized settings snapshot. The App token is revoked with that job; only the
 receipt artifact crosses the boundary.

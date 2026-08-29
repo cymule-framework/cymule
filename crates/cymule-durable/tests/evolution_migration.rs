@@ -3,15 +3,21 @@
 /// Shared public-control fixtures and issued Clock authority.
 pub mod support;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use cymule_core::{
     ArtifactRecord, ArtifactRef, AttemptProjection, Definition, Expression, Machine, Operation,
     Region, SealedPlan, Step, artifact_ref, canonical_bytes, plan_invocation_id, seal_plan,
 };
 use cymule_durable::{
-    DURABLE_CONTROL_VERSION, DurableBoundary, DurableCommand, DurableResponse, DurableRunCurrent,
-    DurableStore, DurableStoreControl, MemoryStore,
+    ApplicationJournalPrefix, ApplicationJournalPrefixReplacementAuthority,
+    CoupledCheckpointReceipt, DURABLE_CONTROL_VERSION, DurableBoundary, DurableCommand,
+    DurableError, DurableResponse, DurableResult, DurableRunCurrent, DurableStore,
+    DurableStoreControl, GcReceipt, JournalRecordManifest, MemoryStore, StateRootManifest,
+    StateRootResolver, StoreBatch, StoreCommit, StoreHead, StoreReclamation, StoreStats,
+    StoredState,
 };
 use cymule_durable_protocol::{Continuation, ContinuationStatus, WaitActivationSource};
 use cymule_profile_protocol::evolution::{
@@ -26,7 +32,6 @@ use cymule_profile_protocol::evolution::{
 use cymule_runtime::ExecutionBinding;
 use serde_json::{Value, json};
 
-const RUN_ID: &str = "run:public-evolution-migration";
 const EVOLUTION_ID: &str = "evolution:public-migration";
 const TEMPLATE_ID: &str = "template:public-migration";
 const LOGICAL_REF: &str = "migration.result";
@@ -35,6 +40,212 @@ const SIGNAL_KEY: &str = "signal:public-migration";
 const ADAPTER_ID: &str = "migration.root-frame";
 const ADAPTER_REVISION: &str =
     "sha256:8888888888888888888888888888888888888888888888888888888888888888";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationStoreFault {
+    ResolverRead,
+    BeforeCas,
+    AfterCas,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct MigrationStoreTrace {
+    resolver_reads: usize,
+    cas_attempts: usize,
+    cas_commits: usize,
+    fault_hits: usize,
+}
+
+#[derive(Default)]
+struct MigrationStoreState {
+    fault: Option<MigrationStoreFault>,
+    trace: MigrationStoreTrace,
+}
+
+#[derive(Clone)]
+struct MigrationStore {
+    inner: MemoryStore,
+    state: Rc<RefCell<MigrationStoreState>>,
+}
+
+impl MigrationStore {
+    fn new(inner: MemoryStore) -> Self {
+        Self {
+            inner,
+            state: Rc::new(RefCell::new(MigrationStoreState::default())),
+        }
+    }
+
+    fn arm(&self, fault: MigrationStoreFault) {
+        *self.state.borrow_mut() = MigrationStoreState {
+            fault: Some(fault),
+            trace: MigrationStoreTrace::default(),
+        };
+    }
+
+    fn reset_trace(&self) {
+        *self.state.borrow_mut() = MigrationStoreState::default();
+    }
+
+    fn trace(&self) -> MigrationStoreTrace {
+        self.state.borrow().trace.clone()
+    }
+}
+
+impl DurableStore for MigrationStore {
+    fn load_head(&mut self) -> DurableResult<Option<StoreHead>> {
+        self.inner.load_head()
+    }
+
+    fn load_state_root_manifest(
+        &mut self,
+        manifest_id: &str,
+    ) -> DurableResult<Option<StateRootManifest>> {
+        self.inner.load_state_root_manifest(manifest_id)
+    }
+
+    fn with_state_root_resolver<T>(
+        &mut self,
+        current: &StateRootManifest,
+        read: impl FnOnce(&mut dyn StateRootResolver) -> DurableResult<T>,
+    ) -> DurableResult<T> {
+        let fail = {
+            let mut state = self.state.borrow_mut();
+            state.trace.resolver_reads += 1;
+            if state.fault == Some(MigrationStoreFault::ResolverRead) {
+                state.fault = None;
+                state.trace.fault_hits += 1;
+                true
+            } else {
+                false
+            }
+        };
+        if fail {
+            return Err(DurableError::Substrate {
+                code: "migration_test_resolver_read".to_owned(),
+                message: "injected storage failure before migration preparation".to_owned(),
+            });
+        }
+        self.inner.with_state_root_resolver(current, read)
+    }
+
+    fn load_full_audit(&mut self) -> DurableResult<Option<StoredState>> {
+        self.inner.load_full_audit()
+    }
+
+    fn application_journal_prefix(
+        &mut self,
+        manifest: &StateRootManifest,
+        journal_id: &str,
+        count: u64,
+    ) -> DurableResult<ApplicationJournalPrefix> {
+        self.inner
+            .application_journal_prefix(manifest, journal_id, count)
+    }
+
+    fn application_journal_record_manifest(
+        &mut self,
+        manifest: &StateRootManifest,
+        journal_id: &str,
+        record_id: &str,
+    ) -> DurableResult<Option<JournalRecordManifest>> {
+        self.inner
+            .application_journal_record_manifest(manifest, journal_id, record_id)
+    }
+
+    fn application_journal_prefix_replacement_authority(
+        &mut self,
+        manifest: &StateRootManifest,
+        replacement_id: &str,
+    ) -> DurableResult<Option<ApplicationJournalPrefixReplacementAuthority>> {
+        self.inner
+            .application_journal_prefix_replacement_authority(manifest, replacement_id)
+    }
+
+    fn coupled_checkpoint_receipt(
+        &mut self,
+        manifest: &StateRootManifest,
+        coupling_id: &str,
+    ) -> DurableResult<Option<CoupledCheckpointReceipt>> {
+        self.inner.coupled_checkpoint_receipt(manifest, coupling_id)
+    }
+
+    fn load_machine_command_archive_segment(
+        &mut self,
+        segment_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandArchiveSegment>> {
+        self.inner.load_machine_command_archive_segment(segment_id)
+    }
+
+    fn load_machine_command_archive_entry(
+        &mut self,
+        entry_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandArchiveEntry>> {
+        self.inner.load_machine_command_archive_entry(entry_id)
+    }
+
+    fn load_machine_command_archive_batch(
+        &mut self,
+        batch_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandBatchRecord>> {
+        self.inner.load_machine_command_archive_batch(batch_id)
+    }
+
+    fn load_machine_command_index_node(
+        &mut self,
+        node_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandIndexNode>> {
+        self.inner.load_machine_command_index_node(node_id)
+    }
+
+    fn compare_and_commit(
+        &mut self,
+        expected: Option<&StoreHead>,
+        batch: &StoreBatch,
+    ) -> DurableResult<StoreCommit> {
+        let fault = {
+            let mut state = self.state.borrow_mut();
+            state.trace.cas_attempts += 1;
+            match state.fault {
+                Some(MigrationStoreFault::BeforeCas | MigrationStoreFault::AfterCas) => {
+                    state.trace.fault_hits += 1;
+                    state.fault.take()
+                }
+                _ => None,
+            }
+        };
+        if fault == Some(MigrationStoreFault::BeforeCas) {
+            return Err(DurableError::Substrate {
+                code: "migration_test_before_cas".to_owned(),
+                message: "injected storage failure before migration head publication".to_owned(),
+            });
+        }
+        let commit = self.inner.compare_and_commit(expected, batch)?;
+        self.state.borrow_mut().trace.cas_commits += 1;
+        if fault == Some(MigrationStoreFault::AfterCas) {
+            return Err(DurableError::CommitOutcomeUnknown {
+                message: "injected lost acknowledgement after migration head publication"
+                    .to_owned(),
+            });
+        }
+        Ok(commit)
+    }
+
+    fn reconcile_cold_reclamation(
+        &mut self,
+        request: &StoreReclamation,
+    ) -> DurableResult<GcReceipt> {
+        self.inner.reconcile_cold_reclamation(request)
+    }
+
+    fn advance_cold_reclamation(&mut self, request: &StoreReclamation) -> DurableResult<GcReceipt> {
+        self.inner.advance_cold_reclamation(request)
+    }
+
+    fn stats(&self) -> DurableResult<StoreStats> {
+        self.inner.stats()
+    }
+}
 
 fn artifact(kind: &str, value: &Value) -> ArtifactRecord {
     let bytes = canonical_bytes(value).expect("fixture JSON canonicalizes");
@@ -127,16 +338,16 @@ fn register_source(control: &mut DurableStoreControl<MemoryStore>) -> SealedPlan
     linked.plan
 }
 
-fn start_waiting(store: MemoryStore, plan: &SealedPlan) -> (MemoryStore, String) {
+fn start_waiting(store: MemoryStore, plan: &SealedPlan, run_id: &str) -> (MemoryStore, String) {
     let mut runtime = support::open_control(store, support::EmptyPlugin, support::empty_binding())
         .expect("source runtime opens");
     let response = runtime
         .submit(DurableCommand::StartRun {
             control_version: DURABLE_CONTROL_VERSION.to_owned(),
-            run_id: RUN_ID.to_owned(),
+            run_id: run_id.to_owned(),
             candidate: plan.candidate.clone(),
             input: json!({"preserved": "source input"}),
-            execution: support::execution(RUN_ID),
+            execution: support::execution(run_id),
         })
         .expect("source Run reaches its declared Wait");
     let DurableResponse::RunBoundary {
@@ -149,7 +360,11 @@ fn start_waiting(store: MemoryStore, plan: &SealedPlan) -> (MemoryStore, String)
     (store, wait_id)
 }
 
-fn activate_source(control: &mut DurableStoreControl<MemoryStore>, wait_id: String) -> ArtifactRef {
+fn activate_source(
+    control: &mut DurableStoreControl<MemoryStore>,
+    run_id: &str,
+    wait_id: String,
+) -> ArtifactRef {
     let response = control
         .submit(DurableCommand::ActivateWait {
             control_version: DURABLE_CONTROL_VERSION.to_owned(),
@@ -164,14 +379,18 @@ fn activate_source(control: &mut DurableStoreControl<MemoryStore>, wait_id: Stri
     let DurableResponse::WaitActivated { receipt } = response else {
         panic!("activation returned another response")
     };
-    assert_eq!(receipt.ready_run_ids, BTreeSet::from([RUN_ID.to_owned()]));
+    assert_eq!(receipt.ready_run_ids, BTreeSet::from([run_id.to_owned()]));
     receipt.activation.result
 }
 
-fn current(control: &mut DurableStoreControl<MemoryStore>, revision: &str) -> DurableRunCurrent {
+fn current<S: DurableStore>(
+    control: &mut DurableStoreControl<S>,
+    run_id: &str,
+    revision: &str,
+) -> DurableRunCurrent {
     let query = DurableCommand::RunCurrent {
         control_version: DURABLE_CONTROL_VERSION.to_owned(),
-        run_id: RUN_ID.to_owned(),
+        run_id: run_id.to_owned(),
         expected_revision: Some(revision.to_owned()),
     };
     let response = control
@@ -263,6 +482,13 @@ fn publish_target(
     (target, edge)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationProviderFault {
+    TargetBinding,
+    Describe,
+    Migrate,
+}
+
 struct RootFrameAdapter {
     descriptor: MigrationAdapterDescriptor,
     state: ArtifactRecord,
@@ -270,16 +496,29 @@ struct RootFrameAdapter {
     described: usize,
     migrated: usize,
     observed_source: Option<MigrationAdapterRequest>,
+    fault: Option<MigrationProviderFault>,
 }
 
 impl MigrationAdapter for RootFrameAdapter {
     fn describe(&mut self) -> EvolutionResult<MigrationAdapterDescriptor> {
         self.described += 1;
+        if self.fault == Some(MigrationProviderFault::Describe) {
+            return Err(EvolutionError::PluginDefect {
+                code: "migration_test_describe_failed".to_owned(),
+                message: "injected migration adapter Describe failure".to_owned(),
+            });
+        }
         Ok(self.descriptor.clone())
     }
 
     fn migrate(&mut self, request: &MigrationAdapterRequest) -> EvolutionResult<MigrationOutput> {
         self.migrated += 1;
+        if self.fault == Some(MigrationProviderFault::Migrate) {
+            return Err(EvolutionError::PluginDefect {
+                code: "migration_test_migrate_failed".to_owned(),
+                message: "injected migration adapter execution failure".to_owned(),
+            });
+        }
         request.verify()?;
         self.observed_source = Some(request.clone());
         let mut continuation = request.source_continuation.clone();
@@ -311,6 +550,7 @@ struct MigrationProviders {
     binding_lookups: usize,
     adapter_lookups: usize,
     shadow_lookups: usize,
+    binding_fault: bool,
 }
 
 impl MigrationProviders {
@@ -323,11 +563,24 @@ impl MigrationProviders {
             self.adapter.migrated,
         )
     }
+
+    fn arm(&mut self, fault: MigrationProviderFault) {
+        self.binding_fault = fault == MigrationProviderFault::TargetBinding;
+        self.adapter.fault = match fault {
+            MigrationProviderFault::Describe | MigrationProviderFault::Migrate => Some(fault),
+            MigrationProviderFault::TargetBinding => None,
+        };
+    }
 }
 
 impl EvolutionProviders for MigrationProviders {
     fn target_execution_binding(&mut self, plan_id: &str) -> EvolutionResult<ExecutionBinding> {
         self.binding_lookups += 1;
+        if self.binding_fault {
+            return Err(EvolutionError::NotFound(
+                "injected target-binding registry failure".to_owned(),
+            ));
+        }
         if plan_id != self.adapter.descriptor.to_plan {
             return Err(EvolutionError::NotFound(format!(
                 "unregistered target Plan {plan_id}"
@@ -365,21 +618,22 @@ impl EvolutionProviders for MigrationProviders {
 }
 
 struct MigrationFixture {
-    store: MemoryStore,
-    control: DurableStoreControl<MemoryStore>,
+    store: MigrationStore,
+    control: DurableStoreControl<MigrationStore>,
     source: Continuation,
     source_attempts: BTreeMap<String, AttemptProjection>,
     command: EvolutionPersistenceCommand,
     providers: MigrationProviders,
+    run_id: String,
 }
 
-fn fixture() -> MigrationFixture {
+fn fixture(run_id: &str) -> MigrationFixture {
     let mut control = DurableStoreControl::initialize(MemoryStore::new())
         .expect("empty durable domain initializes through its public facade");
     let source_plan = register_source(&mut control);
-    let (mut store, wait_id) = start_waiting(control.into_store(), &source_plan);
+    let (mut store, wait_id) = start_waiting(control.into_store(), &source_plan, run_id);
     let mut control = DurableStoreControl::open(store.clone()).expect("store-only control reopens");
-    let evidence = activate_source(&mut control, wait_id);
+    let evidence = activate_source(&mut control, run_id, wait_id);
     let source_binding = support::empty_binding()
         .artifact_ref()
         .expect("source binding derives");
@@ -388,7 +642,7 @@ fn fixture() -> MigrationFixture {
         .load_full_audit()
         .expect("actual source state audits")
         .expect("source exists");
-    let source = source_audit.state.continuations[RUN_ID].clone();
+    let source = source_audit.state.continuations[run_id].clone();
     assert_eq!(source.status, ContinuationStatus::Ready);
     assert!(source.execution_claim.is_none());
     assert!(source.wait_set.is_empty());
@@ -396,12 +650,12 @@ fn fixture() -> MigrationFixture {
     assert_eq!(source.frames[0].next_step, 1);
     let source_machine = Machine::restore(source_audit.state.machine)
         .expect("actual source command history verifies");
-    let source_attempts = source_machine.projection().runs[RUN_ID].attempts.clone();
+    let source_attempts = source_machine.projection().runs[run_id].attempts.clone();
     let compatibility = analyze_relink(&source_plan, &target).expect("compatibility derives");
     assert!(compatibility.is_compatible());
     let request = MigrationRequest {
         migration_id: "migration:public-root-frame".to_owned(),
-        run_id: RUN_ID.to_owned(),
+        run_id: run_id.to_owned(),
         from_plan: source_plan.plan_id,
         to_plan: target.plan_id,
         plan_edge_id: edge.edge_id,
@@ -424,6 +678,9 @@ fn fixture() -> MigrationFixture {
         budget_and_ownership: MigrationPreservation::Preserved,
         authority_and_effects: MigrationCapabilityChange::NoWidening,
     };
+    let store = MigrationStore::new(control.into_store());
+    let control = DurableStoreControl::open(store.clone())
+        .expect("fault-oriented store-only control reopens");
     MigrationFixture {
         store,
         control,
@@ -453,11 +710,14 @@ fn fixture() -> MigrationFixture {
                 described: 0,
                 migrated: 0,
                 observed_source: None,
+                fault: None,
             },
             binding_lookups: 0,
             adapter_lookups: 0,
             shadow_lookups: 0,
+            binding_fault: false,
         },
+        run_id: run_id.to_owned(),
     }
 }
 
@@ -465,7 +725,11 @@ fn assert_same_root(fixture: &mut MigrationFixture, commit: &EvolutionCommit) {
     let LiveEvolutionOutcome::Migrated { receipt } = &commit.receipt.outcome else {
         panic!("migration returned another outcome")
     };
-    let current = current(&mut fixture.control, &commit.observed_revision);
+    let current = current(
+        &mut fixture.control,
+        &fixture.run_id,
+        &commit.observed_revision,
+    );
     assert_eq!(current.epoch, fixture.source.epoch + 1);
     assert_eq!(current.epoch, receipt.target_epoch);
     assert_eq!(current.plan_id, receipt.request.to_plan);
@@ -529,12 +793,12 @@ fn assert_audited_epoch(fixture: &mut MigrationFixture, receipt: &MigrationRecei
         .load_full_audit()
         .expect("migrated store fully audits")
         .expect("migrated state exists");
-    let continuation = &audited.state.continuations[RUN_ID];
+    let continuation = &audited.state.continuations[&fixture.run_id];
     assert_eq!(continuation, &receipt.target_continuation);
     assert!(continuation.execution_claim.is_none());
     let machine =
         Machine::restore(audited.state.machine).expect("actual committed history verifies");
-    let run = &machine.projection().runs[RUN_ID];
+    let run = &machine.projection().runs[&fixture.run_id];
     assert_eq!(run.epoch, continuation.epoch);
     assert_eq!(run.current_plan, continuation.plan_id);
     assert_eq!(run.current_binding_context, continuation.binding_context);
@@ -590,9 +854,279 @@ fn assert_replay(fixture: &mut MigrationFixture, original: &EvolutionCommit) {
     );
 }
 
+#[derive(Clone)]
+struct MigrationAuthoritySnapshot {
+    head: StoreHead,
+    stats: StoreStats,
+    current: DurableRunCurrent,
+}
+
+fn authority_snapshot(fixture: &mut MigrationFixture) -> MigrationAuthoritySnapshot {
+    let head = fixture
+        .store
+        .load_head()
+        .expect("migration source head reads")
+        .expect("migration source exists");
+    let stats = fixture
+        .store
+        .stats()
+        .expect("migration source physical counts read");
+    let current = current(&mut fixture.control, &fixture.run_id, &head.revision);
+    MigrationAuthoritySnapshot {
+        head,
+        stats,
+        current,
+    }
+}
+
+fn assert_no_migration_write(fixture: &mut MigrationFixture, before: &MigrationAuthoritySnapshot) {
+    assert_eq!(
+        fixture.store.load_head().expect("head reads after failure"),
+        Some(before.head.clone()),
+        "pre-CAS failure must not publish another Store head"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .stats()
+            .expect("physical counts read after failure"),
+        before.stats,
+        "pre-CAS failure must not retain immutable objects"
+    );
+    assert_eq!(
+        current(&mut fixture.control, &fixture.run_id, &before.head.revision),
+        before.current,
+        "pre-CAS failure must not change M1 Run authority"
+    );
+
+    let mut providers = NoEvolutionProviders;
+    let retained = fixture
+        .control
+        .evolution(&mut providers)
+        .read_receipt(&EvolutionReceiptQuery {
+            evolution_id: EVOLUTION_ID.to_owned(),
+            command_id: fixture.command.command.command_id().to_owned(),
+            expected_revision: Some(before.head.revision.clone()),
+        })
+        .expect("exact absent migration receipt reads");
+    assert_eq!(retained.observed_revision, before.head.revision);
+    assert!(
+        retained.receipt.is_none(),
+        "failed migration retained an M4 receipt"
+    );
+
+    let target_binding = fixture
+        .providers
+        .target_binding
+        .artifact_ref()
+        .expect("target binding derives");
+    for reference in [
+        &target_binding,
+        &fixture.providers.adapter.state.reference,
+        &fixture.providers.adapter.evidence.reference,
+    ] {
+        assert!(
+            fixture
+                .control
+                .read_artifact(reference, &before.head.revision)
+                .expect("failed migration material absence reads")
+                .value
+                .is_none(),
+            "failed migration retained material {}",
+            reference.artifact_id
+        );
+    }
+
+    let audited = fixture
+        .store
+        .load_full_audit()
+        .expect("source store still fully audits")
+        .expect("source state remains");
+    assert_eq!(audited.state.continuations[&fixture.run_id], fixture.source);
+    let machine = Machine::restore(audited.state.machine)
+        .expect("source Machine still restores after failed migration");
+    assert_eq!(
+        machine.projection().runs[&fixture.run_id].attempts,
+        fixture.source_attempts
+    );
+}
+
+fn commit_migration(fixture: &mut MigrationFixture) -> DurableResult<EvolutionCommit> {
+    fixture
+        .control
+        .evolution(&mut fixture.providers)
+        .commit(&fixture.command)
+}
+
+#[test]
+fn migration_storage_read_failure_precedes_every_provider_and_write() {
+    let mut fixture = fixture("run:public-evolution-migration:storage-read");
+    let before = authority_snapshot(&mut fixture);
+    fixture.store.arm(MigrationStoreFault::ResolverRead);
+
+    let error = commit_migration(&mut fixture)
+        .expect_err("injected exact-root read failure must stop migration preparation");
+    assert!(matches!(
+        error,
+        DurableError::Substrate { ref code, .. } if code == "migration_test_resolver_read"
+    ));
+    assert_eq!(fixture.providers.calls(), (0, 0, 0, 0, 0));
+    assert_eq!(
+        fixture.store.trace(),
+        MigrationStoreTrace {
+            resolver_reads: 1,
+            cas_attempts: 0,
+            cas_commits: 0,
+            fault_hits: 1,
+        }
+    );
+    assert_no_migration_write(&mut fixture, &before);
+
+    let committed = commit_migration(&mut fixture)
+        .expect("retry after a definite read failure executes one fresh migration");
+    assert_eq!(fixture.providers.calls(), (1, 1, 0, 1, 1));
+    assert_eq!(fixture.store.trace().cas_attempts, 1);
+    assert_eq!(fixture.store.trace().cas_commits, 1);
+    assert_same_root(&mut fixture, &committed);
+}
+
+#[test]
+fn migration_provider_failures_precede_the_single_cas_with_exact_call_boundaries() {
+    for (label, fault, expected_calls, expected_code) in [
+        (
+            "target-binding",
+            MigrationProviderFault::TargetBinding,
+            (1, 0, 0, 0, 0),
+            "target-binding registry",
+        ),
+        (
+            "describe",
+            MigrationProviderFault::Describe,
+            (1, 1, 0, 1, 0),
+            "migration_test_describe_failed",
+        ),
+        (
+            "migrate",
+            MigrationProviderFault::Migrate,
+            (1, 1, 0, 1, 1),
+            "migration_test_migrate_failed",
+        ),
+    ] {
+        let mut fixture = fixture(&format!("run:public-evolution-migration:provider:{label}"));
+        let before = authority_snapshot(&mut fixture);
+        fixture.store.reset_trace();
+        fixture.providers.arm(fault);
+
+        let error = commit_migration(&mut fixture)
+            .expect_err("injected migration provider failure must stop before CAS");
+        match fault {
+            MigrationProviderFault::TargetBinding => assert!(matches!(
+                error,
+                DurableError::NotFound(ref message) if message.contains(expected_code)
+            )),
+            MigrationProviderFault::Describe | MigrationProviderFault::Migrate => {
+                assert!(matches!(
+                    error,
+                    DurableError::RuntimeDefect { ref code, .. } if code == expected_code
+                ));
+            }
+        }
+        assert_eq!(fixture.providers.calls(), expected_calls);
+        assert_eq!(fixture.store.trace().cas_attempts, 0);
+        assert_eq!(fixture.store.trace().cas_commits, 0);
+        assert_no_migration_write(&mut fixture, &before);
+    }
+}
+
+#[test]
+fn migration_before_cas_failure_writes_nothing_and_definite_retry_runs_provider_again() {
+    let mut fixture = fixture("run:public-evolution-migration:before-cas");
+    let before = authority_snapshot(&mut fixture);
+    fixture.store.arm(MigrationStoreFault::BeforeCas);
+
+    let error = commit_migration(&mut fixture)
+        .expect_err("injected pre-CAS failure must reject migration publication");
+    assert!(matches!(
+        error,
+        DurableError::Substrate { ref code, .. } if code == "migration_test_before_cas"
+    ));
+    assert_eq!(fixture.providers.calls(), (1, 1, 0, 1, 1));
+    let trace = fixture.store.trace();
+    assert!(trace.resolver_reads > 0);
+    assert_eq!(trace.cas_attempts, 1);
+    assert_eq!(trace.cas_commits, 0);
+    assert_eq!(trace.fault_hits, 1);
+    assert_no_migration_write(&mut fixture, &before);
+
+    let committed = commit_migration(&mut fixture)
+        .expect("definite pre-CAS failure permits a fresh provider execution");
+    assert_eq!(fixture.providers.calls(), (2, 2, 0, 2, 2));
+    assert_eq!(fixture.store.trace().cas_attempts, 2);
+    assert_eq!(fixture.store.trace().cas_commits, 1);
+    let after = fixture
+        .store
+        .load_head()
+        .expect("retried migration head reads")
+        .expect("retried migration commits");
+    assert_eq!(after.sequence, before.head.sequence + 1);
+    assert_same_root(&mut fixture, &committed);
+}
+
+#[test]
+fn migration_after_cas_lost_ack_replays_exact_alias_without_provider_or_second_cas() {
+    let mut fixture = fixture("run:public-evolution-migration:after-cas");
+    let before = authority_snapshot(&mut fixture);
+    fixture.store.arm(MigrationStoreFault::AfterCas);
+
+    let error = commit_migration(&mut fixture)
+        .expect_err("lost migration CAS acknowledgement must remain unknown");
+    assert!(matches!(error, DurableError::CommitOutcomeUnknown { .. }));
+    assert_eq!(fixture.providers.calls(), (1, 1, 0, 1, 1));
+    assert_eq!(fixture.store.trace().cas_attempts, 1);
+    assert_eq!(fixture.store.trace().cas_commits, 1);
+    assert_eq!(fixture.store.trace().fault_hits, 1);
+
+    let after = fixture
+        .store
+        .load_head()
+        .expect("post-CAS head reads")
+        .expect("post-CAS migration exists");
+    assert_eq!(after.sequence, before.head.sequence + 1);
+    let post_commit_stats = fixture
+        .store
+        .stats()
+        .expect("post-CAS physical counts read");
+    fixture.control =
+        DurableStoreControl::open(fixture.store.clone()).expect("post-CAS exact authority reopens");
+    let calls = fixture.providers.calls();
+    let replay = commit_migration(&mut fixture)
+        .expect("exact migration alias resolves the lost acknowledgement");
+    replay
+        .verify_for(&fixture.command)
+        .expect("replayed migration receipt verifies");
+    assert_eq!(replay.committed_revision, None);
+    assert_eq!(replay.observed_revision, after.revision);
+    assert_eq!(fixture.providers.calls(), calls);
+    assert_eq!(fixture.store.trace().cas_attempts, 1);
+    assert_eq!(fixture.store.trace().cas_commits, 1);
+    assert_eq!(
+        fixture
+            .store
+            .stats()
+            .expect("physical counts read after alias replay"),
+        post_commit_stats
+    );
+    assert_eq!(
+        fixture.store.load_head().expect("head reads after replay"),
+        Some(after)
+    );
+    assert_same_root(&mut fixture, &replay);
+    assert_replay(&mut fixture, &replay);
+}
+
 #[test]
 fn migration_advances_core_and_continuation_epoch_atomically_then_resumes_after_reopen() {
-    let mut fixture = fixture();
+    let mut fixture = fixture("run:public-evolution-migration:success");
     let before = fixture
         .store
         .load_head()
@@ -663,8 +1197,8 @@ fn migration_advances_core_and_continuation_epoch_atomically_then_resumes_after_
     let response = resumed
         .submit(DurableCommand::ResumeRun {
             control_version: DURABLE_CONTROL_VERSION.to_owned(),
-            run_id: RUN_ID.to_owned(),
-            execution: support::execution(RUN_ID),
+            run_id: fixture.run_id.clone(),
+            execution: support::execution(&fixture.run_id),
         })
         .expect("migrated Ready Run acquires its next Attempt and executes the target Plan");
     assert_eq!(support::expect_completed_value(response), json!("target"));

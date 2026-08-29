@@ -1779,12 +1779,22 @@ impl<S: DurableStore> DurableCoordinator<S> {
             },
             max_targets,
         )?;
-        let Some(delivery) = delivery else {
+        let Some(source_delivery) = delivery else {
             return Ok(None);
         };
-        if delivery.wait_ids.is_empty() || delivery.wait_ids.len() > max_targets {
+        let selected_now = source_delivery.is_selected_now();
+        let delivery = source_delivery.into_delivery();
+        if delivery.wait_ids.is_empty()
+            || delivery.wait_ids.len() > crate::MAX_WAIT_DELIVERY_TARGETS
+            || (selected_now && delivery.wait_ids.len() > max_targets)
+        {
+            let bound = if selected_now {
+                max_targets
+            } else {
+                crate::MAX_WAIT_DELIVERY_TARGETS
+            };
             return Err(DurableError::Validation(format!(
-                "wait source returned {} targets for caller limit {max_targets}",
+                "wait source returned {} targets outside its selection bound {bound}",
                 delivery.wait_ids.len()
             )));
         }
@@ -4570,9 +4580,14 @@ impl<S: DurableStore> DurableCoordinator<S> {
         command: &virtual_protocol::VirtualPersistenceCommand,
         providers: &mut dyn virtual_protocol::VirtualProviders,
         clock: &mut dyn crate::ExecutionClockAuthority,
-        binding: &ExecutionBinding,
     ) -> DurableResult<virtual_protocol::VirtualCommit> {
         command.verify()?;
+        if matches!(
+            command.operation,
+            virtual_protocol::VirtualPersistenceOperation::Claim(_)
+        ) {
+            return self.replay_virtual_claim_alias(command);
+        }
         if matches!(
             command.operation,
             virtual_protocol::VirtualPersistenceOperation::Initialize(_)
@@ -4591,9 +4606,6 @@ impl<S: DurableStore> DurableCoordinator<S> {
             return Ok(commit);
         }
         let clock_reference = match &command.operation {
-            virtual_protocol::VirtualPersistenceOperation::Claim(operation) => {
-                Some(&operation.command.clock)
-            }
             virtual_protocol::VirtualPersistenceOperation::RenewLease(operation) => {
                 Some(&operation.command.clock)
             }
@@ -4608,17 +4620,37 @@ impl<S: DurableStore> DurableCoordinator<S> {
         let result = match clock_reference {
             Some(reference) => {
                 self.with_current_clock(clock, reference, |coordinator, observation| {
-                    coordinator.commit_virtual_observed(
+                    coordinator.commit_virtual_non_claim_observed(
                         command,
                         providers,
-                        binding,
                         Some(observation),
                     )
                 })
             }
-            None => self.commit_virtual_observed(command, providers, binding, None),
+            None => self.commit_virtual_non_claim_observed(command, providers, None),
         }?;
         Ok(result.commit)
+    }
+
+    fn replay_virtual_claim_alias(
+        &mut self,
+        command: &virtual_protocol::VirtualPersistenceCommand,
+    ) -> DurableResult<virtual_protocol::VirtualCommit> {
+        let receipt = self.read_current_state_root(|manifest, resolver| {
+            load_virtual_commit_receipt(manifest, resolver, command)
+        })?;
+        let Some(receipt) = receipt else {
+            return Err(DurableError::Validation(
+                "fresh Virtual Claim requires DurableVirtualControl::claim".to_owned(),
+            ));
+        };
+        let commit = virtual_protocol::VirtualCommit {
+            observed_revision: self.current_revision()?.to_owned(),
+            committed_revision: None,
+            receipt,
+        };
+        commit.verify_for(command)?;
+        Ok(commit)
     }
 
     fn with_current_clock<T>(
@@ -4746,38 +4778,63 @@ impl<S: DurableStore> DurableCoordinator<S> {
         Ok(())
     }
 
-    fn commit_virtual_observed(
+    fn commit_virtual_non_claim_observed(
         &mut self,
         command: &virtual_protocol::VirtualPersistenceCommand,
         providers: &mut dyn virtual_protocol::VirtualProviders,
-        binding: &ExecutionBinding,
         observation: Option<ClockObservation>,
     ) -> DurableResult<VirtualCommandCommit> {
+        let mut preparation = self.begin_virtual_command(command)?;
+        let operation =
+            self.prepare_virtual_operation(command, providers, observation, &mut preparation)?;
+        self.commit_prepared_virtual_command(command, preparation, &operation)
+    }
+
+    fn commit_virtual_claim_observed(
+        &mut self,
+        claim: &virtual_protocol::VirtualClaimPersistenceCommand,
+        binding: &ExecutionBinding,
+        observation: ClockObservation,
+    ) -> DurableResult<VirtualCommandCommit> {
+        let command = virtual_protocol::VirtualPersistenceCommand::new(
+            virtual_protocol::VirtualPersistenceOperation::Claim(claim.clone()),
+        )?;
+        let mut preparation = self.begin_virtual_command(&command)?;
+        let operation =
+            self.prepare_virtual_claim(&command, claim, binding, observation, &mut preparation)?;
+        self.commit_prepared_virtual_command(&command, preparation, &operation)
+    }
+
+    fn begin_virtual_command(
+        &mut self,
+        command: &virtual_protocol::VirtualPersistenceCommand,
+    ) -> DurableResult<VirtualCommandPreparation> {
         let current = self.read_current_state_root(|manifest, resolver| {
             crate::state_root::load_virtual_current(manifest, resolver, command.scheduler_id())
         })?;
-        let mut preparation = VirtualCommandPreparation {
+        Ok(VirtualCommandPreparation {
             current,
             reads: Vec::new(),
             operations: Vec::new(),
             plans: Vec::new(),
             artifacts: Vec::new(),
             claim_plan: None,
-        };
-        let operation = self.prepare_virtual_operation(
-            command,
-            providers,
-            binding,
-            observation,
-            &mut preparation,
-        )?;
+        })
+    }
+
+    fn commit_prepared_virtual_command(
+        &mut self,
+        command: &virtual_protocol::VirtualPersistenceCommand,
+        mut preparation: VirtualCommandPreparation,
+        operation: &virtual_protocol::VirtualOperationAuthority,
+    ) -> DurableResult<VirtualCommandCommit> {
         let reduction =
             self.satisfy_virtual_reads(command.scheduler_id(), &mut preparation, |source| {
                 virtual_protocol::prepare_virtual(
                     command,
                     &virtual_protocol::VirtualReductionAuthority::new(
                         source.clone(),
-                        operation.clone(),
+                        (*operation).clone(),
                     ),
                 )
             })?;
@@ -4859,7 +4916,6 @@ impl<S: DurableStore> DurableCoordinator<S> {
         &mut self,
         command: &virtual_protocol::VirtualPersistenceCommand,
         providers: &mut dyn virtual_protocol::VirtualProviders,
-        binding: &ExecutionBinding,
         observation: Option<ClockObservation>,
         preparation: &mut VirtualCommandPreparation,
     ) -> DurableResult<virtual_protocol::VirtualOperationAuthority> {
@@ -4868,13 +4924,9 @@ impl<S: DurableStore> DurableCoordinator<S> {
         };
         match &command.operation {
             Operation::Initialize(_) => Ok(Authority::Initialize),
-            Operation::Claim(claim) => self.prepare_virtual_claim(
-                command,
-                claim,
-                binding,
-                required_virtual_clock(observation)?,
-                preparation,
-            ),
+            Operation::Claim(_) => Err(DurableError::Validation(
+                "fresh Virtual Claim requires DurableVirtualControl::claim".to_owned(),
+            )),
             Operation::RenewLease(operation) => {
                 self.prepare_virtual_lease_renewal(operation, observation, preparation)
             }
@@ -5692,7 +5744,6 @@ impl<S: DurableStore> DurableCoordinator<S> {
     pub(crate) fn claim_virtual(
         &mut self,
         command: &virtual_protocol::VirtualClaimPersistenceCommand,
-        providers: &mut dyn virtual_protocol::VirtualProviders,
         clock: &mut dyn crate::ExecutionClockAuthority,
         binding: &ExecutionBinding,
     ) -> DurableResult<virtual_protocol::VirtualClaimOutcome> {
@@ -5706,12 +5757,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         }
         let result =
             self.with_current_clock(clock, &command.command.clock, |coordinator, observation| {
-                coordinator.commit_virtual_observed(
-                    &persistence,
-                    providers,
-                    binding,
-                    Some(observation),
-                )
+                coordinator.commit_virtual_claim_observed(command, binding, observation)
             })?;
         virtual_claim_outcome(result.commit.receipt, result.claim_plan)
     }
@@ -7732,10 +7778,10 @@ fn query_run_index_page(
         resolver,
         root,
         request,
-        |key, resolver| {
+        |key, value_id, resolver| {
             let current = load_required_query_leaf::<crate::DurableRunCurrent>(
-                root,
                 key,
+                value_id,
                 crate::StateRootLeafKind::RunCurrent,
                 resolver,
             )?;
@@ -7783,10 +7829,10 @@ fn query_run_wait_page(
         resolver,
         &root,
         request,
-        |key, resolver| {
+        |key, value_id, resolver| {
             let value = load_required_query_leaf::<WaitCondition>(
-                &root,
                 key,
+                value_id,
                 crate::StateRootLeafKind::Wait,
                 resolver,
             )?;
@@ -7821,10 +7867,10 @@ fn query_run_effect_page(
         resolver,
         &root,
         request,
-        |key, resolver| {
+        |key, value_id, resolver| {
             let value = load_required_query_leaf::<EffectDispatch>(
-                &root,
                 key,
+                value_id,
                 crate::StateRootLeafKind::Outbox,
                 resolver,
             )?;
@@ -7861,10 +7907,10 @@ fn query_run_occurrence_page(
         resolver,
         &root,
         request,
-        |key, resolver| {
+        |key, value_id, resolver| {
             let value = load_required_query_leaf::<ComponentOccurrence>(
-                &root,
                 key,
+                value_id,
                 crate::StateRootLeafKind::ComponentOccurrence,
                 resolver,
             )?;
@@ -7899,10 +7945,10 @@ fn query_run_attempt_page(
         resolver,
         &root,
         request,
-        |key, resolver| {
+        |key, value_id, resolver| {
             let value = load_required_query_leaf::<OperationAttempt>(
-                &root,
                 key,
+                value_id,
                 crate::StateRootLeafKind::OperationAttempt,
                 resolver,
             )?;
@@ -8022,7 +8068,7 @@ fn query_typed_page<T>(
     resolver: &mut dyn crate::StateRootResolver,
     root: &MapRoot,
     request: QueryPageRequest<'_>,
-    mut load: impl FnMut(&str, &mut dyn crate::StateRootResolver) -> DurableResult<T>,
+    mut load: impl FnMut(&str, &str, &mut dyn crate::StateRootResolver) -> DurableResult<T>,
     wrap: impl Fn(crate::DurableQueryPage<T>) -> crate::DurableResponse,
 ) -> DurableResult<crate::DurableResponse>
 where
@@ -8066,7 +8112,7 @@ where
         next_cursor: None,
     });
     for (index, entry) in physical.entries.iter().enumerate() {
-        items.push(load(&entry.key, resolver)?);
+        items.push(load(&entry.key, &entry.value_id, resolver)?);
         let has_more = index + 1 < physical.entries.len() || physical.next_position.is_some();
         let next_cursor = has_more
             .then(|| {
@@ -8118,20 +8164,15 @@ where
 }
 
 fn load_required_query_leaf<T>(
-    root: &MapRoot,
-    key: &str,
+    _key: &str,
+    value_id: &str,
     kind: crate::StateRootLeafKind,
     resolver: &mut dyn crate::StateRootResolver,
 ) -> DurableResult<T>
 where
     T: serde::de::DeserializeOwned + serde::Serialize,
 {
-    crate::state_root::load_typed_state_map_value(root, key, kind, resolver)?.ok_or_else(|| {
-        DurableError::Integrity {
-            code: "query_index_leaf_missing".to_owned(),
-            message: format!("authenticated query-index key {key} has no typed value"),
-        }
-    })
+    crate::state_root::load_typed_state_value(value_id, kind, resolver)
 }
 
 fn ensure_query_source(
@@ -8678,6 +8719,7 @@ fn verify_agent_message_origin<R: crate::StateRootResolver + ?Sized>(
             match &postcondition.effect {
                 agent_protocol::AgentSessionUpdateEffect::Message { current } => Some(current),
                 agent_protocol::AgentSessionUpdateEffect::Metadata
+                | agent_protocol::AgentSessionUpdateEffect::Closed { .. }
                 | agent_protocol::AgentSessionUpdateEffect::Tool { .. } => None,
             }
         }
@@ -8685,6 +8727,7 @@ fn verify_agent_message_origin<R: crate::StateRootResolver + ?Sized>(
             agent_protocol::AgentStreamEffect::Finalized { session, .. } => match &session.effect {
                 agent_protocol::AgentSessionUpdateEffect::Message { current } => Some(current),
                 agent_protocol::AgentSessionUpdateEffect::Metadata
+                | agent_protocol::AgentSessionUpdateEffect::Closed { .. }
                 | agent_protocol::AgentSessionUpdateEffect::Tool { .. } => None,
             },
             agent_protocol::AgentStreamEffect::Opened { .. }
@@ -8714,6 +8757,9 @@ fn verify_agent_tool_origin<R: crate::StateRootResolver + ?Sized>(
         agent_protocol::AgentCommandOutcome::Session(postcondition) => {
             match &postcondition.effect {
                 agent_protocol::AgentSessionUpdateEffect::Tool { current } => Some(current),
+                agent_protocol::AgentSessionUpdateEffect::Closed { tools } => tools
+                    .iter()
+                    .find(|retained| retained.tool.tool_call_id == current.tool.tool_call_id),
                 agent_protocol::AgentSessionUpdateEffect::Metadata
                 | agent_protocol::AgentSessionUpdateEffect::Message { .. } => None,
             }
@@ -8722,6 +8768,7 @@ fn verify_agent_tool_origin<R: crate::StateRootResolver + ?Sized>(
             agent_protocol::AgentStreamEffect::Finalized { session, .. } => match &session.effect {
                 agent_protocol::AgentSessionUpdateEffect::Tool { current } => Some(current),
                 agent_protocol::AgentSessionUpdateEffect::Metadata
+                | agent_protocol::AgentSessionUpdateEffect::Closed { .. }
                 | agent_protocol::AgentSessionUpdateEffect::Message { .. } => None,
             },
             agent_protocol::AgentStreamEffect::Opened { .. }
@@ -8917,6 +8964,28 @@ fn prepare_agent_session_update<R: crate::StateRootResolver + ?Sized>(
                     &tool.tool_call_id,
                 )?,
             }
+        }
+        agent_protocol::AgentUpdate::State {
+            state: agent_protocol::AgentState::Closed,
+            ..
+        } => {
+            let mut tools = Vec::with_capacity(session.nonterminal_tools.len());
+            for tool_call_id in session.nonterminal_tools.keys() {
+                let current = crate::state_root::load_agent_tool_current(
+                    manifest,
+                    resolver,
+                    session_id,
+                    tool_call_id,
+                )?
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_nonterminal_tool_missing".to_owned(),
+                    message: format!(
+                        "Agent Session {session_id} non-terminal Tool {tool_call_id} is missing"
+                    ),
+                })?;
+                tools.push(current);
+            }
+            agent_protocol::AgentSessionEntrySource::Close { tools }
         }
         agent_protocol::AgentUpdate::State { .. }
         | agent_protocol::AgentUpdate::Plan { .. }
@@ -9302,6 +9371,14 @@ fn append_agent_session_postcondition(
     });
     match &postcondition.effect {
         agent_protocol::AgentSessionUpdateEffect::Metadata => {}
+        agent_protocol::AgentSessionUpdateEffect::Closed { tools } => {
+            operations.extend(
+                tools
+                    .iter()
+                    .cloned()
+                    .map(|value| DurableOperation::PutAgentToolCurrent { value }),
+            );
+        }
         agent_protocol::AgentSessionUpdateEffect::Message { current } => {
             operations.push(DurableOperation::PutAgentMessageCurrent {
                 value: current.clone(),
@@ -11899,6 +11976,136 @@ mod agent_message_page_tests {
                     .len())
                 .sum::<usize>()
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod agent_session_close_tests {
+    use super::*;
+    use cymule_profile_protocol::agent::{
+        AgentCommand, AgentCommandAction, AgentCommandOutcome, AgentSessionQuery,
+        AgentSessionUpdateEffect, AgentState, AgentToolQuery, AgentUpdate, ToolCall,
+        ToolCallStatus,
+    };
+
+    const SESSION_ID: &str = "session:durable-close";
+    const TOOL_ID: &str = "tool:durable-close";
+
+    fn tool_command(
+        source_revision: &str,
+        update_id: &str,
+        status: ToolCallStatus,
+    ) -> DurableResult<AgentCommand> {
+        AgentCommand::new(
+            source_revision.to_owned(),
+            AgentCommandAction::SessionUpdate {
+                session_id: SESSION_ID.to_owned(),
+                update: AgentUpdate::Tool {
+                    update_id: update_id.to_owned(),
+                    tool: ToolCall {
+                        tool_call_id: TOOL_ID.to_owned(),
+                        operation: "test.execute".to_owned(),
+                        status,
+                        input: serde_json::json!({"path": "README.md"}),
+                        output: None,
+                        locations: vec!["workspace:test".to_owned()],
+                    },
+                },
+            },
+        )
+        .map_err(Into::into)
+    }
+
+    fn close_command(source_revision: &str) -> DurableResult<AgentCommand> {
+        AgentCommand::new(
+            source_revision.to_owned(),
+            AgentCommandAction::SessionUpdate {
+                session_id: SESSION_ID.to_owned(),
+                update: AgentUpdate::State {
+                    update_id: "update:session:durable-close".to_owned(),
+                    state: AgentState::Closed,
+                    stop_reason: None,
+                },
+            },
+        )
+        .map_err(Into::into)
+    }
+
+    #[test]
+    fn memory_close_commits_session_and_tool_terminalization_in_one_cas() -> DurableResult<()> {
+        let mut coordinator = DurableCoordinator::open(crate::MemoryStore::new())?;
+        coordinator.initialize_if_empty()?;
+        let pending_source = coordinator.current_revision()?.to_owned();
+        coordinator.commit_agent_local(&tool_command(
+            &pending_source,
+            "update:tool:durable-pending",
+            ToolCallStatus::Pending,
+        )?)?;
+        let pending_revision = coordinator.current_revision()?.to_owned();
+        let stale_close = close_command(&pending_revision)?;
+        coordinator.commit_agent_local(&tool_command(
+            &pending_revision,
+            "update:tool:durable-in-progress",
+            ToolCallStatus::InProgress,
+        )?)?;
+        let in_progress_revision = coordinator.current_revision()?.to_owned();
+
+        assert!(coordinator.commit_agent_local(&stale_close).is_err());
+        assert_eq!(coordinator.current_revision()?, in_progress_revision);
+
+        let close = close_command(&in_progress_revision)?;
+        let committed = coordinator.commit_agent_local(&close)?;
+        let close_revision = committed
+            .committed_revision
+            .clone()
+            .expect("fresh close returns its exact CAS revision");
+        assert_eq!(close_revision, committed.observed_revision);
+        let AgentCommandOutcome::Session(postcondition) = &committed.receipt.outcome else {
+            panic!("close returns one Session postcondition")
+        };
+        let AgentSessionUpdateEffect::Closed { tools } = &postcondition.effect else {
+            panic!("close returns explicit Tool terminalization")
+        };
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool.status, ToolCallStatus::Cancelled);
+
+        let session = coordinator
+            .read_agent_session(&AgentSessionQuery {
+                session_id: SESSION_ID.to_owned(),
+                expected_revision: Some(close_revision.clone()),
+            })?
+            .current
+            .expect("closed Session exists at the close revision");
+        let tool = coordinator
+            .read_agent_tool(&AgentToolQuery {
+                session_id: SESSION_ID.to_owned(),
+                tool_call_id: TOOL_ID.to_owned(),
+                expected_revision: Some(close_revision.clone()),
+            })?
+            .current
+            .expect("cancelled Tool exists at the close revision");
+        assert_eq!(session.state, AgentState::Closed);
+        assert!(session.nonterminal_tools.is_empty());
+        assert_eq!(tool.tool.status, ToolCallStatus::Cancelled);
+
+        let unrelated = AgentCommand::new(
+            close_revision.clone(),
+            AgentCommandAction::SessionUpdate {
+                session_id: "session:after-durable-close".to_owned(),
+                update: AgentUpdate::State {
+                    update_id: "update:after-durable-close:running".to_owned(),
+                    state: AgentState::Running,
+                    stop_reason: None,
+                },
+            },
+        )?;
+        let unrelated = coordinator.commit_agent_local(&unrelated)?;
+        let replay = coordinator.commit_agent_local(&close)?;
+        assert_eq!(replay.committed_revision, None);
+        assert_eq!(replay.observed_revision, unrelated.observed_revision);
+        assert_eq!(replay.receipt, committed.receipt);
+        assert_eq!(coordinator.current_revision()?, replay.observed_revision);
         Ok(())
     }
 }

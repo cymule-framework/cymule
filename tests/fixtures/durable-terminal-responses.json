@@ -40,5 +40,12 @@
       "status": "effect_not_applied",
       "intent_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
     }
+  },
+  {
+    "type": "run_boundary",
+    "boundary": {
+      "status": "effect_unavailable",
+      "intent_id": "sha256:982a836f8dcb860b0eedabf0fd133bc2f966992526e2703316cba497f929e03b"
+    }
   }
 ]

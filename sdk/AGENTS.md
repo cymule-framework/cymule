@@ -1,7 +1,7 @@
 # SDK Guidance
 
 - Every SDK emits the same frozen `cymule.ir/3` JSON shape and calls an Engine.
-- Every CLI client sends and receives only `cymule.engine/4`; v3 envelopes are
+- Every CLI client sends and receives only `cymule.engine/5`; v4 envelopes are
   invalid and never trigger a compatibility decoder. Surface a typed Engine
   error that preserves the Rust failure object; never parse stderr or a human
   message into semantic categories, and never recommend replay merely because
@@ -22,7 +22,7 @@
   field does not equal an explicit `null`; do not compare only typed values after
   a lossy optional/defaulting decode. This one check correlates Seal,
   Resource, verification, Clock, durable/cancel, execution, and live-evolution
-  successes. Missing/mismatched echoes and the older v4 success shape fail
+  successes. Missing/mismatched echoes and predecessor success shapes fail
   closed; SDKs never recompute Rust-owned Plan, Resource, Clock, rollout, or
   other derived identities as a substitute. If the sent request is mutating,
   invalid echo is `unknown_world_outcome` with `reconcile`; otherwise it is an
@@ -93,6 +93,10 @@
 - Resource `annotations` are omission-only when empty. Builders omit the member
   instead of emitting `{}` so the submitted wire remains identical to the Rust
   request echo; non-empty annotations remain semantic identity input.
+- Clock issuance crosses custom and CLI transports as
+  `{ run_id, observation }`. High-level clients compare `run_id` and source
+  generation with the exact request before returning the observation; only
+  Rust verifies the opaque scope derivation.
 - Keep APIs idiomatic in each language while preserving explicit site IDs,
   effect occurrence keys, scopes, risk profiles, and version information.
 - Every component builder requires the Plan-owned `output_artifact_kind`; there
@@ -211,7 +215,7 @@
   Continuations. Mutating response loss is an unknown-world outcome in every
   language.
 - Nested migration receipts carry the complete admitted migration request.
-  SDKs validate that request inside the owning Engine v4 live-evolution receipt
+  SDKs validate that request inside the owning Engine v5 live-evolution receipt
   and enforce the shared JSON safe-integer bound for source/target epochs and
   mapped Continuations.
 - Migration target epochs are positive, and every mapped Continuation has a

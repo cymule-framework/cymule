@@ -16,7 +16,7 @@ remain pending the final source freeze and complete gate run.
 | Large Virtual Graph M3 | Implemented | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker slot leases/recovery, four SDK controls, and restore |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
-| Live Evolution M4 | Implemented | unified registry/DAG/rollout/pin authority, reusable modules, default transitive latest-compatible relinking with reachable no-widening admission, template-plus-Plan history, exact patch admission, conservative extensible impact, exact-domain quiescence-gated migration and replacement, isolated shadow plugins, immutable mixed-version pins, deterministic canary gates, promotion/rollback, four SDK controls, complete Engine `/4` receipts, atomic `cymule.live-evolution-checkpoint/6` authority, and current-head lost-receipt recovery |
+| Live Evolution M4 | Implemented | unified registry/DAG/rollout/pin authority, reusable modules, default transitive latest-compatible relinking with reachable no-widening admission, template-plus-Plan history, exact patch admission, conservative extensible impact, exact-domain quiescence-gated migration and replacement, isolated shadow plugins, immutable mixed-version pins, deterministic canary gates, promotion/rollback, four SDK controls, complete Engine `/5` receipts, atomic `cymule.live-evolution-checkpoint/6` authority, and current-head lost-receipt recovery |
 
 The M0 rows do not claim persistence. M1 proves single-domain durable wait and
 nested-scope resumption, exact replay of recorded component outputs, three
@@ -222,7 +222,7 @@ The local suite verifies:
   same Rust kernel and external plugin;
 - TypeScript, Python, Rust, and Go receive the same structured validation,
   plugin-defect, and pre-dispatch substrate failures through
-  `cymule.engine/4`; v3 envelopes fail without fallback and missing-envelope
+  `cymule.engine/5`; v4 envelopes fail without fallback and missing-envelope
   transport failures carry no inferred retry permission;
 - that shared Plan invokes a reusable definition, so all four SDKs produce one
   `cymule.ir/3` Plan ID and the Rust runtime binds the invoked result before its

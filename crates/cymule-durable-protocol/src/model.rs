@@ -88,6 +88,58 @@ impl ClockObservationRef {
     }
 }
 
+/// Engine-issued binding between one requested Run and its logical Clock observation.
+///
+/// This result is the transport correlation authority for Clock issuance. The
+/// durable protocol verifies the opaque scope with its sole derivation helper;
+/// non-Rust SDKs compare `run_id` with the exact request instead of duplicating
+/// the Clock-scope derivation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClockObservationResult {
+    /// Exact Run whose execution scope was observed.
+    pub run_id: String,
+    /// Retained reference issued for that Run's execution scope.
+    pub observation: ClockObservationRef,
+}
+
+impl ClockObservationResult {
+    /// Construct one verified Run-scoped observation result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Run or observation is malformed or the
+    /// observation belongs to another Clock scope.
+    pub fn new(
+        run_id: impl Into<String>,
+        observation: ClockObservationRef,
+    ) -> DurableProtocolResult<Self> {
+        let result = Self {
+            run_id: run_id.into(),
+            observation,
+        };
+        result.verify()?;
+        Ok(result)
+    }
+
+    /// Verify this result against the sole durable Clock-scope derivation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the nested reference is malformed or is not
+    /// scoped to the retained Run.
+    pub fn verify(&self) -> DurableProtocolResult<()> {
+        validate_identity("Clock observation Run", &self.run_id)?;
+        self.observation.verify()?;
+        if self.observation.scope != execution_clock_scope(&self.run_id)? {
+            return Err(DurableProtocolError::Validation(
+                "Clock observation result does not match its Run scope".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Complete self-authenticating logical Clock receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -359,7 +411,7 @@ impl Continuation {
             )));
         }
         validate_identity("Continuation Run", &self.run_id)?;
-        validate_identity("Continuation Plan", &self.plan_id)?;
+        validate_sha256("Continuation Plan", &self.plan_id)?;
         validate_identity("Continuation binding", &self.binding_context)?;
         if self.epoch > MAX_EXACT_INTEGER || self.execution_fence > MAX_EXACT_INTEGER {
             return Err(DurableProtocolError::Validation(
@@ -535,7 +587,8 @@ impl ContinuationExecutionClaim {
     /// Returns an error when the claim is malformed or does not exactly match
     /// the owning Continuation.
     pub fn verify_wire(&self, continuation: &Continuation) -> DurableProtocolResult<()> {
-        validate_identity("Continuation Attempt", &self.continuation_attempt_id)?;
+        validate_sha256("Continuation Attempt", &self.continuation_attempt_id)?;
+        validate_sha256("Continuation execution Plan", &self.plan_id)?;
         self.execution_binding_ref.validate().map_err(|error| {
             DurableProtocolError::Validation(format!("execution binding is invalid: {error}"))
         })?;

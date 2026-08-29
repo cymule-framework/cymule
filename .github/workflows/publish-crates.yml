@@ -179,8 +179,49 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  executor-witness:
+    needs: verify
+    runs-on: macos-15
+    permissions:
+      contents: read
+    outputs:
+      release_sha: ${{ steps.identity.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the credential-free macOS executor witness
+        id: identity
+        env:
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust without publication identity
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+
+      - name: Verify the exact release executor on macOS
+        run: >-
+          python3 scripts/test_harness.py run
+          rust-executor-plugin
+          --report .cache/test-harness/release-executor-macos.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: crates-release-executor-macos-${{ inputs.version }}
+          path: .cache/test-harness/release-executor-macos.json
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
-    needs: [verify, close]
+    needs: [verify, close, executor-witness]
     runs-on: ubuntu-24.04
     environment: crates-io
     permissions:
@@ -209,11 +250,13 @@ jobs:
         env:
           CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
           CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          EXECUTOR_WITNESS_SHA: ${{ needs.executor-witness.outputs.release_sha }}
           RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
           RELEASE_TAG: v${{ needs.verify.outputs.version }}
           RELEASE_VERSION: ${{ needs.verify.outputs.version }}
         run: |
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          test "$EXECUTOR_WITNESS_SHA" = "$RELEASE_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/crates_release.py scripts/version_domains.py
           git fetch --no-tags origin main
           test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"

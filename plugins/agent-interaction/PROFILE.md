@@ -68,7 +68,8 @@ rereading its latest revision.
 ## Keyed bounded state
 
 `AgentSessionCurrent` is metadata only: state, stop reason, bounded Plan and
-usage, sequence counters, message head/count, pending-input count,
+usage, sequence counters, message head/count, pending-input count, a bounded
+non-terminal Tool capacity directory,
 unresolved-occurrence count/generation, open-stream count/generation, and one
 typed last-transition witness. It never embeds message, tool, elicitation,
 occurrence, stream, or chunk history.
@@ -101,6 +102,7 @@ The protocol enforces these hard bounds before Store serialization:
 - 512 KiB per keyed current/read wrapper;
 - 2 MiB per command and 10 MiB per semantic receipt;
 - 256 entries per bounded content or Plan vector;
+- 64 concurrently non-terminal Tools and 4 MiB of exact Tool-close charge;
 - 64 append-only recovery observations per occurrence, with the final slot
   reserved for NotApplied evidence; and
 - 4,096 entries / 16 MiB per pinned context scan capability.
@@ -121,6 +123,13 @@ second transition.
 A Tool current can enter the Session only as `Pending`. Every later transition
 keeps the same `tool_call_id`, operation, and immutable input while following
 the closed lifecycle through permission, execution, and one terminal state.
+The Session directory carries only each non-terminal Tool identity, exact
+current digest, and before/Cancelled byte charge; the independently keyed
+current remains lifecycle authority. Closing is not a generic metadata update: one bounded source resolves
+that complete directory, and the sole close reducer writes `Closed` plus every
+deterministic `Cancelled` Tool successor in the same command/CAS. Open streams,
+unresolved occurrences, pending input, partial or reordered Tool sources, and
+unbounded Tool-family scans cannot participate in close.
 
 Generic Session updates cannot mutate elicitations. Input suspend/complete is
 the only authority which changes an elicitation current, pending count,
@@ -324,10 +333,10 @@ Agent/M1 transition.
 
 ## Wire and compatibility
 
-Current persisted command and receipt selectors are `cymule.agent-command/1`
-and `cymule.agent-command-receipt/1`; bounded Session metadata is
-`cymule.agent-session-current/1`, and the current closed schema generation is
-`cymule.agent/5`. Recovery observations and publication intents use their own
+Current persisted command and receipt selectors are `cymule.agent-command/2`
+and `cymule.agent-command-receipt/2`; bounded Session metadata is
+`cymule.agent-session-current/2`, and the current closed schema generation is
+`cymule.agent/6`. Recovery observations and publication intents use their own
 content-ID generations. All persisted unions deny unknown fields.
 There is no reader or writer for the removed aggregate Session, recursive
 journal-base, or stream-record formats. This profile is still internal, so the

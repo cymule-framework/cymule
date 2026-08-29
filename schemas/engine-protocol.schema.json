@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-  "title": "Cymule Engine Protocol cymule.engine/4",
+  "title": "Cymule Engine Protocol cymule.engine/5",
   "oneOf": [
     { "$ref": "#/$defs/requestEnvelope" },
     { "$ref": "#/$defs/responseEnvelope" }
@@ -11,7 +11,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["engine_protocol", "request"],
       "properties": {
-        "engine_protocol": { "const": "cymule.engine/4" },
+        "engine_protocol": { "const": "cymule.engine/5" },
         "request": { "$ref": "#/$defs/request" }
       }
     },
@@ -244,7 +244,7 @@
           "type": "object", "additionalProperties": false,
           "required": ["outcome", "engine_protocol", "request", "response"],
           "properties": {
-            "outcome": { "const": "success" }, "engine_protocol": { "const": "cymule.engine/4" },
+            "outcome": { "const": "success" }, "engine_protocol": { "const": "cymule.engine/5" },
             "request": { "$ref": "#/$defs/request" },
             "response": { "$ref": "#/$defs/successResponse" }
           },
@@ -254,7 +254,7 @@
           "type": "object", "additionalProperties": false,
           "required": ["outcome", "engine_protocol", "error"],
           "properties": {
-            "outcome": { "const": "failure" }, "engine_protocol": { "const": "cymule.engine/4" },
+            "outcome": { "const": "failure" }, "engine_protocol": { "const": "cymule.engine/5" },
             "error": { "$ref": "#/$defs/failure" }
           }
         }
@@ -338,7 +338,7 @@
         { "type": "object", "additionalProperties": false, "required": ["type", "resource"], "properties": { "type": { "const": "sealed_resource" }, "resource": { "$ref": "resource.schema.json#/$defs/resourceHandle" } } },
         { "type": "object", "additionalProperties": false, "required": ["type", "activation"], "properties": { "type": { "const": "verified_wait_activation" }, "activation": { "$ref": "wait-activation.schema.json" } } },
         { "type": "object", "additionalProperties": false, "required": ["type", "command"], "properties": { "type": { "const": "verified_durable_command" }, "command": { "$ref": "durable-control.schema.json" } } },
-        { "type": "object", "additionalProperties": false, "required": ["type", "observation"], "properties": { "type": { "const": "clock_observed" }, "observation": { "$ref": "#/$defs/clockObservationRef" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "result"], "properties": { "type": { "const": "clock_observed" }, "result": { "$ref": "#/$defs/clockObservationResult" } } },
         { "type": "object", "additionalProperties": false, "required": ["type", "command"], "properties": { "type": { "const": "verified_evolution_command" }, "command": { "$ref": "evolution-control.schema.json" } } },
         { "type": "object", "additionalProperties": false, "required": ["type", "command"], "properties": { "type": { "const": "verified_live_evolution_command" }, "command": { "$ref": "live-evolution-control.schema.json" } } },
         { "type": "object", "additionalProperties": false, "required": ["type", "response"], "properties": { "type": { "const": "durable_executed" }, "response": { "$ref": "#/$defs/durableResponse" } } },
@@ -694,6 +694,14 @@
         "scope": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$" }
       }
     },
+    "clockObservationResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "observation"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/durableIdentity" },
+        "observation": { "$ref": "#/$defs/clockObservationRef" }
+      }
+    },
     "executionClaim": {
       "type": "object", "additionalProperties": false,
       "required": ["claim_version", "run_id", "continuation_id", "owner", "continuation_attempt_id", "fence", "plan_id", "execution_binding_ref", "clock_observation_ref", "logical_acquired_at", "logical_ttl", "logical_expires_at"],
@@ -732,7 +740,7 @@
       "properties": {
         "continuation_version": { "const": "cymule.continuation-state/1" },
         "run_id": { "$ref": "#/$defs/durableIdentity" },
-        "plan_id": { "type": "string", "minLength": 1 },
+        "plan_id": { "$ref": "#/$defs/contentId" },
         "binding_context": { "type": "string", "minLength": 1 },
         "frames": { "type": "array", "items": { "$ref": "#/$defs/frameState" } },
         "state": { "$ref": "#/$defs/nullableArtifact" },

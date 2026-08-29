@@ -7,8 +7,10 @@ the first exact wait targets are persisted before delivery, so lost
 acknowledgement redelivers the same activation and targets even after those
 waits leave the rebuilt parked index.
 
-Retained target selections always redeliver first. Fresh due-source discovery
-uses a fixed 256-row scan budget and an exclusive `(due_unix_ms,
+Retained target selections always redeliver first and remain independent of a
+later caller's target limit; fresh selections are checked against their own
+call limit before retention. Fresh due-source discovery uses a fixed 256-row
+scan budget and an exclusive `(due_unix_ms,
 activation_id)` continuation between polls. Large prefixes of due timers with
 no matching parked wait therefore cannot make one poll unbounded or starve a
 later matching timer; the cursor resets after reaching the current end so newly

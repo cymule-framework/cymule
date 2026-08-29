@@ -1,5 +1,5 @@
 {
-  "protocol": "cymule.engine/4",
+  "protocol": "cymule.engine/5",
   "cases": {
     "invalid_plan_version": {
       "category": "validation",

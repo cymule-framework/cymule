@@ -387,12 +387,55 @@ class ChangeRoutingTests(unittest.TestCase):
             ):
                 self.assertNotIn(scheduled, expanded)
 
+    def test_release_contract_selector_source_selects_full(self) -> None:
+        suites, _ = HARNESS.select_suites(["scripts/release_contracts.py"])
+        self.assertEqual(suites, ["full"])
+
     def test_catalog_retains_explicit_scheduled_and_normal_evidence(self) -> None:
         expanded = HARNESS.expand_suites(["catalog"], HARNESS.load_manifest())
         self.assertIn("rust-directory-plugin", expanded)
         self.assertIn("rust-soak", expanded)
         self.assertIn("rust-mutation", expanded)
         self.assertIn("rust-portability", expanded)
+
+    def test_compatibility_keeps_a_native_windows_directory_non_unix_witness(self) -> None:
+        workflow = (ROOT / ".github/workflows/compatibility.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("  schedule:\n", workflow)
+        self.assertIn("  workflow_dispatch:\n", workflow)
+        self.assertIn("os: [ubuntu-24.04, macos-15]", workflow)
+        for ordinary_event in ("push", "pull_request", "merge_group"):
+            self.assertNotIn(f"  {ordinary_event}:\n", workflow)
+
+        marker = "\n  directory-non-unix:\n"
+        self.assertEqual(workflow.count(marker), 1)
+        witness = workflow.split(marker, 1)[1]
+        for fragment in (
+            "runs-on: windows-2025",
+            "shell: pwsh",
+            "rustup toolchain install 1.97.1-x86_64-pc-windows-msvc --profile minimal",
+            "cargo +1.97.1-x86_64-pc-windows-msvc test --locked --package cymule-directory-store --lib non_unix_tests::writable_generation_fails_before_initialization -- --exact",
+            "if (-not $IsWindows)",
+            'test result: ok\\. 1 passed; 0 failed;',
+        ):
+            self.assertIn(fragment, witness)
+        self.assertNotIn("continue-on-error", witness)
+        self.assertNotIn("shell: bash", witness)
+        self.assertNotIn("needs:", witness)
+
+        required_ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertNotIn("directory-non-unix", required_ci)
+        self.assertNotIn("compatibility.yml", required_ci)
+
+        source = (ROOT / "plugins/directory-store/src/lib.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("#[cfg(not(unix))]\nmod non_unix_tests", source)
+        self.assertEqual(
+            source.count("fn writable_generation_fails_before_initialization()"),
+            1,
+        )
 
     def test_python_toolchain_authority_routes_every_uv_consumer(self) -> None:
         suites, _ = HARNESS.select_suites(["sdk/python/uv.lock"])
@@ -415,6 +458,23 @@ class ChangeRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             set(suites), {"docs", "harness", "protocol", "rust-durable"}
+        )
+
+    def test_durable_state_root_fixture_selects_every_schema_reader(self) -> None:
+        suites, _ = HARNESS.select_suites(
+            ["tests/harness/fixtures/durable-storage-state-root.json"]
+        )
+        self.assertEqual(
+            set(suites),
+            {
+                "docs",
+                "harness",
+                "protocol",
+                "sdk-rust",
+                "sdk-typescript",
+                "sdk-python",
+                "sdk-go",
+            },
         )
 
     def test_applied_effect_summary_fixture_selects_durable_and_all_sdk_readers(self) -> None:

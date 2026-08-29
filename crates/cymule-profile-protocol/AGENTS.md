@@ -78,6 +78,12 @@
   receipt reads recompute the full update byte count for both delivery modes.
   External streams keep staged bytes and content blocks zero, while their final
   update byte counter remains nonzero. The staged-chunk byte limit is unchanged.
+- Agent Session close is the sole reducer authority for terminal Session state.
+  Session metadata retains one bounded non-terminal Tool capacity directory;
+  close exact-reads that complete directory and atomically writes every Tool's
+  deterministic `Cancelled` successor with the `Closed` Session. A generic
+  metadata-only Closed update, a partial Tool set, an unbounded family scan, or
+  a Closed Session retaining a non-terminal Tool is invalid.
 - Context requests and snapshots pin one exact immutable message-history prefix
   with required `source_message_head` and `source_message_count`. Count is a safe
   integer and zero exactly when the head is null; responses echo both fields and
@@ -91,7 +97,7 @@
   validator owns this state-dependent capacity for helpers, public snapshot
   commands, current reads, and receipt replay alike.
 - These Agent bounds and the required counters belong to the current unfrozen
-  internal `cymule.agent/5` hard cut. Omitted counters and historical aggregate
+  internal `cymule.agent/6` hard cut. Omitted counters and historical aggregate
   stream shapes have no default, compatibility decoder, or migration fallback;
   freeze the final schema digest with this release generation.
 - Required-nullable fields reject a missing JSON member and accept explicit

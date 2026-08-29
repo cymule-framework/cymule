@@ -12,7 +12,8 @@
   partial, and extended layouts fail before mutation and are never repaired.
 - Writable /5 authority is Unix-only: it requires proven file and directory
   fsync plus atomic replacement semantics. Other platforms fail before
-  initialization instead of acknowledging an unproven durability protocol;
+  initialization with a durability substrate error, never an unsupported-store
+  generation error, instead of acknowledging an unproven durability protocol;
   read-only inspection of an existing exact layout remains separate.
 - Persist only the closed StateRootObject physical envelope, including the
   authenticated-map/log node `/1` preimages owned by the lower collection
@@ -164,7 +165,9 @@
 - Tests use real process death at internal object/head/receipt/sweep durability
   boundaries, reopen and audit complete closure, preserve reachable archives,
   delete only valid orphans, and reject legacy generations and unsafe
-  filesystem object kinds.
+  filesystem object kinds. The exact `66a432c` whole-state fixture is a tracked
+  negative: both writable and read-only open reject its writer bytes without
+  creating, repairing, or changing any current-generation entry.
 - Runtime fixtures initialize only a zero-Run catalog Machine. Create the first
   Run through `DurableRuntimeControl::submit(DurableCommand::StartRun)` with its
   current Clock receipt so Run, Continuation, Attempt, claim, and fence share

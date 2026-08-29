@@ -11,10 +11,12 @@ is exercised by `tests/public_durable.rs`.
   identity, bound, normalized current leaf, typed mutation, pure reducer, query,
   read result, and commit envelope.
 - `cymule-durable::DurableRuntimeControl::virtual_work()` is the only public
-  persistence authority. Its `commit` accepts a semantic
-  `VirtualPersistenceCommand`; callers cannot supply a checkpoint, delta,
-  StateRoot, receipt, provider product, journal record, transaction callback,
-  or prepared capability.
+  persistence authority. Its `commit` accepts fresh non-Claim semantic
+  `VirtualPersistenceCommand` values and exact retained Claim aliases; only
+  its dedicated `claim` method may create a fresh Claim and return the complete
+  `VirtualClaimOutcome`. Callers cannot supply a checkpoint, delta, StateRoot,
+  receipt, provider product, journal record, transaction callback, or prepared
+  capability.
 - This crate owns only provider orchestration. Its production implementation is
   `ResourceBackedVirtualArchive`, a binding-and-revision-pinned implementation
   of the closed `VirtualArchiveProvider` trait.
@@ -93,7 +95,9 @@ is exercised by `tests/public_durable.rs`.
   immutable receipt. A later writer cannot turn that known success into a
   current-root lookup failure. Dedicated claim replay reads the exact receipt
   and original Plan within one pinned callback without Clock/provider access;
-  generic receipt-only commit replay does not load a Plan.
+  generic receipt-only commit replay accepts only an exact retained Claim alias
+  and does not load a Plan. A fresh Claim sent to generic commit fails before
+  Clock, provider, or Store mutation.
 
 ## Archive and Resource lifecycle
 

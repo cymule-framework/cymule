@@ -21,8 +21,8 @@ use cymule_resource::{
     RESOURCE_CATALOG_RECORD_VERSION, RESOURCE_MANIFEST_MEDIA_TYPE, ResourceCandidate,
     ResourceCatalogRecord, ResourceCatalogStore, ResourceClient, ResourceDeleter,
     ResourceDeletionTarget, ResourceError, ResourceIntegrity, ResourceListCursor, ResourceLocation,
-    ResourceManifestDescriptor, ResourceManifestEntry, ResourceShape, ResourceWriteIntent,
-    ResourceWriteSession, resource_retention_key,
+    ResourceManifestDescriptor, ResourceManifestEntry, ResourcePublication, ResourceShape,
+    ResourceWriteIntent, ResourceWriteSession, resource_retention_key,
 };
 use cymule_resource_fs::{FsResourceStore, MAX_DIRECTORY_IMPORT_DEPTH};
 #[cfg(unix)]
@@ -45,6 +45,13 @@ fn oversized_catalog_record() -> ResourceCatalogRecord {
         record_id,
         payload,
     }
+}
+
+fn assert_resource_not_found(store: &mut FsResourceStore, publication: &ResourcePublication) {
+    assert!(matches!(
+        store.stat(&publication.resource, &publication.locators),
+        Err(ResourceError::NotFound(_))
+    ));
 }
 
 #[test]
@@ -107,9 +114,9 @@ fn physical_generation_marker_rejects_unmarked_or_wrong_layouts() {
     fs::create_dir(&wrong).expect("wrong root creates");
     fs::write(
         wrong.join("layout.json"),
-        br#"{"layout_version":"cymule.resource-fs-layout/0"}"#,
+        br#"{"layout_version":"cymule.resource-fs-layout/1"}"#,
     )
-    .expect("wrong marker seeds");
+    .expect("pre-tombstone marker seeds");
     assert!(matches!(
         FsResourceStore::open(&wrong, "fs:wrong"),
         Err(ResourceError::Integrity { code, .. }) if code == "filesystem_layout_invalid"
@@ -661,6 +668,15 @@ fn filesystem_deleter_is_idempotent_and_proves_absence() {
     let publication = store.commit_write(&session).expect("write commits");
     let target =
         ResourceDeletionTarget::from_publication(&publication).expect("deletion target derives");
+    let mut mismatched = target.clone();
+    mismatched.content_size += 1;
+    assert!(matches!(
+        store.delete_and_verify_absent(&mismatched),
+        Err(ResourceError::Integrity { .. })
+    ));
+    store
+        .stat(&publication.resource, &publication.locators)
+        .expect("target validation failure does not fence valid retained content");
     store
         .delete_and_verify_absent(&target)
         .expect("delete succeeds and proves absence");
@@ -671,6 +687,115 @@ fn filesystem_deleter_is_idempotent_and_proves_absence() {
         store.stat(&publication.resource, &publication.locators),
         Err(ResourceError::NotFound(_))
     ));
+}
+
+#[test]
+fn deletion_tombstone_fences_publishing_across_write_ids_and_reopen() {
+    let directory = tempdir().expect("temporary directory");
+    let root = directory.path().join("store");
+    let binding = "fs:deletion-fence";
+    let bytes = b"one physical retention family";
+    let mut published = FsResourceStore::open(&root, binding).expect("store opens");
+    let first = ResourceWriteIntent {
+        write_id: "write:deletion-fence-first".to_owned(),
+        shape: ResourceShape::Object,
+        media_type: "application/octet-stream".to_owned(),
+        annotations: BTreeMap::new(),
+    };
+    let first_session = published.begin_write(&first).expect("first write begins");
+    published
+        .write_chunk(&first_session, 0, bytes)
+        .expect("first bytes persist");
+    let publication = published
+        .commit_write(&first_session)
+        .expect("first publication commits");
+    let target = ResourceDeletionTarget::from_publication(&publication)
+        .expect("exact deletion target derives");
+
+    let late = ResourceWriteIntent {
+        write_id: "write:deletion-fence-late".to_owned(),
+        ..first.clone()
+    };
+    let mut late_writer =
+        FsResourceStore::open(&root, binding).expect("independent late writer opens");
+    let late_session = late_writer.begin_write(&late).expect("late write begins");
+    late_writer
+        .write_chunk(&late_session, 0, bytes)
+        .expect("late bytes persist");
+
+    let retention_key = resource_retention_key(&publication).expect("retention key derives");
+    let retention_token = retention_key
+        .strip_prefix("sha256:")
+        .expect("retention key is SHA-256 addressed");
+    let retention_control = root
+        .join("locks")
+        .join(format!("retention-{retention_token}.lock"));
+    let family_barrier = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&retention_control)
+        .expect("retention-family control opens");
+    fs4::FileExt::lock(&family_barrier).expect("deterministic family barrier locks");
+
+    assert!(matches!(
+        late_writer.commit_write(&late_session),
+        Err(ResourceError::Conflict { code, .. }) if code == "filesystem_lock_busy"
+    ));
+    assert!(matches!(
+        published.delete_and_verify_absent(&target),
+        Err(ResourceError::Conflict { code, .. }) if code == "filesystem_lock_busy"
+    ));
+    assert_eq!(
+        fs::read(&retention_control).expect("live retention control reads"),
+        b"",
+        "content remains live until deletion durably fences the family"
+    );
+    fs4::FileExt::unlock(&family_barrier).expect("family barrier unlocks");
+
+    published
+        .delete_and_verify_absent(&target)
+        .expect("deletion persists its fence before removing content");
+    assert_eq!(
+        fs::read(&retention_control).expect("deletion tombstone reads"),
+        b"D",
+        "the exact family control permanently records deletion"
+    );
+    drop(late_writer);
+    drop(published);
+
+    let mut reopened = FsResourceStore::open(&root, binding).expect("deleted store reopens");
+    assert_resource_not_found(&mut reopened, &publication);
+    assert!(matches!(
+        reopened.commit_write(&late_session),
+        Err(ResourceError::Conflict { code, .. }) if code == "filesystem_resource_deleted"
+    ));
+    assert!(matches!(
+        reopened.begin_write(&late),
+        Err(ResourceError::Conflict { code, .. }) if code == "filesystem_resource_deleted"
+    ));
+
+    let third = ResourceWriteIntent {
+        write_id: "write:deletion-fence-third".to_owned(),
+        ..first
+    };
+    let third_session = reopened
+        .begin_write(&third)
+        .expect("different write ID begins");
+    reopened
+        .write_chunk(&third_session, 0, bytes)
+        .expect("different write ID stages identical bytes");
+    assert!(matches!(
+        reopened.commit_write(&third_session),
+        Err(ResourceError::Conflict { code, .. }) if code == "filesystem_resource_deleted"
+    ));
+    reopened
+        .delete_and_verify_absent(&target)
+        .expect("terminal deletion replays after reopen");
+    assert_resource_not_found(&mut reopened, &publication);
+    assert_eq!(
+        fs::read(&retention_control).expect("permanent tombstone remains"),
+        b"D"
+    );
 }
 
 #[test]

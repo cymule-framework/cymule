@@ -235,7 +235,7 @@ The cross-language mutation is exactly:
 execute_live_evolution(target, evolution_id, command) -> EvolutionCommit
 ```
 
-The Engine v4 success first echoes the complete strictly decoded request. An
+The Engine v5 success first echoes the complete strictly decoded request. An
 SDK compares that echo with the exact JSON value it sent before validating the
 commit. It then verifies `observed_revision`, the required-nullable
 `committed_revision`, and the semantic receipt against the exact `evolution_id`

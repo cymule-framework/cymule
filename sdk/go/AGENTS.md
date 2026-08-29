@@ -141,7 +141,7 @@
   authority and must not be reimplemented in Go.
 - Before an `apply_patch` live mutation, the Go CLI transport seals the target
   candidate through the same Rust Engine and requires the returned Plan edge to
-  name that exact target Plan. Engine v4 returns the complete `EvolutionCommit`;
+  name that exact target Plan. Engine v5 returns the complete `EvolutionCommit`;
   operation-specific outcome fields are never used as a substitute for the
   echoed semantic command's request identity.
 - Go request and response JSON rejects invalid UTF-8 and unpaired surrogate

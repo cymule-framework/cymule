@@ -20,7 +20,7 @@ use cymule_durable::{
     DurableRunCurrent, DurableRunItem, DurableRunItemSelector, DurableRuntimeControl, DurableStore,
     DurableWaitSummary, MAX_DURABLE_QUERY_EXACT_RESPONSE_BYTES, MAX_DURABLE_QUERY_PAGE_BYTES,
     ParkedWaitView, StoreBatch, StoreCommit, StoreHead, WaitAdmissionOutcome, WaitCondition,
-    WaitDelivery, WaitSourceDriver, WaitState,
+    WaitDelivery, WaitSourceDelivery, WaitSourceDriver, WaitState,
 };
 use cymule_durable_protocol::{
     ContinuationStatus, ExecutionClaimRequest, WAIT_RESULT_ARTIFACT_KIND,
@@ -412,7 +412,7 @@ impl WaitSourceDriver for BarrierDriver {
         &mut self,
         view: &mut dyn ParkedWaitView,
         max_targets: usize,
-    ) -> DurableResult<Option<WaitDelivery>> {
+    ) -> DurableResult<Option<WaitSourceDelivery>> {
         let delivery = self.inner.receive(view, max_targets)?;
         if delivery.is_some() && matches!(self.phase, DriverBarrier::AfterSelection) {
             self.stop("after_selection");
@@ -448,9 +448,11 @@ impl<D: WaitSourceDriver> WaitSourceDriver for RecordingDriver<D> {
         &mut self,
         view: &mut dyn ParkedWaitView,
         max_targets: usize,
-    ) -> DurableResult<Option<WaitDelivery>> {
+    ) -> DurableResult<Option<WaitSourceDelivery>> {
         let delivery = self.inner.receive(view, max_targets)?;
-        self.delivery.clone_from(&delivery);
+        self.delivery = delivery
+            .as_ref()
+            .map(|delivery| delivery.delivery().clone());
         Ok(delivery)
     }
 

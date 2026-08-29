@@ -67,7 +67,7 @@ NON_CARGO_PACKAGES = {
 }
 MAX_EXACT_INTEGER = 9_007_199_254_740_991
 REGISTRY_VERSION = "cymule.version-domain-registry/3"
-RELEASE_BOM_VERSION = "cymule.release-bom/2"
+RELEASE_BOM_VERSION = "cymule.release-bom/3"
 NPM_REGISTRY = "https://registry.npmjs.org/"
 CRATES_REGISTRY = "https://crates.io/"
 NPM_SIGSTORE_CERTIFICATE_IDENTITY = (
@@ -103,6 +103,7 @@ PRODUCTION_IDENTITY_GLOBS = (
     "plugins/*/schemas/**/*.schema.json",
     "scripts/crates_release.py",
     "scripts/npm_release.py",
+    "scripts/release_contracts.py",
     "scripts/version_domains.py",
     "scripts/validate_schemas.py",
 )
@@ -474,6 +475,28 @@ def current_source_snapshot_digest(root: pathlib.Path = ROOT) -> str:
             continue
         entries.append((relative, mode, "blob", payload))
     return source_snapshot_digest(entries)
+
+
+def commit_source_snapshot_digest(
+    source_sha: str, *, root: pathlib.Path = ROOT
+) -> str:
+    """Hash the exact public-source projection of one immutable Git commit."""
+
+    if SHA_PATTERN.fullmatch(source_sha) is None:
+        raise ValueError("public source SHA must be one exact lowercase Git commit")
+    resolved = str(
+        git_output(["rev-parse", "--verify", f"{source_sha}^{{commit}}"], root=root)
+    ).strip()
+    if resolved != source_sha:
+        raise ValueError("public source SHA does not resolve to its exact commit")
+    tree = _commit_tree(root, source_sha)
+    blobs = _git_blobs(root, {oid for _path, _mode, _kind, oid in tree})
+    return source_snapshot_digest(
+        [
+            (path, mode, kind, blobs[oid])
+            for path, mode, kind, oid in tree
+        ]
+    )
 
 
 def _commit_tree(root: pathlib.Path, commit: str) -> list[tuple[str, str, str, str]]:
@@ -1766,7 +1789,7 @@ def validate_identity_source_dependencies(domain: dict[str, Any]) -> None:
 def validate_release_registry_closure(
     registry: dict[str, Any], root: pathlib.Path = ROOT
 ) -> None:
-    """Validate the registry, schema, domain, and migration closure embedded by BOM/2."""
+    """Validate the registry, schema, domain, and migration closure embedded by BOM/3."""
 
     validate_registry_closed_shape(registry, root)
     validate_registry_schema(registry, root)
@@ -2742,7 +2765,7 @@ def validate_bom_package_order(packages: object) -> None:
 
 
 def release_bom_projection(registry: dict[str, Any]) -> dict[str, Any]:
-    """Derive every registry-owned BOM/2 projection from one exact registry."""
+    """Derive every registry-owned BOM/3 projection from one exact registry."""
 
     defaults = registry["defaults"]
     schemas_by_path: dict[str, tuple[str, str]] = {}
@@ -2829,7 +2852,7 @@ def validate_release_bom_projection(
     *,
     registry: dict[str, Any],
     source_sha: str,
-    public_source_sha: str | None,
+    public_source_sha: str,
     catalog: list[dict[str, Any]] | None = None,
     root: pathlib.Path = ROOT,
 ) -> dict[str, Any]:
@@ -2853,8 +2876,14 @@ def validate_release_bom_projection(
         raise ValueError("release BOM has an open or incomplete top-level shape")
     if SHA_PATTERN.fullmatch(source_sha) is None:
         raise ValueError("source SHA must be one exact lowercase Git commit")
-    if public_source_sha is not None and SHA_PATTERN.fullmatch(public_source_sha) is None:
-        raise ValueError("public source SHA must be one exact lowercase Git commit")
+    if (
+        public_source_sha is None
+        or SHA_PATTERN.fullmatch(public_source_sha) is None
+        or public_source_sha == source_sha
+    ):
+        raise ValueError(
+            "public source SHA must be one distinct exact rewritten Git commit"
+        )
     validate_registry_closed_shape(registry, root)
     if value["bom_version"] != RELEASE_BOM_VERSION:
         raise ValueError("release BOM version is not supported")
@@ -2905,7 +2934,7 @@ def validate_release_bom_projection(
             )
     expected_packages = package_records(
         publications,
-        source_sha,
+        public_source_sha,
         catalog=catalog,
         root=root,
     )
@@ -2919,11 +2948,11 @@ def validate_release_bom(
     *,
     registry: dict[str, Any],
     source_sha: str,
-    public_source_sha: str | None,
+    public_source_sha: str,
     catalog: list[dict[str, Any]] | None = None,
     root: pathlib.Path = ROOT,
 ) -> dict[str, Any]:
-    """Validate the complete semantic closure of one release BOM/2."""
+    """Validate the complete semantic closure of one release BOM/3."""
 
     if root.resolve() != ROOT.resolve():
         raise ValueError(
@@ -2943,7 +2972,7 @@ def validate_release_bom(
 def build_bom(
     registry: dict[str, Any],
     source_sha: str,
-    public_source_sha: str | None,
+    public_source_sha: str,
     publications: object,
     *,
     catalog: list[dict[str, Any]] | None = None,
@@ -2953,14 +2982,20 @@ def build_bom(
     validate_registry_schema(registry, root)
     if SHA_PATTERN.fullmatch(source_sha) is None:
         raise ValueError("source SHA must be one exact lowercase Git commit")
-    if public_source_sha is not None and SHA_PATTERN.fullmatch(public_source_sha) is None:
-        raise ValueError("public source SHA must be one exact lowercase Git commit")
+    if (
+        public_source_sha is None
+        or SHA_PATTERN.fullmatch(public_source_sha) is None
+        or public_source_sha == source_sha
+    ):
+        raise ValueError(
+            "public source SHA must be one distinct exact rewritten Git commit"
+        )
     validate_stable_release_version(registry["source_generation"]["workspace_version"])
     projection = release_bom_projection(registry)
     resolved_catalog = release_catalog() if catalog is None else catalog
     packages = package_records(
         publications,
-        source_sha,
+        public_source_sha,
         catalog=resolved_catalog,
         root=root,
     )
@@ -3035,7 +3070,7 @@ def parse_arguments() -> argparse.Namespace:
     digest.add_argument("--bare", action="store_true")
     bom = subparsers.add_parser("bom")
     bom.add_argument("--source-sha", required=True)
-    bom.add_argument("--public-source-sha")
+    bom.add_argument("--public-source-sha", required=True)
     bom.add_argument(
         "--publications",
         dest="publication_paths",

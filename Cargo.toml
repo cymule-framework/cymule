@@ -55,11 +55,12 @@ cymule-executor-process = { version = "0.2.0", path = "plugins/executor-process"
 cymule-resource = { version = "0.2.0", path = "crates/cymule-resource" }
 cymule-runtime = { version = "0.2.0", path = "crates/cymule-runtime" }
 cymule-store-sqlite = { version = "0.2.0", path = "plugins/store-sqlite" }
+cymule-test-world = { path = "tests/test-world" }
 cymule-virtual = { version = "0.2.0", path = "crates/cymule-virtual" }
 axum = "0.8.9"
 futures-util = "0.3.34"
 jsonschema = { version = "0.49.9", default-features = false }
-nix = { version = "=0.31.3", features = ["dir", "fs", "process", "signal"] }
+nix = { version = "=0.31.3", features = ["dir", "fs", "poll", "process", "signal"] }
 object_store = { version = "=0.14.1", default-features = false }
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }

@@ -137,7 +137,7 @@ fn stream_current() -> Value {
 #[test]
 fn schema_accepts_terminal_currents_and_rejects_removed_aggregate_records() {
     let schema = agent_schema();
-    assert_eq!(schema["title"], "Cymule Agent Protocol cymule.agent/5");
+    assert_eq!(schema["title"], "Cymule Agent Protocol cymule.agent/6");
     assert_eq!(
         schema["$id"],
         "https://cymule.dev/schemas/agent-protocol.schema.json"
@@ -165,6 +165,12 @@ fn schema_accepts_terminal_currents_and_rejects_removed_aggregate_records() {
     validator
         .validate(&session)
         .expect("bounded Session current validates");
+    let mut missing_tool_directory = session.clone();
+    missing_tool_directory
+        .as_object_mut()
+        .expect("Session current is an object")
+        .remove("nonterminal_tools");
+    assert!(!validator.is_valid(&missing_tool_directory));
     let occurrence: Value = decode_json(include_bytes!("fixtures/agent-occurrence.json"))
         .expect("occurrence fixture parses through the strict decoder");
     validator

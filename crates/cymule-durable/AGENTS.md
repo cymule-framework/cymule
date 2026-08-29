@@ -16,6 +16,12 @@
   It does not require a PluginHost or create an execution binding.
   Agent writes and Virtual claims belong to `DurableRuntimeControl`; their
   read-only facades do not gain writer or provider authority.
+- `DurableRuntimeControl::virtual_work().claim(...)` is the sole fresh Virtual
+  Claim entry point and returns the complete closed `VirtualClaimOutcome`.
+  Generic Virtual `commit` rejects an absent Claim alias before Clock,
+  provider, or Store mutation. It may return a receipt-only `VirtualCommit`
+  only when the exact Claim command already has a retained all-ever alias;
+  that replay does not load the executable Plan.
 - `DurableRuntimeControl::open` consumes the one-shot
   `ExecutionBindingAdmission` produced before writable Store I/O. Do not
   repeat Describe or binding admission during open.
@@ -34,6 +40,9 @@
   that pinned root. Core derives typed touched-key mutations; immutable maps
   copy changed trie paths and logs copy their authenticated append spines.
   Never defer a whole-domain traversal until the first command.
+- A verified persistent-map range page retains each selected key's authenticated
+  value-object identity. Query projection loads that exact typed value once;
+  never discard the range proof result and repeat an exact-key proof per item.
 - Typed DurableOperation::Put* values are complete normalized postconditions.
   An unchanged projection is valid when Core events or sibling fields advance.
   StateRoot alone compares exact encoded values and lowers only real physical
@@ -202,8 +211,11 @@
 - Identified signal/timer admission is store-only. Its result Artifact, exact
   selected/applied/Ready receipt, completed waits, frame locals, and readiness
   commit together without provider execution, Clock access, or auto-resume.
-- Source drivers use authenticated pinned pending-source pages and obey both
-  the framework hard target bound and the caller's max_targets.
+- Source drivers use authenticated pinned pending-source pages. A target set
+  selected in the current receive call obeys both the framework hard target
+  bound and that caller's `max_targets`; an exact target set retained by an
+  earlier receive obeys the framework bound but is not reinterpreted by a
+  later caller's smaller limit.
   Check a retained activation receipt before consulting today's pending bucket.
   Exact redelivery retains the original targets, winners, and Ready Run set.
   Terminal selected targets are stable non-winners, never broadcast head-of-line
@@ -305,7 +317,8 @@
   The public VirtualClaimOutcome returns a complete verified Plan only for
   Claimed, retained from its pre-CAS pinned source; NoWork carries only its
   receipt. Dedicated replay loads the exact receipt and original Plan in one
-  pinned callback; generic receipt-only replay never loads a Plan.
+  pinned callback; generic receipt-only replay is available only for an exact
+  retained Claim alias and never loads a Plan or creates a fresh Claim.
 - Virtual providers are exact binding-pinned sources, migrators, and archives.
   Migration returns the full typed proposal with verified coverage and exact
   target-source Artifact bytes. Archive pin/release uses Resource's shared pure

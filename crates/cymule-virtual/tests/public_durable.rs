@@ -1227,6 +1227,138 @@ fn rehydrate_with_lost_receipt(
     );
 }
 
+fn assert_generic_claim_alias_replay(
+    fixture: &Fixture,
+    claim: &VirtualClaimPersistenceCommand,
+    persistence: &VirtualPersistenceCommand,
+    expected: &VirtualClaimOutcome,
+) {
+    let mut runtime = fixture.runtime();
+    let mut providers = fixture.providers();
+    let replay_head = fixture
+        .store
+        .clone()
+        .load_head()
+        .expect("replay head reads");
+    let replay_calls = fixture.observations.effects();
+    let plan_reads = fixture.observations.plan_reads.get();
+    fixture.observations.forbid_plan_reads.set(true);
+    let replay = runtime
+        .virtual_work(&mut providers)
+        .commit(persistence)
+        .expect("generic commit replays the exact retained Claim alias");
+    fixture.observations.forbid_plan_reads.set(false);
+    replay
+        .verify_for(persistence)
+        .expect("receipt-only Claim alias replay verifies");
+    assert_eq!(&replay.receipt, expected.receipt());
+    assert_eq!(replay.committed_revision, None);
+    assert_eq!(fixture.observations.effects(), replay_calls);
+    assert_eq!(fixture.observations.plan_reads.get(), plan_reads);
+    assert_eq!(
+        fixture.store.clone().load_head().expect("head rereads"),
+        replay_head
+    );
+
+    let mut reused_claim = claim.clone();
+    "worker:claim-facade:other".clone_into(&mut reused_claim.command.owner);
+    let reused = fixture.claim_persistence(&reused_claim);
+    let mut runtime = fixture.runtime();
+    let mut providers = fixture.providers();
+    let reused_calls = fixture.observations.effects();
+    let reused_head = fixture.store.clone().load_head().expect("head reads");
+    assert!(matches!(
+        runtime.virtual_work(&mut providers).commit(&reused),
+        Err(DurableError::HistoryConflict { code, .. }) if code == "virtual_command_reused"
+    ));
+    assert_eq!(fixture.observations.effects(), reused_calls);
+    assert_eq!(
+        fixture.store.clone().load_head().expect("head rereads"),
+        reused_head
+    );
+
+    let dedicated = fixture.replay_claim(claim, expected.receipt());
+    assert_eq!(&dedicated, expected);
+}
+
+#[test]
+fn fresh_claim_requires_claim_facade_and_generic_commit_only_replays_its_alias() {
+    let fixture = Fixture::new("claim-facade", 1);
+    let claim = fixture.claim_command("claim-facade", "slot:claim-facade", "worker:claim-facade");
+    let persistence = fixture.claim_persistence(&claim);
+
+    let before_state = fixture
+        .store
+        .clone()
+        .load_full_audit()
+        .expect("fresh-claim source audits");
+    let before_head = fixture.store.clone().load_head().expect("head reads");
+    let mut runtime = fixture.runtime();
+    let mut providers = fixture.providers();
+    let before_calls = fixture.observations.effects();
+    let error = runtime
+        .virtual_work(&mut providers)
+        .commit(&persistence)
+        .expect_err("generic commit cannot create a fresh Claim");
+    assert_eq!(
+        error,
+        DurableError::Validation(
+            "fresh Virtual Claim requires DurableVirtualControl::claim".to_owned()
+        )
+    );
+    assert_eq!(fixture.observations.effects(), before_calls);
+    assert_eq!(
+        fixture.store.clone().load_head().expect("head rereads"),
+        before_head
+    );
+    assert_eq!(
+        fixture
+            .store
+            .clone()
+            .load_full_audit()
+            .expect("rejected generic Claim leaves source auditable"),
+        before_state
+    );
+    assert!(fixture.receipt(&persistence).is_none());
+
+    let mut runtime = fixture.runtime();
+    let mut providers = fixture.providers();
+    let before_claim_calls = fixture.observations.effects();
+    let outcome = runtime
+        .virtual_work(&mut providers)
+        .claim(&claim)
+        .expect("dedicated Claim facade creates the fresh claim");
+    outcome
+        .verify()
+        .expect("fresh closed claim outcome verifies");
+    let VirtualClaimOutcome::Claimed {
+        claim: claimed,
+        plan,
+        ..
+    } = &outcome
+    else {
+        panic!("materialized work must produce a claimed outcome")
+    };
+    assert_eq!(plan.as_ref(), &fixture.plan);
+    assert_eq!(claimed.plan_id, plan.plan_id);
+    let after_claim_calls = fixture.observations.effects();
+    assert_eq!(after_claim_calls[0], before_claim_calls[0] + 1, "one CAS");
+    assert_eq!(
+        after_claim_calls[4],
+        before_claim_calls[4] + 1,
+        "one current-Clock guard"
+    );
+    assert_eq!(
+        after_claim_calls[2], before_claim_calls[2],
+        "Claim selection performs no Virtual provider lookup"
+    );
+    assert_eq!(
+        after_claim_calls[3], before_claim_calls[3],
+        "Claim selection performs no RegionSource call"
+    );
+    assert_generic_claim_alias_replay(&fixture, &claim, &persistence, &outcome);
+}
+
 #[test]
 fn fresh_claim_returns_its_pre_cas_plan_after_another_writer_advances_head() {
     let fixture = Fixture::new("claim-head-interleaving", 1);

@@ -75,8 +75,9 @@ duplicate members, floats, out-of-range integers, invalid Unicode, and anything
 outside the no-float I-JSON subset; canonical object keys use UTF-16 order.
 
 Private and public commit SHAs are publication receipts, not registry
-provenance. `cymule.release-bom/2` binds the immutable release source and package
-evidence, never a mutable finalizer controller identity. The exact annotated
+provenance. `cymule.release-bom/3` binds the immutable release source and package
+evidence with distinct required private `source_sha` and rewritten
+`public_source_sha`, never a mutable finalizer controller identity. The exact annotated
 tag object and current controller are separately bound by the finalization
 stage, attestation, and same-run control-plane receipt. Every source package has a required `publication`
 member: Cargo and npm records contain exact registry bytes plus checksum or

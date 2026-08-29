@@ -67,10 +67,10 @@
 - Unified live-evolution builders preserve the parent template, nested command,
   publication evidence, and exact semantic source intent. They never implement
   reverse-dependency relinking or split the durable command.
-- Speak only `cymule.engine/4`; Engine `/3` is unsupported. Stateful
+- Speak only `cymule.engine/5`; Engine `/4` is unsupported. Stateful
   live-evolution success returns the complete closed receipt containing the
   exact journal, serialized command, and recursively validated outcome.
-- Every Engine `/4` success envelope carries the complete raw inner request
+- Every Engine `/5` success envelope carries the complete raw inner request
   echo. Compare it with the defensive JSON snapshot actually sent before
   reading or validating any success payload; member presence is exact, so an
   omitted optional field never equals an explicit null. Failure envelopes carry

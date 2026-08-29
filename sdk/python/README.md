@@ -52,7 +52,7 @@ exact `run_item`, `resume`, `takeover`, `signal`, `release`,
 control-submit protocol. Python
 does not replay Continuations or reduce state. Non-finite numbers, duplicate
 response keys, and integers outside the shared safe JSON range fail closed.
-The client speaks only `cymule.engine/4`. `evolve` returns the complete durable
+The client speaks only `cymule.engine/5`. `evolve` returns the complete durable
 receipt—journal, exact echoed command, and recursively validated outcome—and
 classifies any post-mutation receipt mismatch as requiring reconciliation.
 Every successful Engine call also echoes the complete raw inner request; the

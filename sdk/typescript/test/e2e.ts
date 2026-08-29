@@ -32,6 +32,7 @@ import {
   type EffectProfile,
   type EngineDurableTarget,
   type EngineEvolutionTarget,
+  type EngineTransport,
   type EngineMigrationProviderTarget,
   type EnginePluginTarget,
   type EngineShadowProviderTarget,
@@ -258,7 +259,7 @@ async function withSuccessEngine<T>(
   response: unknown,
   invoke: (engine: CliEngine) => T | Promise<T>,
   sealedPlanId?: string,
-  engineProtocol = "cymule.engine/4",
+  engineProtocol = "cymule.engine/5",
   echoRequest?: unknown,
 ): Promise<T> {
   const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-"));
@@ -311,7 +312,7 @@ process.stdin.on("data", (chunk) => { input += chunk; });
 process.stdin.on("end", () => {
   const request = JSON.parse(input).request;
   process.stdout.write(
-    '{"engine_protocol":"cymule.engine/4","outcome":"success","request":'
+    '{"engine_protocol":"cymule.engine/5","outcome":"success","request":'
       + JSON.stringify(request)
       + ',"response":'
       + ${JSON.stringify(rawResponse)}
@@ -331,7 +332,7 @@ process.stdin.on("end", () => {
 async function withFailureEngine<T>(
   failure: unknown,
   invoke: (engine: CliEngine) => T | Promise<T>,
-  engineProtocol = "cymule.engine/4",
+  engineProtocol = "cymule.engine/5",
 ): Promise<T> {
   const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-"));
   const executable = join(directory, "failure-engine");
@@ -629,7 +630,7 @@ process.stdin.on("data", (chunk) => { input += chunk; });
 process.stdin.on("end", () => {
   const request = JSON.parse(input).request;
   process.stdout.write(JSON.stringify({
-    engine_protocol: "cymule.engine/4",
+    engine_protocol: "cymule.engine/5",
     outcome: "success",
     request,
     response: {
@@ -1077,7 +1078,7 @@ test("TypeScript Engine ingress rejects duplicate JSON object members", async ()
     executable,
     `#!/bin/sh
 cat >/dev/null
-printf '%s' '{"engine_protocol":"cymule.engine/4","outcome":"success","response":{"type":"sealed","type":"verified"}}'
+printf '%s' '{"engine_protocol":"cymule.engine/5","outcome":"success","response":{"type":"sealed","type":"verified"}}'
 `,
   );
   chmodSync(executable, 0o700);
@@ -1302,7 +1303,7 @@ process.stdin.on("end", () => {
   const request = JSON.parse(input).request;
   const response = JSON.parse(${JSON.stringify(JSON.stringify(entry.response))});
   process.stdout.write(JSON.stringify({
-    engine_protocol: "cymule.engine/4",
+    engine_protocol: "cymule.engine/5",
     outcome: "success",
     request,
     response,
@@ -1790,7 +1791,7 @@ test("TypeScript live-evolution successes are recursively closed and self-consis
           shadowProvider,
         ).evolve(command),
         undefined,
-        "cymule.engine/4",
+        "cymule.engine/5",
         {
           type: "execute_live_evolution",
           target: expectedTarget,
@@ -2557,7 +2558,7 @@ process.stdin.on("end", () => {
       } }
     : JSON.parse(${JSON.stringify(JSON.stringify(mutationResponse))});
   process.stdout.write(JSON.stringify({
-    engine_protocol: "cymule.engine/4",
+    engine_protocol: "cymule.engine/5",
     outcome: "success",
     request,
     response,
@@ -2710,7 +2711,7 @@ test("TypeScript classifies wrong success tags by request mutation authority", a
       { type: "sealed", plan: { plan_id: contentId("b"), candidate } },
       (engine) => engine.seal(candidate),
       undefined,
-      "cymule.engine/3",
+      "cymule.engine/4",
     ),
     (error: unknown) => error instanceof EngineError
       && error.failure.category === "contract_violation"
@@ -2725,7 +2726,7 @@ test("TypeScript classifies wrong success tags by request mutation authority", a
         command,
       ),
       undefined,
-      "cymule.engine/3",
+      "cymule.engine/4",
     ),
     (error: unknown) => error instanceof EngineError
       && error.failure.category === "unknown_world_outcome"
@@ -2745,7 +2746,7 @@ test("TypeScript classifies wrong success tags by request mutation authority", a
         "journal:legacy-failure",
         command,
       ),
-      "cymule.engine/3",
+      "cymule.engine/4",
     ),
     (error: unknown) => error instanceof EngineError
       && error.failure.category === "unknown_world_outcome"
@@ -2841,7 +2842,7 @@ test("TypeScript binds every success envelope to the exact sent request", async 
       sealedResponse,
       (engine) => engine.seal(candidate),
       undefined,
-      "cymule.engine/4",
+      "cymule.engine/5",
       { type: "seal", candidate: { ...candidate, name: "other" } },
     ),
     (error: unknown) => error instanceof EngineError
@@ -2856,12 +2857,15 @@ test("TypeScript binds every success envelope to the exact sent request", async 
   );
   const clockResponse = {
     type: "clock_observed",
-    observation: {
-      clock_version: "cymule.clock-observation/2",
-      observation_id: contentId("3"),
-      source_id: clockTarget.source_id,
-      source_generation: clockTarget.source_generation,
-      scope: "scope:echo",
+    result: {
+      run_id: "run:echo",
+      observation: {
+        clock_version: "cymule.clock-observation/2",
+        observation_id: contentId("3"),
+        source_id: clockTarget.source_id,
+        source_generation: clockTarget.source_generation,
+        scope: "scope:echo",
+      },
     },
   };
   await assert.rejects(
@@ -2869,7 +2873,7 @@ test("TypeScript binds every success envelope to the exact sent request", async 
       clockResponse,
       (engine) => engine.observeClock(clockTarget, "run:echo"),
       undefined,
-      "cymule.engine/4",
+      "cymule.engine/5",
       { type: "observe_clock", target: clockTarget, run_id: "run:other" },
     ),
     (error: unknown) => error instanceof EngineError
@@ -2931,7 +2935,7 @@ test("TypeScript binds every success envelope to the exact sent request", async 
       cancelledResponse,
       (engine) => engine.executeDurable(cancelTarget, cancel),
       undefined,
-      "cymule.engine/4",
+      "cymule.engine/5",
       {
         type: "execute_durable",
         target: cancelTarget,
@@ -2948,7 +2952,7 @@ test("TypeScript binds every success envelope to the exact sent request", async 
       cancelledResponse,
       (engine) => engine.executeDurable(cancelTarget, cancel),
       undefined,
-      "cymule.engine/4",
+      "cymule.engine/5",
       {
         type: "execute_durable",
         target: {
@@ -3123,7 +3127,7 @@ test("TypeScript binds every success envelope to the exact sent request", async 
         liveCommand,
       ),
       undefined,
-      "cymule.engine/4",
+      "cymule.engine/5",
       {
         type: "execute_live_evolution",
         target: evolutionTarget,
@@ -3141,7 +3145,13 @@ test("TypeScript binds every success envelope to the exact sent request", async 
     () => withSuccessEngine(
       {
         ...clockResponse,
-        observation: { ...clockResponse.observation, source_id: "clock:other" },
+        result: {
+          ...clockResponse.result,
+          observation: {
+            ...clockResponse.result.observation,
+            source_id: "clock:other",
+          },
+        },
       },
       (engine) => engine.observeClock(clockTarget, "run:echo"),
     ),
@@ -3224,7 +3234,7 @@ test("TypeScript binds every success envelope to the exact sent request", async 
     `#!/bin/sh
 cat >/dev/null
 printf '%s' '${JSON.stringify({
-      engine_protocol: "cymule.engine/4",
+      engine_protocol: "cymule.engine/5",
       outcome: "success",
       response: sealedResponse,
     })}'
@@ -3241,6 +3251,39 @@ printf '%s' '${JSON.stringify({
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("TypeScript durable Clock rejects a typed result bound to another Run", async () => {
+  const clock = sqliteClock(
+    "/tmp/cymule-clock-fake-run",
+    "clock:fake-run",
+    `sha256:${"1".repeat(64)}`,
+  );
+  const transport: EngineTransport = {
+    async seal(): Promise<never> { throw new Error("unused"); },
+    async observeClock() {
+      return {
+        run_id: "run:foreign",
+        observation: {
+          clock_version: "cymule.clock-observation/2",
+          observation_id: `sha256:${"2".repeat(64)}`,
+          source_id: clock.source_id,
+          source_generation: clock.source_generation,
+          scope: `sha256:${"3".repeat(64)}`,
+        },
+      };
+    },
+    async executeDurable(): Promise<never> { throw new Error("unused"); },
+    async executeLiveEvolution(): Promise<never> { throw new Error("unused"); },
+  };
+  const durable = new DurableEngine(directoryStore("unused"), undefined, clock, transport);
+  await assert.rejects(
+    () => durable.observeClock("run:expected"),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "unknown_world_outcome"
+      && error.failure.code === "invalid_engine_response"
+      && error.failure.retry_disposition === "reconcile",
+  );
 });
 
 test("TypeScript rejects malformed Resource integrity relationships", async () => {
@@ -3312,6 +3355,7 @@ test("TypeScript rejects malformed Resource integrity relationships", async () =
     { resource_id: contentId("5"), ...nonEmptyCandidate },
   );
   const invalid = [
+    { ...inline, annotations: {} },
     {
       ...emptyCandidate,
       manifest: {
@@ -3421,7 +3465,7 @@ process.stdin.on("end", () => {
         execution,
       }))});
   process.stdout.write(JSON.stringify({
-    engine_protocol: "cymule.engine/4",
+    engine_protocol: "cymule.engine/5",
     outcome: "success",
     request,
     response,
@@ -3751,7 +3795,7 @@ process.stdin.on("end", () => {
         response,
       }))});
   process.stdout.write(JSON.stringify({
-    engine_protocol: "cymule.engine/4",
+    engine_protocol: "cymule.engine/5",
     outcome: "success",
     request,
     response,
@@ -3770,7 +3814,9 @@ process.stdin.on("end", () => {
             { code: "fixture_cancelled" },
           )
         : DurableControlBuilder.releaseEffect(
-            `sha256:${"2".repeat(64)}`,
+            index === 2
+              ? `sha256:${"2".repeat(64)}`
+              : String((response as { boundary: { intent_id: string } }).boundary.intent_id),
             fixtureExecution(),
           );
       assert.deepEqual(
@@ -5028,7 +5074,7 @@ process.stdin.on("end", () => {
   const request = JSON.parse(input).request;
   const rawRequest = JSON.stringify(request).replace('"input":0', '"input":1e-10000');
   process.stdout.write(
-    '{"engine_protocol":"cymule.engine/4","outcome":"success","request":'
+    '{"engine_protocol":"cymule.engine/5","outcome":"success","request":'
       + rawRequest
       + ',"response":'
       + ${JSON.stringify(JSON.stringify(echoResponse))}

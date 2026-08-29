@@ -31,9 +31,10 @@ pub use cymule_durable::{
 };
 pub use cymule_durable_protocol::{
     CLOCK_OBSERVATION_VERSION, CONTINUATION_STATE_VERSION, ClockObservation, ClockObservationRef,
-    Continuation, ContinuationExecutionClaim, ContinuationStatus, ExecutionClaimRequest,
-    FrameState, WAIT_ACTIVATION_RECEIPT_VERSION, WAIT_ACTIVATION_VERSION, WaitActivation,
-    WaitActivationDisposition, WaitActivationReceipt, WaitActivationSource, WaitOwner,
+    ClockObservationResult, Continuation, ContinuationExecutionClaim, ContinuationStatus,
+    ExecutionClaimRequest, FrameState, WAIT_ACTIVATION_RECEIPT_VERSION, WAIT_ACTIVATION_VERSION,
+    WaitActivation, WaitActivationDisposition, WaitActivationReceipt, WaitActivationSource,
+    WaitOwner,
 };
 pub use cymule_evolution::{
     EVOLUTION_CONTROL_VERSION, EvolutionCommand, EvolutionCommit, EvolutionCurrent,

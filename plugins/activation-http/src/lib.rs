@@ -14,9 +14,9 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use cymule_durable::{
     DurableError, DurableResult, ParkedWaitView, SignalKeyPageOutcome, WaitDelivery,
-    WaitSourceCursor, WaitSourceDriver,
+    WaitSourceCursor, WaitSourceDelivery, WaitSourceDriver,
 };
-use cymule_durable_protocol::WaitActivationSource;
+use cymule_durable_protocol::{MAX_WAIT_DELIVERY_TARGETS, WaitActivationSource};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -131,7 +131,24 @@ struct StoredSignal {
     activation_id: String,
     key: String,
     value: Vec<u8>,
-    selected: Option<Vec<u8>>,
+    selected: Vec<u8>,
+}
+
+enum TargetSelection {
+    Selected(BTreeSet<String>),
+    Retained(BTreeSet<String>),
+}
+
+impl TargetSelection {
+    fn into_delivery(
+        self,
+        delivery: impl FnOnce(BTreeSet<String>) -> WaitDelivery,
+    ) -> WaitSourceDelivery {
+        match self {
+            Self::Selected(wait_ids) => WaitSourceDelivery::Selected(delivery(wait_ids)),
+            Self::Retained(wait_ids) => WaitSourceDelivery::Retained(delivery(wait_ids)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,53 +294,7 @@ async fn bounded_acknowledgement_recheck(
 }
 
 impl SqliteHttpSignalDriver {
-    fn retained_targets(
-        &self,
-        activation_id: &str,
-        selected: Option<Vec<u8>>,
-        source: &WaitActivationSource,
-        view: &mut dyn ParkedWaitView,
-        max_targets: usize,
-    ) -> DurableResult<Option<BTreeSet<String>>> {
-        if let Some(selected) = selected {
-            let targets = cymule_core::decode_json(&selected)?;
-            validate_targets(&targets, max_targets)?;
-            return Ok(Some(targets));
-        }
-        let selection = view.select(source, max_targets)?;
-        if selection.wait_ids.is_empty() {
-            return Ok(None);
-        }
-        let bytes = cymule_core::canonical_bytes(&selection.wait_ids)?;
-        self.connection
-            .execute(
-                "UPDATE cymule_http_signals SET selected_wait_ids = ?1
-                 WHERE activation_id = ?2 AND selected_wait_ids IS NULL
-                   AND acknowledged = 0",
-                params![bytes, activation_id],
-            )
-            .map_err(contention)?;
-        let retained: Vec<u8> = self
-            .connection
-            .query_row(
-                "SELECT selected_wait_ids FROM cymule_http_signals
-                 WHERE activation_id = ?1 AND acknowledged = 0",
-                [activation_id],
-                |row| row.get(0),
-            )
-            .map_err(contention)?;
-        let targets = cymule_core::decode_json(&retained)?;
-        validate_targets(&targets, max_targets)?;
-        Ok(Some(targets))
-    }
-}
-
-impl WaitSourceDriver for SqliteHttpSignalDriver {
-    fn receive(
-        &mut self,
-        view: &mut dyn ParkedWaitView,
-        max_targets: usize,
-    ) -> DurableResult<Option<WaitDelivery>> {
+    fn retained_delivery(&self) -> DurableResult<Option<WaitSourceDelivery>> {
         let retained: Option<StoredSignal> = self
             .connection
             .query_row(
@@ -343,28 +314,77 @@ impl WaitSourceDriver for SqliteHttpSignalDriver {
             )
             .optional()
             .map_err(contention)?;
-        if let Some(retained) = retained {
-            let source = WaitActivationSource::Signal { key: retained.key };
-            let wait_ids = self
-                .retained_targets(
-                    &retained.activation_id,
-                    retained.selected,
-                    &source,
-                    view,
-                    max_targets,
-                )?
-                .ok_or_else(|| {
-                    DurableError::Validation(format!(
-                        "retained HTTP activation {} lost its selected targets",
-                        retained.activation_id
-                    ))
-                })?;
-            return Ok(Some(WaitDelivery {
-                activation_id: retained.activation_id,
-                source,
-                wait_ids,
-                value: cymule_core::decode_json(&retained.value)?,
-            }));
+        let Some(retained) = retained else {
+            return Ok(None);
+        };
+        let wait_ids = cymule_core::decode_json(&retained.selected)?;
+        validate_retained_targets(&wait_ids)?;
+        Ok(Some(WaitSourceDelivery::Retained(WaitDelivery {
+            activation_id: retained.activation_id,
+            source: WaitActivationSource::Signal { key: retained.key },
+            wait_ids,
+            value: cymule_core::decode_json(&retained.value)?,
+        })))
+    }
+
+    fn select_new_targets(
+        &self,
+        activation_id: &str,
+        source: &WaitActivationSource,
+        view: &mut dyn ParkedWaitView,
+        max_targets: usize,
+    ) -> DurableResult<Option<TargetSelection>> {
+        let selection = view.select(source, max_targets)?;
+        if selection.wait_ids.is_empty() {
+            return Ok(None);
+        }
+        validate_new_targets(&selection.wait_ids, max_targets)?;
+        let bytes = cymule_core::canonical_bytes(&selection.wait_ids)?;
+        let selected_now = self
+            .connection
+            .execute(
+                "UPDATE cymule_http_signals SET selected_wait_ids = ?1
+                 WHERE activation_id = ?2 AND selected_wait_ids IS NULL
+                   AND acknowledged = 0",
+                params![bytes, activation_id],
+            )
+            .map_err(contention)?;
+        let retained: Vec<u8> = self
+            .connection
+            .query_row(
+                "SELECT selected_wait_ids FROM cymule_http_signals
+                 WHERE activation_id = ?1 AND acknowledged = 0",
+                [activation_id],
+                |row| row.get(0),
+            )
+            .map_err(contention)?;
+        let targets = cymule_core::decode_json(&retained)?;
+        validate_retained_targets(&targets)?;
+        if selected_now == 1 {
+            if targets != selection.wait_ids {
+                return Err(DurableError::Integrity {
+                    code: "http_selected_targets_changed".to_owned(),
+                    message: format!(
+                        "HTTP activation {activation_id} did not retain the target set selected by this receive call"
+                    ),
+                });
+            }
+            Ok(Some(TargetSelection::Selected(targets)))
+        } else {
+            Ok(Some(TargetSelection::Retained(targets)))
+        }
+    }
+}
+
+impl WaitSourceDriver for SqliteHttpSignalDriver {
+    fn receive(
+        &mut self,
+        view: &mut dyn ParkedWaitView,
+        max_targets: usize,
+    ) -> DurableResult<Option<WaitSourceDelivery>> {
+        validate_receive_bound(max_targets)?;
+        if let Some(retained) = self.retained_delivery()? {
+            return Ok(Some(retained));
         }
 
         for _ in 0..HTTP_SIGNAL_KEY_SCAN_LIMIT {
@@ -409,19 +429,20 @@ impl WaitSourceDriver for SqliteHttpSignalDriver {
                 continue;
             };
             let source = WaitActivationSource::Signal { key };
-            let wait_ids = self
-                .retained_targets(&activation_id, None, &source, view, max_targets)?
+            let targets = self
+                .select_new_targets(&activation_id, &source, view, max_targets)?
                 .ok_or_else(|| {
                     DurableError::Validation(format!(
                         "indexed HTTP activation {activation_id} has no selectable target"
                     ))
                 })?;
-            return Ok(Some(WaitDelivery {
+            let value = cymule_core::decode_json(&value)?;
+            return Ok(Some(targets.into_delivery(|wait_ids| WaitDelivery {
                 activation_id,
                 source,
                 wait_ids,
-                value: cymule_core::decode_json(&value)?,
-            }));
+                value,
+            })));
         }
         Ok(None)
     }
@@ -615,10 +636,29 @@ fn validate_identity(kind: &str, identity: &str) -> DurableResult<()> {
     cymule_core::validate_identity(&format!("HTTP {kind} identity"), identity).map_err(Into::into)
 }
 
-fn validate_targets(wait_ids: &BTreeSet<String>, max_targets: usize) -> DurableResult<()> {
-    if max_targets == 0 || wait_ids.is_empty() || wait_ids.len() > max_targets {
+fn validate_new_targets(wait_ids: &BTreeSet<String>, max_targets: usize) -> DurableResult<()> {
+    if wait_ids.is_empty() || wait_ids.len() > max_targets {
         return Err(DurableError::Validation(format!(
-            "retained HTTP delivery has {} targets outside requested bound {max_targets}",
+            "new HTTP delivery has {} targets outside requested bound {max_targets}",
+            wait_ids.len()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_receive_bound(max_targets: usize) -> DurableResult<()> {
+    if !(1..=MAX_WAIT_DELIVERY_TARGETS).contains(&max_targets) {
+        return Err(DurableError::Validation(format!(
+            "HTTP wait target bound must be within 1..={MAX_WAIT_DELIVERY_TARGETS}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_retained_targets(wait_ids: &BTreeSet<String>) -> DurableResult<()> {
+    if wait_ids.is_empty() || wait_ids.len() > MAX_WAIT_DELIVERY_TARGETS {
+        return Err(DurableError::Validation(format!(
+            "retained HTTP delivery has {} targets outside framework bound {MAX_WAIT_DELIVERY_TARGETS}",
             wait_ids.len()
         )));
     }

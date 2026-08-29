@@ -440,7 +440,7 @@ with open(__file__ + ".response", encoding="utf-8") as source:
     response = json.load(source)
 json.dump(
     {
-        "engine_protocol": "cymule.engine/4",
+        "engine_protocol": "cymule.engine/5",
         "outcome": "success",
         "request": request,
         "response": response,
@@ -499,7 +499,7 @@ else:
     raise SystemExit(2)
 json.dump(
     {
-        "engine_protocol": "cymule.engine/4",
+        "engine_protocol": "cymule.engine/5",
         "outcome": "success",
         "request": request,
         "response": response,
@@ -1144,7 +1144,7 @@ class EndToEndTest(unittest.TestCase):
             engine = _engine_with_envelope(
                 directory,
                 {
-                    "engine_protocol": "cymule.engine/4",
+                    "engine_protocol": "cymule.engine/5",
                     "outcome": "success",
                     "request": {"type": "seal", "candidate": {**candidate, "name": "forged"}},
                     "response": {"type": "sealed", "plan": sealed},
@@ -1160,7 +1160,7 @@ class EndToEndTest(unittest.TestCase):
             engine = _engine_with_envelope(
                 directory,
                 {
-                    "engine_protocol": "cymule.engine/4",
+                    "engine_protocol": "cymule.engine/5",
                     "outcome": "success",
                     "response": {"type": "sealed", "plan": sealed},
                 },
@@ -1189,10 +1189,16 @@ class EndToEndTest(unittest.TestCase):
             engine = _engine_with_envelope(
                 directory,
                 {
-                    "engine_protocol": "cymule.engine/4",
+                    "engine_protocol": "cymule.engine/5",
                     "outcome": "success",
                     "request": clock_echo,
-                    "response": {"type": "clock_observed", "observation": observation},
+                    "response": {
+                        "type": "clock_observed",
+                        "result": {
+                            "run_id": "run:forged",
+                            "observation": observation,
+                        },
+                    },
                 },
             )
             with self.assertRaises(EngineError) as rejected:
@@ -1270,7 +1276,7 @@ class EndToEndTest(unittest.TestCase):
                 engine = _engine_with_envelope(
                     directory,
                     {
-                        "engine_protocol": "cymule.engine/4",
+                        "engine_protocol": "cymule.engine/5",
                         "outcome": "success",
                         "request": request,
                         "response": response,
@@ -1297,7 +1303,7 @@ class EndToEndTest(unittest.TestCase):
             engine = _engine_with_envelope(
                 directory,
                 {
-                    "engine_protocol": "cymule.engine/4",
+                    "engine_protocol": "cymule.engine/5",
                     "outcome": "success",
                     "request": {
                         "type": "execute_durable",
@@ -1335,7 +1341,7 @@ class EndToEndTest(unittest.TestCase):
             engine = _engine_with_envelope(
                 directory,
                 {
-                    "engine_protocol": "cymule.engine/4",
+                    "engine_protocol": "cymule.engine/5",
                     "outcome": "success",
                     "request": {
                         "type": "execute_live_evolution",
@@ -1378,7 +1384,7 @@ class EndToEndTest(unittest.TestCase):
             engine = _engine_with_envelope(
                 directory,
                 {
-                    "engine_protocol": "cymule.engine/4",
+                    "engine_protocol": "cymule.engine/5",
                     "outcome": "success",
                     "request": {
                         "type": "verify_live_evolution_command",
@@ -1395,6 +1401,42 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(rejected.exception.failure["category"], "transport_failure")
             self.assertEqual(rejected.exception.failure["code"], "invalid_engine_response")
             self.assertNotIn("retry_disposition", rejected.exception.failure)
+
+    def test_python_durable_clock_rejects_a_typed_result_for_another_run(self) -> None:
+        clock = sqlite_clock(
+            "clock.sqlite", "clock:fake-run", _content_id("1")
+        )
+
+        class WrongRunClockTransport:
+            @staticmethod
+            def observe_clock(
+                _target: dict[str, object], _run_id: str
+            ) -> dict[str, object]:
+                return {
+                    "run_id": "run:foreign",
+                    "observation": {
+                        "clock_version": "cymule.clock-observation/2",
+                        "observation_id": _content_id("2"),
+                        "source_id": clock["source_id"],
+                        "source_generation": clock["source_generation"],
+                        "scope": _content_id("3"),
+                    },
+                }
+
+        durable = DurableEngine(
+            directory_store("unused"),
+            None,
+            clock,
+            WrongRunClockTransport(),  # type: ignore[arg-type]
+        )
+        with self.assertRaises(EngineError) as rejected:
+            durable.observe_clock("run:expected")
+        self.assertEqual(
+            rejected.exception.failure["category"], "unknown_world_outcome"
+        )
+        self.assertEqual(
+            rejected.exception.failure["retry_disposition"], "reconcile"
+        )
 
     def test_python_binds_every_verify_result_to_the_exact_wire_value(self) -> None:
         activation = WaitActivationBuilder.signal(
@@ -1832,6 +1874,7 @@ class EndToEndTest(unittest.TestCase):
         manifest_digest = _manifest_descriptor_id(_content_id("2"), 10, 1)
         inline = ResourceBuilder.text("value")
         invalid_candidates = [
+            {**inline, "annotations": {}},
             ResourceBuilder.external(
                 "directory",
                 "application/octet-stream",
@@ -1971,7 +2014,7 @@ class EndToEndTest(unittest.TestCase):
             "phase": "validate_request",
             "code": "invalid_request",
             "message": "request is invalid",
-            "contract": "cymule.engine/4",
+            "contract": "cymule.engine/5",
             "contract_side": "input",
             "path": "/request",
             "issues": [
@@ -2011,7 +2054,7 @@ class EndToEndTest(unittest.TestCase):
             with self.subTest(label=label), self.assertRaises(EngineError):
                 _validate_engine_envelope(
                     {
-                        "engine_protocol": "cymule.engine/4",
+                        "engine_protocol": "cymule.engine/5",
                         "outcome": "failure",
                         "error": malformed,
                     }
@@ -2020,7 +2063,7 @@ class EndToEndTest(unittest.TestCase):
         null_failure = copy.deepcopy(failure)
         null_failure["path"] = None
         envelope = {
-            "engine_protocol": "cymule.engine/4",
+            "engine_protocol": "cymule.engine/5",
             "outcome": "failure",
             "error": null_failure,
         }
@@ -2073,7 +2116,7 @@ class EndToEndTest(unittest.TestCase):
 
         def envelope(candidate: dict[str, object]) -> dict[str, object]:
             return {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "outcome": "failure",
                 "error": candidate,
             }
@@ -2167,7 +2210,7 @@ class EndToEndTest(unittest.TestCase):
         candidate = FlowBuilder("protocol_response", {}, {}).finish({"kind": "input"})
         sealed = {"plan_id": _content_id("1"), "candidate": candidate}
         legacy = {
-            "engine_protocol": "cymule.engine/3",
+            "engine_protocol": "cymule.engine/4",
             "outcome": "success",
             "request": {"type": "seal", "candidate": candidate},
             "response": {"type": "sealed", "plan": sealed},
@@ -2193,12 +2236,12 @@ class EndToEndTest(unittest.TestCase):
         malformed_successes = [
             legacy,
             {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "outcome": "success",
                 "response": {"type": "verified"},
             },
             {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "outcome": [],
                 "error": {},
             },
@@ -2677,7 +2720,7 @@ class EndToEndTest(unittest.TestCase):
                 "command": command,
             }
             envelope = {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "outcome": "success",
                 "request": request,
                 "response": {
@@ -3111,6 +3154,11 @@ class EndToEndTest(unittest.TestCase):
         concatenated["continuation_id"] = f"continuation:{run_id}"
         with self.assertRaises(EngineError):
             _validate_continuation_execution_claim(concatenated)
+        for field in ("continuation_attempt_id", "plan_id"):
+            malformed = copy.deepcopy(claim)
+            malformed[field] = f"{field}:not-content-addressed"
+            with self.assertRaises(EngineError):
+                _validate_continuation_execution_claim(malformed)
 
         class CapturingTransport:
             command: dict[str, object] | None = None
@@ -3275,7 +3323,7 @@ class EndToEndTest(unittest.TestCase):
         with self.assertRaises(EngineError) as legacy:
             _validate_engine_envelope(
                 {
-                    "engine_protocol": "cymule.engine/3",
+                    "engine_protocol": "cymule.engine/4",
                     "outcome": "success",
                     "request": {},
                     "response": {"type": "verified"},
@@ -3287,7 +3335,7 @@ class EndToEndTest(unittest.TestCase):
         with self.assertRaises(EngineError):
             _validate_engine_envelope(
                 {
-                    "engine_protocol": "cymule.engine/4",
+                    "engine_protocol": "cymule.engine/5",
                     "outcome": "failure",
                     "request": {},
                     "error": {},
@@ -3296,19 +3344,19 @@ class EndToEndTest(unittest.TestCase):
 
         invalid_responses = [
             {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "outcome": "success",
                 "request": {},
                 "response": {"type": "sealed", "plan": None},
             },
             {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "outcome": "success",
                 "request": {},
                 "response": {"type": "unknown"},
             },
             {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "outcome": "success",
                 "request": {},
                 "response": {
@@ -3317,7 +3365,7 @@ class EndToEndTest(unittest.TestCase):
                 },
             },
             {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "outcome": "success",
                 "request": {},
                 "response": {
@@ -3330,7 +3378,7 @@ class EndToEndTest(unittest.TestCase):
                 },
             },
             {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "outcome": "success",
                 "request": {},
                 "response": {
@@ -3350,7 +3398,7 @@ class EndToEndTest(unittest.TestCase):
                 },
             },
             {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "outcome": "success",
                 "request": {},
                 "response": {
@@ -3364,7 +3412,7 @@ class EndToEndTest(unittest.TestCase):
                 },
             },
             {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "outcome": "success",
                 "request": {},
                 "response": {
@@ -3410,7 +3458,7 @@ class EndToEndTest(unittest.TestCase):
         ):
             _validate_engine_envelope(
                 {
-                    "engine_protocol": "cymule.engine/4",
+                    "engine_protocol": "cymule.engine/5",
                     "outcome": "success",
                     "request": {},
                     "response": {"type": "execution_boundary", "execution": execution},
@@ -3736,7 +3784,7 @@ time.sleep(10)
                 _engine_with_envelope(
                     directory,
                     {
-                        "engine_protocol": "cymule.engine/4",
+                        "engine_protocol": "cymule.engine/5",
                         "outcome": "failure",
                         "error": remote_timeout,
                     },
@@ -4123,7 +4171,7 @@ time.sleep(30)
         for response in responses:
             _validate_engine_envelope(
                 {
-                    "engine_protocol": "cymule.engine/4",
+                    "engine_protocol": "cymule.engine/5",
                     "outcome": "success",
                     "request": {},
                     "response": {"type": "durable_executed", "response": response},
@@ -4136,12 +4184,23 @@ time.sleep(30)
                 self.assertEqual(
                     response["receipt"]["boundary"]["status"], "cancelled"
                 )
-            else:
+            elif response["boundary"]["status"] == "effect_not_applied":
                 self.assertEqual(
                     response["boundary"],
                     {
                         "status": "effect_not_applied",
                         "intent_id": _content_id("2"),
+                    },
+                )
+            else:
+                self.assertEqual(
+                    response["boundary"],
+                    {
+                        "status": "effect_unavailable",
+                        "intent_id": (
+                            "sha256:982a836f8dcb860b0eedabf0fd133bc2"
+                            "f966992526e2703316cba497f929e03b"
+                        ),
                     },
                 )
 

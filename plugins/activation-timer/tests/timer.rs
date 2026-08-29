@@ -140,8 +140,12 @@ fn due_timer_redelivers_until_acknowledged() {
         .expect("timer receives")
         .expect("delivery exists");
     assert_eq!(first.activation_id, "activation:one");
+    let first = first.into_delivery();
     assert_eq!(
-        driver.receive(&mut index(), 1).expect("redelivers"),
+        driver
+            .receive(&mut index(), 1)
+            .expect("redelivers")
+            .map(cymule_durable::WaitSourceDelivery::into_delivery),
         Some(first)
     );
     driver.acknowledge("activation:one").expect("acknowledges");
@@ -405,7 +409,8 @@ fn selected_delivery_survives_reopen_after_the_wait_leaves_the_index() {
     let selected = driver
         .receive(&mut index(), 1)
         .expect("timer receives")
-        .expect("delivery exists");
+        .expect("delivery exists")
+        .into_delivery();
     drop(driver);
 
     let mut unavailable = ObservedTimerView {
@@ -417,7 +422,8 @@ fn selected_delivery_survives_reopen_after_the_wait_leaves_the_index() {
     assert_eq!(
         reopened
             .receive(&mut unavailable, 1)
-            .expect("redelivery reads"),
+            .expect("redelivery reads")
+            .map(cymule_durable::WaitSourceDelivery::into_delivery),
         Some(selected),
         "acknowledgement loss must not trigger target reselection"
     );
@@ -448,7 +454,8 @@ fn retained_delivery_precedes_earlier_unselected_timer_source_errors() {
     let retained = driver
         .receive(&mut index(), 1)
         .expect("polls")
-        .expect("selects");
+        .expect("selects")
+        .into_delivery();
     driver
         .schedule(
             "activation:earlier",
@@ -474,7 +481,8 @@ fn retained_delivery_precedes_earlier_unselected_timer_source_errors() {
     assert_eq!(
         reopened
             .receive(&mut view, 1)
-            .expect("retained selection bypasses the view"),
+            .expect("retained selection bypasses the view")
+            .map(cymule_durable::WaitSourceDelivery::into_delivery),
         Some(retained)
     );
     assert!(view.selections.is_empty());

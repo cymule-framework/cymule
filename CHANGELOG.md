@@ -98,13 +98,16 @@ domains described in `docs/specification.md`.
 - Establish one machine-readable version-domain registry with canonical schema
   digests, source/package ownership, and a generated specification table. npm
   and crates staging bind the exact source SHA and registry digest;
-  finalization materializes `cymule.release-bom/2` as the exact-SHA release
-  asset. BOM/2 requires a `publication` member for every source package, records
+  finalization materializes `cymule.release-bom/3` as the exact-SHA release
+  asset. BOM/3 requires a `publication` member for every source package, records
+  distinct non-null private and rewritten-public source SHAs,
   fresh closed Cargo/npm registry evidence, preserves the Fulcio-signed npm
   publisher ref/SHA, and uses explicit `null` for Python/Go packages without
   publication authority. The current finalizer commit is intentionally outside
   the stable BOM bytes and is instead bound by the finalization stage, Artifact
   Attestation, and same-run control-plane receipt.
+  `scripts/release_contracts.py` now owns the four registered release-only
+  selectors used at those boundaries.
 - Split GitHub Release finalization into credential-free verification/freeze and
   one current-main `contents: write` controller over an authenticated notes/BOM
   bundle. Terminal npm, crates.io, and Release jobs now re-read the remote
@@ -197,7 +200,7 @@ domains described in `docs/specification.md`.
 - Admit historical provider work per exact operation pin, settle unavailable
   intents only through independent evidence, and replay committed replacement
   authorization before rechecking an obsolete safe point.
-- Advance Engine transport to `cymule.engine/4`, live-evolution control to
+- Advance Engine transport to `cymule.engine/5`, live-evolution control to
   `cymule.live-evolution-control/6`, persistence commands and receipts to `/4`,
   normalized state leaves to `/3`, and the process-provider wire to
   `cymule.evolution-plugin/3`. `cymule-profile-protocol::evolution` now owns the
@@ -233,12 +236,15 @@ domains described in `docs/specification.md`.
   derives solely from the retained source decision, target decision, and
   complete verified gate evaluation, making every transition identity
   independently recomputable.
-- Require every Engine v4 success to echo the complete inner request actually
+- Require every Engine v5 success to echo the complete inner request actually
   accepted by strict decoding beside its response. All SDKs compare the actual
   sent wire before response validation instead of recomputing Rust-derived
   Plan, Resource, Clock, durable-control, or rollout results. Failure carries no
-  request because it may precede decoding; the earlier response-only v4 success
-  shape fails closed.
+  request because it may precede decoding; every predecessor success shape
+  fails closed. Clock issuance now returns a typed Run-bound observation result
+  so SDKs never duplicate opaque scope derivation. RPC stdin is cancellation-
+  aware and capped at 64 MiB before JSON decoding, while empty Resource
+  annotations have only the omitted wire.
 - Separate coupled M3 claim execution into the typed
   `DurableVirtualControl::claim` facade. It is not an M4 control command,
   accepts no caller-authored M4 selector, and commits the occurrence selection,

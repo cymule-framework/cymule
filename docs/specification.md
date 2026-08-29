@@ -51,9 +51,9 @@ or migration meaning requires a new semantic specification version.
 
 ### 3.1 Engine failures
 
-Every CLI Engine request and response MUST use `cymule.engine/4`. Engine v3 is
+Every CLI Engine request and response MUST use `cymule.engine/5`. Engine v4 is
 unsupported: an implementation MUST reject it without trying a legacy decoder,
-projecting a v4 receipt into an older outcome, or probing another response
+projecting a v5 receipt into an older outcome, or probing another response
 shape. A semantic failure MUST be a successful transport response containing
 exactly one closed failure object with category, phase, stable code, and
 display-only message.
@@ -69,8 +69,8 @@ contain the complete inner `EngineRequest` value accepted by the strict decoder
 and the closed response produced by executing that value. It MUST NOT echo only
 an operation-specific projection. Failure contains exactly one structured error
 and MUST NOT contain a request because envelope or request decoding may have
-failed before a typed value existed. The former v4 response-only success shape
-is invalid without fallback. Success response tags and their fields are closed.
+failed before a typed value existed. Every predecessor success shape is invalid
+without fallback. Success response tags and their fields are closed.
 Each request variant admits exactly one success-response variant: the request
 and response discriminators form one closed pair and MUST NOT be validated as
 independent unions.
@@ -100,12 +100,20 @@ missing, malformed, or mismatched echo after a mutating request begins MUST be
 reported as `unknown_world_outcome` with `reconcile`; the same defect on a
 non-mutating request is an invalid response and grants no replay permission.
 
+`observe_clock` success MUST be the typed
+`ClockObservationResult { run_id, observation }`. Rust MUST construct that
+result only after the durable-protocol verifier proves that the opaque
+observation scope is derived for `run_id`. Every SDK MUST compare the returned
+Run and Clock source generation with the exact request before exposing the
+nested reference; SDKs MUST NOT implement the Clock-scope derivation.
+
 Typed Engine admission MUST also compare each strictly parsed raw request or
 response with its typed reserialization before executing or exposing it. If a
-raw object member is explicitly `null` but omission-only typed serialization
-removes that member, admission MUST fail recursively, including inside arrays.
-This check does not canonicalize other legal representations and does not reject
-a required nullable member whose typed serialization retains `null`. Request
+raw object member is present but typed serialization omits it, admission MUST
+fail recursively, including explicit `null` and empty defaulted collections
+inside arrays. This check does not canonicalize other legal representations and
+does not reject a required nullable member whose typed serialization retains
+`null`. Request
 failure is `validation/correct_and_retry` before operation I/O; malformed
 responses follow the read-only invalid-response versus mutating
 `unknown_world_outcome/reconcile` boundary above.
@@ -121,7 +129,14 @@ Contract projection MUST sort and deduplicate its issue set and retain at most
 99 concrete issues plus one deterministic omission summary. Before stdout
 serialization, the Engine MUST validate its own failure projection; an invalid
 internal projection becomes one closed `plugin_defect/never`
-`cymule.engine/4` envelope rather than an unversioned stderr-only failure.
+`cymule.engine/5` envelope rather than an unversioned stderr-only failure.
+
+The CLI RPC stdin boundary is Unix-only and MUST read through bounded polling
+that observes SIGINT/SIGTERM cancellation while a partial pipe remains open.
+The complete Engine envelope has one fixed 64 MiB raw limit; byte 64 MiB plus
+one MUST terminate before strict JSON decoding or typed allocation. This bound
+is wider than every currently admitted inner provider message plus envelope
+overhead and is not an operation-specific payload limit.
 
 SDKs MUST preserve the complete failure object. Process status and stderr are
 transport diagnostics only and MUST NOT become a parallel semantic error path.
@@ -781,10 +796,15 @@ Selection and eventual delivery belong to scheduler, signal, and clock
 substrates; those substrates propose activations and never mutate canonical
 state directly. M1 exposes a lazy revision-pinned `ParkedWaitView` over
 authenticated source and per-source active-wait maps, not a second durable
-queue. A source driver MUST return exact indexed targets within the
-framework bound and acknowledge transport delivery only after the activation
-CAS succeeds. Lost acknowledgement MUST redeliver the identical activation ID,
-source, targets, and value; admission then returns the retained decision.
+queue. A source driver MUST distinguish a target set selected through that
+view during the current receive call from a target set durably retained by an
+earlier receive. A new selection MUST satisfy both the framework target bound
+and the current caller's bound before it may become retained. A retained
+selection MUST remain within the framework bound, but a later caller's smaller
+bound MUST NOT reject, truncate, reselect, or otherwise reinterpret it. The
+driver acknowledges transport delivery only after the activation CAS succeeds.
+Lost acknowledgement MUST redeliver the identical activation ID, source,
+targets, and value; admission then returns the retained decision.
 Open MUST NOT rebuild or enumerate the complete parked-wait index. A fresh
 selection resolves only its bounded source page and exact target membership;
 committed transitions update only touched paths. A stale authenticated page
@@ -1324,25 +1344,40 @@ The official process realization pins `cymule.process-execution-binding/2` and
 `cymule.process-working-directory/2`. Those identities authenticate fixed
 private permissions and the complete captured closure. Materialization and
 reclamation MUST be descriptor-relative, iterative, no-symlink, and constant-FD
-across depth. Owner cancellation, deadline expiry, and child launch MUST
+across depth. Reclamation MUST scan each directory at most once, enforce fixed
+per-directory and per-occurrence entry ceilings before collection growth, and
+authenticate every child, ancestor, and final root name. A cleanup failure after
+a world-mutating invocation has started is an unknown-world outcome, never a
+same-request retry grant. Owner cancellation, deadline expiry, and child launch MUST
 linearize on one retained launch receipt: a pre-start cancellation performs no
 provider I/O, while a launch-committed mutating invocation is an unknown-world
-outcome until reconciled. Post-fork descriptor isolation MUST operate on one
-platform-authenticated inherited descriptor set without allocating, locking,
-running destructors, or reading a descriptor directory. Apple realizations MUST
-preallocate the bounded table in the parent, enumerate the exact inherited open
-set with one `proc_pidinfo(PROC_PIDLISTFDS)` kernel-wrapper call, preserve
-existing descriptor flags when adding close-on-exec, and reject malformed,
-duplicate, out-of-domain, truncated, or misaligned table results before plugin
-execution. The spawning parent thread MUST block all signals before watchdog
-fork and restore its exact prior mask on every returning path. Exactly one
-parent-side `setpgid` transition MUST establish watchdog group authority and
-publish the group gate while the parent remains masked, before the child can
-advance. The child MUST inherit the blocked mask, consume that fixed
-parent-established group gate, verify its PID equals its process group, and
-never race a second `setpgid`. Every failure before readiness MUST emit one
-fixed, allocation-free stage code that the parent maps to a stable typed
-diagnostic.
+outcome until reconciled. The official executor MUST reject every platform
+other than Linux and macOS before capturing or starting provider code unless
+that platform gains an equally exact launch and descriptor authority.
+
+The parent-liveness watchdog is the sole forked process on macOS. The spawning
+thread MUST block all signals before that fork and restore its exact prior mask
+on every returning path. Exactly one parent-side `setpgid` transition MUST
+establish watchdog group authority and publish the group gate while the parent
+remains masked. The watchdog MUST inherit that mask, consume the gate, verify
+its PID equals its process group, and never race a second `setpgid`. Its parent-
+sized table MUST enumerate the exact inherited open set with one
+`proc_pidinfo(PROC_PIDLISTFDS)` kernel-wrapper call, reject malformed,
+duplicate, out-of-domain, truncated, or misaligned results, and close every
+descriptor except its two private channels before readiness. Every failure
+before readiness MUST emit one fixed, allocation-free stage code.
+
+The macOS plugin image MUST use raw `posix_spawn` with
+`POSIX_SPAWN_CLOEXEC_DEFAULT`, `POSIX_SPAWN_START_SUSPENDED`, and
+`POSIX_SPAWN_SETPGROUP`, plus explicit cwd, argv, environment, and standard-I/O
+actions. The parent MUST verify the suspended child's watchdog group and let
+cancellation, deadline, and start compete on the retained launch receipt. It
+MUST kill and reap a cancellation or expiry winner without provider I/O and
+MUST send `SIGCONT` only after the start transition wins. There is no macOS
+plugin-side fork callback or inherited-descriptor scan. Linux MAY retain its
+syscall-only pre-exec boundary, but both plugin and watchdog paths MUST use
+`close_range` authority and must not allocate, lock, run destructors, or read a
+descriptor directory after fork.
 
 Changing a default MUST NOT rewrite an admitted occurrence. If its original
 binding is unavailable, the occurrence enters an explicit unavailable or
@@ -1621,7 +1656,7 @@ registry link.
 
 The cross-language mutation MUST be exactly
 `execute_live_evolution(target, evolution_id, command) -> EvolutionCommit`.
-After matching the Engine v4 request echo, an SDK MUST verify the commit's
+After matching the Engine v5 request echo, an SDK MUST verify the commit's
 `observed_revision`, required-nullable `committed_revision`, and semantic
 receipt against the exact partition and command it sent. The receipt MUST NOT
 contain a generic history identity, StateRoot manifest, CAS token, or physical

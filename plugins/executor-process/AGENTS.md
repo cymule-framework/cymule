@@ -11,8 +11,11 @@
 - Materialization and reclamation are iterative, descriptor-relative, and
   constant-FD across depth. Retain the parent/root descriptors and root inode,
   pass one component to `*at`, never fall back to `TempDir`/`remove_dir_all`,
-  and authenticate the final name. `/2` fixes root/directories at `0700`, the
-  sealed executable at `0500`, and working files at `0600` or `0700`.
+  and authenticate the final name. Cleanup scans each directory once, admits
+  no more than 65,536 entries in one directory or 65,538 across the complete
+  private occurrence, and fails before growing its name collection past either
+  ceiling. `/2` fixes root/directories at `0700`, the sealed executable at
+  `0500`, and working files at `0600` or `0700`.
 - Resolve the configured working-directory root once, open every resolved root
   component without following a symlink, and traverse descendants exclusively
   through retained directory descriptors plus `openat(O_NOFOLLOW)`. Metadata
@@ -42,17 +45,21 @@
   from checked bounds rather than saturating arithmetic.
 - The same absolute deadline and cancellation authority cover private closure
   materialization through child start and provider completion. Start the
-  process-group watchdog before `Command::spawn`; it holds the monotonic
-  deadline while the parent may be waiting on the child exec-error pipe. The
-  child checks that same deadline immediately before exec, so a child that
-  reaches the spawn boundary after watchdog expiry cannot invoke plugin code.
-  Materialize in bounded chunks and never perform an unbounded whole-file read
-  before enforcing the closure limit.
+  process-group watchdog before the platform launch. Linux retains the bounded
+  `Command::spawn` exec-error boundary and checks the shared launch receipt in
+  its syscall-only pre-exec callback. macOS uses raw `posix_spawn` to finish
+  exec while the image is suspended; only the parent may commit the shared
+  launch receipt, and only after that commit may it send `SIGCONT`. A child
+  that loses cancellation or deadline before that commit performs no provider
+  I/O. Materialize in bounded chunks and never perform an unbounded whole-file
+  read before enforcing the closure limit.
 - Process-group termination and both child reaps end provider authority under
   the invocation deadline. Explicit temporary-directory deletion is a later
   host reclamation phase: a cleanup failure turns an otherwise successful call
-  into `process_cleanup_failed`, while an existing provider error remains the
-  terminal result. Do not claim filesystem deletion is deadline-bounded.
+  into `process_cleanup_failed`; after a world-mutating Effect has started that
+  code is an Unknown-world outcome, never a retryable substrate failure. An
+  existing provider error remains the terminal result. Do not claim filesystem
+  deletion is deadline-bounded.
 - Validate the actual serialized outbound plugin or adjacent provider-protocol
   bytes against the shared strict JSON domain before materialization or spawn.
   An invalid request or provider attempt is deterministic only while still on
@@ -74,9 +81,12 @@
 - Conformance process fixtures must consume the complete request before writing
   a response. An early child exit that closes stdin is a failed dispatch, even
   if the child happened to emit response-shaped bytes; do not suppress EPIPE.
-- This crate is Unix-only and deliberately rejects other platforms at
-  construction. A process that deliberately escapes its process group requires
-  an OS/container/Wasm sandbox executor; this transport does not claim
+- This crate supports only Linux and macOS and deliberately rejects every other
+  target at construction. Linux requires atomic `close_range(CLOEXEC)`;
+  macOS requires `POSIX_SPAWN_CLOEXEC_DEFAULT`,
+  `POSIX_SPAWN_START_SUSPENDED`, `POSIX_SPAWN_SETPGROUP`, and the cwd file
+  action. A process that deliberately escapes its process group requires an
+  OS/container/Wasm sandbox executor; this transport does not claim
   untrusted-code isolation.
 - No process pool, Agent Loop, shell interpretation, sandbox policy, or network
   authority belongs in this crate. Higher-isolation executors are separate
@@ -97,37 +107,37 @@
   the occurrence process group; the token is lifecycle
   control and is excluded from the immutable execution-binding identity.
 - This crate's unsafe code is limited to the parent-created shared atomic
-  launch mapping and fixed signal transition, fork-only watchdog, and plugin
-  child pre-exec boundaries. Before plugin exec, Linux atomically marks every
-  descriptor above stderr close-on-exec with `close_range(CLOEXEC)`. Apple
-  allocates one bounded `proc_fdinfo` table in the parent; each forked branch
-  uses the Apple-exported `proc_pidinfo(PROC_PIDLISTFDS)` private libproc
-  wrapper's reviewed single `__proc_info` kernel call to enumerate its exact
-  inherited open descriptors. Plugin
-  pre-exec ORs `FD_CLOEXEC` into each actual descriptor above stderr and
-  preserves every other descriptor flag. The Apple descriptor domain is the
-  exact parent buffer capacity derived from the larger of the kernel process
-  maximum and current FD-table requirement, plus fixed truncation slack; a
-  later-lowered resource limit is not authority over an already-open high FD.
-  Other Unix targets retain their finite parent-prefetched hard-limit fallback.
-  The final executable inherits only stdin/stdout/stderr, while Rust's internal
-  exec-error pipe remains usable until exec. After the watchdog fork, that
-  branch closes the complete inherited descriptor table from the child-side
-  authority: Linux uses the atomic `close_range` syscall; Apple closes only the
-  exact enumerated descriptors other than its two retained channels; other
-  Unix targets use the validated finite hard limit, never the mutable soft
-  limit. Every post-fork table byte count, alignment, descriptor order/domain,
-  duplicate, and retained-channel check fails closed. These branches may use
-  only the reviewed descriptor-close/CLOEXEC, Apple `proc_pidinfo` syscall
-  wrapper, `clock_gettime`, `poll`, `pause`, `write`, `read`, `getpid`,
-  `getppid`, `getpgrp`, `kill`, and `_exit` operations; they must never return
-  to Rust, allocate, lock, run
-  destructors, read a descriptor directory, or call plugin code before exec,
-  `_exit`, or `SIGKILL`. The spawning parent thread saves its exact signal mask
+  launch mapping and fixed signal transition, the fork-only watchdog, Linux's
+  syscall-only plugin pre-exec boundary, and macOS raw `posix_spawn` ownership.
+  Before plugin exec, Linux atomically marks every descriptor above stderr
+  close-on-exec with `close_range(CLOEXEC)`. macOS creates the already-execed
+  plugin suspended with `POSIX_SPAWN_CLOEXEC_DEFAULT`; explicit file actions
+  own cwd and map exactly three pipes to stdin/stdout/stderr, so no plugin-side
+  Rust or signal handler can run between process creation and exec. Apple
+  allocates one bounded `proc_fdinfo` table in the parent only for the watchdog;
+  that forked branch uses the Apple-exported
+  `proc_pidinfo(PROC_PIDLISTFDS)` private libproc wrapper's reviewed single
+  `__proc_info` kernel call to enumerate its exact inherited open descriptors.
+  The Apple descriptor domain is the exact parent buffer capacity derived from
+  the larger of the kernel process maximum and current FD-table requirement,
+  plus fixed truncation slack; a later-lowered resource limit is not authority
+  over an already-open high FD. The final executable inherits only
+  stdin/stdout/stderr. After the watchdog fork, that branch closes the complete
+  inherited descriptor table from the child-side authority: Linux uses the
+  atomic `close_range` syscall and Apple closes only the exact enumerated
+  descriptors other than its two retained channels. Every post-fork table byte
+  count, alignment, descriptor order/domain, duplicate, and retained-channel
+  check fails closed. The watchdog branch may use only the reviewed
+  descriptor-close, Apple `proc_pidinfo` syscall wrapper, `clock_gettime`,
+  `poll`, `write`, `read`, `getpid`, `getppid`, `getpgrp`, `kill`, and `_exit`
+  operations; it must never return to Rust, allocate, lock, run destructors,
+  read a descriptor directory, or call plugin code before `_exit` or `SIGKILL`.
+  The spawning parent thread saves its exact signal mask
   and blocks every signal before `fork`; the watchdog inherits that closed mask
-  before any handler can run. The parent is the sole `setpgid` authority and
-  publishes one fixed group-established byte over the liveness socket while
-  signals remain blocked, then restores its prior mask on every returning path.
+  before any handler can run. The parent is the sole watchdog `setpgid`
+  authority and publishes one fixed group-established byte over the liveness
+  socket while signals remain blocked, then restores its prior mask on every
+  returning path.
   The child cannot enumerate descriptors or publish readiness
   until it consumes that byte and verifies `getpid() == getpgrp()`; it never
   races a second `setpgid`. Each pre-readiness failure publishes one fixed stage

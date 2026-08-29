@@ -62,7 +62,7 @@ and accepts the provider's actual terminal outcome without hashing reason or
 result values. The
 store, process plugin, and persistence-backed Clock are transport
 configuration; the Plan and durable command remain provider-neutral. `evolve`
-returns the Engine `/4` receipt containing the exact journal, full submitted
+returns the Engine `/5` receipt containing the exact journal, full submitted
 command, and closed outcome. Obtain an opaque issued Clock reference before
 every new driver claim:
 
@@ -109,7 +109,7 @@ its response authority.
 The SDK never seals or hashes a future Clock receipt locally. A deadline or
 cancellation after a mutating request begins returns a structured
 `unknown_world_outcome` that callers must reconcile.
-Every Engine `/4` success echoes the complete inner request; the client matches
+Every Engine `/5` success echoes the complete inner request; the client matches
 it to the exact serialized wire before exposing the typed payload.
 Process-backed targets always carry the complete closed `EngineProcessConfig`;
 there is no path-string overload, ambient environment, implicit working

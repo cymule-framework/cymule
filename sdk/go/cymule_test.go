@@ -995,10 +995,13 @@ func TestCliEngineRejectsNaturalExitWithLingeringProcessGroup(t *testing.T) {
 			name: "mutation",
 			response: map[string]any{
 				"type": "clock_observed",
-				"observation": ClockObservationRef{
-					ClockVersion: "cymule.clock-observation/2", ObservationID: fixedContentID("7"),
-					SourceID: clockTarget.SourceID, SourceGeneration: clockTarget.SourceGeneration,
-					Scope: "run:lingering",
+				"result": ClockObservationResult{
+					RunID: "run:lingering",
+					Observation: ClockObservationRef{
+						ClockVersion: "cymule.clock-observation/2", ObservationID: fixedContentID("7"),
+						SourceID: clockTarget.SourceID, SourceGeneration: clockTarget.SourceGeneration,
+						Scope: "run:lingering",
+					},
 				},
 			},
 			invoke: func(engine CliEngine) error {
@@ -1187,11 +1190,14 @@ func TestEngineSuccessRequiresOperationPayloads(t *testing.T) {
 		},
 		{
 			name: "malformed Clock observation", response: map[string]any{
-				"type": "clock_observed", "observation": map[string]any{
-					"clock_version":  "cymule.clock-observation/1",
-					"observation_id": "sha256:" + strings.Repeat("1", 64),
-					"source_id":      "clock:test", "source_generation": "sha256:" + strings.Repeat("2", 64),
-					"scope": "run:test",
+				"type": "clock_observed", "result": map[string]any{
+					"run_id": "run:test",
+					"observation": map[string]any{
+						"clock_version":  "cymule.clock-observation/1",
+						"observation_id": "sha256:" + strings.Repeat("1", 64),
+						"source_id":      "clock:test", "source_generation": "sha256:" + strings.Repeat("2", 64),
+						"scope": "run:test",
+					},
 				},
 			},
 			invoke: func(engine CliEngine) error {
@@ -1222,6 +1228,27 @@ func TestEngineSuccessRequiresOperationPayloads(t *testing.T) {
 	}
 }
 
+func TestDurableClockRejectsTypedResultForAnotherRun(t *testing.T) {
+	clock := SQLiteClock("unused", "clock:fake-run", fixedContentID("1"))
+	response := map[string]any{
+		"type": "clock_observed",
+		"result": ClockObservationResult{
+			RunID: "run:foreign",
+			Observation: ClockObservationRef{
+				ClockVersion: "cymule.clock-observation/2", ObservationID: fixedContentID("2"),
+				SourceID: clock.SourceID, SourceGeneration: clock.SourceGeneration,
+				Scope: fixedContentID("3"),
+			},
+		},
+	}
+	durable := DurableEngine{
+		Store: DirectoryStore("unused"), Clock: &clock,
+		Transport: engineWithSuccess(t, response),
+	}
+	_, err := durable.ObserveClock("run:expected")
+	requireFailure(t, err, "unknown_world_outcome", "invalid_engine_response", "reconcile")
+}
+
 func TestEngineSuccessRequiresExactRequestEcho(t *testing.T) {
 	sealResponse := map[string]any{"type": "sealed", "plan": fixedPlan()}
 	wrongSealRequest := map[string]any{
@@ -1235,10 +1262,13 @@ func TestEngineSuccessRequiresExactRequestEcho(t *testing.T) {
 	clockTarget := SQLiteClock("unused", "clock:test", fixedContentID("2"))
 	clockResponse := map[string]any{
 		"type": "clock_observed",
-		"observation": ClockObservationRef{
-			ClockVersion: "cymule.clock-observation/2", ObservationID: fixedContentID("1"),
-			SourceID: clockTarget.SourceID, SourceGeneration: clockTarget.SourceGeneration,
-			Scope: fixedContentID("3"),
+		"result": ClockObservationResult{
+			RunID: "run:test",
+			Observation: ClockObservationRef{
+				ClockVersion: "cymule.clock-observation/2", ObservationID: fixedContentID("1"),
+				SourceID: clockTarget.SourceID, SourceGeneration: clockTarget.SourceGeneration,
+				Scope: fixedContentID("3"),
+			},
 		},
 	}
 	wrongClockRequest := map[string]any{
@@ -3050,6 +3080,12 @@ func TestResourceHandleValidationIsClosedAndComplete(t *testing.T) {
 			},
 		},
 		{
+			name: "explicit empty annotations",
+			mutate: func(resource map[string]any) {
+				resource["annotations"] = map[string]any{}
+			},
+		},
+		{
 			name: "cross-variant integrity member",
 			mutate: func(resource map[string]any) {
 				resource["integrity"].(map[string]any)["digest"] = fixedContentID("2")
@@ -3149,7 +3185,7 @@ func TestEngineJSONRejectsInvalidUTF8AndUnpairedSurrogates(t *testing.T) {
 		t.Fatal("strict JSON accepted invalid UTF-8")
 	}
 	mutatingRequest := map[string]any{"type": "observe_clock"}
-	malformed := []byte(`{"outcome":"failure","engine_protocol":"cymule.engine/4","error":{"category":"transport_failure","phase":"transport","code":"bad","message":"\ud800"}}`)
+	malformed := []byte(`{"outcome":"failure","engine_protocol":"cymule.engine/5","error":{"category":"transport_failure","phase":"transport","code":"bad","message":"\ud800"}}`)
 	var response map[string]any
 	err := decodeEngineResponseForRequest(malformed, &response, mutatingRequest)
 	requireFailure(t, err, "unknown_world_outcome", "invalid_engine_response", "reconcile")
@@ -3177,6 +3213,28 @@ func TestEngineJSONRejectsInvalidUTF8AndUnpairedSurrogates(t *testing.T) {
 	cyclic["self"] = cyclic
 	if _, err := StartDurableRun("run:test", fixedCandidate(), cyclic, fixtureExecution()); err == nil {
 		t.Fatal("durable input accepted a cyclic non-JSON value")
+	}
+}
+
+func TestCanonicalJSONSizeMatchesRustJCSWithoutHTMLEscaping(t *testing.T) {
+	raw := json.RawMessage("{\"<\":\"<&>\u2028\",\"n\":0.000001,\"m\":1e-7}")
+	size, err := normalizedJSONSize(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size != 36 {
+		t.Fatalf("unexpected RFC 8785 byte size: got %d want 36", size)
+	}
+	decoded, err := decodeUniqueJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	htmlEscaped, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(htmlEscaped) <= size {
+		t.Fatalf("test fixture did not distinguish HTML-escaped JSON: %q", htmlEscaped)
 	}
 }
 
@@ -3508,11 +3566,11 @@ func TestEngineProcessTargetRequiresCompleteClosedConfiguration(t *testing.T) {
 
 func TestEngineEnvelopeRequiresExclusiveOutcomePayload(t *testing.T) {
 	invalid := []string{
-		`{"engine_protocol":"cymule.engine/4","outcome":"success","response":{"type":"verified"}}`,
-		`{"engine_protocol":"cymule.engine/4","outcome":"success","response":{"type":"verified"},"error":{"category":"validation","phase":"transport","code":"invalid","message":"invalid"}}`,
-		`{"engine_protocol":"cymule.engine/4","outcome":"failure","response":{"type":"verified"},"error":{"category":"validation","phase":"transport","code":"invalid","message":"invalid"}}`,
-		`{"engine_protocol":"cymule.engine/4","outcome":"failure","request":{},"error":{"category":"validation","phase":"transport","code":"invalid","message":"invalid"}}`,
-		`{"engine_protocol":"cymule.engine/4","outcome":"success"}`,
+		`{"engine_protocol":"cymule.engine/5","outcome":"success","response":{"type":"verified"}}`,
+		`{"engine_protocol":"cymule.engine/5","outcome":"success","response":{"type":"verified"},"error":{"category":"validation","phase":"transport","code":"invalid","message":"invalid"}}`,
+		`{"engine_protocol":"cymule.engine/5","outcome":"failure","response":{"type":"verified"},"error":{"category":"validation","phase":"transport","code":"invalid","message":"invalid"}}`,
+		`{"engine_protocol":"cymule.engine/5","outcome":"failure","request":{},"error":{"category":"validation","phase":"transport","code":"invalid","message":"invalid"}}`,
+		`{"engine_protocol":"cymule.engine/5","outcome":"success"}`,
 	}
 	for _, input := range invalid {
 		var response struct {
@@ -3592,20 +3650,20 @@ func TestEngineRejectsProtocolV3(t *testing.T) {
 		Type string `json:"type"`
 	}
 	err := decodeEngineResponse(
-		[]byte(`{"engine_protocol":"cymule.engine/3","outcome":"success","request":{},"response":{"type":"verified"}}`),
+		[]byte(`{"engine_protocol":"cymule.engine/4","outcome":"success","request":{},"response":{"type":"verified"}}`),
 		&response,
 	)
 	var failure EngineFailure
 	if !errors.As(err, &failure) || failure.Category != "contract_violation" ||
 		failure.Code != "unsupported_engine_protocol" || failure.Contract != EngineProtocolVersion {
-		t.Fatalf("expected strict Engine v3 rejection, got %#v (%v)", failure, err)
+		t.Fatalf("expected strict Engine v4 rejection, got %#v (%v)", failure, err)
 	}
 }
 
 func TestOldProtocolAfterMutationBeginsIsUnknown(t *testing.T) {
 	mutatingRequest := map[string]any{"type": "observe_clock"}
 	input := mustRawJSON(t, map[string]any{
-		"engine_protocol": "cymule.engine/3", "outcome": "success",
+		"engine_protocol": "cymule.engine/4", "outcome": "success",
 		"request": mutatingRequest, "response": map[string]any{"type": "verified"},
 	})
 	var response map[string]any
@@ -3614,7 +3672,7 @@ func TestOldProtocolAfterMutationBeginsIsUnknown(t *testing.T) {
 
 	readRequest := map[string]any{"type": "seal"}
 	input = mustRawJSON(t, map[string]any{
-		"engine_protocol": "cymule.engine/3", "outcome": "success",
+		"engine_protocol": "cymule.engine/4", "outcome": "success",
 		"request": readRequest, "response": map[string]any{"type": "verified"},
 	})
 	err = decodeEngineResponseForRequest(input, &response, readRequest)
@@ -4417,7 +4475,7 @@ func TestSharedTerminalDurableBoundariesAreTyped(t *testing.T) {
 	if err := json.Unmarshal(fixtureBytes, &responses); err != nil {
 		t.Fatal(err)
 	}
-	if len(responses) != 3 {
+	if len(responses) != 4 {
 		t.Fatalf("unexpected terminal response count: %d", len(responses))
 	}
 	for _, response := range responses {
@@ -4430,6 +4488,12 @@ func TestSharedTerminalDurableBoundariesAreTyped(t *testing.T) {
 		effectNotApplied["status"] != "effect_not_applied" ||
 		effectNotApplied["intent_id"] != fixedContentID("2") {
 		t.Fatalf("effect-not-applied boundary is not exact: %#v %v", effectNotApplied, err)
+	}
+	var effectUnavailable map[string]any
+	if err := json.Unmarshal(responses[3].Boundary, &effectUnavailable); err != nil ||
+		effectUnavailable["status"] != "effect_unavailable" ||
+		effectUnavailable["intent_id"] != "sha256:982a836f8dcb860b0eedabf0fd133bc2f966992526e2703316cba497f929e03b" {
+		t.Fatalf("effect-unavailable boundary is not exact: %#v %v", effectUnavailable, err)
 	}
 }
 

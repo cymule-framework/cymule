@@ -28,10 +28,15 @@ but every success is confirmed by durable acknowledgement readback and cannot
 be lost if acknowledgement races waiter registration or is committed by an
 independently opened driver.
 
-The durable driver redelivers retained selections first. New selection pages
-the provider-neutral parked signal-key index with a fair cursor and uses the
-SQLite `(acknowledged, signal_key, activation_id)` index, so an arbitrary prefix
-of unrelated pending requests cannot starve a later matching activation.
+The durable driver redelivers retained selections first. A new target set is
+checked against the bound of the exact call that selected it before SQLite can
+retain it. After that point the complete retained set is the selection
+authority: reopening with a smaller caller bound neither rejects, truncates,
+nor reselects it, while the framework-wide target maximum still applies. New
+selection pages the provider-neutral parked signal-key index with a fair cursor
+and uses the SQLite `(acknowledged, signal_key, activation_id)` index, so an
+arbitrary prefix of unrelated pending requests cannot starve a later matching
+activation.
 
 The spool has one physical generation,
 `cymule.activation-http-spool/1`. A completely empty database is initialized

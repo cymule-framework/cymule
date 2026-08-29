@@ -679,6 +679,56 @@ fn prior_markers_are_rejected_before_any_io_mutation() {
 }
 
 #[test]
+fn exact_pre_state_root_fixture_is_rejected_without_mutation() {
+    let directory = test_directory();
+    fs::create_dir_all(&directory).expect("legacy fixture root creates");
+    let repository_payload =
+        include_bytes!("../../../tests/fixtures/directory-store-66a432c-empty-state.json");
+    let writer_payload = repository_payload
+        .strip_suffix(b"\n")
+        .expect("repository fixture carries one non-writer trailing newline");
+    let metadata: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/directory-store-66a432c-empty-state.metadata.json"
+    ))
+    .expect("legacy fixture metadata decodes");
+    assert_eq!(
+        metadata["source_commit"],
+        "66a432c45c81a74dfa3b030783a75ad7df5b772e"
+    );
+    assert_eq!(
+        metadata["payload_sha256"],
+        cymule_core::sha256_bytes(writer_payload)
+    );
+    let legacy_state = directory.join("state.json");
+    fs::write(&legacy_state, writer_payload).expect("exact legacy writer bytes install");
+    let before = root_entry_names(&directory);
+
+    assert_unsupported(
+        DirectoryStore::open_read_only(&directory)
+            .expect_err("read-only open rejects the exact predecessor payload"),
+    );
+    assert_eq!(root_entry_names(&directory), before);
+    assert_eq!(
+        fs::read(&legacy_state).expect("legacy payload rereads"),
+        writer_payload
+    );
+
+    assert_unsupported(
+        DirectoryStore::open(&directory)
+            .expect_err("writable open rejects the exact predecessor payload"),
+    );
+    assert_eq!(root_entry_names(&directory), before);
+    assert_eq!(
+        fs::read(&legacy_state).expect("legacy payload remains exact"),
+        writer_payload
+    );
+    assert!(!directory.join("store-meta.json").exists());
+    assert!(!directory.join("cymule.directory-store-5").exists());
+    assert!(!directory.join("state-root-objects").exists());
+    fs::remove_dir_all(directory).expect("legacy fixture removes");
+}
+
+#[test]
 fn noncanonical_current_marker_is_an_exact_unsupported_generation() {
     let directory = test_directory();
     DirectoryStore::open(&directory).expect("current layout initializes");

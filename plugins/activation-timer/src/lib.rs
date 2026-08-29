@@ -4,8 +4,10 @@ use std::path::Path;
 use std::time::Duration;
 
 pub use cymule_clock_system::{SystemWallClock as SystemClock, WallClock as Clock};
-use cymule_durable::{DurableError, DurableResult, ParkedWaitView, WaitDelivery, WaitSourceDriver};
-use cymule_durable_protocol::WaitActivationSource;
+use cymule_durable::{
+    DurableError, DurableResult, ParkedWaitView, WaitDelivery, WaitSourceDelivery, WaitSourceDriver,
+};
+use cymule_durable_protocol::{MAX_WAIT_DELIVERY_TARGETS, WaitActivationSource};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde_json::Value;
 
@@ -233,7 +235,7 @@ impl<C: Clock> SqliteTimerDriver<C> {
         view: &mut dyn ParkedWaitView,
         max_targets: usize,
         now: i64,
-    ) -> DurableResult<Option<WaitDelivery>> {
+    ) -> DurableResult<Option<WaitSourceDelivery>> {
         let pending = self.pending_timer_page(now)?;
         if pending.is_empty() {
             self.scan_cursor = None;
@@ -253,8 +255,10 @@ impl<C: Clock> SqliteTimerDriver<C> {
                 self.scan_cursor = Some(cursor);
                 continue;
             }
+            validate_new_targets(&selection.wait_ids, max_targets)?;
             let target_bytes = cymule_core::canonical_bytes(&selection.wait_ids)?;
-            self.connection
+            let selected_now = self
+                .connection
                 .execute(
                     "UPDATE cymule_timers SET selected_wait_ids = ?1
                      WHERE activation_id = ?2 AND selected_wait_ids IS NULL
@@ -277,15 +281,28 @@ impl<C: Clock> SqliteTimerDriver<C> {
                 continue;
             };
             let wait_ids = cymule_core::decode_json(&retained)?;
-            validate_retained_targets(&wait_ids, max_targets)?;
+            validate_retained_targets(&wait_ids)?;
             let value = cymule_core::decode_json(&value)?;
             self.scan_cursor = Some(cursor);
-            return Ok(Some(WaitDelivery {
+            let delivery = WaitDelivery {
                 activation_id: timer.activation_id,
                 source,
                 wait_ids,
                 value,
-            }));
+            };
+            if selected_now == 1 {
+                if delivery.wait_ids != selection.wait_ids {
+                    return Err(DurableError::Integrity {
+                        code: "timer_selected_targets_changed".to_owned(),
+                        message: format!(
+                            "timer activation {} did not retain the target set selected by this receive call",
+                            delivery.activation_id
+                        ),
+                    });
+                }
+                return Ok(Some(WaitSourceDelivery::Selected(delivery)));
+            }
+            return Ok(Some(WaitSourceDelivery::Retained(delivery)));
         }
         if terminal_page {
             self.scan_cursor = None;
@@ -308,7 +325,8 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
         &mut self,
         view: &mut dyn ParkedWaitView,
         max_targets: usize,
-    ) -> DurableResult<Option<WaitDelivery>> {
+    ) -> DurableResult<Option<WaitSourceDelivery>> {
+        validate_receive_bound(max_targets)?;
         let now =
             i64::try_from(self.clock.now_unix_ms()?).map_err(|error| DurableError::Substrate {
                 code: "timer_clock_value_out_of_range".to_owned(),
@@ -336,15 +354,15 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
             .map_err(contention)?;
         if let Some(retained) = retained {
             let wait_ids = cymule_core::decode_json(&retained.wait_ids)?;
-            validate_retained_targets(&wait_ids, max_targets)?;
-            return Ok(Some(WaitDelivery {
+            validate_retained_targets(&wait_ids)?;
+            return Ok(Some(WaitSourceDelivery::Retained(WaitDelivery {
                 activation_id: retained.activation_id,
                 source: WaitActivationSource::Timer {
                     timer_id: retained.timer_id,
                 },
                 wait_ids,
                 value: cymule_core::decode_json(&retained.value)?,
-            }));
+            })));
         }
         self.receive_fresh_due(view, max_targets, now)
     }
@@ -388,13 +406,32 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
     }
 }
 
-fn validate_retained_targets(
+fn validate_new_targets(
     wait_ids: &std::collections::BTreeSet<String>,
     max_targets: usize,
 ) -> DurableResult<()> {
-    if max_targets == 0 || wait_ids.is_empty() || wait_ids.len() > max_targets {
+    if wait_ids.is_empty() || wait_ids.len() > max_targets {
         return Err(DurableError::Validation(format!(
-            "retained timer delivery has {} targets outside requested bound {max_targets}",
+            "new timer delivery has {} targets outside requested bound {max_targets}",
+            wait_ids.len()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_receive_bound(max_targets: usize) -> DurableResult<()> {
+    if !(1..=MAX_WAIT_DELIVERY_TARGETS).contains(&max_targets) {
+        return Err(DurableError::Validation(format!(
+            "timer wait target bound must be within 1..={MAX_WAIT_DELIVERY_TARGETS}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_retained_targets(wait_ids: &std::collections::BTreeSet<String>) -> DurableResult<()> {
+    if wait_ids.is_empty() || wait_ids.len() > MAX_WAIT_DELIVERY_TARGETS {
+        return Err(DurableError::Validation(format!(
+            "retained timer delivery has {} targets outside framework bound {MAX_WAIT_DELIVERY_TARGETS}",
             wait_ids.len()
         )));
     }

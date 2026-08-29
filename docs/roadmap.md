@@ -161,7 +161,7 @@ Status: implemented for one provider-neutral durable domain.
   implemented.
 - `cymule.live-evolution-control/6` exposes the complete template-scoped
   authority through Rust, TypeScript, Python, and Go without client-side
-  sequencing; Engine v4 returns one `EvolutionCommit` whose physical revisions
+  sequencing; Engine v5 returns one `EvolutionCommit` whose physical revisions
   remain outside the stable semantic receipt.
 
 ## M5 - Isolation and federation

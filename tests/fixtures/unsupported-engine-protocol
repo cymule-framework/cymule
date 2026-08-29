@@ -6,7 +6,7 @@ import sys
 request = json.load(sys.stdin)["request"]
 json.dump(
     {
-        "engine_protocol": "cymule.engine/3",
+        "engine_protocol": "cymule.engine/4",
         "outcome": "success",
         "legacy_extension": True,
         "request": request,

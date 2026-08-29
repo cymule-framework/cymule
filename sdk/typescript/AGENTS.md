@@ -117,13 +117,13 @@
   A malformed or wrong outer type or inner live-evolution result after a
   mutation begins is an unknown-world outcome requiring reconciliation; the
   same mismatch on a read-only request remains an invalid Engine response.
-- Engine `/4` live execution returns an `EvolutionCommit` with observed
+- Engine `/5` live execution returns an `EvolutionCommit` with observed
   revision, required-nullable committed revision, and one complete persistence
   receipt. Accept it only when the receipt's evolution identity and full
   semantic command equal the actual serialized request and the closed outcome
-  and mutation set validate; partial result-field correlation and Engine `/3`
+  and mutation set validate; partial result-field correlation and Engine `/4`
   are unsupported.
-- Every Engine `/4` success envelope echoes the complete inner request. Compare
+- Every Engine `/5` success envelope echoes the complete inner request. Compare
   that echo to the strict actual sent-wire snapshot before inspecting the typed
   payload, for every request variant. Failure envelopes never carry a request.
   This echo is the cross-language correlation authority for Rust-derived values

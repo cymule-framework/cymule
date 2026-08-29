@@ -5,6 +5,8 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
+#[cfg(unix)]
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -15,7 +17,9 @@ use cymule_durable::{
     DurableCommand, DurableProviderControl, DurableResponse, DurableRuntimeControl, DurableStore,
     DurableStoreControl, GcReceipt, StoreBatch, StoreCommit, StoreHead, StoreStats,
 };
-use cymule_durable_protocol::{ClockObservationRef, WaitActivation, execution_clock_scope};
+use cymule_durable_protocol::{
+    ClockObservationRef, ClockObservationResult, WaitActivation, execution_clock_scope,
+};
 use cymule_evolution::{
     EvolutionCommand, EvolutionCommit, EvolutionError, EvolutionPersistenceCommand,
     EvolutionPluginMigrationRequest, EvolutionPluginRequest, EvolutionPluginRequestEnvelope,
@@ -39,6 +43,10 @@ use cymule_runtime::{
 use cymule_store_sqlite::SqliteStore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+const MAX_ENGINE_RPC_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+const ENGINE_RPC_READ_POLL_MILLIS: u16 = 25;
+const ENGINE_RPC_READ_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -92,7 +100,7 @@ enum EngineResponse {
     SealedResource { resource: ResourceHandle },
     VerifiedWaitActivation { activation: WaitActivation },
     VerifiedDurableCommand { command: DurableCommand },
-    ClockObserved { observation: ClockObservationRef },
+    ClockObserved { result: ClockObservationResult },
     VerifiedEvolutionCommand { command: EvolutionCommand },
     VerifiedLiveEvolutionCommand { command: LiveEvolutionCommand },
     ExecutionBoundary { execution: ExecutionOutcome },
@@ -171,13 +179,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn rpc() -> Result<(), Box<dyn std::error::Error>> {
     let cancellation = install_cancellation()?;
-    let mut input = Vec::new();
-    let response = match io::stdin().read_to_end(&mut input) {
-        Ok(_) => decode_and_execute_request_with_cancellation(&input, Some(&cancellation)),
-        Err(error) => Err(EngineFailure::transport(
-            "engine_read_failed",
-            error.to_string(),
-        )),
+    let response = match read_rpc_input(&cancellation) {
+        Ok(input) => decode_and_execute_request_with_cancellation(&input, Some(&cancellation)),
+        Err(error) => Err(error),
     };
     let response = match response {
         Ok((request, response)) => EngineResponseEnvelope::success(request, response),
@@ -186,6 +190,119 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     print_json(&response)
+}
+
+#[cfg(unix)]
+fn read_rpc_input(cancellation: &ProcessCancellation) -> Result<Vec<u8>, EngineFailure> {
+    let stdin = io::stdin();
+    read_rpc_input_from_descriptor(&stdin, cancellation)
+}
+
+#[cfg(unix)]
+fn read_rpc_input_from_descriptor<F>(
+    descriptor: &F,
+    cancellation: &ProcessCancellation,
+) -> Result<Vec<u8>, EngineFailure>
+where
+    F: AsFd,
+{
+    let mut input = Vec::with_capacity(ENGINE_RPC_READ_CHUNK_BYTES);
+    let mut chunk = vec![0_u8; ENGINE_RPC_READ_CHUNK_BYTES].into_boxed_slice();
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(rpc_read_cancelled());
+        }
+        let mut readiness = [nix::poll::PollFd::new(
+            descriptor.as_fd(),
+            nix::poll::PollFlags::POLLIN,
+        )];
+        let result = match nix::poll::poll(&mut readiness, ENGINE_RPC_READ_POLL_MILLIS) {
+            Ok(result) => result,
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => {
+                return Err(EngineFailure::transport(
+                    "engine_read_failed",
+                    error.to_string(),
+                ));
+            }
+        };
+        if result == 0 {
+            continue;
+        }
+        let events = readiness[0].revents().ok_or_else(|| {
+            EngineFailure::transport(
+                "engine_read_failed",
+                "Engine stdin returned unknown readiness flags",
+            )
+        })?;
+        if events.contains(nix::poll::PollFlags::POLLNVAL) {
+            return Err(EngineFailure::transport(
+                "engine_read_failed",
+                "Engine stdin descriptor became invalid",
+            ));
+        }
+        let remaining = MAX_ENGINE_RPC_REQUEST_BYTES
+            .checked_sub(input.len())
+            .ok_or_else(rpc_read_invariant_failure)?;
+        let remaining_with_overflow = remaining
+            .checked_add(1)
+            .ok_or_else(rpc_read_invariant_failure)?;
+        let read_limit = chunk.len().min(remaining_with_overflow);
+        let count = match nix::unistd::read(descriptor, &mut chunk[..read_limit]) {
+            Ok(count) => count,
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => {
+                return Err(EngineFailure::transport(
+                    "engine_read_failed",
+                    error.to_string(),
+                ));
+            }
+        };
+        if count == 0 {
+            return Ok(input);
+        }
+        if count > remaining {
+            return Err(rpc_request_too_large());
+        }
+        input.extend_from_slice(&chunk[..count]);
+    }
+}
+
+#[cfg(not(unix))]
+fn read_rpc_input(_cancellation: &ProcessCancellation) -> Result<Vec<u8>, EngineFailure> {
+    Err(EngineFailure::transport(
+        "engine_rpc_platform_unsupported",
+        "Engine RPC process cancellation requires Unix",
+    ))
+}
+
+fn rpc_read_cancelled() -> EngineFailure {
+    let mut failure = EngineFailure::new(
+        EngineFailureCategory::Cancelled,
+        EnginePhase::Transport,
+        "engine_read_cancelled",
+        "Engine request input was cancelled before decoding",
+    );
+    failure.retry_disposition = Some(EngineRetryDisposition::Never);
+    failure
+}
+
+fn rpc_request_too_large() -> EngineFailure {
+    let mut failure = EngineFailure::new(
+        EngineFailureCategory::Validation,
+        EnginePhase::DecodeRequest,
+        "engine_request_too_large",
+        format!("Engine request exceeds the fixed {MAX_ENGINE_RPC_REQUEST_BYTES} byte bound"),
+    );
+    failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
+    failure
+}
+
+fn rpc_read_invariant_failure() -> EngineFailure {
+    EngineFailure::transport(
+        "engine_read_invariant_failed",
+        "Engine request reader violated its fixed byte accounting invariant",
+    )
 }
 
 #[cfg(test)]
@@ -304,9 +421,16 @@ fn execute_engine_request(
                 .map_err(|error| map_durable_error(&error, EnginePhase::VerifyDurableCommand))?;
             EngineResponse::VerifiedDurableCommand { command }
         }
-        EngineRequest::ObserveClock { target, run_id } => EngineResponse::ClockObserved {
-            observation: observe_clock(&target, &run_id)?,
-        },
+        EngineRequest::ObserveClock { target, run_id } => {
+            let observation = observe_clock(&target, &run_id)?;
+            let result = ClockObservationResult::new(run_id, observation).map_err(|error| {
+                map_durable_error(
+                    &cymule_durable::DurableError::from(error),
+                    EnginePhase::ObserveClock,
+                )
+            })?;
+            EngineResponse::ClockObserved { result }
+        }
         EngineRequest::VerifyEvolutionCommand { command } => {
             command.verify().map_err(|error| {
                 map_evolution_error(&error, EnginePhase::VerifyEvolutionCommand)
@@ -2118,7 +2242,10 @@ fn argument_value<'a>(arguments: &'a [String], flag: &str) -> Result<&'a str, St
         .ok_or_else(|| format!("missing required option {flag}"))
 }
 
-fn read_path<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Box<dyn std::error::Error>> {
+fn read_path<T>(path: &str) -> Result<T, Box<dyn std::error::Error>>
+where
+    T: serde::de::DeserializeOwned + Serialize,
+{
     let bytes = if path == "-" {
         let mut bytes = Vec::new();
         io::stdin().read_to_end(&mut bytes)?;
@@ -2126,8 +2253,11 @@ fn read_path<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Box<dyn st
     } else {
         fs::read(Path::new(path))?
     };
-    let value = decode_strict_json_value(&bytes)?;
-    Ok(serde_json::from_value(value)?)
+    let retained = decode_strict_json_value(&bytes)?;
+    let value: T = serde_json::from_value(retained.clone())?;
+    let normalized = serde_json::to_value(&value)?;
+    validate_json_member_presence(&retained, &normalized)?;
+    Ok(value)
 }
 
 fn print_json<T: Serialize>(value: &T) -> Result<(), Box<dyn std::error::Error>> {
@@ -2145,6 +2275,10 @@ mod tests {
         execute_durable, execute_live_evolution, filesystem_components_equivalent,
         map_durable_error, map_evolution_error, map_resource_error, observe_clock, open_store,
         process_executor_config, reject_store_clock_alias,
+    };
+    #[cfg(unix)]
+    use super::{
+        MAX_ENGINE_RPC_REQUEST_BYTES, decode_strict_json_value, read_rpc_input_from_descriptor,
     };
     use cymule_core::{Definition, Expression, Region};
     use cymule_directory_store::DirectoryStore;
@@ -2461,7 +2595,7 @@ mod tests {
     #[test]
     fn rpc_rejects_nested_duplicate_plan_members_before_typed_decode() {
         let error = decode_and_execute_request(
-            br#"{"engine_protocol":"cymule.engine/4","request":{"type":"seal","candidate":{"ir_version":"cymule.ir/3","ir_version":"changed"}}}"#,
+            br#"{"engine_protocol":"cymule.engine/5","request":{"type":"seal","candidate":{"ir_version":"cymule.ir/3","ir_version":"changed"}}}"#,
         )
         .expect_err("duplicate Plan member is rejected");
         assert_eq!(error.code.as_ref(), "invalid_engine_request");
@@ -2471,18 +2605,134 @@ mod tests {
     #[test]
     fn rpc_rejects_integers_outside_the_shared_sdk_domain() {
         let error = decode_and_execute_request(
-            br#"{"engine_protocol":"cymule.engine/4","request":{"type":"verify_durable_command","command":{"type":"activate_wait","control_version":"cymule.durable-control/3","activation_id":"activation:test","source":{"source":"signal","key":"signal:test"},"wait_ids":["wait:test"],"value":9007199254740992}}}"#,
+            br#"{"engine_protocol":"cymule.engine/5","request":{"type":"verify_durable_command","command":{"type":"activate_wait","control_version":"cymule.durable-control/3","activation_id":"activation:test","source":{"source":"signal","key":"signal:test"},"wait_ids":["wait:test"],"value":9007199254740992}}}"#,
         )
         .expect_err("unsafe integer is rejected before typed decode");
         assert_eq!(error.code.as_ref(), "invalid_engine_request");
         assert!(error.message.contains("exact cross-language range"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rpc_reader_accepts_the_maximum_legal_run_input_plus_envelope() {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+
+        let input = Value::String("x".repeat(cymule_core::MAX_ARTIFACT_BYTES - 2));
+        assert_eq!(
+            cymule_core::canonical_bytes(&input)
+                .expect("maximum Run input canonicalizes")
+                .len(),
+            cymule_core::MAX_ARTIFACT_BYTES,
+        );
+        let request = EngineRequest::Run {
+            plan: embedded_plan(serde_json::json!({"type": "string"})),
+            input,
+            plugin: process_target("/bin/true"),
+            run_id: "run:maximum-rpc-input".to_owned(),
+        };
+        let envelope = serde_json::to_vec(&EngineRequestEnvelope::new(request))
+            .expect("maximum legal Engine request serializes");
+        assert!(envelope.len() < MAX_ENGINE_RPC_REQUEST_BYTES);
+        let (reader, mut writer) = UnixStream::pair().expect("test stream opens");
+        let expected = envelope.clone();
+        let writer = std::thread::spawn(move || {
+            writer
+                .write_all(&envelope)
+                .expect("bounded envelope writes");
+        });
+        let cancellation = ProcessCancellation::new().expect("cancellation authority opens");
+        let read = read_rpc_input_from_descriptor(&reader, &cancellation)
+            .expect("maximum legal Run input plus Engine envelope is admitted");
+        writer.join().expect("writer exits");
+        assert_eq!(read, expected);
+        let raw = decode_strict_json_value(&read).expect("admitted bytes remain strict JSON");
+        let envelope: EngineRequestEnvelope<Value> =
+            serde_json::from_value(raw).expect("Engine envelope remains typed");
+        let request: EngineRequest =
+            serde_json::from_value(envelope.request).expect("inner request remains typed");
+        let EngineRequest::Run {
+            plan,
+            input,
+            plugin,
+            run_id,
+        } = request
+        else {
+            panic!("maximum fixture decoded as another request")
+        };
+        cymule_runtime::verify_execution_request(&plan, &input, &run_id)
+            .expect("maximum Run input passes semantic request admission");
+        plugin.verify().expect("process target remains valid");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rpc_reader_cancels_after_consuming_a_partial_open_pipe() {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+
+        let (reader, mut writer) = UnixStream::pair().expect("test stream opens");
+        let (written_tx, written_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let chunk = vec![b'x'; 64 * 1024].into_boxed_slice();
+            for _ in 0..16 {
+                writer.write_all(&chunk).expect("partial request writes");
+            }
+            written_tx.send(()).expect("writer publishes progress");
+            release_rx.recv().expect("reader releases open writer");
+        });
+        let cancellation = ProcessCancellation::new().expect("cancellation authority opens");
+        let canceller = cancellation.clone();
+        let cancel = std::thread::spawn(move || {
+            written_rx
+                .recv()
+                .expect("reader consumed enough bytes for writer progress");
+            canceller.cancel();
+        });
+        let error = read_rpc_input_from_descriptor(&reader, &cancellation)
+            .expect_err("cancellation terminates a partial request while the pipe stays open");
+        release_tx.send(()).expect("writer is released");
+        writer.join().expect("writer exits");
+        cancel.join().expect("canceller exits");
+        assert_eq!(error.category, EngineFailureCategory::Cancelled);
+        assert_eq!(error.code.as_ref(), "engine_read_cancelled");
+        assert_eq!(error.retry_disposition, Some(EngineRetryDisposition::Never));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rpc_reader_rejects_max_plus_one_before_json_decode() {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+
+        let (reader, mut writer) = UnixStream::pair().expect("test stream opens");
+        let writer = std::thread::spawn(move || {
+            let chunk = vec![b'x'; 64 * 1024].into_boxed_slice();
+            let mut remaining = MAX_ENGINE_RPC_REQUEST_BYTES + 1;
+            while remaining > 0 {
+                let count = remaining.min(chunk.len());
+                writer
+                    .write_all(&chunk[..count])
+                    .expect("oversized request writes until rejection");
+                remaining -= count;
+            }
+        });
+        let cancellation = ProcessCancellation::new().expect("cancellation authority opens");
+        let error = read_rpc_input_from_descriptor(&reader, &cancellation)
+            .expect_err("max plus one is rejected by the byte reader");
+        writer.join().expect("writer exits");
+        assert_eq!(error.category, EngineFailureCategory::Validation);
+        assert_eq!(error.phase, EnginePhase::DecodeRequest);
+        assert_eq!(error.code.as_ref(), "engine_request_too_large");
+    }
+
     #[test]
     fn rpc_normalizes_mathematical_integer_tokens_before_typed_decode_and_echo() {
         for lexeme in ["1.0", "1e0"] {
             let input = format!(
-                r#"{{"engine_protocol":"cymule.engine/4","request":{{"type":"verify_evolution_command","command":{{"control_version":"cymule.evolution-control/5","command_id":"command:mathematical-integer","operation":"apply_gate","gate":{{"gate_id":"gate:mathematical-integer","decision_id":"decision:mathematical-integer","min_target_observations":{lexeme},"max_target_failures":0,"min_equivalent_shadows":0,"max_inequivalent_shadows":0}},"next_decision_id":"decision:mathematical-integer-next"}}}}}}"#
+                r#"{{"engine_protocol":"cymule.engine/5","request":{{"type":"verify_evolution_command","command":{{"control_version":"cymule.evolution-control/5","command_id":"command:mathematical-integer","operation":"apply_gate","gate":{{"gate_id":"gate:mathematical-integer","decision_id":"decision:mathematical-integer","min_target_observations":{lexeme},"max_target_failures":0,"min_equivalent_shadows":0,"max_inequivalent_shadows":0}},"next_decision_id":"decision:mathematical-integer-next"}}}}}}"#
             );
             let (echo, response) = decode_and_execute_request(input.as_bytes())
                 .expect("safe mathematical integer is admitted");
@@ -2500,20 +2750,20 @@ mod tests {
             );
         }
 
-        let fractional = br#"{"engine_protocol":"cymule.engine/4","request":{"type":"verify_evolution_command","command":{"control_version":"cymule.evolution-control/5","command_id":"command:fractional-integer","operation":"apply_gate","gate":{"gate_id":"gate:fractional-integer","decision_id":"decision:fractional-integer","min_target_observations":1.5,"max_target_failures":0,"min_equivalent_shadows":0,"max_inequivalent_shadows":0},"next_decision_id":"decision:fractional-integer-next"}}}"#;
+        let fractional = br#"{"engine_protocol":"cymule.engine/5","request":{"type":"verify_evolution_command","command":{"control_version":"cymule.evolution-control/5","command_id":"command:fractional-integer","operation":"apply_gate","gate":{"gate_id":"gate:fractional-integer","decision_id":"decision:fractional-integer","min_target_observations":1.5,"max_target_failures":0,"min_equivalent_shadows":0,"max_inequivalent_shadows":0},"next_decision_id":"decision:fractional-integer-next"}}}"#;
         let error = decode_and_execute_request(fractional)
             .expect_err("fractional value is not a typed integer");
         assert_eq!(error.code.as_ref(), "invalid_engine_request");
     }
 
     #[test]
-    fn rpc_v4_rejects_v3_without_transport_fallback() {
+    fn rpc_v5_rejects_v4_without_transport_fallback() {
         let error = decode_and_execute_request(
-            br#"{"engine_protocol":"cymule.engine/3","request":{"type":"observe_clock","target":{"provider":"cymule.clock-system/2","location":"unused.sqlite","source_id":"clock:test","source_generation":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"run_id":"run:test"}}"#,
+            br#"{"engine_protocol":"cymule.engine/4","request":{"type":"observe_clock","target":{"provider":"cymule.clock-system/2","location":"unused.sqlite","source_id":"clock:test","source_generation":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"run_id":"run:test"}}"#,
         )
-        .expect_err("Engine v3 is not a supported fallback generation");
+        .expect_err("Engine v4 is not a supported fallback generation");
         assert_eq!(error.code.as_ref(), "unsupported_engine_protocol");
-        assert_eq!(error.contract.as_deref(), Some("cymule.engine/4"));
+        assert_eq!(error.contract.as_deref(), Some("cymule.engine/5"));
         assert_eq!(error.retry_disposition, Some(EngineRetryDisposition::Never));
     }
 
@@ -2894,7 +3144,7 @@ mod tests {
     }
 
     #[test]
-    fn rpc_bounds_more_than_one_hundred_contract_issues_inside_one_v4_failure() {
+    fn rpc_bounds_more_than_one_hundred_contract_issues_inside_one_v5_failure() {
         let all_of = (0..101)
             .map(|index| serde_json::json!({"required": [format!("field_{index}")]}))
             .collect::<Vec<_>>();
@@ -2923,16 +3173,16 @@ mod tests {
                 .as_ref(),
             "contract_issues_omitted"
         );
-        failure.verify().expect("bounded projection is valid v4");
+        failure.verify().expect("bounded projection is valid v5");
         let envelope = EngineResponseEnvelope::<Value, EngineResponse>::failure(failure);
         let wire = serde_json::to_value(envelope).expect("failure envelope serializes");
         assert_eq!(wire["outcome"], "failure");
-        assert_eq!(wire["engine_protocol"], "cymule.engine/4");
+        assert_eq!(wire["engine_protocol"], "cymule.engine/5");
         assert_eq!(wire["error"]["issues"].as_array().unwrap().len(), 100);
     }
 
     #[test]
-    fn invalid_internal_failure_is_reprojected_as_one_valid_v4_envelope() {
+    fn invalid_internal_failure_is_reprojected_as_one_valid_v5_envelope() {
         let invalid = EngineFailure::new(
             EngineFailureCategory::Validation,
             EnginePhase::ExecutePlan,

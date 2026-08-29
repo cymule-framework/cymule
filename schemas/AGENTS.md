@@ -17,24 +17,26 @@
   owner to authenticate several real contracts in a shared document without
   attributing a pure DTO to the document's unrelated runtime owner. BOM schema
   entries remain path-unique with exact ID/digest equality.
-- Release BOM/2 contains only immutable release source, package, schema,
+- Release BOM/3 contains only immutable release source, package, schema,
   registry, migration, and publication evidence. It rejects a finalizer
   `controller_sha` field; the finalization stage, attestation, and current-run
-  control-plane receipt independently bind controller authority.
-- `engine-protocol.schema.json` owns both sides of `cymule.engine/4`: one
+  control-plane receipt independently bind controller authority. Both
+  `source_sha` and `public_source_sha` are required lowercase SHA-1 strings;
+  semantic validation additionally requires them to differ.
+- `engine-protocol.schema.json` owns both sides of `cymule.engine/5`: one
   versioned request envelope and one success-or-failure response envelope.
   Every success requires both the complete inner request and closed response;
   that request uses the same exact union as request ingress, and each request
   variant admits exactly its corresponding success-response variant rather
   than an independently selected response tag. Failure requires only the
   structured error and forbids a request because strict decoding may not have
-  produced one. The former v4 success shape without request is invalid.
+  produced one. Every predecessor success shape is invalid.
   Failure categories, phases, contract sides, issue bounds, and retry
   dispositions are closed and must match Rust plus every SDK. A category admits
   only its exact recovery set; only transport failure and not-found omit the
   member, while unknown-world-outcome requires reconciliation. Contract issues
   preserve separate instance `path` and `schema_path` JSON Pointers.
-- Engine v4 live evolution returns an `EvolutionCommit` whose persistence
+- Engine v5 live evolution returns an `EvolutionCommit` whose persistence
   receipt retains the exact evolution identity, complete admitted semantic
   command, closed outcome, and mutation set. Nested migration receipts retain
   the complete admitted migration request and reject
@@ -307,3 +309,7 @@
   `contract` carries one structured `ContractViolation`, while all other
   categories carry an ASCII `^[a-z][a-z0-9_]{0,199}$` code and a 1..=2000
   Unicode-scalar message, exactly matching the sole Rust admission path.
+- Engine v5 `clock_observed` carries exactly one `ClockObservationResult` with
+  the requested `run_id` and nested reference. The predecessor response with a
+  bare observation is invalid. Resource annotations have at least one member
+  whenever present; the empty map has no wire distinct from omission.

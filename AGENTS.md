@@ -141,9 +141,11 @@ Use this precedence order when guidance conflicts:
   digest string is never authentication.
 - Signal and timer transport belongs behind `WaitSourceDriver`. Drivers select
   only from the rebuildable parked-wait index, page indexed source identities
-  fairly instead of scanning a fixed transport prefix, obey the hard target
-  bound, and acknowledge only after durable target selection and the activation
-  CAS; lost acknowledgement redelivers the identical activation identity and
+  fairly instead of scanning a fixed transport prefix, and acknowledge only
+  after durable target selection and the activation CAS. A current-call
+  selection obeys its caller bound; a previously retained selection obeys the
+  framework bound without being reinterpreted by a later smaller caller bound.
+  Lost acknowledgement redelivers the identical activation identity and
   targets. `cymule.wait-activation-receipt/3` retains that complete selection,
   the newly applied wait subset, and the original ready-Run set. Targets already
   completed or cancelled are terminal nonwinners, never a broadcast HOL block
@@ -221,7 +223,7 @@ Use this precedence order when guidance conflicts:
   and must surface contention instead of waiting indefinitely.
 - Cross-language SDKs author the same frozen IR and use the same engine contract.
   They must not implement a second reducer or invent language-specific semantics.
-- `cymule.engine/4` is the only CLI Engine transport. Every request and every
+- `cymule.engine/5` is the only CLI Engine transport. Every request and every
   success or failure uses its versioned envelope; v3 is rejected without shape
   fallback. Stderr and process status are transport diagnostics, never a second
   semantic error channel. A missing response never implies that retrying a
@@ -234,7 +236,7 @@ Use this precedence order when guidance conflicts:
   Every success requires the complete inner `EngineRequest` actually accepted by
   the strict decoder plus the closed response. SDKs compare that echo with the
   exact JSON value they serialized and sent before interpreting the response;
-  an older v4 success with no request echo or any mismatch fails closed. A
+  a predecessor success with no request echo or any mismatch fails closed. A
   failure contains no request because transport or strict decoding may fail
   before one exists. Success tags, nested execution outcomes, and returned
   evolution commands remain closed unions.
@@ -243,7 +245,8 @@ Use this precedence order when guidance conflicts:
   optional/defaulting typed decode is insufficient when that decode erases the
   distinction. The same loss check applies to every typed Engine ingress: after
   decoding, recursively compare the raw value with typed reserialization and
-  reject an explicit `null` member that an omission-only optional field erases.
+  reject every explicit member that omission-only/defaulted serialization
+  erases, including `null` and empty collections.
   Required nullable members remain valid because typed serialization retains
   them.
 - Engine request echo is the single transport-correlation mechanism for Seal,
@@ -455,14 +458,21 @@ Use this precedence order when guidance conflicts:
 - GitHub Release finalization additionally binds the annotated tag object itself.
   Verification requires object type `tag`, records its exact 40-hex
   `release_tag_sha` separately from the peeled `release_sha`, and rejects the two
-  identities being equal. Its finalization bundle uses exact `schema_version: 2`,
-  and freeze, terminal publish, and every Release mutation re-read both the raw
-  tag ref and peeled commit. Replacing annotation or signature while preserving
-  the target commit is a tag-authority change and fails before mutation.
+  identities being equal. Its finalization bundle uses exact
+  `stage_version: cymule.release-finalization-stage/3`
+  and also binds the authenticated private source SHA, raw immutable
+  `cymule-mirror/<public-sha>` receipt tag, and shared source-snapshot digest.
+  Freeze, terminal publish, and every Release mutation re-read the release and
+  receipt tag authorities. Replacing either annotated tag while preserving its
+  target commit is an authority change and fails before mutation.
+  `scripts/release_contracts.py` is the single selector source for the
+  finalization stage, mirror receipt, GitHub settings snapshot, and GitHub
+  control-plane receipt; private mirror shell writes must be statically matched
+  to that public reader and never become a second registered source.
 - GitHub Release finalization also requires a separate protected contents-read
   job to mint a repository-scoped Administration-read plus Actions-read App token and close a
-  15-minute `github-release-control-plane-receipt/1` from live immutable
-  Release, exact tag-ruleset, protected-environment, default-permission, and
+  15-minute `cymule.github-release-control-plane-receipt/2` from live immutable
+  Release, exact release/receipt tag rulesets, protected-environment, default-permission, and
   default-branch authority. The contents writer receives no administration
   credential and validates the same-run/attempt receipt before every mutation,
   including before `--draft=false`. Settings administrators must not change
@@ -479,6 +489,11 @@ Use this precedence order when guidance conflicts:
   version-domain source-closure leaf. It exact-matches all public candidate
   bytes and Git modes to the registered source snapshot and validates the
   registry closure without turning each narrow product change into `full`.
+  Any plan selecting `rust-executor-plugin` additionally requires an exact
+  candidate-SHA `macos-15` witness, and the `Required CI` aggregator closes that
+  job and its reported SHA. `publish-crates.yml` consumes the equivalent
+  credential-free exact-release-SHA macOS executor witness before its OIDC job
+  can acquire a token or issue a PUT.
 - npm trusts only the inert `publish-npm-release.yml` caller generation `/1`.
   That caller delegates to `publish-npm-controller.yml@main`; the called
   contents-write and OIDC jobs require GitHub's resolved job workflow SHA to
@@ -500,8 +515,9 @@ Use this precedence order when guidance conflicts:
   extensions 1.9 and 1.10 bind the actual publisher `signer_ref` and
   `signer_sha`; that signer may be a retained historical controller and is not
   interchangeable with a later finalizer controller SHA.
-- The immutable GitHub Release asset is `cymule.release-bom/2`. It records the
-  immutable source inventory and a required
+- The immutable GitHub Release asset is `cymule.release-bom/3`. It records the
+  immutable source inventory with distinct authenticated private and rewritten
+  public SHAs, plus a required
   `publication` member for every package: closed Cargo/npm registry content and
   provenance evidence, or explicit `null` for Python/Go packages that have no
   publication authority. A fresh credential-free freeze runner performs the

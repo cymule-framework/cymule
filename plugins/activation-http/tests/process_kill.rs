@@ -21,7 +21,7 @@ use cymule_durable::{
     DurableRuntimeControl, DurableStore, DurableWaitSummary,
     MAX_DURABLE_QUERY_EXACT_RESPONSE_BYTES, MAX_DURABLE_QUERY_PAGE_BYTES, ParkedWaitView,
     StoreBatch, StoreCommit, StoreHead, WaitAdmissionOutcome, WaitCondition, WaitDelivery,
-    WaitSourceDriver, WaitState,
+    WaitSourceDelivery, WaitSourceDriver, WaitState,
 };
 use cymule_durable_protocol::{
     ContinuationStatus, ExecutionClaimRequest, WAIT_RESULT_ARTIFACT_KIND,
@@ -39,7 +39,11 @@ use tower::ServiceExt;
 
 const RUN_ID: &str = "run:http-process-kill";
 const PEER_RUN_ID: &str = "run:http-broadcast-peer";
+const LATER_RUN_ID: &str = "run:http-broadcast-later";
+const LATER_PEER_RUN_ID: &str = "run:http-broadcast-later-peer";
 const ACTIVATION_ID: &str = "activation:http-process-kill";
+const LATER_ACTIVATION_ID: &str = "activation:http-process-kill-later";
+const FINAL_ACTIVATION_ID: &str = "activation:http-process-kill-final";
 const SIGNAL_KEY: &str = "signal:http-process-kill";
 const CLOCK_SOURCE_ID: &str = "clock:http-process-kill";
 const CLOCK_SOURCE_GENERATION: &str =
@@ -268,11 +272,89 @@ fn broadcast_candidate() -> PlanCandidate {
     candidate
 }
 
+struct BroadcastScenario {
+    _world: TestWorld,
+    state_database: PathBuf,
+    spool_database: PathBuf,
+    clock_database: PathBuf,
+    store_domain: &'static str,
+    wait_ids: BTreeMap<String, String>,
+}
+
+impl BroadcastScenario {
+    fn initialize(seed: u64, store_domain: &'static str) -> (Self, HttpRuntime) {
+        let world = TestWorld::new(seed).expect("HTTP test world creates");
+        let state_database = world
+            .domain()
+            .path("state.sqlite")
+            .expect("state path resolves");
+        let spool_database = world
+            .domain()
+            .path("http.sqlite")
+            .expect("spool path resolves");
+        let clock_database = world
+            .domain()
+            .path("clock.sqlite")
+            .expect("Clock path resolves");
+        let mut runtime = open_runtime(
+            SqliteStore::open(&state_database, store_domain).expect("durable store opens"),
+            &clock_database,
+        );
+        let wait_ids = [RUN_ID, PEER_RUN_ID]
+            .into_iter()
+            .map(|run_id| {
+                let wait_id = start_waiting_run(
+                    &mut runtime,
+                    broadcast_candidate(),
+                    json!({"run_id": run_id}),
+                    run_id,
+                    execution_request_for(&clock_database, run_id),
+                );
+                (run_id.to_owned(), wait_id)
+            })
+            .collect();
+        (
+            Self {
+                _world: world,
+                state_database,
+                spool_database,
+                clock_database,
+                store_domain,
+                wait_ids,
+            },
+            runtime,
+        )
+    }
+
+    fn reopen_runtime(&self) -> HttpRuntime {
+        open_runtime(
+            SqliteStore::open(&self.state_database, self.store_domain)
+                .expect("durable store reopens"),
+            &self.clock_database,
+        )
+    }
+
+    fn open_source(&self) -> (axum::Router, SqliteHttpSignalDriver) {
+        durable_signal_router(&self.spool_database, 8, AllowAll).expect("HTTP source opens")
+    }
+
+    fn selected_wait_ids(&self) -> BTreeSet<String> {
+        BTreeSet::from([
+            self.wait_ids[RUN_ID].clone(),
+            self.wait_ids[PEER_RUN_ID].clone(),
+        ])
+    }
+}
+
 fn request(ok: bool) -> Request<Body> {
+    request_for(ACTIVATION_ID, ok)
+}
+
+fn request_for(activation_id: &str, ok: bool) -> Request<Body> {
     Request::post("/v1/signals")
         .header("content-type", "application/json")
         .body(Body::from(format!(
-            r#"{{"activation_id":"{ACTIVATION_ID}","key":"{SIGNAL_KEY}","value":{{"ok":{ok}}}}}"#
+            r#"{{"activation_id":"{activation_id}","key":"{SIGNAL_KEY}","value":{{"ok":{ok}}}}}"#
         )))
         .expect("HTTP request builds")
 }
@@ -304,7 +386,7 @@ impl WaitSourceDriver for BarrierDriver {
         &mut self,
         view: &mut dyn ParkedWaitView,
         max_targets: usize,
-    ) -> DurableResult<Option<WaitDelivery>> {
+    ) -> DurableResult<Option<WaitSourceDelivery>> {
         let delivery = self.inner.receive(view, max_targets)?;
         if delivery.is_some() && matches!(self.phase, DriverBarrier::AfterSelection) {
             self.stop("after_selection");
@@ -354,9 +436,11 @@ impl<D: WaitSourceDriver> WaitSourceDriver for RecordingDriver<D> {
         &mut self,
         view: &mut dyn ParkedWaitView,
         max_targets: usize,
-    ) -> DurableResult<Option<WaitDelivery>> {
+    ) -> DurableResult<Option<WaitSourceDelivery>> {
         let delivery = self.inner.receive(view, max_targets)?;
-        self.delivery.clone_from(&delivery);
+        self.delivery = delivery
+            .as_ref()
+            .map(|delivery| delivery.delivery().clone());
         if self.interrupt_after_selection && delivery.is_some() {
             return Err(DurableError::Substrate {
                 code: "test_wait_selection_interrupted".to_owned(),
@@ -368,6 +452,38 @@ impl<D: WaitSourceDriver> WaitSourceDriver for RecordingDriver<D> {
     }
 
     fn acknowledge(&mut self, activation_id: &str) -> DurableResult<()> {
+        self.inner.acknowledge(activation_id)
+    }
+}
+
+struct LoseAcknowledgementOnce<D> {
+    inner: D,
+    lost: bool,
+}
+
+impl<D> LoseAcknowledgementOnce<D> {
+    const fn new(inner: D) -> Self {
+        Self { inner, lost: false }
+    }
+}
+
+impl<D: WaitSourceDriver> WaitSourceDriver for LoseAcknowledgementOnce<D> {
+    fn receive(
+        &mut self,
+        view: &mut dyn ParkedWaitView,
+        max_targets: usize,
+    ) -> DurableResult<Option<WaitSourceDelivery>> {
+        self.inner.receive(view, max_targets)
+    }
+
+    fn acknowledge(&mut self, activation_id: &str) -> DurableResult<()> {
+        if !self.lost {
+            self.lost = true;
+            return Err(DurableError::Substrate {
+                code: "test_http_acknowledgement_lost".to_owned(),
+                message: format!("test lost HTTP acknowledgement for activation {activation_id}"),
+            });
+        }
         self.inner.acknowledge(activation_id)
     }
 }
@@ -611,41 +727,9 @@ async fn http_process_kill_worker_entry() {
 
 #[tokio::test]
 async fn selected_broadcast_delivery_acks_after_one_target_cancels_and_reopens() {
-    let world = TestWorld::new(17).expect("HTTP test world creates");
-    let state_database = world
-        .domain()
-        .path("state.sqlite")
-        .expect("state path resolves");
-    let spool_database = world
-        .domain()
-        .path("http.sqlite")
-        .expect("spool path resolves");
-    let clock_database = world
-        .domain()
-        .path("clock.sqlite")
-        .expect("Clock path resolves");
-    let mut runtime = open_runtime(
-        SqliteStore::open(&state_database, "domain:http-process-kill")
-            .expect("durable store opens"),
-        &clock_database,
-    );
-    let wait_ids = [RUN_ID, PEER_RUN_ID]
-        .into_iter()
-        .map(|run_id| {
-            let wait_id = start_waiting_run(
-                &mut runtime,
-                broadcast_candidate(),
-                json!({"run_id": run_id}),
-                run_id,
-                execution_request_for(&clock_database, run_id),
-            );
-            (run_id.to_owned(), wait_id)
-        })
-        .collect::<BTreeMap<_, _>>();
-    let selected_wait_ids =
-        BTreeSet::from([wait_ids[RUN_ID].clone(), wait_ids[PEER_RUN_ID].clone()]);
-    let (router, source) =
-        durable_signal_router(&spool_database, 8, AllowAll).expect("HTTP source opens");
+    let (scenario, mut runtime) = BroadcastScenario::initialize(17, "domain:http-process-kill");
+    let selected_wait_ids = scenario.selected_wait_ids();
+    let (router, source) = scenario.open_source();
     let response = tokio::spawn(router.oneshot(request(true)));
     let mut source = RecordingDriver::interrupt_after_selection(source);
     loop {
@@ -716,10 +800,204 @@ async fn selected_broadcast_delivery_acks_after_one_target_cancels_and_reopens()
             .status(),
         StatusCode::ACCEPTED
     );
-    assert_mixed_broadcast_state(&mut runtime, &wait_ids);
+    assert_mixed_broadcast_state(&mut runtime, &scenario.wait_ids);
     let (store, _) = runtime.into_parts();
     drop(source);
-    assert_broadcast_reopen(store, &clock_database, &spool_database, &wait_ids).await;
+    assert_broadcast_reopen(
+        store,
+        &scenario.clock_database,
+        &scenario.spool_database,
+        &scenario.wait_ids,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn retained_broadcast_survives_smaller_reopen_bound_and_later_ingress_progresses() {
+    let (scenario, mut runtime) = BroadcastScenario::initialize(18, "domain:http-retained-bound");
+    persist_broadcast_selection_before_m1(&scenario, &mut runtime).await;
+    drop(runtime);
+    commit_retained_activation_without_acknowledgement(&scenario);
+    let (mut runtime, router, mut source) = replay_retained_activation(&scenario).await;
+    prove_new_bounded_ingress_progress(&scenario, &mut runtime, router, &mut source).await;
+}
+
+async fn persist_broadcast_selection_before_m1(
+    scenario: &BroadcastScenario,
+    runtime: &mut HttpRuntime,
+) {
+    let (router, source) = scenario.open_source();
+    let response = tokio::spawn(router.oneshot(request(true)));
+    let mut source = RecordingDriver::interrupt_after_selection(source);
+    loop {
+        match runtime.drive_wait_source(&mut source, 2) {
+            Ok(None) => tokio::task::yield_now().await,
+            Err(DurableError::Substrate { code, .. })
+                if code == "test_wait_selection_interrupted" =>
+            {
+                break;
+            }
+            outcome => panic!("HTTP initial selection barrier returned {outcome:?}"),
+        }
+    }
+    assert_eq!(
+        source
+            .delivery
+            .as_ref()
+            .expect("initial HTTP selection is retained")
+            .wait_ids,
+        scenario.selected_wait_ids()
+    );
+    response.abort();
+    let _ = response.await;
+}
+
+fn commit_retained_activation_without_acknowledgement(scenario: &BroadcastScenario) {
+    let mut runtime = scenario.reopen_runtime();
+    let (_router, source) = scenario.open_source();
+    let mut source = LoseAcknowledgementOnce::new(source);
+    assert!(matches!(
+        runtime.drive_wait_source(&mut source, 1),
+        Err(DurableError::Substrate { code, .. })
+            if code == "test_http_acknowledgement_lost"
+    ));
+    for (run_id, wait_id) in &scenario.wait_ids {
+        assert_eq!(
+            wait_current(&mut runtime, run_id, wait_id).state,
+            WaitState::Completed
+        );
+        assert_eq!(
+            run_current(&mut runtime, run_id).continuation_status,
+            ContinuationStatus::Ready
+        );
+    }
+}
+
+async fn replay_retained_activation(
+    scenario: &BroadcastScenario,
+) -> (
+    HttpRuntime,
+    axum::Router,
+    RecordingDriver<SqliteHttpSignalDriver>,
+) {
+    let mut runtime = scenario.reopen_runtime();
+    let (router, source) = scenario.open_source();
+    let mut source = RecordingDriver::new(source);
+    let (replay, delivery) = drive_http_request(
+        &mut runtime,
+        &mut source,
+        router.clone(),
+        ACTIVATION_ID,
+        true,
+    )
+    .await;
+    assert_eq!(
+        replay,
+        WaitAdmissionOutcome {
+            disposition: WaitActivationDisposition::Applied,
+            ready_run_ids: BTreeSet::from([RUN_ID.to_owned(), PEER_RUN_ID.to_owned()]),
+        }
+    );
+    assert_eq!(delivery.wait_ids, scenario.selected_wait_ids());
+    (runtime, router, source)
+}
+
+async fn prove_new_bounded_ingress_progress(
+    scenario: &BroadcastScenario,
+    runtime: &mut HttpRuntime,
+    router: axum::Router,
+    source: &mut RecordingDriver<SqliteHttpSignalDriver>,
+) {
+    let later_wait_ids = [LATER_RUN_ID, LATER_PEER_RUN_ID]
+        .into_iter()
+        .map(|run_id| {
+            let wait_id = start_waiting_run(
+                runtime,
+                broadcast_candidate(),
+                json!({"run_id": run_id}),
+                run_id,
+                execution_request_for(&scenario.clock_database, run_id),
+            );
+            (run_id.to_owned(), wait_id)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let (later, later_delivery) =
+        drive_http_request(runtime, source, router.clone(), LATER_ACTIVATION_ID, false).await;
+    assert_eq!(later_delivery.activation_id, LATER_ACTIVATION_ID);
+    assert_eq!(later_delivery.wait_ids.len(), 1);
+    let selected_run_id = later_wait_ids
+        .iter()
+        .find(|(_, wait_id)| later_delivery.wait_ids.contains(*wait_id))
+        .map(|(run_id, _)| run_id.clone())
+        .expect("later bounded selection belongs to one pending Run");
+    assert_eq!(
+        later,
+        WaitAdmissionOutcome {
+            disposition: WaitActivationDisposition::Applied,
+            ready_run_ids: BTreeSet::from([selected_run_id.clone()]),
+        }
+    );
+    let remaining_run_id = later_wait_ids
+        .keys()
+        .find(|run_id| run_id.as_str() != selected_run_id)
+        .expect("one later Run remains pending")
+        .clone();
+    let remaining_wait_id = later_wait_ids[&remaining_run_id].clone();
+    assert_eq!(
+        wait_current(runtime, &remaining_run_id, &remaining_wait_id).state,
+        WaitState::Pending
+    );
+    let (final_outcome, final_delivery) =
+        drive_http_request(runtime, source, router, FINAL_ACTIVATION_ID, true).await;
+    assert_eq!(
+        final_outcome,
+        WaitAdmissionOutcome {
+            disposition: WaitActivationDisposition::Applied,
+            ready_run_ids: BTreeSet::from([remaining_run_id.clone()]),
+        }
+    );
+    assert_eq!(final_delivery.activation_id, FINAL_ACTIVATION_ID);
+    assert_eq!(
+        final_delivery.wait_ids,
+        BTreeSet::from([remaining_wait_id.clone()])
+    );
+    assert_eq!(
+        wait_current(runtime, &remaining_run_id, &remaining_wait_id).state,
+        WaitState::Completed
+    );
+}
+
+async fn drive_http_request(
+    runtime: &mut HttpRuntime,
+    source: &mut RecordingDriver<SqliteHttpSignalDriver>,
+    router: axum::Router,
+    activation_id: &str,
+    ok: bool,
+) -> (WaitAdmissionOutcome, WaitDelivery) {
+    let response = tokio::spawn(router.oneshot(request_for(activation_id, ok)));
+    let outcome = loop {
+        if let Some(outcome) = runtime
+            .drive_wait_source(source, 1)
+            .expect("HTTP ingress drives under the requested target bound")
+        {
+            break outcome;
+        }
+        tokio::task::yield_now().await;
+    };
+    let delivery = source
+        .delivery
+        .as_ref()
+        .expect("HTTP ingress selects or redelivers")
+        .clone();
+    assert_eq!(
+        response
+            .await
+            .expect("HTTP request joins")
+            .expect("HTTP request responds")
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    (outcome, delivery)
 }
 
 fn cancel_selected_run(runtime: &mut HttpRuntime) {

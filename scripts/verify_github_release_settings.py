@@ -15,12 +15,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from release_contracts import (
+    CONTROL_PLANE_RECEIPT_VERSION,
+    CONTROL_PLANE_SETTINGS_VERSION,
+)
+
 
 DEFAULT_REPOSITORY = "cymule-framework/cymule"
 REQUIRED_STATUS_CONTEXTS = {"Required CI"}
 GITHUB_ACTIONS_INTEGRATION_ID = 15368
-SETTINGS_SNAPSHOT_VERSION = "github-release-settings-snapshot/1"
-CONTROL_PLANE_RECEIPT_VERSION = "github-release-control-plane-receipt/1"
 CONTROL_PLANE_RECEIPT_TTL_SECONDS = 15 * 60
 GIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 POSITIVE_DECIMAL_PATTERN = re.compile(r"[1-9][0-9]*")
@@ -431,11 +434,25 @@ def verify(
         ref="refs/tags/v*",
         rules={"deletion", "update"},
     )
+    mirror_receipt_creation = require_exact_ruleset(
+        rulesets,
+        target="tag",
+        ref="refs/tags/cymule-mirror/*",
+        rules={"creation"},
+    )
+    immutable_mirror_receipts = require_exact_ruleset(
+        rulesets,
+        target="tag",
+        ref="refs/tags/cymule-mirror/*",
+        rules={"deletion", "update"},
+    )
     verify_exact_ref_scope(main, "~DEFAULT_BRANCH")
     verify_required_status_checks(main)
     verify_main_bypass(main, mirror_integration_id)
     verify_release_tag_bypass(release_tag_creation, release_tag_integration_id)
     verify_no_bypass(immutable_release_tags)
+    verify_release_tag_bypass(mirror_receipt_creation, mirror_integration_id)
+    verify_no_bypass(immutable_mirror_receipts)
     permissions = github_json(repository, "/actions/permissions/workflow", token)
     expected_permissions = {
         "default_workflow_permissions": "read",
@@ -477,7 +494,7 @@ def verify(
     if not isinstance(main_checks, list):
         raise ValueError("verified main status checks changed type")
     snapshot = {
-        "snapshot_version": SETTINGS_SNAPSHOT_VERSION,
+        "snapshot_version": CONTROL_PLANE_SETTINGS_VERSION,
         "default_branch": "main",
         "authorities": {
             "mirror_integration_id": mirror_integration_id,
@@ -519,6 +536,22 @@ def verify(
                 "rules": ["deletion", "update"],
                 "bypass_actors": projected_bypass_actors(immutable_release_tags),
             },
+            "mirror_receipt_creation": {
+                "enforcement": "active",
+                "target": "tag",
+                "ref": "refs/tags/cymule-mirror/*",
+                "rules": ["creation"],
+                "bypass_actors": projected_bypass_actors(mirror_receipt_creation),
+            },
+            "mirror_receipt_immutable": {
+                "enforcement": "active",
+                "target": "tag",
+                "ref": "refs/tags/cymule-mirror/*",
+                "rules": ["deletion", "update"],
+                "bypass_actors": projected_bypass_actors(
+                    immutable_mirror_receipts
+                ),
+            },
         },
         "actions_permissions": expected_permissions,
         "immutable_releases": immutable_releases,
@@ -540,6 +573,9 @@ def create_control_plane_receipt(
     controller_sha: str,
     release_sha: str,
     release_tag_sha: str,
+    private_source_sha: str,
+    mirror_receipt_tag_sha: str,
+    public_source_snapshot_digest: str,
     settings_snapshot: dict[str, object],
     observed_at: dt.datetime | None = None,
 ) -> pathlib.Path:
@@ -554,12 +590,23 @@ def create_control_plane_receipt(
         ("controller SHA", controller_sha),
         ("release SHA", release_sha),
         ("release tag SHA", release_tag_sha),
+        ("private source SHA", private_source_sha),
+        ("mirror receipt tag SHA", mirror_receipt_tag_sha),
     ):
         if GIT_SHA_PATTERN.fullmatch(value) is None:
             raise ValueError(f"{label} must be one exact lowercase Git identity")
     if release_tag_sha == release_sha:
         raise ValueError("release tag SHA must be a distinct annotated tag object")
-    if settings_snapshot.get("snapshot_version") != SETTINGS_SNAPSHOT_VERSION:
+    if private_source_sha == release_sha:
+        raise ValueError("private and public source SHA must be distinct")
+    if not isinstance(public_source_snapshot_digest, str) or re.fullmatch(
+        r"sha256:[0-9a-f]{64}", public_source_snapshot_digest
+    ) is None:
+        raise ValueError("public source snapshot digest is malformed")
+    if (
+        settings_snapshot.get("snapshot_version")
+        != CONTROL_PLANE_SETTINGS_VERSION
+    ):
         raise ValueError("GitHub release settings snapshot has the wrong generation")
     if settings_snapshot.get("default_branch") != "main":
         raise ValueError("GitHub release settings default branch must be exactly main")
@@ -577,6 +624,9 @@ def create_control_plane_receipt(
         "controller_sha": controller_sha,
         "release_sha": release_sha,
         "release_tag_sha": release_tag_sha,
+        "private_source_sha": private_source_sha,
+        "mirror_receipt_tag_sha": mirror_receipt_tag_sha,
+        "public_source_snapshot_digest": public_source_snapshot_digest,
         "observed_at": instant.isoformat().replace("+00:00", "Z"),
         "expires_at": expires.isoformat().replace("+00:00", "Z"),
         "settings_snapshot": settings_snapshot,
@@ -617,6 +667,9 @@ def main() -> int:
     parser.add_argument("--controller-sha")
     parser.add_argument("--release-sha")
     parser.add_argument("--release-tag-sha")
+    parser.add_argument("--private-source-sha")
+    parser.add_argument("--mirror-receipt-tag-sha")
+    parser.add_argument("--public-source-snapshot-digest")
     args = parser.parse_args()
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
@@ -648,6 +701,9 @@ def main() -> int:
         "controller_sha": args.controller_sha,
         "release_sha": args.release_sha,
         "release_tag_sha": args.release_tag_sha,
+        "private_source_sha": args.private_source_sha,
+        "mirror_receipt_tag_sha": args.mirror_receipt_tag_sha,
+        "public_source_snapshot_digest": args.public_source_snapshot_digest,
     }
     if args.receipt_output is None:
         if any(value is not None for value in receipt_bindings.values()):
@@ -665,6 +721,9 @@ def main() -> int:
             controller_sha=args.controller_sha,
             release_sha=args.release_sha,
             release_tag_sha=args.release_tag_sha,
+            private_source_sha=args.private_source_sha,
+            mirror_receipt_tag_sha=args.mirror_receipt_tag_sha,
+            public_source_snapshot_digest=args.public_source_snapshot_digest,
             settings_snapshot=snapshot,
         )
         print(args.receipt_output)

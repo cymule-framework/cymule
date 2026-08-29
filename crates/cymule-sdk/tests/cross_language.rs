@@ -275,7 +275,7 @@ fn rust_classifies_unsupported_engine_protocol_by_mutation_authority() {
         FlowBuilder::new("unsupported_protocol", json!({}), json!({})).finish(Expression::Input);
     let read = engine
         .seal(&candidate)
-        .expect_err("Engine v3 cannot settle a read request");
+        .expect_err("Engine v4 cannot settle a read request");
     assert_eq!(
         read.category,
         cymule::EngineFailureCategory::ContractViolation
@@ -295,7 +295,7 @@ fn rust_classifies_unsupported_engine_protocol_by_mutation_authority() {
             ),
             "run:unsupported-protocol",
         )
-        .expect_err("Engine v3 cannot settle a mutating request");
+        .expect_err("Engine v4 cannot settle a mutating request");
     assert_eq!(
         mutation.category,
         cymule::EngineFailureCategory::UnknownWorldOutcome
@@ -472,6 +472,13 @@ fn rust_terminal_boundaries_match_the_shared_fixture() {
             boundary: cymule::DurableBoundary::EffectNotApplied { intent_id },
         } if intent_id
             == "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    ));
+    assert!(matches!(
+        &responses[3],
+        DurableResponse::RunBoundary {
+            boundary: cymule::DurableBoundary::EffectUnavailable { intent_id },
+        } if intent_id
+            == "sha256:982a836f8dcb860b0eedabf0fd133bc2f966992526e2703316cba497f929e03b"
     ));
 }
 

@@ -1007,6 +1007,29 @@ fn resolve_source(
                             .to_owned(),
                     ));
                 }
+                AgentUpdate::State {
+                    state: cymule_profile_protocol::agent::AgentState::Closed,
+                    ..
+                } => AgentSessionEntrySource::Close {
+                    tools: session
+                        .nonterminal_tools
+                        .keys()
+                        .map(|tool_call_id| {
+                            state
+                                .tools
+                                .get(&(session_id.clone(), tool_call_id.clone()))
+                                .cloned()
+                                .ok_or_else(|| {
+                                    AgentError::persistence(
+                                        "agent_nonterminal_tool_missing",
+                                        format!(
+                                            "Agent Session {session_id} non-terminal Tool {tool_call_id} is missing"
+                                        ),
+                                    )
+                                })
+                        })
+                        .collect::<AgentResult<Vec<_>>>()?,
+                },
                 AgentUpdate::State { .. }
                 | AgentUpdate::Plan { .. }
                 | AgentUpdate::Usage { .. } => AgentSessionEntrySource::Metadata,
@@ -1253,6 +1276,14 @@ fn apply_session(state: &mut EphemeralAgentState, postcondition: AgentSessionPos
     );
     match postcondition.effect {
         AgentSessionUpdateEffect::Metadata => {}
+        AgentSessionUpdateEffect::Closed { tools } => {
+            for current in tools {
+                state.tools.insert(
+                    (session_id.clone(), current.tool.tool_call_id.clone()),
+                    current,
+                );
+            }
+        }
         AgentSessionUpdateEffect::Message { current } => {
             state.message_order.insert(
                 (session_id.clone(), current.order.index),
@@ -1531,6 +1562,200 @@ mod tests {
         assert_eq!(replay.committed_revision, None);
         assert_eq!(replay.receipt, fresh.receipt);
         assert_eq!(replay.observed_revision, fresh.observed_revision);
+    }
+
+    fn commit_tool_update(
+        persistence: &mut EphemeralAgentPersistence,
+        session_id: &str,
+        update_id: &str,
+        status: cymule_profile_protocol::agent::ToolCallStatus,
+    ) -> AgentCommit {
+        let source_revision = persistence
+            .read_agent_session(&AgentSessionQuery {
+                session_id: session_id.to_owned(),
+                expected_revision: None,
+            })
+            .expect("Tool source Session reads")
+            .revision;
+        let command = AgentCommand::new(
+            source_revision,
+            AgentCommandAction::SessionUpdate {
+                session_id: session_id.to_owned(),
+                update: AgentUpdate::Tool {
+                    update_id: update_id.to_owned(),
+                    tool: cymule_profile_protocol::agent::ToolCall {
+                        tool_call_id: "tool:close-persistence".to_owned(),
+                        operation: "test.execute".to_owned(),
+                        status,
+                        input: serde_json::json!({"path": "README.md"}),
+                        output: None,
+                        locations: vec!["workspace:test".to_owned()],
+                    },
+                },
+            },
+        )
+        .expect("Tool command seals");
+        persistence
+            .commit_agent(&command)
+            .expect("Tool command commits")
+    }
+
+    fn close_state_snapshot(
+        persistence: &EphemeralAgentPersistence,
+        session_id: &str,
+    ) -> (
+        String,
+        usize,
+        usize,
+        Option<AgentSessionCurrent>,
+        Option<cymule_profile_protocol::agent::AgentToolCurrent>,
+    ) {
+        let state = persistence.state().expect("ephemeral state reads");
+        (
+            state.revision.clone(),
+            state.receipts.len(),
+            state.updates.len(),
+            state.sessions.get(session_id).cloned(),
+            state
+                .tools
+                .get(&(session_id.to_owned(), "tool:close-persistence".to_owned()))
+                .cloned(),
+        )
+    }
+
+    fn reject_close_update_id_conflict_and_advance_head(
+        persistence: &mut EphemeralAgentPersistence,
+        committed: &AgentCommit,
+        session_id: &str,
+    ) -> AgentCommit {
+        let conflicting_update_id = AgentCommand::new(
+            committed.observed_revision.clone(),
+            AgentCommandAction::SessionUpdate {
+                session_id: session_id.to_owned(),
+                update: AgentUpdate::State {
+                    update_id: "update:session:close".to_owned(),
+                    state: AgentState::Running,
+                    stop_reason: None,
+                },
+            },
+        )
+        .expect("conflicting update-ID command seals");
+        let before_conflict = close_state_snapshot(persistence, session_id);
+        assert!(persistence.commit_agent(&conflicting_update_id).is_err());
+        assert_eq!(
+            close_state_snapshot(persistence, session_id),
+            before_conflict
+        );
+
+        let unrelated = AgentCommand::new(
+            committed.observed_revision.clone(),
+            AgentCommandAction::SessionUpdate {
+                session_id: "session:after-close".to_owned(),
+                update: AgentUpdate::State {
+                    update_id: "update:after-close:running".to_owned(),
+                    state: AgentState::Running,
+                    stop_reason: None,
+                },
+            },
+        )
+        .expect("unrelated command seals");
+        persistence
+            .commit_agent(&unrelated)
+            .expect("unrelated Session advances the global head")
+    }
+
+    #[test]
+    fn close_commit_atomically_cancels_tools_conflicts_when_stale_and_replays_without_write() {
+        use cymule_profile_protocol::agent::{AgentSessionUpdateEffect, ToolCallStatus};
+
+        let mut persistence = EphemeralAgentPersistence::default();
+        let session_id = "session:close-persistence";
+        let pending = commit_tool_update(
+            &mut persistence,
+            session_id,
+            "update:tool:pending",
+            ToolCallStatus::Pending,
+        );
+        let stale_close = AgentCommand::new(
+            pending.observed_revision.clone(),
+            AgentCommandAction::SessionUpdate {
+                session_id: session_id.to_owned(),
+                update: AgentUpdate::State {
+                    update_id: "update:session:close".to_owned(),
+                    state: AgentState::Closed,
+                    stop_reason: None,
+                },
+            },
+        )
+        .expect("stale close command seals");
+        let in_progress = commit_tool_update(
+            &mut persistence,
+            session_id,
+            "update:tool:in-progress",
+            ToolCallStatus::InProgress,
+        );
+        let before_stale = close_state_snapshot(&persistence, session_id);
+        assert!(matches!(
+            persistence.commit_agent(&stale_close),
+            Err(AgentError::Persistence { code, .. })
+                if code == "ephemeral_agent_revision_conflict"
+        ));
+        assert_eq!(close_state_snapshot(&persistence, session_id), before_stale);
+
+        let close = AgentCommand::new(
+            in_progress.observed_revision,
+            AgentCommandAction::SessionUpdate {
+                session_id: session_id.to_owned(),
+                update: AgentUpdate::State {
+                    update_id: "update:session:close".to_owned(),
+                    state: AgentState::Closed,
+                    stop_reason: None,
+                },
+            },
+        )
+        .expect("fresh close command seals");
+        let committed = persistence
+            .commit_agent(&close)
+            .expect("fresh close commits atomically");
+        assert_eq!(
+            committed.committed_revision.as_ref(),
+            Some(&committed.observed_revision)
+        );
+        let AgentCommandOutcome::Session(postcondition) = &committed.receipt.outcome else {
+            panic!("close returns Session postcondition")
+        };
+        let AgentSessionUpdateEffect::Closed { tools } = &postcondition.effect else {
+            panic!("close returns explicit Tool cancellation effect")
+        };
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool.status, ToolCallStatus::Cancelled);
+        {
+            let state = persistence.state().expect("closed state reads");
+            assert_eq!(state.sessions[session_id].state, AgentState::Closed);
+            assert!(state.sessions[session_id].nonterminal_tools.is_empty());
+            assert_eq!(
+                state.tools[&(session_id.to_owned(), "tool:close-persistence".to_owned())]
+                    .tool
+                    .status,
+                ToolCallStatus::Cancelled
+            );
+        }
+        let unrelated = reject_close_update_id_conflict_and_advance_head(
+            &mut persistence,
+            &committed,
+            session_id,
+        );
+        let before_replay = close_state_snapshot(&persistence, session_id);
+        let replay = persistence
+            .commit_agent(&close)
+            .expect("exact close command replays");
+        assert_eq!(replay.committed_revision, None);
+        assert_eq!(replay.observed_revision, unrelated.observed_revision);
+        assert_eq!(replay.receipt, committed.receipt);
+        assert_eq!(
+            close_state_snapshot(&persistence, session_id),
+            before_replay
+        );
     }
 
     #[test]

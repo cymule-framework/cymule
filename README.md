@@ -40,10 +40,10 @@ than framework semantics.
   declaration and invocation.
 - **Stable program identity.** Validated Plans are canonicalized and assigned a
   content-addressed `PlanId`.
-- **Closed Engine correlation.** Every Engine v4 success echoes the complete
+- **Closed Engine correlation.** Every Engine v5 success echoes the complete
   inner request the strict decoder executed, and SDKs compare it with their
   actual sent wire before accepting the response. Failures have no request echo
-  because decoding itself may fail; the older response-only v4 success shape is
+  because decoding itself may fail; predecessor success shapes are
   rejected.
 - **Safe command retries.** Repeating the same command returns the original
   receipt; reusing its ID for different work fails.
@@ -149,11 +149,11 @@ metrics, deployment, and traffic movement are also replaceable plugins; Cymule
 owns only their contracts, immutable receipts, and deterministic admission
 rules. TypeScript, Python, Rust, and Go expose the same
 `cymule.evolution-control/5` transport commands without duplicating the Rust
-controller. Stateful live-evolution control changes use only `cymule.engine/4`
+controller. Stateful live-evolution control changes use only `cymule.engine/5`
 and return one complete receipt with the exact journal, submitted command, and
 original outcome. An exact retry returns that outcome while preserving the
 latest visible journal state; reusing an ID for different work fails before
-migration or shadow plugin I/O. Engine v3 and live-evolution checkpoint v4 have
+migration or shadow plugin I/O. Engine v4 and live-evolution checkpoint v4 have
 no compatibility fallback.
 
 ## Five-minute source-checkout quick start
@@ -564,7 +564,7 @@ See [Architecture](docs/architecture.md) and the
 | Durable effect policies | Implemented | Nested commit gates, eager observation binding, explicit caller release, Run-local outbox authority, Core-bound paged failure/cancellation, and ambiguity reconciliation. |
 | Large virtual work | Implemented | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker recovery, durable checkpoints, and four SDK controls. |
 | Virtual work control | Implemented | Binding-pinned attempts, work/lease fencing, explicit recovery, closed dispositions, and four SDK transport interfaces. |
-| Live evolution | Implemented | Unified definition/DAG/rollout authority, compatible transitive relinking, complete Engine `/4` receipts, atomic `cymule.live-evolution-checkpoint/6` state, current-head historical replay, durable occurrence pins, content-backed safe-point migration and shadow evidence, canary gates, and rollback. |
+| Live evolution | Implemented | Unified definition/DAG/rollout authority, compatible transitive relinking, complete Engine `/5` receipts, atomic `cymule.live-evolution-checkpoint/6` state, current-head historical replay, durable occurrence pins, content-backed safe-point migration and shadow evidence, canary gates, and rollback. |
 | Agent interaction plugin | Optional, implemented | Fresh-only identified host dispatch, head/count-pinned Context history, input/workspace coupling, capacity-safe staged/external streams, and real process-death fault matrices. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
 | JSON Schema contracts | Implemented | Draft 2020-12 Plan and protocol schemas. |

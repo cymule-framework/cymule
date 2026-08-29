@@ -105,6 +105,19 @@
   receipt, GC sweep, and GC-head boundaries. After every kill, run complete
   PRAGMA integrity_check, checkpoint WAL, repeat integrity check, reopen through
   SqliteStore, and compare the exact canonical readback.
+- M4 process-death conformance uses only the public provider-registry-bound
+  Evolution control over the exact SQLite `/6` store. A successful
+  provider-free catalog mutation plus provider-backed migration derives the
+  real CAS boundary count; each pre/post-CAS child kill reopens through exact
+  command alias and typed receipt. Persist provider binding lookup, adapter
+  lookup, Describe, and migrate counts in a separate WAL ledger and require a
+  post-CAS lost acknowledgement to replay without repeating any provider call.
+- Paged terminal process-death coverage starts from a real in-flight provider
+  Attempt with multiple pending Effects. Discover the exact Begin, every
+  Progress, and Finalize CAS from one successful SQLite `/6` cancellation, then
+  SIGKILL before and after each discovered boundary. Reopen through public
+  control, converge and exactly replay the cancellation receipt, close the
+  Attempt, Continuation, and outbox, and prove the provider was not reinvoked.
 - A committed physical head may contain only parameter-free genesis or admitted
   material, with no Run yet. Process-death recovery uses the public typed
   Run-current query: an absent Run admits Start, Running requires explicit

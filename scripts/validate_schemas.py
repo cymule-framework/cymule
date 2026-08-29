@@ -128,7 +128,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="cymule-release-bom-") as temporary:
         publications = Path(temporary) / "publications.json"
         publications.write_text(
-            json.dumps(release_publication_fixture(release_version, "a" * 40)),
+            json.dumps(release_publication_fixture(release_version, "b" * 40)),
             encoding="utf-8",
         )
         release_bom = json.loads(
@@ -151,7 +151,7 @@ def main() -> int:
             ).stdout
         )
     release_bom_validator = Draft202012Validator(
-        by_title["Cymule Release BOM cymule.release-bom/2"], registry=registry
+        by_title["Cymule Release BOM cymule.release-bom/3"], registry=registry
     )
     release_bom_validator.validate(release_bom)
     assert_invalid(
@@ -163,6 +163,11 @@ def main() -> int:
         release_bom_validator,
         {**release_bom, "controller_sha": "c" * 40},
         "release BOM accepted mutable finalizer identity as immutable payload",
+    )
+    assert_invalid(
+        release_bom_validator,
+        {**release_bom, "public_source_sha": None},
+        "release BOM accepted a null rewritten public source SHA",
     )
     package = release_bom["packages"][0]
     assert_invalid(
@@ -239,7 +244,7 @@ def main() -> int:
                 malformed_artifact,
                 f"{schema_name} accepted a malformed Artifact reference",
             )
-    engine_schema = by_title["Cymule Engine Protocol cymule.engine/4"]
+    engine_schema = by_title["Cymule Engine Protocol cymule.engine/5"]
     engine_validator = Draft202012Validator(engine_schema, registry=registry)
     effect_summary_validator = Draft202012Validator(
         {"$ref": engine_schema["$id"] + "#/$defs/durableEffectSummary"}, registry=registry
@@ -541,13 +546,13 @@ def main() -> int:
 
     def validate_engine_request(request: object) -> None:
         engine_validator.validate(
-            {"engine_protocol": "cymule.engine/4", "request": request}
+            {"engine_protocol": "cymule.engine/5", "request": request}
         )
 
     def engine_success(request: object, response: object) -> dict[str, object]:
         return {
             "outcome": "success",
-            "engine_protocol": "cymule.engine/4",
+            "engine_protocol": "cymule.engine/5",
             "request": request,
             "response": response,
         }
@@ -646,7 +651,7 @@ def main() -> int:
         invalid_run_limit["plugin"]["process"]["message_limit"] = invalid_limit
         assert_invalid(
             engine_validator,
-            {"engine_protocol": "cymule.engine/4", "request": invalid_run_limit},
+            {"engine_protocol": "cymule.engine/5", "request": invalid_run_limit},
             "ordinary Engine plugin accepted a narrowed or widened message limit",
         )
     for field, maximum, overflow in [
@@ -669,7 +674,7 @@ def main() -> int:
         overflow_request["plugin"]["process"][field] = overflow
         assert_invalid(
             engine_validator,
-            {"engine_protocol": "cymule.engine/4", "request": overflow_request},
+            {"engine_protocol": "cymule.engine/5", "request": overflow_request},
             f"Engine process {field} accepted 4097 entries",
         )
     for invalid_runtime in ["unix:darwin:arm64", "sha256:" + "A" * 64]:
@@ -679,14 +684,14 @@ def main() -> int:
         }
         assert_invalid(
             engine_validator,
-            {"engine_protocol": "cymule.engine/4", "request": invalid_runtime_request},
+            {"engine_protocol": "cymule.engine/5", "request": invalid_runtime_request},
             "Engine process runtime closure accepted a non-content identity",
         )
     for malformed_run_id in ["界" * 513, "run:\u0000forged", "run:\u0085forged"]:
         assert_invalid(
             engine_validator,
             {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "request": {**direct_run_request, "run_id": malformed_run_id},
             },
             "Engine direct Run request accepted an invalid Run identity",
@@ -702,7 +707,7 @@ def main() -> int:
         subprocess.run(
             [str(engine), "rpc"],
             input=json.dumps(
-                {"engine_protocol": "cymule.engine/4", "request": seal_request}
+                {"engine_protocol": "cymule.engine/5", "request": seal_request}
             ),
             check=True,
             capture_output=True,
@@ -721,7 +726,7 @@ def main() -> int:
     assert_invalid(
         engine_validator,
         missing_success_request,
-        "Engine v4 schema accepted a success without its complete request",
+        "Engine v5 schema accepted a success without its complete request",
     )
     engine_retry_matrix = {
         "transport_failure": {None},
@@ -749,7 +754,7 @@ def main() -> int:
         for disposition in engine_retry_dispositions:
             failure = {
                 "outcome": "failure",
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "error": {
                     "category": category,
                     "phase": "transport",
@@ -769,7 +774,7 @@ def main() -> int:
                 )
     transport_failure_with_null_retry = {
         "outcome": "failure",
-        "engine_protocol": "cymule.engine/4",
+        "engine_protocol": "cymule.engine/5",
         "error": {
             "category": "transport_failure",
             "phase": "transport",
@@ -785,7 +790,7 @@ def main() -> int:
     )
     bounded_contract_failure = {
         "outcome": "failure",
-        "engine_protocol": "cymule.engine/4",
+        "engine_protocol": "cymule.engine/5",
         "error": {
             "category": "contract_violation",
             "phase": "validate_request",
@@ -834,7 +839,7 @@ def main() -> int:
         engine_validator,
         {
             "outcome": "failure",
-            "engine_protocol": "cymule.engine/4",
+            "engine_protocol": "cymule.engine/5",
             "request": seal_request,
             "error": {
                 "category": "validation",
@@ -843,14 +848,14 @@ def main() -> int:
                 "message": "failure envelopes do not claim a decoded request",
             },
         },
-        "Engine v4 schema accepted a request on a failure envelope",
+        "Engine v5 schema accepted a request on a failure envelope",
     )
     malformed_rpc = json.loads(
         subprocess.run(
             [str(engine), "rpc"],
             input=json.dumps(
                 {
-                    "engine_protocol": "cymule.engine/4",
+                    "engine_protocol": "cymule.engine/5",
                     "request": {"type": "seal", "candidate": candidate, "extra": True},
                 }
             ),
@@ -867,10 +872,10 @@ def main() -> int:
     ):
         raise AssertionError("Rust Engine did not return a structured decode failure")
     duplicate_request = json.dumps(
-        {"engine_protocol": "cymule.engine/4", "request": {"type": "seal", "candidate": candidate}}
+        {"engine_protocol": "cymule.engine/5", "request": {"type": "seal", "candidate": candidate}}
     ).replace(
-        '"engine_protocol": "cymule.engine/4"',
-        '"engine_protocol": "cymule.engine/4", "engine_protocol": "cymule.engine/4"',
+        '"engine_protocol": "cymule.engine/5"',
+        '"engine_protocol": "cymule.engine/5", "engine_protocol": "cymule.engine/5"',
         1,
     )
     duplicate_rpc = json.loads(
@@ -1085,6 +1090,11 @@ def main() -> int:
     )
     resource_candidate = load(root / "tests/fixtures/resource-candidate.json")
     resource_validator.validate(resource_candidate)
+    assert_invalid(
+        resource_validator,
+        {**resource_candidate, "annotations": {}},
+        "Resource schema accepted an explicit empty annotation map",
+    )
     maximum_annotations = {
         **resource_candidate,
         "annotations": {f"annotation-{index}": "value" for index in range(64)},
@@ -1606,9 +1616,34 @@ def main() -> int:
     engine_validator.validate(
         engine_success(
             clock_request,
-            {"type": "clock_observed", "observation": execution["clock"]},
+            {
+                "type": "clock_observed",
+                "result": {
+                    "run_id": durable_control["run_id"],
+                    "observation": execution["clock"],
+                },
+            },
         )
     )
+    for malformed_clock_success in [
+        {"type": "clock_observed", "observation": execution["clock"]},
+        {
+            "type": "clock_observed",
+            "result": {"observation": execution["clock"]},
+        },
+        {
+            "type": "clock_observed",
+            "result": {
+                "run_id": "run:\u0000forged",
+                "observation": execution["clock"],
+            },
+        },
+    ]:
+        assert_invalid(
+            engine_validator,
+            engine_success(clock_request, malformed_clock_success),
+            "Engine Clock success accepted an unbound Run observation result",
+        )
     for malformed_execution in [
         {**execution, "clock": {**execution["clock"], "clock_version": "unsupported"}},
         {**execution, "clock": {**execution["clock"], "logical_time": 10}},
@@ -1664,7 +1699,7 @@ def main() -> int:
         assert_invalid(
             engine_validator,
             {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "request": malformed_durable_run_request,
             },
             "Engine execute_durable accepted an invalid Run identity",
@@ -1696,7 +1731,7 @@ def main() -> int:
     null_executor_request["target"]["executor"] = None
     assert_invalid(
         engine_validator,
-        {"engine_protocol": "cymule.engine/4", "request": null_executor_request},
+        {"engine_protocol": "cymule.engine/5", "request": null_executor_request},
         "Engine request schema treated an explicit null executor as omission",
     )
     engine_validator.validate(
@@ -1914,14 +1949,18 @@ def main() -> int:
         },
         registry=registry,
     )
-    for malformed_continuation_id in [
-        "continuation:run:fixture",
-        "sha256:" + "A" * 64,
+    for field, malformed_identity in [
+        ("continuation_id", "continuation:run:fixture"),
+        ("continuation_id", "sha256:" + "A" * 64),
+        ("continuation_attempt_id", "attempt:fixture"),
+        ("continuation_attempt_id", "sha256:" + "A" * 64),
+        ("plan_id", "plan:fixture"),
+        ("plan_id", "sha256:" + "A" * 64),
     ]:
         assert_invalid(
             execution_claim_validator,
-            {**claim, "continuation_id": malformed_continuation_id},
-            "Engine execution claim accepted a malformed Continuation content ID",
+            {**claim, field: malformed_identity},
+            f"Engine execution claim accepted a malformed {field} content ID",
         )
     continuation_validator = Draft202012Validator(
         {"$ref": "https://cymule.dev/schemas/engine-protocol.schema.json#/$defs/continuation"},
@@ -3518,7 +3557,7 @@ def main() -> int:
         }
     )
     mathematical_envelope = {
-        "engine_protocol": "cymule.engine/4",
+        "engine_protocol": "cymule.engine/5",
         "request": {
             "type": "verify_evolution_command",
             "command": mathematical_integer_command,
@@ -3557,7 +3596,7 @@ def main() -> int:
     assert_invalid(
         engine_validator,
         {
-            "engine_protocol": "cymule.engine/4",
+            "engine_protocol": "cymule.engine/5",
             "request": {
                 "type": "verify_evolution_command",
                 "command": fractional_integer_command,
@@ -3979,7 +4018,7 @@ def main() -> int:
     del missing_target_bindings["target"]["target_execution_bindings"]
     assert_invalid(
         engine_validator,
-        {"engine_protocol": "cymule.engine/4", "request": missing_target_bindings},
+        {"engine_protocol": "cymule.engine/5", "request": missing_target_bindings},
         "Evolution Engine target omitted target_execution_bindings",
     )
     target_execution = json.loads(json.dumps(direct_run_request["plugin"]))
@@ -3997,7 +4036,7 @@ def main() -> int:
     assert_invalid(
         engine_validator,
         {
-            "engine_protocol": "cymule.engine/4",
+            "engine_protocol": "cymule.engine/5",
             "request": too_many_target_bindings,
         },
         "Evolution Engine target accepted more than one target execution binding",
@@ -4009,7 +4048,7 @@ def main() -> int:
     assert_invalid(
         engine_validator,
         {
-            "engine_protocol": "cymule.engine/4",
+            "engine_protocol": "cymule.engine/5",
             "request": unpinned_target_binding,
         },
         "Evolution Engine target accepted an unpinned target execution binding",
@@ -4022,7 +4061,7 @@ def main() -> int:
         assert_invalid(
             engine_validator,
             {
-                "engine_protocol": "cymule.engine/4",
+                "engine_protocol": "cymule.engine/5",
                 "request": invalid_migration_limit,
             },
             "Evolution Engine plugin accepted a narrowed or widened message limit",
@@ -4277,7 +4316,7 @@ def main() -> int:
     assert_invalid(
         engine_validator,
         {
-            "engine_protocol": "cymule.engine/4",
+            "engine_protocol": "cymule.engine/5",
             "request": legacy_restart_request,
         },
         "Engine schema accepted a retired live-evolution journal identity",

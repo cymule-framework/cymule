@@ -40,7 +40,7 @@
   child authority with delimiter-based string concatenation.
 - Authenticate sessions by recomputing the exact upload ID from `write_id`, the
   adapter generation, and the complete configured binding before deriving
-  paths. `cymule.resource-fs-upload/8` also retains and verifies that binding;
+  paths. `cymule.resource-fs-upload/9` also retains and verifies that binding;
   upload keys are lowercase digest bytes only. Stores sharing one root under
   different bindings never continue or abort each other's uploads, and their
   object/catalog/manifest-index families live in binding-derived physical
@@ -53,6 +53,13 @@
   and the terminal receipt remain M1-owned.
   An already absent object still requires syncing its owning directory before
   acknowledging deletion, because an earlier unlink may have lost its sync.
+  Publishing and deletion take the same non-blocking cross-process claim keyed
+  only by the verified physical retention family. Deletion must durably write
+  and read back that claim file's permanent tombstone before removing payload
+  or manifest-index bytes. A tombstoned family is resolver-absent and can never
+  publish again, including through another `write_id`; an interrupted
+  Publishing upload closes as `Deleted` and cleans only its upload-owned
+  staging targets. Never remove or time-expire the tombstone.
 - Write and fsync a unique staging object before linking it into the content
   namespace. Never expose partial bytes at a committed Resource location.
 - Whether the content link is newly created or already exists, verify its exact
@@ -60,7 +67,7 @@
   object, fsync staging, and only then persist the committed publication. A
   committed import replay compares source and retained content in one sequential
   pass; never hash the whole object once per retried chunk.
-- `cymule.resource-fs-upload/8` records the only acknowledged chunk frontier,
+- `cymule.resource-fs-upload/9` records the only acknowledged chunk frontier,
   immutable cleanup plan, and terminal plan-derived cleanup receipt.
   Sync bytes and a newly created upload directory entry before atomically
   advancing that frontier. On reopen, truncate only bytes beyond it; bytes below
@@ -103,7 +110,7 @@
   permits recreating the sort tree. Do not hold that claim across recursion.
 - Cross-process writer claims are non-blocking. Contention returns a Resource
   conflict; retry policy belongs to the caller.
-- `cymule.resource-fs-layout/1` is the physical namespace marker. An unmarked
+- `cymule.resource-fs-layout/2` is the physical namespace marker. An unmarked
   non-empty root or another marker generation is unsupported and must not gain
   a new upload authority for the same `write_id`. Open the root and every fixed
   directory once with no-follow descriptors; all owned entries and recursive
@@ -136,7 +143,7 @@
 - Catalog put computes the exact canonical record bytes and enforces the shared
   protocol-owned 16 MiB bound as catalog get before any staging or destination
   mutation.
-- The upload record has the same exact 16 MiB physical bound. Keep it
+- The `/9` upload record has the same exact 16 MiB physical bound. Keep it
   fixed-cardinality: scalar acknowledged frontier, compact publication, fixed
   cleanup plan/receipt, and no chunk or manifest-entry vector. `begin_write`
   must preflight the largest legal terminal record before acquiring the writer

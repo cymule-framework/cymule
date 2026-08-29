@@ -2,6 +2,11 @@
 
 Status: source implemented; operator execution pending.
 
+The independent
+[`public-mirror-receipt-carrier-v1.md`](public-mirror-receipt-carrier-v1.md)
+migration must also be executed before finalization can authenticate the
+private/public source mapping in BOM/3.
+
 Owner: Cymule release maintainer with GitHub organization-owner, repository
 ruleset, environment, GitHub App, Actions-secret, and immutable-release
 administration access.
@@ -11,7 +16,7 @@ administration access.
 This migration makes one repository-installed GitHub App the only creator of
 `refs/tags/v*`, makes the finalizer workflow the only `contents: write`
 workflow, disables environment administrator bypass, and enables
-owner-enforced immutable GitHub Releases. The exact BOM/2 Artifact Attestation
+owner-enforced immutable GitHub Releases. The exact BOM/3 Artifact Attestation
 is the terminal content authority; a GitHub Release is its immutable projection.
 
 Required non-secret configuration:

@@ -96,7 +96,7 @@ boundaries are admitted only with an exact Plan content ID, lowercase
 projection digest, ordered effect content IDs, and the closed
 `pre:<safe-epoch>:<event-content-id>` token.
 
-Every v4 success is correlated only by the exact request echoed by the Engine.
+Every v5 success is correlated only by the exact request echoed by the Engine.
 The SDK still validates the returned object itself, but it does not reseal a
 Plan or Resource candidate or compare a locally derived identity as a second
 correlation channel. Valid structured failures are preserved exactly; a

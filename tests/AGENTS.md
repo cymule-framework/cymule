@@ -27,18 +27,19 @@
 - Engine negative fixtures assert category, phase, code, and only an explicitly
   justified retry disposition through the real Rust CLI in all four SDKs.
   Transport loss must not manufacture replay safety.
-- The unsupported-Engine fixture intentionally carries a v3-only extension:
+- The unsupported-Engine fixture intentionally carries the v4 predecessor:
   clients select/reject the unsupported generation before applying the closed
-  v4 shape, yielding read-only `contract_violation/never` and mutating
+  v5 shape, yielding read-only `contract_violation/never` and mutating
   `unknown_world_outcome/reconcile` with the same stable protocol code.
 - Every success fixture echoes the complete inner request exactly as serialized
   and sent. The matrix covers every request variant and rejects a missing echo,
-  one-field mismatch, unknown/duplicate echo members, or the former v4
-  response-only success before accepting the payload. Failure fixtures carry no
+  one-field mismatch, unknown/duplicate echo members, or any predecessor
+  success before accepting the payload. Failure fixtures carry no
   request and reject one as an unknown member. SDK tests must prove this common
   correlation path without recomputing Rust Plan, Resource, Clock, rollout, or
-  other derived identities. Include omitted-versus-explicit-null cases so a
-  typed optional/defaulting decoder cannot erase a real wire mismatch.
+  other derived identities. Include omitted-versus-explicit-null and omitted-
+  versus-empty cases so a typed optional/defaulting decoder cannot erase a real
+  wire mismatch.
 - The shared failure fixture includes every exercised typed plugin outcome;
   protocol categories and stable codes may not live only in one SDK test.
 - The expected Plan ID is always computed by the Rust kernel from the checked-in
@@ -73,7 +74,7 @@
 - The shared durable-control fixture is the exact four-language explicit
   takeover envelope, including its execution-claim request, issued Clock
   reference shape, TTL, and expected fence. Rust validates the envelope through
-  Engine v4; stateful restart-level tests prove actual receipt resolution and
+  Engine v5; stateful restart-level tests prove actual receipt resolution and
   every mutation variant. SDKs transport the union and never become a second
   state reducer.
 - The shared terminal cancellation response is a complete
@@ -135,9 +136,20 @@
   deterministic source-closure leaf without widening narrow path evidence.
   Tag-authority tests distinguish the configured GitHub App ID from its live
   bot user ID and reject a tagger email derived from the App ID.
+  Mirror-provenance tests must reject a lightweight, moved, malformed,
+  wrong-target, wrong-private-SHA, or wrong-snapshot receipt tag; workflow
+  negatives must remove `fetch-depth: 0`, the ordinary exact-SHA macOS witness,
+  the pre-OIDC crates witness, and each receipt ruleset independently.
+  `tests/harness/fixtures/durable-storage-state-root.json` is schema input and
+  must route to protocol plus all four SDK schema readers, in addition to the
+  generic harness/docs owner.
 - Plugin suites remain split by store, Resource, activation, executor,
   observability, and Agent-protocol ownership. A plugin change runs its leaf;
   manifest/catalog changes additionally run package verification.
+- Harness workflow tests pin the scheduled/manual compatibility boundary: the
+  ordinary portability matrix remains Linux/macOS, while a separate native
+  `windows-2025` PowerShell job runs the exact cfg(non-Unix) DirectoryStore unit
+  and rejects a zero-test success. Do not route that witness into Required CI.
 - Real process-death tests may wrap a production `DurableStore` to place a
   marker immediately before or after CAS, then let the parent send `SIGKILL`.
   The wrapper belongs only in integration tests; never add a pause or crash
@@ -184,6 +196,9 @@
   must bind the receipt's activation ID, source, and selected wait set to the
   submitted command. Shared terminal fixtures include the closed
   `effect_not_applied` boundary with an exact lowercase SHA-256 intent ID.
+  They also include `effect_unavailable`; its exact intent is produced and
+  compared by the real Durable Unknown-Effect handler-drift path before all
+  four SDKs consume it.
 - The durable wait-condition fixture always carries its exact owner even when
   `owner.bind` is null. Missing owner or missing bind presence must fail the
   frozen schema instead of restoring the old optional-owner shape.
@@ -256,7 +271,10 @@
   They also prove inline allow annotations, repository ignore state, high-line
   positions, and files above the byte-exact scan limit cannot bypass admission.
   ZIP, tar/container, common compressed-archive magic, and Git LFS pointers are
-  terminal rejection canaries. The no-credential scanner must scan the actual
+  terminal rejection canaries. ZIP coverage includes a real prefixed deflated
+  archive whose compressed payload contains the secret canary plus a clean
+  non-ZIP record containing `PK` signatures, so neither SFX bypass nor
+  signature-only false positives can pass. The no-credential scanner must scan the actual
   candidate job artifact, not only a fixture. Registry-only, commit-message,
   author, parent/history, and coherent bundle/manifest replacements must fail
   the terminal controller's independently reconstructed full public-history tip

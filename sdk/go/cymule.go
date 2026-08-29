@@ -28,7 +28,7 @@ import (
 )
 
 // EngineProtocolVersion is the frozen Engine transport contract.
-const EngineProtocolVersion = "cymule.engine/4"
+const EngineProtocolVersion = "cymule.engine/5"
 const maxExactInteger uint64 = 9_007_199_254_740_991
 const maxEngineOutputBytes = 16 * 1024 * 1024
 const maxInlineResourceBytes = 1024 * 1024
@@ -1167,6 +1167,12 @@ type ClockObservationRef struct {
 	SourceID         string `json:"source_id"`
 	SourceGeneration string `json:"source_generation"`
 	Scope            string `json:"scope"`
+}
+
+// ClockObservationResult binds one Engine-issued observation to its requested Run.
+type ClockObservationResult struct {
+	RunID       string              `json:"run_id"`
+	Observation ClockObservationRef `json:"observation"`
 }
 
 // ClockObservation is one complete receipt resolved from persistent Clock authority.
@@ -3083,11 +3089,130 @@ func normalizedJSONSize(raw json.RawMessage) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return 0, err
+	return canonicalJSONSize(value)
+}
+
+func canonicalJSONSize(value any) (int, error) {
+	switch value := value.(type) {
+	case nil:
+		return len("null"), nil
+	case bool:
+		if value {
+			return len("true"), nil
+		}
+		return len("false"), nil
+	case string:
+		return canonicalJSONStringSize(value), nil
+	case json.Number:
+		integer, isInteger, err := mathematicalJSONInteger(value)
+		if err != nil {
+			return 0, err
+		}
+		if isInteger {
+			return len(integer.String()), nil
+		}
+		floating, err := value.Float64()
+		if err != nil || math.IsNaN(floating) || math.IsInf(floating, 0) {
+			return 0, fmt.Errorf("canonical JSON number is invalid")
+		}
+		return len(formatJCSNumber(floating)), nil
+	case []any:
+		total := 2
+		for index, member := range value {
+			memberSize, err := canonicalJSONSize(member)
+			if err != nil {
+				return 0, err
+			}
+			if index > 0 {
+				memberSize++
+			}
+			if err := addCanonicalJSONSize(&total, memberSize); err != nil {
+				return 0, err
+			}
+		}
+		return total, nil
+	case map[string]any:
+		total := 2
+		index := 0
+		for key, member := range value {
+			memberSize, err := canonicalJSONSize(member)
+			if err != nil {
+				return 0, err
+			}
+			entrySize := canonicalJSONStringSize(key) + 1 + memberSize
+			if index > 0 {
+				entrySize++
+			}
+			if err := addCanonicalJSONSize(&total, entrySize); err != nil {
+				return 0, err
+			}
+			index++
+		}
+		return total, nil
+	default:
+		return 0, fmt.Errorf("canonical JSON contains unsupported value %T", value)
 	}
-	return len(encoded), nil
+}
+
+func canonicalJSONStringSize(value string) int {
+	total := 2
+	for _, character := range value {
+		switch character {
+		case '"', '\\', '\b', '\t', '\n', '\f', '\r':
+			total += 2
+		case 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+			0x0b, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+			0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f:
+			total += len(`\u0000`)
+		default:
+			total += utf8.RuneLen(character)
+		}
+	}
+	return total
+}
+
+func formatJCSNumber(value float64) string {
+	if value == 0 {
+		return "0"
+	}
+	sign := ""
+	if value < 0 {
+		sign = "-"
+		value = -value
+	}
+	scientific := strconv.FormatFloat(value, 'e', -1, 64)
+	mantissa, exponentText, _ := strings.Cut(scientific, "e")
+	exponent, _ := strconv.Atoi(exponentText)
+	digits := strings.ReplaceAll(mantissa, ".", "")
+	n := exponent + 1
+	switch {
+	case len(digits) <= n && n <= 21:
+		return sign + digits + strings.Repeat("0", n-len(digits))
+	case 0 < n && n <= 21:
+		return sign + digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		return sign + "0." + strings.Repeat("0", -n) + digits
+	default:
+		exponent = n - 1
+		exponentSign := ""
+		if exponent >= 0 {
+			exponentSign = "+"
+		}
+		fraction := ""
+		if len(digits) > 1 {
+			fraction = "." + digits[1:]
+		}
+		return sign + digits[:1] + fraction + "e" + exponentSign + strconv.Itoa(exponent)
+	}
+}
+
+func addCanonicalJSONSize(total *int, addition int) error {
+	maximum := int(^uint(0) >> 1)
+	if addition < 0 || *total > maximum-addition {
+		return fmt.Errorf("canonical JSON byte size overflows the host integer range")
+	}
+	*total += addition
+	return nil
 }
 
 func validateDurableQueryPage(
@@ -6364,15 +6489,15 @@ func (engine CliEngine) VerifyDurableCommand(command DurableCommand) (DurableCom
 }
 
 // ObserveClock issues one retained logical Clock reference for a Run.
-func (engine CliEngine) ObserveClock(target EngineClockTarget, runID string) (ClockObservationRef, error) {
+func (engine CliEngine) ObserveClock(target EngineClockTarget, runID string) (ClockObservationResult, error) {
 	if !validRunIdentity(runID) || validateEngineClockTarget(target) != nil {
-		return ClockObservationRef{}, validationFailure(
+		return ClockObservationResult{}, validationFailure(
 			"invalid_engine_request", "Clock observation request is invalid",
 		)
 	}
 	var response struct {
-		Type        string              `json:"type"`
-		Observation ClockObservationRef `json:"observation"`
+		Type   string                 `json:"type"`
+		Result ClockObservationResult `json:"result"`
 	}
 	err := engine.request(map[string]any{
 		"type": "observe_clock", "target": target, "run_id": runID,
@@ -6380,7 +6505,7 @@ func (engine CliEngine) ObserveClock(target EngineClockTarget, runID string) (Cl
 	if err == nil && response.Type != "clock_observed" {
 		err = unexpectedEngineResponse("clock_observed", response.Type)
 	}
-	return response.Observation, err
+	return response.Result, err
 }
 
 func validateResourceHandle(resource ResourceHandle) error {
@@ -6435,6 +6560,9 @@ func validateResourceHandle(resource ResourceHandle) error {
 			resource.Integrity.Size != resource.Manifest.Size {
 			return fmt.Errorf("Resource manifest does not match content integrity")
 		}
+	}
+	if resource.Annotations != nil && len(resource.Annotations) == 0 {
+		return fmt.Errorf("Resource annotations must be omitted when empty")
 	}
 	for key, value := range resource.Annotations {
 		if !validResourceToken(key) || len(value) > 4096 {
@@ -6494,7 +6622,7 @@ func validateResourceHandleWire(value any) error {
 	}
 	if annotations, exists := object["annotations"]; exists {
 		annotationObject, ok := annotations.(map[string]any)
-		if !ok {
+		if !ok || len(annotationObject) == 0 {
 			return fmt.Errorf("Resource annotations are not an object")
 		}
 		for _, annotation := range annotationObject {
@@ -6735,6 +6863,13 @@ func validClockObservationRef(reference ClockObservationRef) bool {
 		validClockIdentity(reference.SourceID) && validClockIdentity(reference.Scope)
 }
 
+func validateClockObservationResult(result ClockObservationResult) error {
+	if !validRunIdentity(result.RunID) || !validClockObservationRef(result.Observation) {
+		return fmt.Errorf("Clock observation result is invalid")
+	}
+	return nil
+}
+
 func validClockIdentity(value string) bool {
 	if len(value) == 0 || !utf8.ValidString(value) || utf8.RuneCountInString(value) > 512 {
 		return false
@@ -6931,7 +7066,19 @@ func (engine DurableEngine) ObserveClock(runID string) (ClockObservationRef, err
 	if engine.Clock == nil {
 		return ClockObservationRef{}, fmt.Errorf("durable Clock target is missing")
 	}
-	return engine.Transport.ObserveClock(*engine.Clock, runID)
+	result, err := engine.Transport.ObserveClock(*engine.Clock, runID)
+	if err != nil {
+		return ClockObservationRef{}, err
+	}
+	if err := validateClockObservationResult(result); err != nil || result.RunID != runID ||
+		result.Observation.SourceID != engine.Clock.SourceID ||
+		result.Observation.SourceGeneration != engine.Clock.SourceGeneration {
+		request := map[string]any{
+			"type": "observe_clock", "target": *engine.Clock, "run_id": runID,
+		}
+		return ClockObservationRef{}, responseLossFailure(request, "invalid_engine_response")
+	}
+	return result.Observation, nil
 }
 
 // Start creates or idempotently reopens one Run.
@@ -7510,7 +7657,7 @@ func validateSuccessResponse(input json.RawMessage) error {
 		"sealed_resource":                 "resource",
 		"verified_wait_activation":        "activation",
 		"verified_durable_command":        "command",
-		"clock_observed":                  "observation",
+		"clock_observed":                  "result",
 		"verified_evolution_command":      "command",
 		"verified_live_evolution_command": "command",
 		"execution_boundary":              "execution",
@@ -7553,14 +7700,11 @@ func validateSuccessResponse(input json.RawMessage) error {
 		}
 		return validateDurableCommandResponse(command)
 	case "clock_observed":
-		var observation ClockObservationRef
-		if err := decodeClosedValue(payload, &observation); err != nil {
+		var result ClockObservationResult
+		if err := decodeClosedValue(payload, &result); err != nil {
 			return err
 		}
-		if !validClockObservationRef(observation) {
-			return fmt.Errorf("Clock observation reference is invalid")
-		}
-		return nil
+		return validateClockObservationResult(result)
 	case "verified_evolution_command":
 		var command EvolutionCommand
 		return decodeClosedValue(payload, &command)
@@ -7682,8 +7826,10 @@ func validateSuccessResponseForRequest(request any, input json.RawMessage) error
 	}
 	if requestType == "observe_clock" {
 		target, targetOK := requestObject["target"].(map[string]any)
-		observation, observationOK := responseObject["observation"].(map[string]any)
-		if !targetOK || !observationOK || observation["source_id"] != target["source_id"] ||
+		result, resultOK := responseObject["result"].(map[string]any)
+		observation, observationOK := result["observation"].(map[string]any)
+		if !targetOK || !resultOK || !observationOK || result["run_id"] != requestObject["run_id"] ||
+			observation["source_id"] != target["source_id"] ||
 			observation["source_generation"] != target["source_generation"] {
 			return fmt.Errorf("Clock observation does not match its requested authority")
 		}
@@ -7722,17 +7868,7 @@ func validateSuccessResponseForRequest(request any, input json.RawMessage) error
 }
 
 func resourceCandidatesEqual(left, right map[string]any) bool {
-	normalize := func(value map[string]any) map[string]any {
-		copy := make(map[string]any, len(value)+1)
-		for key, member := range value {
-			copy[key] = member
-		}
-		if _, exists := copy["annotations"]; !exists {
-			copy["annotations"] = map[string]any{}
-		}
-		return copy
-	}
-	return wireValuesEqual(normalize(left), normalize(right))
+	return wireValuesEqual(left, right)
 }
 
 func validateExecutionSuccessForRequest(request map[string]any, input json.RawMessage) error {

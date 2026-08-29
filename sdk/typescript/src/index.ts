@@ -285,6 +285,12 @@ export interface ClockObservationRef {
   scope: string;
 }
 
+/** Engine correlation authority for one Run-scoped Clock issuance. */
+export interface ClockObservationResult {
+  run_id: string;
+  observation: ClockObservationRef;
+}
+
 export interface ClockObservation extends ClockObservationRef {
   logical_time: number;
   observed_unix_ms: number;
@@ -2214,7 +2220,7 @@ export class ResourceBuilder {
   }
 }
 
-export const ENGINE_PROTOCOL_VERSION = "cymule.engine/4" as const;
+export const ENGINE_PROTOCOL_VERSION = "cymule.engine/5" as const;
 
 export type EngineFailureCategory =
   | "transport_failure"
@@ -2294,7 +2300,7 @@ export interface CliEngineOptions {
 /** Provider-neutral Engine transport consumed by the high-level durable facade. */
 export interface EngineTransport {
   seal(candidate: PlanCandidate): Promise<SealedPlan>;
-  observeClock(target: EngineClockTarget, runId: string): Promise<ClockObservationRef>;
+  observeClock(target: EngineClockTarget, runId: string): Promise<ClockObservationResult>;
   executeDurable(target: EngineDurableTarget, command: DurableCommand): Promise<DurableResponse>;
   executeLiveEvolution(
     target: EngineEvolutionTarget,
@@ -2342,7 +2348,7 @@ export class CliEngine {
     return response.command;
   }
 
-  async observeClock(target: EngineClockTarget, runId: string): Promise<ClockObservationRef> {
+  async observeClock(target: EngineClockTarget, runId: string): Promise<ClockObservationResult> {
     requireRequestRunIdentity(runId);
     let targetSnapshot: EngineClockTarget;
     try {
@@ -2360,7 +2366,7 @@ export class CliEngine {
     if (response.type !== "clock_observed") {
       throw unexpectedResponse("clock_observed", response.type);
     }
-    return response.observation;
+    return response.result;
   }
 
   async verifyEvolutionCommand(command: EvolutionCommand): Promise<EvolutionCommand> {
@@ -2662,7 +2668,23 @@ export class DurableEngine {
 
   async observeClock(runId: string): Promise<ClockObservationRef> {
     if (this.clock === undefined) throw new Error("durable Clock target is missing");
-    return await this.#transport.observeClock(this.clock, runId);
+    const request: EngineRequest = {
+      type: "observe_clock",
+      target: this.clock,
+      run_id: runId,
+    };
+    const result = await this.#transport.observeClock(this.clock, runId);
+    try {
+      validateClockObservationResult(result);
+      if (result.run_id !== runId
+        || result.observation.source_id !== this.clock.source_id
+        || result.observation.source_generation !== this.clock.source_generation) {
+        throw new Error("Clock observation result does not match its request");
+      }
+    } catch (error) {
+      throw responseLossError(request, "invalid_engine_response", errorMessage(error));
+    }
+    return result.observation;
   }
 
   async runIndexPage(
@@ -3041,7 +3063,7 @@ type EngineResponse =
   | { type: "sealed_resource"; resource: ResourceHandle }
   | { type: "verified_wait_activation"; activation: WaitActivation }
   | { type: "verified_durable_command"; command: DurableCommand }
-  | { type: "clock_observed"; observation: ClockObservationRef }
+  | { type: "clock_observed"; result: ClockObservationResult }
   | { type: "verified_evolution_command"; command: EvolutionCommand }
   | { type: "verified_live_evolution_command"; command: LiveEvolutionCommand }
   | { type: "execution_boundary"; execution: ExecutionOutcome }
@@ -3089,17 +3111,7 @@ function successResponseMatchesRequest(
     case "seal_resource": {
       if (response.type !== "sealed_resource") return false;
       const { resource_id: _resourceId, ...candidate } = response.resource;
-      return wireValuesEqual(
-        {
-          ...candidate,
-          annotations: candidate.annotations === undefined ? {} : candidate.annotations,
-        },
-        {
-          ...request.candidate,
-          annotations: request.candidate.annotations === undefined
-            ? {} : request.candidate.annotations,
-        },
-      );
+      return wireValuesEqual(candidate, request.candidate);
     }
     case "verify_wait_activation":
       return response.type === "verified_wait_activation"
@@ -3109,8 +3121,9 @@ function successResponseMatchesRequest(
         && wireValuesEqual(response.command, request.command);
     case "observe_clock":
       return response.type === "clock_observed"
-        && response.observation.source_id === request.target.source_id
-        && response.observation.source_generation === request.target.source_generation;
+        && response.result.run_id === request.run_id
+        && response.result.observation.source_id === request.target.source_id
+        && response.result.observation.source_generation === request.target.source_generation;
     case "verify_evolution_command":
       return response.type === "verified_evolution_command"
         && wireValuesEqual(response.command, request.command);
@@ -3501,7 +3514,7 @@ function validateSuccessResponse(value: unknown): void {
     ["sealed", "plan,type"], ["sealed_resource", "resource,type"],
     ["verified_wait_activation", "activation,type"],
     ["verified_durable_command", "command,type"],
-    ["clock_observed", "observation,type"],
+    ["clock_observed", "result,type"],
     ["verified_evolution_command", "command,type"],
     ["verified_live_evolution_command", "command,type"],
     ["execution_boundary", "execution,type"], ["verified", "type"],
@@ -3515,7 +3528,7 @@ function validateSuccessResponse(value: unknown): void {
   if (value.type === "sealed_resource") validateResourceHandle(value.resource);
   if (value.type === "verified_wait_activation") validateWaitActivation(value.activation);
   if (value.type === "verified_durable_command") validateDurableCommand(value.command);
-  if (value.type === "clock_observed") validateClockObservationRef(value.observation);
+  if (value.type === "clock_observed") validateClockObservationResult(value.result);
   if (value.type === "execution_boundary") validateExecutionOutcome(value.execution);
   if (value.type === "verified_evolution_command") validateEvolutionCommand(value.command);
   if (value.type === "verified_live_evolution_command") validateLiveEvolutionCommand(value.command);
@@ -3565,7 +3578,7 @@ function validateResourceHandle(value: unknown): void {
     }
   }
   if (value.annotations !== undefined) {
-    if (!isRecord(value.annotations)) {
+    if (!isRecord(value.annotations) || Object.keys(value.annotations).length === 0) {
       throw transportError("invalid_engine_response", "Resource annotations are invalid");
     }
     for (const [key, annotation] of Object.entries(value.annotations)) {
@@ -3824,6 +3837,14 @@ function validateClockObservationRef(value: unknown): void {
     !isClockIdentity(value.source_id) || !isClockIdentity(value.scope)) {
     throw transportError("invalid_engine_response", "Clock observation reference is invalid");
   }
+}
+
+function validateClockObservationResult(value: unknown): void {
+  requireClosedRecord(value, ["run_id", "observation"], "Clock observation result");
+  if (!isRunIdentity(value.run_id)) {
+    throw transportError("invalid_engine_response", "Clock observation Run is invalid");
+  }
+  validateClockObservationRef(value.observation);
 }
 
 function validateEngineStoreTarget(value: unknown): asserts value is EngineStoreTarget {
@@ -5010,8 +5031,8 @@ function validateContinuation(value: unknown): void {
     "epoch", "execution_fence", "execution_claim", "status",
   ], "Continuation");
   requireStrings(value, ["run_id", "plan_id", "binding_context"]);
-  if (!isRunIdentity(value.run_id)) {
-    throw transportError("invalid_engine_response", "Continuation Run identity is invalid");
+  if (!isRunIdentity(value.run_id) || !isContentId(value.plan_id)) {
+    throw transportError("invalid_engine_response", "Continuation Run or Plan identity is invalid");
   }
   if (!new Set(["ready", "waiting", "running", "completed", "failed", "cancelled"]).has(String(value.status))) {
     throw transportError("invalid_engine_response", "Continuation status is invalid");
@@ -5064,6 +5085,7 @@ function validateContinuationExecutionClaim(value: unknown): void {
   if (!isRunIdentity(value.run_id)
     || !isContentId(value.continuation_id)
     || !isContentId(value.continuation_attempt_id)
+    || !isContentId(value.plan_id)
     || !isClockIdentity(value.owner)) {
     throw transportError(
       "invalid_engine_response",

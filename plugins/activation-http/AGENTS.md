@@ -44,6 +44,13 @@
   scan a fixed activation-ID prefix; unrelated ingress cannot starve a later
   active source. Reset the cursor only for the view's typed `Stale` outcome;
   every actual view error remains an error.
+- Validate a newly selected target set against the `max_targets` supplied to
+  that exact `receive` call before SQLite may retain it. Once retained, the
+  complete set is the original selection authority: a later caller's smaller
+  bound must not reject, truncate, or reselect it. Retained sets remain subject
+  to the framework-wide target maximum, and a concurrent loser of the
+  selection update must classify the winning SQLite value as retained rather
+  than reinterpret it under its own bound.
 - Source-view regressions verify one-page reads, continuation beyond the scan
   budget, cursor preservation across actual errors, and retained-delivery
   replay without either source-page or target-selection reads.

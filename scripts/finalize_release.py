@@ -17,17 +17,21 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import version_domains
+from release_contracts import (
+    CONTROL_PLANE_RECEIPT_VERSION,
+    CONTROL_PLANE_SETTINGS_VERSION,
+    FINALIZATION_STAGE_VERSION,
+    MIRROR_RECEIPT_VERSION,
+)
 
 
 Invoke = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 Fence = Callable[[], None]
-FINALIZATION_STAGE_SCHEMA = 2
 FINALIZATION_MANIFEST_NAME = "release-finalization.json"
 FINALIZATION_NOTES_NAME = "release-notes.md"
 GIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 GH_RELEASE_NOT_FOUND = "release not found"
-CONTROL_PLANE_RECEIPT_VERSION = "github-release-control-plane-receipt/1"
-CONTROL_PLANE_SETTINGS_VERSION = "github-release-settings-snapshot/1"
+MIRROR_RECEIPT_TAG_PREFIX = "cymule-mirror/"
 CONTROL_PLANE_RECEIPT_TTL_SECONDS = 15 * 60
 GITHUB_ACTIONS_INTEGRATION_ID = 15368
 POSITIVE_DECIMAL_PATTERN = re.compile(r"[1-9][0-9]*")
@@ -42,10 +46,24 @@ class FinalizationStage:
 
     tag: str
     release_tag_sha: str
+    private_source_sha: str
+    mirror_receipt_tag_sha: str
+    public_source_snapshot_digest: str
     title: str
     notes_path: pathlib.Path
     asset_path: pathlib.Path
     asset_name: str
+
+
+@dataclasses.dataclass(frozen=True)
+class MirrorReceipt:
+    """One immutable private-to-public source mapping carried by a Git tag."""
+
+    private_source_sha: str
+    public_source_sha: str
+    public_source_snapshot_digest: str
+    tag_name: str
+    tag_sha: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -93,6 +111,129 @@ def file_identity(path: pathlib.Path) -> dict[str, object]:
             size += len(chunk)
             digest.update(chunk)
     return {"size": size, "sha256": f"sha256:{digest.hexdigest()}"}
+
+
+def mirror_receipt_tag_name(public_source_sha: str) -> str:
+    """Return the sole public ref carrying one rewritten-source receipt."""
+
+    if GIT_SHA_PATTERN.fullmatch(public_source_sha) is None:
+        raise ValueError("public source SHA must be one exact lowercase Git commit")
+    return f"{MIRROR_RECEIPT_TAG_PREFIX}{public_source_sha}"
+
+
+def load_mirror_receipt(
+    repository_root: pathlib.Path,
+    *,
+    public_source_sha: str,
+    expected_tag_sha: str | None = None,
+) -> MirrorReceipt:
+    """Authenticate an immutable annotated-tag mapping and its source snapshot."""
+
+    if repository_root.is_symlink() or not repository_root.is_dir():
+        raise ValueError("mirror receipt repository must be one real directory")
+    if GIT_SHA_PATTERN.fullmatch(public_source_sha) is None:
+        raise ValueError("public source SHA must be one exact lowercase Git commit")
+    if expected_tag_sha is not None and GIT_SHA_PATTERN.fullmatch(expected_tag_sha) is None:
+        raise ValueError("mirror receipt tag SHA must be one exact Git object")
+    resolved_public = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{public_source_sha}^{{commit}}"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if resolved_public != public_source_sha:
+        raise ValueError("mirror receipt public source is not the exact commit")
+
+    tag_name = mirror_receipt_tag_name(public_source_sha)
+    tag_ref = f"refs/tags/{tag_name}"
+    tag_sha = subprocess.run(
+        ["git", "rev-parse", "--verify", tag_ref],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if GIT_SHA_PATTERN.fullmatch(tag_sha) is None or (
+        expected_tag_sha is not None and tag_sha != expected_tag_sha
+    ):
+        raise ValueError("mirror receipt tag object belongs to another mapping")
+    tag_type = subprocess.run(
+        ["git", "cat-file", "-t", tag_sha],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if tag_type != "tag":
+        raise ValueError("mirror receipt carrier must be one annotated Git tag")
+    raw = subprocess.run(
+        ["git", "cat-file", "tag", tag_sha],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+    ).stdout
+    header, separator, message = raw.partition(b"\n\n")
+    headers = header.split(b"\n")
+    if (
+        separator != b"\n\n"
+        or len(headers) != 4
+        or headers[0] != f"object {public_source_sha}".encode("ascii")
+        or headers[1] != b"type commit"
+        or headers[2] != f"tag {tag_name}".encode("ascii")
+        or re.fullmatch(
+            rb"tagger Cymule Public Mirror <mirror@cymule\.dev> (?:0|[1-9][0-9]*) \+0000",
+            headers[3],
+        )
+        is None
+    ):
+        raise ValueError("mirror receipt annotated-tag envelope is not exact")
+    value = version_domains.load_json_bytes(
+        message.removesuffix(b"\n"), label="public mirror receipt"
+    )
+    if not isinstance(value, dict) or set(value) != {
+        "private_source_sha",
+        "public_source_sha",
+        "public_source_snapshot_digest",
+        "receipt_version",
+    }:
+        raise ValueError("public mirror receipt has an open or incomplete shape")
+    private_source_sha = value["private_source_sha"]
+    public_source_snapshot_digest = value["public_source_snapshot_digest"]
+    if (
+        value["receipt_version"] != MIRROR_RECEIPT_VERSION
+        or not isinstance(private_source_sha, str)
+        or GIT_SHA_PATTERN.fullmatch(private_source_sha) is None
+        or private_source_sha == public_source_sha
+        or value["public_source_sha"] != public_source_sha
+        or not isinstance(public_source_snapshot_digest, str)
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}", public_source_snapshot_digest
+        )
+        is None
+        or message != version_domains.canonical_bytes(value) + b"\n"
+    ):
+        raise ValueError("public mirror receipt source mapping is not exact")
+    observed_snapshot = version_domains.commit_source_snapshot_digest(
+        public_source_sha, root=repository_root
+    )
+    registry_snapshot = version_domains.load_registry(repository_root)[
+        "source_generation"
+    ]["source_snapshot_digest"]
+    if (
+        public_source_snapshot_digest != observed_snapshot
+        or public_source_snapshot_digest != registry_snapshot
+    ):
+        raise ValueError(
+            "public mirror receipt does not bind the exact source snapshot generation"
+        )
+    return MirrorReceipt(
+        private_source_sha=private_source_sha,
+        public_source_sha=public_source_sha,
+        public_source_snapshot_digest=public_source_snapshot_digest,
+        tag_name=tag_name,
+        tag_sha=tag_sha,
+    )
 
 
 def _receipt_digest(value: dict[str, object]) -> str:
@@ -174,10 +315,32 @@ def _validate_control_plane_settings(snapshot: object) -> None:
         "rules": ["deletion", "update"],
         "bypass_actors": [],
     }
+    expected_mirror_receipt_creation = {
+        "enforcement": "active",
+        "target": "tag",
+        "ref": "refs/tags/cymule-mirror/*",
+        "rules": ["creation"],
+        "bypass_actors": [
+            {
+                "actor_id": authorities["mirror_integration_id"],
+                "actor_type": "Integration",
+                "bypass_mode": "always",
+            }
+        ],
+    }
+    expected_mirror_receipt_immutable = {
+        "enforcement": "active",
+        "target": "tag",
+        "ref": "refs/tags/cymule-mirror/*",
+        "rules": ["deletion", "update"],
+        "bypass_actors": [],
+    }
     expected_rulesets = {
         "main": expected_main,
         "release_tag_creation": expected_tag_creation,
         "release_tag_immutable": expected_tag_immutable,
+        "mirror_receipt_creation": expected_mirror_receipt_creation,
+        "mirror_receipt_immutable": expected_mirror_receipt_immutable,
     }
     if snapshot["rulesets"] != expected_rulesets:
         raise ValueError("control-plane receipt ruleset authority is not exact")
@@ -246,6 +409,9 @@ def assert_control_plane_receipt(
     controller_sha: str,
     release_sha: str,
     release_tag_sha: str,
+    private_source_sha: str,
+    mirror_receipt_tag_sha: str,
+    public_source_snapshot_digest: str,
     now: dt.datetime | None = None,
 ) -> None:
     """Revalidate one short-lived, same-run live settings receipt before a write."""
@@ -262,6 +428,9 @@ def assert_control_plane_receipt(
         "controller_sha",
         "release_sha",
         "release_tag_sha",
+        "private_source_sha",
+        "mirror_receipt_tag_sha",
+        "public_source_snapshot_digest",
         "observed_at",
         "expires_at",
         "settings_snapshot",
@@ -277,6 +446,9 @@ def assert_control_plane_receipt(
         "controller_sha": controller_sha,
         "release_sha": release_sha,
         "release_tag_sha": release_tag_sha,
+        "private_source_sha": private_source_sha,
+        "mirror_receipt_tag_sha": mirror_receipt_tag_sha,
+        "public_source_snapshot_digest": public_source_snapshot_digest,
     }
     for field, expected in expected_identity.items():
         if value[field] != expected:
@@ -288,7 +460,13 @@ def assert_control_plane_receipt(
         or POSITIVE_DECIMAL_PATTERN.fullmatch(run_attempt) is None
     ):
         raise ValueError("control-plane receipt run identity is not canonical")
-    for field in ("controller_sha", "release_sha", "release_tag_sha"):
+    for field in (
+        "controller_sha",
+        "release_sha",
+        "release_tag_sha",
+        "private_source_sha",
+        "mirror_receipt_tag_sha",
+    ):
         if GIT_SHA_PATTERN.fullmatch(value[field]) is None:
             raise ValueError(
                 f"control-plane receipt {field} is not one exact Git identity"
@@ -297,6 +475,14 @@ def assert_control_plane_receipt(
         raise ValueError(
             "control-plane receipt does not bind a distinct annotated tag object"
         )
+    if value["private_source_sha"] == value["release_sha"]:
+        raise ValueError(
+            "control-plane receipt does not distinguish private and public source"
+        )
+    if not isinstance(value["public_source_snapshot_digest"], str) or re.fullmatch(
+        r"sha256:[0-9a-f]{64}", value["public_source_snapshot_digest"]
+    ) is None:
+        raise ValueError("control-plane receipt source snapshot is malformed")
     claimed_digest = value["receipt_sha256"]
     if not isinstance(claimed_digest, str) or re.fullmatch(
         r"sha256:[0-9a-f]{64}", claimed_digest
@@ -329,15 +515,22 @@ def validate_bom_identity(
     *,
     version: str,
     release_sha: str,
+    private_source_sha: str,
+    public_source_snapshot_digest: str,
 ) -> None:
-    """Bind the frozen BOM to the exact public package generation."""
+    """Bind the frozen BOM to distinct private and rewritten public sources."""
 
     value = version_domains.load_json_bytes(path.read_bytes(), label="release BOM")
     registry = version_domains.load_registry()
+    if (
+        registry["source_generation"]["source_snapshot_digest"]
+        != public_source_snapshot_digest
+    ):
+        raise ValueError("release BOM source snapshot does not match the mirror receipt")
     version_domains.validate_release_bom(
         value,
         registry=registry,
-        source_sha=release_sha,
+        source_sha=private_source_sha,
         public_source_sha=release_sha,
     )
     if value["workspace_version"] != version:
@@ -349,15 +542,22 @@ def validate_attested_bom_projection(
     *,
     version: str,
     release_sha: str,
+    private_source_sha: str,
+    public_source_snapshot_digest: str,
 ) -> None:
     """Bind an attested BOM to the exact payload without re-opening its authority."""
 
     value = version_domains.load_json_bytes(path.read_bytes(), label="attested release BOM")
     registry = version_domains.load_registry()
+    if (
+        registry["source_generation"]["source_snapshot_digest"]
+        != public_source_snapshot_digest
+    ):
+        raise ValueError("attested release BOM snapshot differs from the mirror receipt")
     version_domains.validate_release_bom_projection(
         value,
         registry=registry,
-        source_sha=release_sha,
+        source_sha=private_source_sha,
         public_source_sha=release_sha,
     )
     if value["workspace_version"] != version:
@@ -370,6 +570,9 @@ def create_finalization_stage(
     version: str,
     release_sha: str,
     release_tag_sha: str,
+    private_source_sha: str,
+    mirror_receipt_tag_sha: str,
+    public_source_snapshot_digest: str,
     controller_sha: str,
     notes_path: pathlib.Path,
     asset_path: pathlib.Path,
@@ -388,6 +591,15 @@ def create_finalization_stage(
         raise ValueError("release tag SHA must be one distinct annotated tag object")
     if GIT_SHA_PATTERN.fullmatch(controller_sha) is None:
         raise ValueError("controller SHA must be one exact lowercase Git commit")
+    if (
+        GIT_SHA_PATTERN.fullmatch(private_source_sha) is None
+        or private_source_sha == release_sha
+    ):
+        raise ValueError("private source SHA must differ from the public release SHA")
+    if GIT_SHA_PATTERN.fullmatch(mirror_receipt_tag_sha) is None:
+        raise ValueError("mirror receipt tag SHA must be one exact Git object")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", public_source_snapshot_digest) is None:
+        raise ValueError("public source snapshot digest is malformed")
     tag, title, asset_name = release_identity(version)
     file_identity(notes_path)
     file_identity(asset_path)
@@ -398,6 +610,8 @@ def create_finalization_stage(
         asset_path,
         version=version,
         release_sha=release_sha,
+        private_source_sha=private_source_sha,
+        public_source_snapshot_digest=public_source_snapshot_digest,
     )
 
     output.mkdir(parents=True, exist_ok=False)
@@ -406,13 +620,16 @@ def create_finalization_stage(
     shutil.copyfile(notes_path, frozen_notes)
     shutil.copyfile(asset_path, frozen_asset)
     manifest = {
-        "schema_version": FINALIZATION_STAGE_SCHEMA,
+        "stage_version": FINALIZATION_STAGE_VERSION,
         "repository": repository,
         "version": version,
         "tag": tag,
         "title": title,
         "release_sha": release_sha,
         "release_tag_sha": release_tag_sha,
+        "private_source_sha": private_source_sha,
+        "mirror_receipt_tag_sha": mirror_receipt_tag_sha,
+        "public_source_snapshot_digest": public_source_snapshot_digest,
         "controller_sha": controller_sha,
         "notes": {"name": frozen_notes.name, **file_identity(frozen_notes)},
         "asset": {"name": frozen_asset.name, **file_identity(frozen_asset)},
@@ -431,6 +648,9 @@ def _load_finalization_stage_files(
     version: str,
     release_sha: str,
     release_tag_sha: str,
+    private_source_sha: str,
+    mirror_receipt_tag_sha: str,
+    public_source_snapshot_digest: str,
     controller_sha: str,
 ) -> FinalizationStage:
     """Authenticate frozen file identities without executing tag payload."""
@@ -441,6 +661,14 @@ def _load_finalization_stage_files(
         or release_tag_sha == release_sha
     ):
         raise ValueError("release tag SHA must be one distinct annotated tag object")
+    if (
+        GIT_SHA_PATTERN.fullmatch(private_source_sha) is None
+        or private_source_sha == release_sha
+        or GIT_SHA_PATTERN.fullmatch(mirror_receipt_tag_sha) is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", public_source_snapshot_digest)
+        is None
+    ):
+        raise ValueError("release finalization source mapping identity is malformed")
     expected_names = {
         FINALIZATION_MANIFEST_NAME,
         FINALIZATION_NOTES_NAME,
@@ -457,30 +685,34 @@ def _load_finalization_stage_files(
         manifest_path.read_bytes(), label="release finalization manifest"
     )
     if not isinstance(manifest, dict) or set(manifest) != {
-        "schema_version",
+        "stage_version",
         "repository",
         "version",
         "tag",
         "title",
         "release_sha",
         "release_tag_sha",
+        "private_source_sha",
+        "mirror_receipt_tag_sha",
+        "public_source_snapshot_digest",
         "controller_sha",
         "notes",
         "asset",
     }:
         raise ValueError("release finalization manifest has an open or incomplete shape")
     expected = {
-        "schema_version": FINALIZATION_STAGE_SCHEMA,
+        "stage_version": FINALIZATION_STAGE_VERSION,
         "repository": repository,
         "version": version,
         "tag": tag,
         "title": title,
         "release_sha": release_sha,
         "release_tag_sha": release_tag_sha,
+        "private_source_sha": private_source_sha,
+        "mirror_receipt_tag_sha": mirror_receipt_tag_sha,
+        "public_source_snapshot_digest": public_source_snapshot_digest,
         "controller_sha": controller_sha,
     }
-    if type(manifest.get("schema_version")) is not int:
-        raise ValueError("release finalization schema version is not an integer")
     for field, wanted in expected.items():
         if manifest.get(field) != wanted:
             raise ValueError(f"release finalization {field} belongs to another generation")
@@ -508,6 +740,9 @@ def _load_finalization_stage_files(
     return FinalizationStage(
         tag,
         release_tag_sha,
+        private_source_sha,
+        mirror_receipt_tag_sha,
+        public_source_snapshot_digest,
         title,
         paths["notes"],
         paths["asset"],
@@ -522,9 +757,12 @@ def load_finalization_stage(
     version: str,
     release_sha: str,
     release_tag_sha: str,
+    private_source_sha: str,
+    mirror_receipt_tag_sha: str,
+    public_source_snapshot_digest: str,
     controller_sha: str,
 ) -> FinalizationStage:
-    """Authenticate one downloaded bundle and its complete BOM/2 semantics."""
+    """Authenticate one downloaded bundle and its complete BOM/3 semantics."""
 
     frozen = _load_finalization_stage_files(
         directory,
@@ -532,12 +770,17 @@ def load_finalization_stage(
         version=version,
         release_sha=release_sha,
         release_tag_sha=release_tag_sha,
+        private_source_sha=private_source_sha,
+        mirror_receipt_tag_sha=mirror_receipt_tag_sha,
+        public_source_snapshot_digest=public_source_snapshot_digest,
         controller_sha=controller_sha,
     )
     validate_bom_identity(
         frozen.asset_path,
         version=version,
         release_sha=release_sha,
+        private_source_sha=private_source_sha,
+        public_source_snapshot_digest=public_source_snapshot_digest,
     )
     return frozen
 
@@ -567,10 +810,14 @@ def assert_remote_release_fence(
     controller_sha: str,
     release_sha: str,
     release_tag_sha: str,
+    mirror_receipt_tag_sha: str,
     invoke: Invoke = invoke_git,
 ) -> None:
     """Require current public main and the annotated tag before one mutation."""
 
+    mirror_receipt_ref = (
+        f"refs/tags/{mirror_receipt_tag_name(release_sha)}"
+    )
     result = invoke(
         [
             "ls-remote",
@@ -578,6 +825,7 @@ def assert_remote_release_fence(
             "refs/heads/main",
             f"refs/tags/{tag}",
             f"refs/tags/{tag}^{{}}",
+            mirror_receipt_ref,
         ]
     )
     if result.returncode != 0:
@@ -594,14 +842,23 @@ def assert_remote_release_fence(
         refs[fields[1]] = fields[0]
     tag_ref = f"refs/tags/{tag}"
     peeled_ref = f"{tag_ref}^{{}}"
-    if set(refs) != {"refs/heads/main", tag_ref, peeled_ref}:
-        raise ValueError("remote release fence omitted the annotated tag or main")
+    if set(refs) != {
+        "refs/heads/main",
+        tag_ref,
+        peeled_ref,
+        mirror_receipt_ref,
+    }:
+        raise ValueError(
+            "remote release fence omitted main, release tag, or mirror receipt"
+        )
     if refs["refs/heads/main"] != controller_sha:
         raise ValueError("remote public main moved from the release controller")
     if refs[tag_ref] != release_tag_sha:
         raise ValueError("remote annotated tag object moved from the frozen tag")
     if refs[peeled_ref] != release_sha:
         raise ValueError("remote annotated tag moved from the release payload")
+    if refs[mirror_receipt_ref] != mirror_receipt_tag_sha:
+        raise ValueError("remote mirror receipt moved from the frozen source mapping")
 
 
 def stable_tag_version(tag: object) -> tuple[int, int, int] | None:
@@ -1295,11 +1552,20 @@ def converge_release(
 def main() -> int:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
+    mirror = commands.add_parser("verify-mirror-receipt")
+    mirror.add_argument("--public-source-sha", required=True)
+    mirror.add_argument("--expected-tag-sha")
+    mirror.add_argument("--expected-private-source-sha")
+    mirror.add_argument("--expected-source-snapshot-digest")
+    mirror.add_argument("--github-output", type=pathlib.Path)
     stage = commands.add_parser("stage")
     stage.add_argument("--repository", required=True)
     stage.add_argument("--version", required=True)
     stage.add_argument("--release-sha", required=True)
     stage.add_argument("--release-tag-sha", required=True)
+    stage.add_argument("--private-source-sha", required=True)
+    stage.add_argument("--mirror-receipt-tag-sha", required=True)
+    stage.add_argument("--public-source-snapshot-digest", required=True)
     stage.add_argument("--controller-sha", required=True)
     stage.add_argument("--notes-file", type=pathlib.Path, required=True)
     stage.add_argument("--asset", type=pathlib.Path, required=True)
@@ -1309,6 +1575,9 @@ def main() -> int:
     verify_stage.add_argument("--version", required=True)
     verify_stage.add_argument("--release-sha", required=True)
     verify_stage.add_argument("--release-tag-sha", required=True)
+    verify_stage.add_argument("--private-source-sha", required=True)
+    verify_stage.add_argument("--mirror-receipt-tag-sha", required=True)
+    verify_stage.add_argument("--public-source-snapshot-digest", required=True)
     verify_stage.add_argument("--controller-sha", required=True)
     verify_stage.add_argument("--stage", type=pathlib.Path, required=True)
     publish = commands.add_parser("publish")
@@ -1316,6 +1585,9 @@ def main() -> int:
     publish.add_argument("--version", required=True)
     publish.add_argument("--release-sha", required=True)
     publish.add_argument("--release-tag-sha", required=True)
+    publish.add_argument("--private-source-sha", required=True)
+    publish.add_argument("--mirror-receipt-tag-sha", required=True)
+    publish.add_argument("--public-source-snapshot-digest", required=True)
     publish.add_argument("--controller-sha", required=True)
     publish.add_argument("--stage", type=pathlib.Path, required=True)
     publish.add_argument("--attestation-bundle", type=pathlib.Path, required=True)
@@ -1323,12 +1595,47 @@ def main() -> int:
     publish.add_argument("--run-id", required=True)
     publish.add_argument("--run-attempt", required=True)
     arguments = parser.parse_args()
-    if arguments.command == "stage":
+    if arguments.command == "verify-mirror-receipt":
+        receipt = load_mirror_receipt(
+            version_domains.ROOT,
+            public_source_sha=arguments.public_source_sha,
+            expected_tag_sha=arguments.expected_tag_sha,
+        )
+        if (
+            arguments.expected_private_source_sha is not None
+            and receipt.private_source_sha
+            != arguments.expected_private_source_sha
+        ):
+            raise ValueError("mirror receipt private source differs from expectation")
+        if (
+            arguments.expected_source_snapshot_digest is not None
+            and receipt.public_source_snapshot_digest
+            != arguments.expected_source_snapshot_digest
+        ):
+            raise ValueError("mirror receipt source snapshot differs from expectation")
+        outputs = {
+            "private_source_sha": receipt.private_source_sha,
+            "public_source_sha": receipt.public_source_sha,
+            "public_source_snapshot_digest": receipt.public_source_snapshot_digest,
+            "mirror_receipt_tag_sha": receipt.tag_sha,
+        }
+        if arguments.github_output is None:
+            print(json.dumps(outputs, sort_keys=True, separators=(",", ":")))
+        else:
+            if arguments.github_output.is_symlink() or not arguments.github_output.is_file():
+                raise ValueError("GitHub output must be one existing regular file")
+            with arguments.github_output.open("a", encoding="utf-8") as stream:
+                for name, value in outputs.items():
+                    stream.write(f"{name}={value}\n")
+    elif arguments.command == "stage":
         manifest = create_finalization_stage(
             repository=arguments.repository,
             version=arguments.version,
             release_sha=arguments.release_sha,
             release_tag_sha=arguments.release_tag_sha,
+            private_source_sha=arguments.private_source_sha,
+            mirror_receipt_tag_sha=arguments.mirror_receipt_tag_sha,
+            public_source_snapshot_digest=arguments.public_source_snapshot_digest,
             controller_sha=arguments.controller_sha,
             notes_path=arguments.notes_file,
             asset_path=arguments.asset,
@@ -1342,16 +1649,33 @@ def main() -> int:
             version=arguments.version,
             release_sha=arguments.release_sha,
             release_tag_sha=arguments.release_tag_sha,
+            private_source_sha=arguments.private_source_sha,
+            mirror_receipt_tag_sha=arguments.mirror_receipt_tag_sha,
+            public_source_snapshot_digest=arguments.public_source_snapshot_digest,
             controller_sha=arguments.controller_sha,
         )
         print(frozen.asset_path)
     else:
+        receipt = load_mirror_receipt(
+            version_domains.ROOT,
+            public_source_sha=arguments.release_sha,
+            expected_tag_sha=arguments.mirror_receipt_tag_sha,
+        )
+        if (
+            receipt.private_source_sha != arguments.private_source_sha
+            or receipt.public_source_snapshot_digest
+            != arguments.public_source_snapshot_digest
+        ):
+            raise ValueError("mirror receipt differs from finalization source authority")
         frozen = _load_finalization_stage_files(
             arguments.stage,
             repository=arguments.repository,
             version=arguments.version,
             release_sha=arguments.release_sha,
             release_tag_sha=arguments.release_tag_sha,
+            private_source_sha=arguments.private_source_sha,
+            mirror_receipt_tag_sha=arguments.mirror_receipt_tag_sha,
+            public_source_snapshot_digest=arguments.public_source_snapshot_digest,
             controller_sha=arguments.controller_sha,
         )
         control_plane_fence = lambda: assert_control_plane_receipt(
@@ -1362,6 +1686,9 @@ def main() -> int:
             controller_sha=arguments.controller_sha,
             release_sha=arguments.release_sha,
             release_tag_sha=arguments.release_tag_sha,
+            private_source_sha=arguments.private_source_sha,
+            mirror_receipt_tag_sha=arguments.mirror_receipt_tag_sha,
+            public_source_snapshot_digest=arguments.public_source_snapshot_digest,
         )
         control_plane_fence()
         verify_bom_attestation(
@@ -1374,6 +1701,8 @@ def main() -> int:
             frozen.asset_path,
             version=arguments.version,
             release_sha=arguments.release_sha,
+            private_source_sha=arguments.private_source_sha,
+            public_source_snapshot_digest=arguments.public_source_snapshot_digest,
         )
         converge_release(
             repository=arguments.repository,
@@ -1395,6 +1724,7 @@ def main() -> int:
                 controller_sha=arguments.controller_sha,
                 release_sha=arguments.release_sha,
                 release_tag_sha=frozen.release_tag_sha,
+                mirror_receipt_tag_sha=frozen.mirror_receipt_tag_sha,
             ),
         )
     return 0
@@ -1403,5 +1733,5 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (OSError, ValueError) as error:
+    except (OSError, subprocess.CalledProcessError, ValueError) as error:
         raise SystemExit(f"release finalization failed: {error}") from error

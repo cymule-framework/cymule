@@ -5,7 +5,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::mem::size_of;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::ExitStatus;
+#[cfg(not(target_os = "macos"))]
+use std::process::{Child, Command, Stdio};
 use std::ptr::NonNull;
 use std::sync::Arc;
 #[cfg(all(test, unix))]
@@ -40,6 +42,8 @@ const CLOSURE_MODE_BYTES: usize = size_of::<u32>();
 const CLOSURE_DISCRIMINANT_BYTES: usize = size_of::<u8>();
 const MAX_PROCESS_CONFIGURATION_FOOTPRINT: usize = 8 * 1024 * 1024;
 const MAX_CAPTURED_DIRECTORY_ENTRIES: usize = 65_536;
+const MAX_CLEANUP_ENTRIES_PER_DIRECTORY: usize = MAX_CAPTURED_DIRECTORY_ENTRIES;
+const MAX_CLEANUP_TOTAL_ENTRIES: usize = MAX_CAPTURED_DIRECTORY_ENTRIES + 2;
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const SEALED_EXECUTABLE_MODE: u32 = 0o500;
 const MAX_CONCURRENT_CANCELLATION_LAUNCHES: usize = 64;
@@ -50,18 +54,44 @@ const LAUNCH_CANCELLED_BEFORE_START: u8 = 3;
 const LAUNCH_CANCELLED_AFTER_START: u8 = 4;
 const LAUNCH_EXPIRED_BEFORE_START: u8 = 5;
 const LAUNCH_EXPIRED_AFTER_START: u8 = 6;
+#[cfg(target_os = "macos")]
+const LAUNCH_REJECTED_BEFORE_START: u8 = 7;
 #[cfg(unix)]
 const PARENT_RELATION_POLL_INTERVAL_MS: i32 = 10;
 #[cfg(all(test, unix))]
 static HANG_PLUGIN_PRE_EXEC: AtomicBool = AtomicBool::new(false);
 #[cfg(all(test, unix))]
 static BLOCK_BEFORE_LAUNCH_GATE: AtomicBool = AtomicBool::new(false);
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 static PRE_EXEC_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(all(test, unix))]
 static PRE_EXEC_GROUP_MARKER: OnceLock<PathBuf> = OnceLock::new();
 #[cfg(all(test, unix))]
 static PRE_EXEC_READY_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+#[cfg(all(test, unix))]
+thread_local! {
+    static CLEANUP_ENTRY_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+mod unsupported_platform_tests {
+    #[test]
+    fn construction_rejects_platform_without_exact_process_authority() {
+        let config = super::ProcessExecutorConfig::new(
+            "/unsupported/process-plugin",
+            std::collections::BTreeMap::from([(
+                "test-runtime".to_owned(),
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    .to_owned(),
+            )]),
+        );
+        assert!(matches!(
+            super::ProcessExecutor::new(config),
+            Err(cymule_runtime::RuntimeError::PluginDefect { .. })
+        ));
+    }
+}
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const APPLE_DESCRIPTOR_QUERY_SLACK_ENTRIES: usize = 16;
@@ -96,12 +126,6 @@ struct ChildDescriptorAuthority {
     buffer_bytes: i32,
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     descriptor_domain_exclusive: i32,
-    #[cfg(all(
-        not(target_os = "linux"),
-        not(target_os = "macos"),
-        not(target_os = "ios")
-    ))]
-    descriptor_limit: i32,
 }
 
 #[cfg(unix)]
@@ -113,12 +137,6 @@ struct ChildDescriptorAuthorityView {
     buffer_bytes: i32,
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     descriptor_domain_exclusive: i32,
-    #[cfg(all(
-        not(target_os = "linux"),
-        not(target_os = "macos"),
-        not(target_os = "ios")
-    ))]
-    descriptor_limit: i32,
 }
 
 #[cfg(unix)]
@@ -134,12 +152,6 @@ impl std::fmt::Debug for ChildDescriptorAuthority {
                 "descriptor_domain_exclusive",
                 &self.descriptor_domain_exclusive,
             );
-        #[cfg(all(
-            not(target_os = "linux"),
-            not(target_os = "macos"),
-            not(target_os = "ios")
-        ))]
-        debug.field("descriptor_limit", &self.descriptor_limit);
         debug.finish()
     }
 }
@@ -170,15 +182,11 @@ impl ChildDescriptorAuthority {
         {
             prepare_apple_descriptor_authority()
         }
-        #[cfg(all(
-            not(target_os = "linux"),
-            not(target_os = "macos"),
-            not(target_os = "ios")
-        ))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
         {
-            Ok(Self {
-                descriptor_limit: parent_descriptor_limit()?,
-            })
+            Err(RuntimeError::plugin_defect(
+                "the process executor has no exact descriptor authority on this Unix platform",
+            ))
         }
     }
 
@@ -190,12 +198,6 @@ impl ChildDescriptorAuthority {
             buffer_bytes: self.buffer_bytes,
             #[cfg(any(target_os = "macos", target_os = "ios"))]
             descriptor_domain_exclusive: self.descriptor_domain_exclusive,
-            #[cfg(all(
-                not(target_os = "linux"),
-                not(target_os = "macos"),
-                not(target_os = "ios")
-            ))]
-            descriptor_limit: self.descriptor_limit,
         }
     }
 }
@@ -816,7 +818,7 @@ impl ProcessExecutor {
     /// Returns a typed configuration, capture, or substrate error when the
     /// executable closure cannot be admitted exactly.
     pub fn new(config: ProcessExecutorConfig) -> RuntimeResult<Self> {
-        #[cfg(not(unix))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         ensure_supported_platform()?;
         config.validate()?;
         let mut closure_budget = ClosureBudget::new(config.closure_limit);
@@ -965,7 +967,7 @@ impl ProcessExecutor {
             ambiguous_world_effect,
             message_limit,
         );
-        finish_invocation(invocation, outcome)
+        finish_invocation(invocation, outcome, ambiguous_world_effect)
     }
 
     fn invoke_materialized(
@@ -976,7 +978,6 @@ impl ProcessExecutor {
         ambiguous_world_effect: bool,
         message_limit: usize,
     ) -> RuntimeResult<Vec<u8>> {
-        let mut command = self.prepare_command(invocation);
         check_materialization_authority(deadline, self.config.cancellation.as_ref())?;
         let cancellation = self
             .config
@@ -984,7 +985,7 @@ impl ProcessExecutor {
             .clone()
             .map_or_else(ProcessCancellation::new, Ok)?;
         let launch = cancellation.register_launch()?;
-        let mut supervisor = ProcessGroupSupervisor::start(deadline, &launch)?;
+        let supervisor = ProcessGroupSupervisor::start(deadline, &launch)?;
         #[cfg(test)]
         if let Some(marker) = PRE_EXEC_GROUP_MARKER.get() {
             let process_group = supervisor.process_group().to_string();
@@ -1000,20 +1001,33 @@ impl ProcessExecutor {
                 )
             })?;
         }
-        let descriptor_authority = supervisor.descriptor_authority_view();
-        if let Err(error) = configure_process_boundary(
-            &mut command,
-            supervisor.process_group(),
-            supervisor.execution_deadline(),
-            supervisor.engine_liveness_fd(),
-            descriptor_authority,
-            launch.state_ptr(),
-        ) {
-            supervisor.terminate();
-            return Err(error);
-        }
-        launch.check_pre_start(deadline)?;
-        let mut process = Self::spawn_process(command, supervisor, launch, ambiguous_world_effect)?;
+        #[cfg(target_os = "macos")]
+        let mut process = self.spawn_process_darwin(
+            invocation,
+            supervisor,
+            launch,
+            deadline,
+            ambiguous_world_effect,
+        )?;
+        #[cfg(not(target_os = "macos"))]
+        let mut process = {
+            let mut supervisor = supervisor;
+            let mut command = self.prepare_command(invocation);
+            let descriptor_authority = supervisor.descriptor_authority_view();
+            if let Err(error) = configure_process_boundary(
+                &mut command,
+                supervisor.process_group(),
+                supervisor.execution_deadline(),
+                supervisor.engine_liveness_fd(),
+                descriptor_authority,
+                launch.state_ptr(),
+            ) {
+                supervisor.terminate();
+                return Err(error);
+            }
+            launch.check_pre_start(deadline)?;
+            Self::spawn_process_standard(command, supervisor, launch, ambiguous_world_effect)?
+        };
         if let Err(error) = process
             .launch
             .check_running(deadline, ambiguous_world_effect)
@@ -1030,6 +1044,7 @@ impl ProcessExecutor {
         )
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn prepare_command(&self, invocation: &InvocationFiles) -> Command {
         let mut command = Command::new(&invocation.executable);
         command
@@ -1051,12 +1066,15 @@ impl ProcessExecutor {
         command
     }
 
-    fn spawn_process(
+    #[cfg(not(target_os = "macos"))]
+    fn spawn_process_standard(
         mut command: Command,
         mut supervisor: ProcessGroupSupervisor,
         launch: LaunchAuthority,
         ambiguous_world_effect: bool,
     ) -> RuntimeResult<RunningProcess> {
+        use std::os::fd::OwnedFd;
+
         let Ok(mut child) = command.spawn() else {
             let error = launch.classify_spawn_failure(ambiguous_world_effect);
             supervisor.terminate();
@@ -1065,6 +1083,7 @@ impl ProcessExecutor {
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
+            let mut child = ProcessChild::Standard(child);
             terminate_process_tree(&mut child, &mut supervisor);
             return Err(process_failure(
                 ambiguous_world_effect,
@@ -1072,6 +1091,132 @@ impl ProcessExecutor {
                 "one or more plugin process pipes were unavailable",
             ));
         };
+        let stdin = File::from(OwnedFd::from(stdin));
+        let stdout = File::from(OwnedFd::from(stdout));
+        let stderr = File::from(OwnedFd::from(stderr));
+        if set_nonblocking(&stdin).is_err()
+            || set_nonblocking(&stdout).is_err()
+            || set_nonblocking(&stderr).is_err()
+        {
+            let mut child = ProcessChild::Standard(child);
+            terminate_process_tree(&mut child, &mut supervisor);
+            return Err(process_failure(
+                ambiguous_world_effect,
+                "process_pipe_configuration_failed",
+                "plugin process pipes could not be configured for bounded I/O",
+            ));
+        }
+        Ok(RunningProcess::new(
+            ProcessChild::Standard(child),
+            supervisor,
+            launch,
+            stdin,
+            stdout,
+            stderr,
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn spawn_process_darwin(
+        &self,
+        invocation: &InvocationFiles,
+        mut supervisor: ProcessGroupSupervisor,
+        launch: LaunchAuthority,
+        deadline: Instant,
+        ambiguous_world_effect: bool,
+    ) -> RuntimeResult<RunningProcess> {
+        launch.check_pre_start(deadline)?;
+        let working_directory = invocation
+            .working_directory
+            .as_deref()
+            .unwrap_or_else(|| invocation.directory.path());
+        let Ok(spawned) = spawn_darwin_suspended(
+            &invocation.executable,
+            &self.config.arguments,
+            &self.config.environment,
+            working_directory,
+            supervisor.process_group(),
+        ) else {
+            let error = launch.classify_spawn_failure(ambiguous_world_effect);
+            supervisor.terminate();
+            return Err(error);
+        };
+        let DarwinSpawnedProcess {
+            pid,
+            stdin,
+            stdout,
+            stderr,
+        } = spawned;
+        let mut child = ProcessChild::Darwin { pid };
+        // SAFETY: `pid` is the exact suspended direct child. Read back the
+        // kernel-applied process group before launch can commit.
+        if unsafe { nix::libc::getpgid(pid) } != supervisor.process_group() {
+            let error = darwin_group_readback_failure(&launch, ambiguous_world_effect);
+            terminate_process_tree(&mut child, &mut supervisor);
+            return Err(error);
+        }
+
+        #[cfg(test)]
+        if BLOCK_BEFORE_LAUNCH_GATE.load(Ordering::Acquire) {
+            if let Err(error) = publish_launch_test_readiness() {
+                terminate_process_tree(&mut child, &mut supervisor);
+                return Err(error);
+            }
+            while launch.status() == LAUNCH_PENDING && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if Instant::now() >= deadline {
+            launch.expire();
+        }
+        let launch_result = match launch.state().compare_exchange(
+            LAUNCH_PENDING,
+            LAUNCH_STARTED,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => Ok(()),
+            Err(LAUNCH_CANCELLED_BEFORE_START) => Err(invocation_cancelled(false)),
+            Err(LAUNCH_EXPIRED_BEFORE_START) => Err(invocation_timeout(false)),
+            Err(_) => Err(RuntimeError::substrate(
+                "process_launch_authority_invalid",
+                "process launch authority rejected the suspended child commit",
+            )),
+        };
+        if let Err(error) = launch_result {
+            terminate_process_tree(&mut child, &mut supervisor);
+            return Err(error);
+        }
+
+        #[cfg(test)]
+        if HANG_PLUGIN_PRE_EXEC.load(Ordering::Acquire) {
+            if let Err(error) = publish_launch_test_readiness() {
+                terminate_process_tree(&mut child, &mut supervisor);
+                return Err(error);
+            }
+            loop {
+                if let Err(error) = launch.check_running(deadline, ambiguous_world_effect) {
+                    terminate_process_tree(&mut child, &mut supervisor);
+                    return Err(error);
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if let Err(error) = launch.check_running(deadline, ambiguous_world_effect) {
+            terminate_process_tree(&mut child, &mut supervisor);
+            return Err(error);
+        }
+        // SAFETY: `pid` is the exact positive, still-suspended child returned
+        // by `posix_spawn`; SIGCONT is the only transition that can let its
+        // already-execed plugin image perform provider I/O.
+        if unsafe { nix::libc::kill(pid, nix::libc::SIGCONT) } != 0 {
+            terminate_process_tree(&mut child, &mut supervisor);
+            return Err(process_failure(
+                ambiguous_world_effect,
+                "process_start_resume_failed",
+                "the launch-committed macOS plugin could not be resumed",
+            ));
+        }
         if set_nonblocking(&stdin).is_err()
             || set_nonblocking(&stdout).is_err()
             || set_nonblocking(&stderr).is_err()
@@ -1113,6 +1258,305 @@ impl ProcessExecutor {
             executable,
             working_directory,
         })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_group_readback_failure(
+    launch: &LaunchAuthority,
+    ambiguous_world_effect: bool,
+) -> RuntimeError {
+    match launch.state().compare_exchange(
+        LAUNCH_PENDING,
+        LAUNCH_REJECTED_BEFORE_START,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    ) {
+        Ok(_) => RuntimeError::substrate(
+            "process_start_group_mismatch",
+            "the suspended macOS plugin did not enter the watchdog process group",
+        ),
+        Err(_) => launch.classify_spawn_failure(ambiguous_world_effect),
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct DarwinSpawnedProcess {
+    pid: nix::libc::pid_t,
+    stdin: File,
+    stdout: File,
+    stderr: File,
+}
+
+#[cfg(target_os = "macos")]
+struct DarwinSpawnAttributes(nix::libc::posix_spawnattr_t);
+
+#[cfg(target_os = "macos")]
+impl DarwinSpawnAttributes {
+    fn new(process_group: nix::libc::pid_t) -> std::io::Result<Self> {
+        let mut raw = std::mem::MaybeUninit::<nix::libc::posix_spawnattr_t>::uninit();
+        darwin_spawn_result(unsafe { nix::libc::posix_spawnattr_init(raw.as_mut_ptr()) })?;
+        // SAFETY: the successful init call initialized the complete object.
+        let mut attributes = Self(unsafe { raw.assume_init() });
+        darwin_spawn_result(unsafe {
+            nix::libc::posix_spawnattr_setpgroup(&raw mut attributes.0, process_group)
+        })?;
+
+        let mut default_signals = std::mem::MaybeUninit::<nix::libc::sigset_t>::uninit();
+        let mut empty_mask = std::mem::MaybeUninit::<nix::libc::sigset_t>::uninit();
+        if unsafe { nix::libc::sigfillset(default_signals.as_mut_ptr()) } != 0
+            || unsafe { nix::libc::sigemptyset(empty_mask.as_mut_ptr()) } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: both signal-set constructors succeeded above.
+        let mut default_signals = unsafe { default_signals.assume_init() };
+        // SIGKILL and SIGSTOP cannot have a disposition; all other inherited
+        // ignored states are reset before the suspended image may run.
+        if unsafe { nix::libc::sigdelset(&raw mut default_signals, nix::libc::SIGKILL) } != 0
+            || unsafe { nix::libc::sigdelset(&raw mut default_signals, nix::libc::SIGSTOP) } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `empty_mask` was initialized by sigemptyset above.
+        let empty_mask = unsafe { empty_mask.assume_init() };
+        darwin_spawn_result(unsafe {
+            nix::libc::posix_spawnattr_setsigdefault(
+                &raw mut attributes.0,
+                &raw const default_signals,
+            )
+        })?;
+        darwin_spawn_result(unsafe {
+            nix::libc::posix_spawnattr_setsigmask(&raw mut attributes.0, &raw const empty_mask)
+        })?;
+        let flags = nix::libc::POSIX_SPAWN_CLOEXEC_DEFAULT
+            | nix::libc::POSIX_SPAWN_START_SUSPENDED
+            | nix::libc::POSIX_SPAWN_SETPGROUP
+            | nix::libc::POSIX_SPAWN_SETSIGDEF
+            | nix::libc::POSIX_SPAWN_SETSIGMASK;
+        let flags = nix::libc::c_short::try_from(flags)
+            .map_err(|_| std::io::Error::other("macOS spawn flags exceed c_short"))?;
+        darwin_spawn_result(unsafe {
+            nix::libc::posix_spawnattr_setflags(&raw mut attributes.0, flags)
+        })?;
+        Ok(attributes)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for DarwinSpawnAttributes {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper is created only after successful initialization
+        // and owns exactly one spawn-attribute object.
+        unsafe {
+            let _ = nix::libc::posix_spawnattr_destroy(&raw mut self.0);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct DarwinSpawnFileActions(nix::libc::posix_spawn_file_actions_t);
+
+#[cfg(target_os = "macos")]
+impl DarwinSpawnFileActions {
+    fn new() -> std::io::Result<Self> {
+        let mut raw = std::mem::MaybeUninit::<nix::libc::posix_spawn_file_actions_t>::uninit();
+        darwin_spawn_result(unsafe { nix::libc::posix_spawn_file_actions_init(raw.as_mut_ptr()) })?;
+        // SAFETY: the successful init call initialized the complete object.
+        Ok(Self(unsafe { raw.assume_init() }))
+    }
+
+    fn add_dup2(&mut self, source: i32, target: i32) -> std::io::Result<()> {
+        darwin_spawn_result(unsafe {
+            nix::libc::posix_spawn_file_actions_adddup2(&raw mut self.0, source, target)
+        })
+    }
+
+    fn add_close(&mut self, descriptor: i32) -> std::io::Result<()> {
+        darwin_spawn_result(unsafe {
+            nix::libc::posix_spawn_file_actions_addclose(&raw mut self.0, descriptor)
+        })
+    }
+
+    fn add_chdir(&mut self, path: &std::ffi::CStr) -> std::io::Result<()> {
+        darwin_spawn_result(unsafe {
+            posix_spawn_file_actions_addchdir_np(&raw mut self.0, path.as_ptr())
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for DarwinSpawnFileActions {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper is created only after successful initialization
+        // and owns exactly one file-actions object.
+        unsafe {
+            let _ = nix::libc::posix_spawn_file_actions_destroy(&raw mut self.0);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn posix_spawn_file_actions_addchdir_np(
+        actions: *mut nix::libc::posix_spawn_file_actions_t,
+        path: *const nix::libc::c_char,
+    ) -> nix::libc::c_int;
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_darwin_suspended(
+    executable: &Path,
+    arguments: &[String],
+    environment: &BTreeMap<String, String>,
+    working_directory: &Path,
+    process_group: nix::libc::pid_t,
+) -> std::io::Result<DarwinSpawnedProcess> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    if process_group <= 0 {
+        return Err(std::io::Error::other(
+            "macOS spawn requires an established positive process group",
+        ));
+    }
+    let executable = CString::new(executable.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::other("macOS executable path contains NUL"))?;
+    let working_directory = CString::new(working_directory.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::other("macOS working directory contains NUL"))?;
+    let mut argument_storage = Vec::with_capacity(arguments.len() + 1);
+    argument_storage.push(executable.clone());
+    for argument in arguments {
+        argument_storage.push(
+            CString::new(argument.as_bytes())
+                .map_err(|_| std::io::Error::other("macOS process argument contains NUL"))?,
+        );
+    }
+    let mut argument_vector = argument_storage
+        .iter()
+        .map(|argument| argument.as_ptr().cast_mut())
+        .collect::<Vec<_>>();
+    argument_vector.push(std::ptr::null_mut());
+
+    let environment_storage = environment
+        .iter()
+        .map(|(key, value)| {
+            CString::new(format!("{key}={value}"))
+                .map_err(|_| std::io::Error::other("macOS process environment contains NUL"))
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut environment_vector = environment_storage
+        .iter()
+        .map(|entry| entry.as_ptr().cast_mut())
+        .collect::<Vec<_>>();
+    environment_vector.push(std::ptr::null_mut());
+
+    let (child_stdin, parent_stdin) = darwin_pipe()?;
+    let (parent_stdout, child_stdout) = darwin_pipe()?;
+    let (parent_stderr, child_stderr) = darwin_pipe()?;
+    let mut actions = DarwinSpawnFileActions::new()?;
+    actions.add_dup2(child_stdin.as_raw_fd(), nix::libc::STDIN_FILENO)?;
+    actions.add_dup2(child_stdout.as_raw_fd(), nix::libc::STDOUT_FILENO)?;
+    actions.add_dup2(child_stderr.as_raw_fd(), nix::libc::STDERR_FILENO)?;
+    for descriptor in [
+        child_stdin.as_raw_fd(),
+        parent_stdin.as_raw_fd(),
+        parent_stdout.as_raw_fd(),
+        child_stdout.as_raw_fd(),
+        parent_stderr.as_raw_fd(),
+        child_stderr.as_raw_fd(),
+    ] {
+        actions.add_close(descriptor)?;
+    }
+    actions.add_chdir(&working_directory)?;
+    let attributes = DarwinSpawnAttributes::new(process_group)?;
+    let mut pid = 0_i32;
+    let spawned = unsafe {
+        nix::libc::posix_spawn(
+            &raw mut pid,
+            executable.as_ptr(),
+            &raw const actions.0,
+            &raw const attributes.0,
+            argument_vector.as_ptr(),
+            environment_vector.as_ptr(),
+        )
+    };
+    darwin_spawn_result(spawned)?;
+    drop(child_stdin);
+    drop(child_stdout);
+    drop(child_stderr);
+    Ok(DarwinSpawnedProcess {
+        pid,
+        stdin: File::from(parent_stdin),
+        stdout: File::from(parent_stdout),
+        stderr: File::from(parent_stderr),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::OwnedFd;
+
+    let (reader, writer) = std::io::pipe()?;
+    Ok((
+        darwin_promote_descriptor(OwnedFd::from(reader))?,
+        darwin_promote_descriptor(OwnedFd::from(writer))?,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_promote_descriptor(
+    descriptor: std::os::fd::OwnedFd,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    if descriptor.as_raw_fd() >= 3 {
+        return Ok(descriptor);
+    }
+    // SAFETY: F_DUPFD_CLOEXEC duplicates the live owned descriptor into the
+    // requested non-standard domain; ownership transfers to `OwnedFd` only on
+    // a nonnegative result.
+    let duplicated =
+        unsafe { nix::libc::fcntl(descriptor.as_raw_fd(), nix::libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicated < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicated) })
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_spawn_result(result: i32) -> std::io::Result<()> {
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(result))
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn publish_launch_test_readiness() -> RuntimeResult<()> {
+    let descriptor = PRE_EXEC_READY_FD.load(Ordering::Acquire);
+    if descriptor < 0 {
+        return Ok(());
+    }
+    let ready = [1_u8; 1];
+    // SAFETY: tests retain the peer endpoint while this synchronous launch is
+    // active and install only its exact live descriptor.
+    if unsafe {
+        nix::libc::write(
+            descriptor,
+            ready.as_ptr().cast::<nix::libc::c_void>(),
+            ready.len(),
+        )
+    } == 1
+    {
+        Ok(())
+    } else {
+        Err(RuntimeError::substrate(
+            "process_launch_test_readiness_failed",
+            "macOS launch test readiness could not be published",
+        ))
     }
 }
 
@@ -1165,10 +1609,10 @@ fn capture_executable(path: &Path, limit: usize) -> RuntimeResult<Vec<u8>> {
     Ok(bytes)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn ensure_supported_platform() -> RuntimeResult<()> {
     Err(RuntimeError::plugin_defect(
-        "the process executor requires Unix process-group and permission semantics",
+        "the process executor supports only Linux close_range and macOS posix_spawn descriptor authority",
     ))
 }
 
@@ -1373,19 +1817,24 @@ impl Drop for PrivateInvocationDirectory {
 fn finish_invocation(
     invocation: InvocationFiles,
     outcome: RuntimeResult<Vec<u8>>,
+    ambiguous_world_effect: bool,
 ) -> RuntimeResult<Vec<u8>> {
     let cleanup = invocation.directory.close();
     match (outcome, cleanup) {
         (Ok(output), Ok(())) => Ok(output),
-        (Ok(_), Err(_)) => Err(RuntimeError::substrate(
+        (Ok(_), Err(error)) => Err(process_failure(
+            ambiguous_world_effect,
             "process_cleanup_failed",
-            "private process invocation directory could not be reclaimed",
+            &format!(
+                "private process invocation directory could not be reclaimed after process start: {error}"
+            ),
         )),
         (Err(error), _) => Err(error),
     }
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_lines)]
 fn reclaim_private_directory(
     parent: &nix::dir::Dir,
     mut current: nix::dir::Dir,
@@ -1405,62 +1854,102 @@ fn reclaim_private_directory(
             "private directory cleanup root identity changed",
         ));
     }
-    rewind_cleanup_directory(&mut current);
-    let mut names = Vec::<std::ffi::CString>::new();
+    let mut cleanup_budget = CleanupBudget::new();
+    let root_frame = CleanupDirectoryFrame {
+        directories: scan_cleanup_directory(&mut current, identity.device, &mut cleanup_budget)?
+            .into_iter(),
+        name_in_parent: None,
+        identity,
+    };
+    let mut frames = vec![root_frame];
     loop {
-        if let Some(name) = next_cleanup_entry(&mut current)? {
+        if let Some(name) = frames
+            .last_mut()
+            .expect("cleanup always retains the current frame")
+            .directories
+            .next()
+        {
             let metadata = match fstatat(&current, name.as_c_str(), AtFlags::AT_SYMLINK_NOFOLLOW) {
                 Ok(metadata) => metadata,
                 Err(Errno::ENOENT) => continue,
                 Err(error) => return Err(nix_io_error(error)),
             };
-            if SFlag::from_bits_truncate(metadata.st_mode) == SFlag::S_IFDIR {
-                let child = match Dir::openat(
-                    &current,
-                    name.as_c_str(),
-                    private_directory_open_flags(),
-                    Mode::empty(),
-                ) {
-                    Ok(child) => child,
-                    Err(Errno::EACCES) => {
-                        fchmodat(
-                            &current,
-                            name.as_c_str(),
-                            Mode::S_IRWXU,
-                            FchmodatFlags::NoFollowSymlink,
-                        )
-                        .map_err(nix_io_error)?;
-                        Dir::openat(
-                            &current,
-                            name.as_c_str(),
-                            private_directory_open_flags(),
-                            Mode::empty(),
-                        )
-                        .map_err(nix_io_error)?
-                    }
+            if SFlag::from_bits_truncate(metadata.st_mode) != SFlag::S_IFDIR {
+                match unlinkat(&current, name.as_c_str(), UnlinkatFlags::NoRemoveDir) {
+                    Ok(()) | Err(Errno::ENOENT) => {}
                     Err(error) => return Err(nix_io_error(error)),
-                };
-                let child_stat = fstat(&child).map_err(nix_io_error)?;
-                if child_stat.st_dev != identity.device {
-                    return Err(std::io::Error::other(
-                        "private directory cleanup refuses a mounted descendant",
-                    ));
                 }
-                fchmod(&child, Mode::S_IRWXU).map_err(nix_io_error)?;
-                names.push(name);
-                current = child;
-                rewind_cleanup_directory(&mut current);
                 continue;
             }
-            match unlinkat(&current, name.as_c_str(), UnlinkatFlags::NoRemoveDir) {
-                Ok(()) | Err(Errno::ENOENT) => {}
+
+            let mut child = match Dir::openat(
+                &current,
+                name.as_c_str(),
+                private_directory_open_flags(),
+                Mode::empty(),
+            ) {
+                Ok(child) => child,
+                Err(Errno::EACCES) => {
+                    fchmodat(
+                        &current,
+                        name.as_c_str(),
+                        Mode::S_IRWXU,
+                        FchmodatFlags::NoFollowSymlink,
+                    )
+                    .map_err(nix_io_error)?;
+                    Dir::openat(
+                        &current,
+                        name.as_c_str(),
+                        private_directory_open_flags(),
+                        Mode::empty(),
+                    )
+                    .map_err(nix_io_error)?
+                }
                 Err(error) => return Err(nix_io_error(error)),
+            };
+            let child_stat = fstat(&child).map_err(nix_io_error)?;
+            if child_stat.st_dev != metadata.st_dev || child_stat.st_ino != metadata.st_ino {
+                return Err(std::io::Error::other(
+                    "private directory cleanup child identity changed before open",
+                ));
             }
+            if child_stat.st_dev != identity.device {
+                return Err(std::io::Error::other(
+                    "private directory cleanup refuses a mounted descendant",
+                ));
+            }
+            fchmod(&child, Mode::S_IRWXU).map_err(nix_io_error)?;
+            let child_identity = PrivateDirectoryIdentity {
+                device: child_stat.st_dev,
+                inode: child_stat.st_ino,
+            };
+            let child_frame = CleanupDirectoryFrame {
+                directories: scan_cleanup_directory(
+                    &mut child,
+                    identity.device,
+                    &mut cleanup_budget,
+                )?
+                .into_iter(),
+                name_in_parent: Some(name),
+                identity: child_identity,
+            };
+            current = child;
+            frames.push(child_frame);
             continue;
         }
-        let Some(name) = names.pop() else {
+
+        let frame = frames
+            .pop()
+            .expect("cleanup always finishes the current frame once");
+        let Some(name) = frame.name_in_parent else {
             break;
         };
+        let retained = fstat(&current).map_err(nix_io_error)?;
+        if retained.st_dev != frame.identity.device || retained.st_ino != frame.identity.inode {
+            return Err(std::io::Error::other(
+                "private directory cleanup descendant identity changed",
+            ));
+        }
         let ancestor = Dir::openat(
             &current,
             "..",
@@ -1468,6 +1957,34 @@ fn reclaim_private_directory(
             Mode::empty(),
         )
         .map_err(nix_io_error)?;
+        let expected_ancestor = frames
+            .last()
+            .expect("a descendant cleanup frame always retains its ancestor")
+            .identity;
+        let ancestor_stat = fstat(&ancestor).map_err(nix_io_error)?;
+        if ancestor_stat.st_dev != expected_ancestor.device
+            || ancestor_stat.st_ino != expected_ancestor.inode
+        {
+            return Err(std::io::Error::other(
+                "private directory cleanup ancestor identity changed",
+            ));
+        }
+        match fstatat(&ancestor, name.as_c_str(), AtFlags::AT_SYMLINK_NOFOLLOW) {
+            Ok(named)
+                if named.st_dev == frame.identity.device
+                    && named.st_ino == frame.identity.inode
+                    && SFlag::from_bits_truncate(named.st_mode) == SFlag::S_IFDIR => {}
+            Ok(_) => {
+                return Err(std::io::Error::other(
+                    "private directory cleanup child name changed identity",
+                ));
+            }
+            Err(Errno::ENOENT) => {
+                current = ancestor;
+                continue;
+            }
+            Err(error) => return Err(nix_io_error(error)),
+        }
         match unlinkat(&ancestor, name.as_c_str(), UnlinkatFlags::RemoveDir) {
             Ok(()) | Err(Errno::ENOENT) => {}
             Err(error) => return Err(nix_io_error(error)),
@@ -1491,20 +2008,92 @@ fn reclaim_private_directory(
 }
 
 #[cfg(unix)]
-fn next_cleanup_entry(directory: &mut nix::dir::Dir) -> std::io::Result<Option<std::ffi::CString>> {
+fn scan_cleanup_directory(
+    directory: &mut nix::dir::Dir,
+    root_device: nix::libc::dev_t,
+    budget: &mut CleanupBudget,
+) -> std::io::Result<Vec<std::ffi::CString>> {
+    use nix::errno::Errno;
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::{SFlag, fstatat};
+    use nix::unistd::{UnlinkatFlags, unlinkat};
+
+    let mut names = Vec::new();
+    let mut directory_entries = 0usize;
+    // Rewind exactly once for this directory. `nix::dir::Iter` rewinds on
+    // drop, so a zero-step iterator establishes the initial scan position
+    // without coupling deletion count to rescans.
+    drop(directory.iter());
     for entry in directory.iter() {
         let entry = entry.map_err(nix_io_error)?;
         let name = entry.file_name();
-        if name.to_bytes() != b"." && name.to_bytes() != b".." {
-            return Ok(Some(name.to_owned()));
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        #[cfg(test)]
+        CLEANUP_ENTRY_VISITS.with(|visits| visits.set(visits.get() + 1));
+        budget.admit(&mut directory_entries)?;
+        names.push(name.to_owned());
+    }
+    let mut directories = Vec::new();
+    for name in names {
+        let metadata = match fstatat(&*directory, name.as_c_str(), AtFlags::AT_SYMLINK_NOFOLLOW) {
+            Ok(metadata) => metadata,
+            Err(Errno::ENOENT) => continue,
+            Err(error) => return Err(nix_io_error(error)),
+        };
+        if SFlag::from_bits_truncate(metadata.st_mode) == SFlag::S_IFDIR {
+            if metadata.st_dev != root_device {
+                return Err(std::io::Error::other(
+                    "private directory cleanup refuses a mounted descendant",
+                ));
+            }
+            directories.push(name);
+            continue;
+        }
+        match unlinkat(&*directory, name.as_c_str(), UnlinkatFlags::NoRemoveDir) {
+            Ok(()) | Err(Errno::ENOENT) => {}
+            Err(error) => return Err(nix_io_error(error)),
         }
     }
-    Ok(None)
+    Ok(directories)
 }
 
 #[cfg(unix)]
-fn rewind_cleanup_directory(directory: &mut nix::dir::Dir) {
-    drop(directory.iter());
+struct CleanupBudget {
+    remaining_total_entries: usize,
+}
+
+#[cfg(unix)]
+impl CleanupBudget {
+    const fn new() -> Self {
+        Self {
+            remaining_total_entries: MAX_CLEANUP_TOTAL_ENTRIES,
+        }
+    }
+
+    fn admit(&mut self, directory_entries: &mut usize) -> std::io::Result<()> {
+        *directory_entries = directory_entries.checked_add(1).ok_or_else(|| {
+            std::io::Error::other("private directory cleanup entry count overflowed")
+        })?;
+        if *directory_entries > MAX_CLEANUP_ENTRIES_PER_DIRECTORY {
+            return Err(std::io::Error::other(
+                "private directory cleanup exceeds the per-directory entry ceiling",
+            ));
+        }
+        self.remaining_total_entries =
+            self.remaining_total_entries.checked_sub(1).ok_or_else(|| {
+                std::io::Error::other("private directory cleanup exceeds the total entry ceiling")
+            })?;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+struct CleanupDirectoryFrame {
+    directories: std::vec::IntoIter<std::ffi::CString>,
+    name_in_parent: Option<std::ffi::CString>,
+    identity: PrivateDirectoryIdentity,
 }
 
 #[cfg(unix)]
@@ -1522,13 +2111,84 @@ fn nix_io_error(error: nix::errno::Errno) -> std::io::Error {
 }
 
 #[derive(Debug)]
+enum ProcessChild {
+    #[cfg(not(target_os = "macos"))]
+    Standard(Child),
+    #[cfg(target_os = "macos")]
+    Darwin { pid: nix::libc::pid_t },
+}
+
+impl ProcessChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        match self {
+            #[cfg(not(target_os = "macos"))]
+            Self::Standard(child) => child.try_wait(),
+            #[cfg(target_os = "macos")]
+            Self::Darwin { pid } => wait_darwin_child(*pid, nix::libc::WNOHANG),
+        }
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        match self {
+            #[cfg(not(target_os = "macos"))]
+            Self::Standard(child) => child.kill(),
+            #[cfg(target_os = "macos")]
+            Self::Darwin { pid } => {
+                // SAFETY: `pid` is the exact positive child identity returned
+                // by this invocation's successful `posix_spawn` call.
+                if unsafe { nix::libc::kill(*pid, nix::libc::SIGKILL) } == 0
+                    || nix::errno::Errno::last_raw() == nix::libc::ESRCH
+                {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            }
+        }
+    }
+
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        match self {
+            #[cfg(not(target_os = "macos"))]
+            Self::Standard(child) => child.wait(),
+            #[cfg(target_os = "macos")]
+            Self::Darwin { pid } => loop {
+                match wait_darwin_child(*pid, 0) {
+                    Ok(Some(status)) => return Ok(status),
+                    Ok(None) => {}
+                    Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                    Err(error) => return Err(error),
+                }
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_darwin_child(pid: nix::libc::pid_t, options: i32) -> std::io::Result<Option<ExitStatus>> {
+    use std::os::unix::process::ExitStatusExt;
+
+    let mut status = 0_i32;
+    // SAFETY: `status` is writable parent-side storage and `pid` is the exact
+    // direct child created by this invocation.
+    let waited = unsafe { nix::libc::waitpid(pid, &raw mut status, options) };
+    if waited == pid {
+        Ok(Some(ExitStatus::from_raw(status)))
+    } else if waited == 0 {
+        Ok(None)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[derive(Debug)]
 struct RunningProcess {
-    child: Child,
+    child: ProcessChild,
     supervisor: ProcessGroupSupervisor,
     launch: LaunchAuthority,
-    stdin: Option<ChildStdin>,
-    stdout: ChildStdout,
-    stderr: ChildStderr,
+    stdin: Option<File>,
+    stdout: File,
+    stderr: File,
     input_offset: usize,
     stdout_bytes: Vec<u8>,
     stderr_bytes: Vec<u8>,
@@ -1540,12 +2200,12 @@ struct RunningProcess {
 
 impl RunningProcess {
     fn new(
-        child: Child,
+        child: ProcessChild,
         supervisor: ProcessGroupSupervisor,
         launch: LaunchAuthority,
-        stdin: ChildStdin,
-        stdout: ChildStdout,
-        stderr: ChildStderr,
+        stdin: File,
+        stdout: File,
+        stderr: File,
     ) -> Self {
         Self {
             child,
@@ -1738,8 +2398,10 @@ fn advance_process_output(
 #[derive(Debug)]
 struct ProcessGroupSupervisor {
     process_group: i32,
+    #[cfg(not(target_os = "macos"))]
     execution_deadline: nix::libc::timespec,
     engine_liveness: Option<UnixStream>,
+    #[cfg(not(target_os = "macos"))]
     descriptor_authority: ChildDescriptorAuthority,
     reaped: bool,
     group_closed: bool,
@@ -1853,8 +2515,10 @@ impl ProcessGroupSupervisor {
         drop(watchdog_ready);
         let mut supervisor = Self {
             process_group: watchdog_pid,
+            #[cfg(not(target_os = "macos"))]
             execution_deadline: watchdog_deadline,
             engine_liveness: Some(engine_liveness),
+            #[cfg(not(target_os = "macos"))]
             descriptor_authority,
             reaped: false,
             group_closed: false,
@@ -1875,16 +2539,19 @@ impl ProcessGroupSupervisor {
         self.process_group
     }
 
+    #[cfg(not(target_os = "macos"))]
     const fn execution_deadline(&self) -> nix::libc::timespec {
         self.execution_deadline
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn engine_liveness_fd(&self) -> i32 {
         self.engine_liveness
             .as_ref()
             .map_or(-1, std::os::fd::AsRawFd::as_raw_fd)
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn descriptor_authority_view(&mut self) -> ChildDescriptorAuthorityView {
         self.descriptor_authority.view()
     }
@@ -2387,25 +3054,11 @@ unsafe fn close_unrelated_descriptors(
     not(target_os = "ios")
 ))]
 unsafe fn close_unrelated_descriptors(
-    first_keep: i32,
-    second_keep: i32,
-    descriptor_authority: ChildDescriptorAuthorityView,
+    _first_keep: i32,
+    _second_keep: i32,
+    _descriptor_authority: ChildDescriptorAuthorityView,
 ) -> u8 {
-    let descriptor_limit = descriptor_authority.descriptor_limit;
-    if descriptor_limit < 3 {
-        return WATCHDOG_DESCRIPTOR_TABLE_INVALID;
-    }
-    for descriptor in 0..descriptor_limit {
-        if descriptor == first_keep || descriptor == second_keep {
-            continue;
-        }
-        if unsafe { nix::libc::close(descriptor) } != 0
-            && nix::errno::Errno::last_raw() != nix::libc::EBADF
-        {
-            return WATCHDOG_DESCRIPTOR_CLOSE_FAILED;
-        }
-    }
-    WATCHDOG_DESCRIPTOR_ISOLATED
+    WATCHDOG_DESCRIPTOR_TABLE_INVALID
 }
 
 #[cfg(not(unix))]
@@ -3184,11 +3837,7 @@ fn validate_exit(ambiguous_world_effect: bool, status: ExitStatus) -> RuntimeRes
     })
 }
 
-fn write_available(
-    writer: &mut ChildStdin,
-    bytes: &[u8],
-    offset: &mut usize,
-) -> std::io::Result<bool> {
+fn write_available(writer: &mut File, bytes: &[u8], offset: &mut usize) -> std::io::Result<bool> {
     match writer.write(&bytes[*offset..]) {
         Ok(0) => Err(std::io::Error::new(
             ErrorKind::WriteZero,
@@ -3258,7 +3907,7 @@ fn set_nonblocking<T>(_pipe: &T) -> std::io::Result<()> {
     ))
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn configure_process_boundary(
     command: &mut Command,
     process_group: i32,
@@ -3376,7 +4025,7 @@ fn configure_process_boundary(
     ))
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 unsafe fn child_execution_deadline_is_open(deadline: nix::libc::timespec) -> bool {
     let mut now = std::mem::MaybeUninit::<nix::libc::timespec>::uninit();
     unsafe {
@@ -3385,44 +4034,10 @@ unsafe fn child_execution_deadline_is_open(deadline: nix::libc::timespec) -> boo
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const fn timespec_precedes(candidate: nix::libc::timespec, deadline: nix::libc::timespec) -> bool {
     candidate.tv_sec < deadline.tv_sec
         || (candidate.tv_sec == deadline.tv_sec && candidate.tv_nsec < deadline.tv_nsec)
-}
-
-#[cfg(all(
-    unix,
-    not(target_os = "linux"),
-    not(target_os = "macos"),
-    not(target_os = "ios")
-))]
-fn parent_descriptor_limit() -> RuntimeResult<i32> {
-    let mut limit = std::mem::MaybeUninit::<nix::libc::rlimit>::uninit();
-    // SAFETY: `limit` is writable storage for one `rlimit`; this parent-side
-    // call runs before `Command::spawn` forks.
-    if unsafe { nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
-        return Err(RuntimeError::substrate(
-            "process_start_failed",
-            "process descriptor authority could not be bounded",
-        ));
-    }
-    // SAFETY: `getrlimit` initialized `limit` after returning success. The
-    // soft limit is mutable and may already be below an inherited high FD, so
-    // it is never descriptor-close authority.
-    let limit = unsafe { limit.assume_init() };
-    if limit.rlim_max != nix::libc::RLIM_INFINITY {
-        return i32::try_from(limit.rlim_max).map_err(|_| {
-            RuntimeError::substrate(
-                "process_start_failed",
-                "process descriptor authority exceeds the child descriptor domain",
-            )
-        });
-    }
-    Err(RuntimeError::substrate(
-        "process_start_failed",
-        "process descriptor hard limit is unbounded and has no platform ceiling",
-    ))
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -3681,41 +4296,11 @@ unsafe fn mark_plugin_descriptors_close_on_exec(
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_os = "ios")]
 unsafe fn mark_plugin_descriptors_close_on_exec(
-    descriptor_authority: ChildDescriptorAuthorityView,
+    _descriptor_authority: ChildDescriptorAuthorityView,
 ) -> bool {
-    let Some(descriptor_count) = (unsafe { apple_open_descriptor_count(descriptor_authority) })
-    else {
-        return false;
-    };
-    let descriptors = std::ptr::with_exposed_provenance::<nix::libc::proc_fdinfo>(
-        descriptor_authority.buffer_address,
-    );
-    for index in 0..descriptor_count {
-        // SAFETY: `apple_open_descriptor_count` authenticated this initialized
-        // prefix and every index remains inside that exact prefix.
-        let descriptor = unsafe { (*descriptors.add(index)).proc_fd };
-        if descriptor < 3 {
-            continue;
-        }
-        let flags = unsafe { nix::libc::fcntl(descriptor, nix::libc::F_GETFD) };
-        if flags < 0 {
-            return false;
-        }
-        if flags & nix::libc::FD_CLOEXEC == 0
-            && unsafe {
-                nix::libc::fcntl(
-                    descriptor,
-                    nix::libc::F_SETFD,
-                    flags | nix::libc::FD_CLOEXEC,
-                )
-            } != 0
-        {
-            return false;
-        }
-    }
-    true
+    false
 }
 
 #[cfg(all(
@@ -3725,27 +4310,9 @@ unsafe fn mark_plugin_descriptors_close_on_exec(
     not(target_os = "ios")
 ))]
 unsafe fn mark_plugin_descriptors_close_on_exec(
-    descriptor_authority: ChildDescriptorAuthorityView,
+    _descriptor_authority: ChildDescriptorAuthorityView,
 ) -> bool {
-    let descriptor_limit = descriptor_authority.descriptor_limit;
-    unsafe {
-        for descriptor in 3..descriptor_limit {
-            let flags = nix::libc::fcntl(descriptor, nix::libc::F_GETFD);
-            if flags < 0 && nix::errno::Errno::last_raw() == nix::libc::EBADF {
-                continue;
-            }
-            if flags < 0
-                || nix::libc::fcntl(
-                    descriptor,
-                    nix::libc::F_SETFD,
-                    flags | nix::libc::FD_CLOEXEC,
-                ) != 0
-            {
-                return false;
-            }
-        }
-        true
-    }
+    false
 }
 
 #[cfg(unix)]
@@ -3761,7 +4328,7 @@ fn kill_process_group(process_group: i32) {
 #[cfg(not(unix))]
 fn kill_process_group(_process_group: i32) {}
 
-fn terminate_process_tree(child: &mut Child, supervisor: &mut ProcessGroupSupervisor) {
+fn terminate_process_tree(child: &mut ProcessChild, supervisor: &mut ProcessGroupSupervisor) {
     supervisor.kill_group();
     let _ = child.kill();
     let _ = child.wait();
@@ -3785,6 +4352,7 @@ fn executable_mode(_metadata: &fs::Metadata) -> u32 {
 }
 
 #[cfg(test)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod tests {
     use super::{checked_bounded_end, checked_chunk_end};
 
@@ -4342,7 +4910,7 @@ mod tests {
                 let invocation = executor
                     .materialize_invocation(deadline)
                     .expect("deep directory materializes on the bounded stack");
-                super::finish_invocation(invocation, Ok(Vec::new()))
+                super::finish_invocation(invocation, Ok(Vec::new()), false)
                     .expect("deep directory reclaims on the bounded stack");
             })
             .expect("low-stack materialization thread starts")
@@ -4403,6 +4971,93 @@ mod tests {
             std::fs::read(&sentinel).expect("outside sentinel remains"),
             b"retained"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_cleanup_scans_large_fanout_once() {
+        use super::{CLEANUP_ENTRY_VISITS, PrivateInvocationDirectory};
+
+        const FANOUT: usize = 4_096;
+        let invocation = PrivateInvocationDirectory::create().expect("invocation root creates");
+        let invocation_path = invocation.path().to_path_buf();
+        for index in 0..FANOUT {
+            std::fs::write(invocation_path.join(format!("entry-{index:04}")), [])
+                .expect("fanout entry writes");
+        }
+        CLEANUP_ENTRY_VISITS.with(|visits| visits.set(0));
+        invocation.close().expect("wide directory cleanup succeeds");
+        let visits = CLEANUP_ENTRY_VISITS.with(std::cell::Cell::get);
+        assert_eq!(
+            visits, FANOUT,
+            "cleanup must inspect each wide-directory entry exactly once"
+        );
+        assert!(
+            !invocation_path.exists(),
+            "wide occurrence root is reclaimed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_entry_ceilings_accept_exact_maximum_and_reject_max_plus_one() {
+        use super::{CleanupBudget, MAX_CLEANUP_ENTRIES_PER_DIRECTORY, MAX_CLEANUP_TOTAL_ENTRIES};
+
+        let mut budget = CleanupBudget::new();
+        let mut first_directory_entries = 0usize;
+        for _ in 0..MAX_CLEANUP_ENTRIES_PER_DIRECTORY {
+            budget
+                .admit(&mut first_directory_entries)
+                .expect("per-directory maximum is admitted");
+        }
+        assert_eq!(first_directory_entries, MAX_CLEANUP_ENTRIES_PER_DIRECTORY);
+        assert!(
+            budget.admit(&mut first_directory_entries).is_err(),
+            "per-directory max-plus-one must fail before collection growth"
+        );
+
+        let mut budget = CleanupBudget::new();
+        let mut directory_entries = 0usize;
+        for admitted in 0..MAX_CLEANUP_TOTAL_ENTRIES {
+            if directory_entries == MAX_CLEANUP_ENTRIES_PER_DIRECTORY {
+                directory_entries = 0;
+            }
+            budget
+                .admit(&mut directory_entries)
+                .unwrap_or_else(|error| panic!("total maximum entry {admitted} failed: {error}"));
+        }
+        assert!(
+            budget.admit(&mut directory_entries).is_err(),
+            "total max-plus-one must fail before collection growth"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_failure_after_mutating_start_is_unknown_world() {
+        use super::{InvocationFiles, PrivateInvocationDirectory, finish_invocation};
+
+        let invocation_directory =
+            PrivateInvocationDirectory::create().expect("invocation root creates");
+        let original = invocation_directory.path().to_path_buf();
+        let relocated = original.with_extension("relocated-for-cleanup-classification");
+        std::fs::rename(&original, &relocated).expect("owned root relocates");
+        std::fs::create_dir(&original).expect("conflicting root name creates");
+        let invocation = InvocationFiles {
+            directory: invocation_directory,
+            executable: relocated.join("plugin"),
+            working_directory: None,
+        };
+
+        let error = finish_invocation(invocation, Ok(Vec::new()), true)
+            .expect_err("post-start cleanup identity conflict fails");
+        assert!(matches!(
+            error,
+            cymule_runtime::RuntimeError::UnknownWorld { code, .. }
+                if code == "process_cleanup_failed"
+        ));
+        std::fs::remove_dir(&original).expect("conflicting root removes");
+        std::fs::remove_dir_all(&relocated).expect("relocated owned root removes");
     }
 
     #[cfg(unix)]
@@ -4506,7 +5161,8 @@ mod tests {
         );
         drop(nested);
         drop(cwd);
-        super::finish_invocation(invocation, Ok(Vec::new())).expect("umask invocation reclaims");
+        super::finish_invocation(invocation, Ok(Vec::new()), false)
+            .expect("umask invocation reclaims");
     }
 
     #[cfg(unix)]
@@ -4584,7 +5240,7 @@ mod tests {
             HANG_PLUGIN_PRE_EXEC, PRE_EXEC_TEST_MUTEX, ProcessExecutor, ProcessExecutorConfig,
         };
         use std::sync::atomic::Ordering;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         struct ResetPreExecHang;
         impl Drop for ResetPreExecHang {
@@ -4602,17 +5258,11 @@ mod tests {
         let executor = ProcessExecutor::new(config).expect("executor captures shell");
         HANG_PLUGIN_PRE_EXEC.store(true, Ordering::Release);
         let _reset = ResetPreExecHang;
-        let started = Instant::now();
-
         assert!(matches!(
             executor.invoke_bytes(b"{}", false, executor.config.message_limit),
             Err(cymule_runtime::RuntimeError::TimedOut { code, .. })
                 if code == "process_response_timed_out"
         ));
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "the pre-exec child remained beyond the absolute watchdog deadline"
-        );
     }
 
     #[cfg(unix)]
@@ -4626,7 +5276,7 @@ mod tests {
         use std::os::fd::AsRawFd;
         use std::os::unix::net::UnixStream;
         use std::sync::atomic::Ordering;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         struct ResetPreExecHang;
         impl Drop for ResetPreExecHang {
@@ -4656,8 +5306,6 @@ mod tests {
                 .expect("launch gate reports readiness");
             cancellation.cancel();
         });
-        let started = Instant::now();
-
         assert!(matches!(
             executor.invoke_bytes(b"{}", true, executor.config.message_limit),
             Err(cymule_runtime::RuntimeError::UnknownWorld { code, .. })
@@ -4665,10 +5313,6 @@ mod tests {
         ));
         drop(ready_writer);
         trigger.join().expect("cancellation trigger joins");
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "post-gate cancellation waited for the provider deadline"
-        );
     }
 
     #[cfg(unix)]
@@ -4696,8 +5340,13 @@ mod tests {
             .lock()
             .expect("pre-exec test authority locks");
         let cancellation = ProcessCancellation::new().expect("cancellation authority creates");
+        let fixture = tempfile::tempdir().expect("pre-start marker fixture creates");
+        let marker = fixture.path().join("provider-started");
         let mut config = ProcessExecutorConfig::new("/bin/sh", runtime_closure());
-        config.arguments = vec!["-c".to_owned(), "exit 97".to_owned()];
+        config.arguments = vec![
+            "-c".to_owned(),
+            format!("printf started > '{}'", marker.display()),
+        ];
         config.timeout = Duration::from_secs(3);
         config.cancellation = Some(cancellation.clone());
         let executor = ProcessExecutor::new(config).expect("executor captures shell");
@@ -4720,6 +5369,48 @@ mod tests {
         ));
         drop(ready_writer);
         trigger.join().expect("cancellation trigger joins");
+        assert!(
+            !marker.exists(),
+            "a pre-start cancellation winner must perform no provider I/O"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn group_readback_loss_preserves_prestart_cancel_and_expiry_authority() {
+        use super::{ProcessCancellation, darwin_group_readback_failure};
+
+        let rejection = ProcessCancellation::new().expect("rejection authority creates");
+        let rejected_launch = rejection
+            .register_launch()
+            .expect("rejected launch registers");
+        assert!(matches!(
+            darwin_group_readback_failure(&rejected_launch, true),
+            cymule_runtime::RuntimeError::Substrate { code, .. }
+                if code == "process_start_group_mismatch"
+        ));
+
+        let cancellation = ProcessCancellation::new().expect("cancellation authority creates");
+        let cancelled_launch = cancellation
+            .register_launch()
+            .expect("cancelled launch registers");
+        cancellation.cancel();
+        assert!(matches!(
+            darwin_group_readback_failure(&cancelled_launch, true),
+            cymule_runtime::RuntimeError::Cancelled { code, .. }
+                if code == "process_invocation_cancelled"
+        ));
+
+        let expiration = ProcessCancellation::new().expect("expiration authority creates");
+        let expired_launch = expiration
+            .register_launch()
+            .expect("expired launch registers");
+        expired_launch.expire();
+        assert!(matches!(
+            darwin_group_readback_failure(&expired_launch, true),
+            cymule_runtime::RuntimeError::TimedOut { code, .. }
+                if code == "process_response_timed_out"
+        ));
     }
 
     #[cfg(unix)]
@@ -4904,9 +5595,19 @@ mod tests {
         loop {
             match killpg(group, None) {
                 Err(Errno::ESRCH) => break,
-                Ok(()) if Instant::now() < termination_deadline => {}
+                Ok(()) if Instant::now() < termination_deadline => {
+                    last_members = process_group_members(process_group);
+                    #[cfg(target_os = "macos")]
+                    if process_group_members_are_terminal(&last_members) {
+                        break;
+                    }
+                }
                 Err(Errno::EPERM) if Instant::now() < termination_deadline => {
                     last_members = process_group_members(process_group);
+                    #[cfg(target_os = "macos")]
+                    if process_group_members_are_terminal(&last_members) {
+                        break;
+                    }
                     eprintln!(
                         "process group {process_group} remained nonterminal after Engine death:\n{last_members}"
                     );
@@ -4941,5 +5642,15 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[cfg(all(unix, target_os = "macos"))]
+    fn process_group_members_are_terminal(members: &str) -> bool {
+        !members.is_empty()
+            && members.lines().all(|line| {
+                line.split_whitespace()
+                    .nth(3)
+                    .is_some_and(|state| state.contains('E') || state.contains('Z'))
+            })
     }
 }

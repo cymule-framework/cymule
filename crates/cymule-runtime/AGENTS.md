@@ -79,11 +79,11 @@
   conflict permits refresh and only Substrate permits identical-request retry.
   Never classify these failures from Display text or flatten them into a
   generic Core defect.
-- `cymule.engine/4` is the sole Engine transport generation. Every success
+- `cymule.engine/5` is the sole Engine transport generation. Every success
   requires the complete strictly decoded inner `EngineRequest` and its closed
   response; every failure contains only the structured error because it may
   originate before request decoding. Missing request echo, mismatched echo, and
-  the older v4 success shape fail closed without fallback. Stateful M4 transport
+  every predecessor success shape fails closed without fallback. Stateful M4 transport
   is exactly `execute_live_evolution(target, evolution_id, command)` and returns
   one `EvolutionCommit`; the host constructs `EvolutionPersistenceCommand` and
   delegates to the closed Durable Evolution control. There is no caller journal
@@ -97,9 +97,10 @@
   `cymule.directory-store/5` and `cymule.sqlite-store/6`. Earlier selectors are
   rejected without a compatibility alias or reader.
 - Strictly parsed Engine values must retain raw object-member presence through
-  typed admission. Recursively reject an explicit `null` member when typed
-  reserialization omits that member; do not canonicalize unrelated legal JSON
-  representations or reject required nullable members that remain present.
+  typed admission. Recursively reject every explicit member when typed
+  reserialization omits it, including `null` and empty defaulted collections;
+  do not canonicalize unrelated legal JSON representations or reject required
+  nullable members that remain present.
 - Strict JSON treats integer as a mathematical type: normalize every safe
   integral token such as `1.0` or `1e0` to an integer before typed decoding and
   success echo construction. Preserve finite fractional values for untyped JSON
@@ -188,7 +189,7 @@
   that fixed source budget. `ContractTarget`, every issue field, and the whole
   `ContractViolation` canonical envelope validate their own bounds before
   Engine or Durable projection; those consumers never re-truncate the issue
-  set. An invalid internal projection still emits one valid `cymule.engine/4`
+  set. An invalid internal projection still emits one valid `cymule.engine/5`
   failure envelope instead of escaping as stderr-only transport failure.
 - Embedded completion, wait, explicit release, and reconciliation are closed
   success-side `ExecutionOutcome` variants. Never flatten release or

@@ -140,6 +140,52 @@ pub struct WaitDelivery {
     pub value: Value,
 }
 
+/// Source-owned authority for one delivery's exact target selection.
+///
+/// A selection made during the current [`WaitSourceDriver::receive`] call is
+/// bounded by that call's `max_targets`. A retained selection was durably
+/// admitted by an earlier call and is redelivered exactly; a later caller's
+/// smaller bound must not reinterpret, truncate, or replace it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WaitSourceDelivery {
+    /// The source selected these targets through the supplied pinned view in
+    /// the current receive call.
+    Selected(WaitDelivery),
+    /// The source is redelivering an exact target set retained before this
+    /// receive call.
+    Retained(WaitDelivery),
+}
+
+impl WaitSourceDelivery {
+    /// Borrow the exact semantic delivery independently of selection origin.
+    #[must_use]
+    pub fn delivery(&self) -> &WaitDelivery {
+        match self {
+            Self::Selected(delivery) | Self::Retained(delivery) => delivery,
+        }
+    }
+
+    /// Consume the selection-origin envelope and return the semantic delivery.
+    #[must_use]
+    pub fn into_delivery(self) -> WaitDelivery {
+        match self {
+            Self::Selected(delivery) | Self::Retained(delivery) => delivery,
+        }
+    }
+
+    pub(crate) fn is_selected_now(&self) -> bool {
+        matches!(self, Self::Selected(_))
+    }
+}
+
+impl std::ops::Deref for WaitSourceDelivery {
+    type Target = WaitDelivery;
+
+    fn deref(&self) -> &Self::Target {
+        self.delivery()
+    }
+}
+
 /// Replaceable source plugin for durable signal or timer deliveries.
 ///
 /// The framework supplies a bounded wait view and a hard target bound. The
@@ -157,7 +203,7 @@ pub trait WaitSourceDriver {
         &mut self,
         view: &mut dyn ParkedWaitView,
         max_targets: usize,
-    ) -> DurableResult<Option<WaitDelivery>>;
+    ) -> DurableResult<Option<WaitSourceDelivery>>;
 
     /// Acknowledge a delivery after its M1 CAS commit.
     ///

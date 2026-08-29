@@ -19,7 +19,7 @@
   order, immutable retry checks, OIDC-only trusted publishing, new-name
   ownership gates, current-controller/exact-payload separation, the three npm
   identity layers, and credential-removal requirements aligned with live
-  workflows and scripts. Document `cymule.release-bom/2` as the terminal
+  workflows and scripts. Document `cymule.release-bom/3` as the terminal
   aggregate content receipt: fresh closed registry evidence,
   signed npm publisher ref/SHA, and required nullable publication for every
   source package remain distinct fields. The current finalizer SHA belongs to

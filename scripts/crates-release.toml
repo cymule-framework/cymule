@@ -153,6 +153,8 @@ dependencies = [
   "cymule-durable",
   "cymule-durable-protocol",
   "cymule-profile-protocol",
+  "cymule-runtime",
+  "cymule-store-sqlite",
 ]
 
 [[crate]]

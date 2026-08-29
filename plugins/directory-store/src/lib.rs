@@ -366,7 +366,8 @@ impl DirectoryStore {
         #[cfg(not(unix))]
         {
             let _ = root;
-            Err(unsupported_generation(
+            Err(substrate(
+                DIRECTORY_SYNC_IO_CODE,
                 "writable directory-store/5 requires Unix directory fsync and atomic replacement",
             ))
         }
@@ -5239,7 +5240,7 @@ mod non_unix_tests {
         assert!(matches!(
             error,
             DurableError::Substrate { code, .. }
-                if code == UNSUPPORTED_STORE_GENERATION_CODE
+                if code == DIRECTORY_SYNC_IO_CODE
         ));
         assert!(
             !root.exists(),

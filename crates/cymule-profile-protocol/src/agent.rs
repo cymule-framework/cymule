@@ -90,6 +90,10 @@ pub const MAX_AGENT_PAGE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_AGENT_VALUE_ENTRIES: usize = 256;
 /// Maximum distinct reconciliation observations retained by one occurrence.
 pub const MAX_AGENT_RECOVERY_OBSERVATIONS: usize = 64;
+/// Maximum concurrently non-terminal tools retained by one Session.
+pub const MAX_AGENT_NONTERMINAL_TOOLS: usize = 64;
+/// Maximum summed before/Cancelled canonical bytes reserved for Session close.
+pub const MAX_AGENT_TOOL_CLOSE_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum canonical bytes of one complete Agent command receipt leaf.
 pub const MAX_AGENT_RECEIPT_BYTES: usize = 10 * 1024 * 1024;
 /// Maximum canonical bytes of one complete closed Agent command.
@@ -99,7 +103,7 @@ pub const MAX_AGENT_CONTEXT_SCAN_ENTRIES: u64 = 4_096;
 /// Maximum canonical message bytes one context capability may inspect.
 pub const MAX_AGENT_CONTEXT_SCAN_BYTES: u64 = 16 * 1024 * 1024;
 /// Current bounded Session metadata wire generation.
-pub const AGENT_SESSION_CURRENT_VERSION: &str = "cymule.agent-session-current/1";
+pub const AGENT_SESSION_CURRENT_VERSION: &str = "cymule.agent-session-current/2";
 
 /// Typed content shared by messages, model output, tools, and artifacts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -563,6 +567,65 @@ impl AgentSessionTransitionWitness {
     }
 }
 
+/// Bounded exact membership and future-close charge for one non-terminal Tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentNonterminalTool {
+    /// Canonical digest of the independently keyed current Tool projection.
+    pub current_digest: String,
+    /// Summed canonical bytes of that current and its Cancelled successor.
+    pub close_bytes: u64,
+}
+
+impl AgentNonterminalTool {
+    fn new(current: &AgentToolCurrent) -> ProtocolResult<Self> {
+        let entry = Self {
+            current_digest: canonical_digest(current)?,
+            close_bytes: current.nonterminal_close_charge()?,
+        };
+        entry.verify_for(current)?;
+        Ok(entry)
+    }
+
+    /// Verify the bounded self-contained directory entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the digest or byte charge is malformed.
+    pub fn verify(&self) -> ProtocolResult<()> {
+        validate_canonical_digest(
+            "Agent non-terminal Tool current digest",
+            &self.current_digest,
+        )?;
+        if self.close_bytes == 0 || self.close_bytes > MAX_EXACT_INTEGER {
+            return Err(ProtocolError::Validation(
+                "Agent non-terminal Tool close charge is outside the exact integer range"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Verify exact coupling to one independently keyed non-terminal Tool current.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the current is terminal, invalid, or differs in
+    /// canonical content or close charge.
+    pub fn verify_for(&self, current: &AgentToolCurrent) -> ProtocolResult<()> {
+        self.verify()?;
+        if current.tool.status.is_terminal()
+            || self.current_digest != canonical_digest(current)?
+            || self.close_bytes != current.nonterminal_close_charge()?
+        {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent non-terminal Tool directory entry differs from its exact current".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Bounded keyed current metadata for one Agent Session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -593,6 +656,14 @@ pub struct AgentSessionCurrent {
     pub message_head: Option<String>,
     /// Number of elicitations which still have no response.
     pub pending_elicitation_count: u64,
+    /// Bounded capacity directory for every non-terminal Tool current.
+    ///
+    /// Each key is an exact Tool identity and each value binds the current's
+    /// canonical digest plus the summed byte charge of that current and its
+    /// deterministic Cancelled successor. The independently keyed Tool current
+    /// remains the sole lifecycle authority; this directory proves bounded
+    /// close completeness.
+    pub nonterminal_tools: BTreeMap<String, AgentNonterminalTool>,
     /// Number of Prepared, Started, or Unknown host occurrences.
     pub unresolved_occurrence_count: u64,
     /// Generation of the deletable unresolved-occurrence index.
@@ -636,6 +707,7 @@ impl AgentSessionCurrent {
             message_count: 0,
             message_head: None,
             pending_elicitation_count: 0,
+            nonterminal_tools: BTreeMap::new(),
             unresolved_occurrence_count: 0,
             unresolved_occurrence_generation,
             open_stream_count: 0,
@@ -694,17 +766,38 @@ impl AgentSessionCurrent {
                 "Agent Session RequiresAction state does not match pending elicitations".to_owned(),
             ));
         }
+        if self.nonterminal_tools.len() > MAX_AGENT_NONTERMINAL_TOOLS {
+            return Err(ProtocolError::Validation(format!(
+                "Agent Session exceeds {MAX_AGENT_NONTERMINAL_TOOLS} non-terminal tools"
+            )));
+        }
+        let mut close_bytes = 0_u64;
+        for (tool_call_id, entry) in &self.nonterminal_tools {
+            validate_content_token("non-terminal Agent tool identity", tool_call_id, 512)?;
+            entry.verify()?;
+            close_bytes = close_bytes.checked_add(entry.close_bytes).ok_or_else(|| {
+                ProtocolError::Validation(
+                    "Agent non-terminal tool close charge is exhausted".to_owned(),
+                )
+            })?;
+        }
+        if close_bytes > MAX_AGENT_TOOL_CLOSE_BYTES as u64 {
+            return Err(ProtocolError::Validation(format!(
+                "Agent non-terminal tools exceed {MAX_AGENT_TOOL_CLOSE_BYTES} close bytes"
+            )));
+        }
         if self.state != AgentState::Idle && self.stop_reason.is_some() {
             return Err(ProtocolError::Validation(
                 "only an idle Agent Session may retain a stop reason".to_owned(),
             ));
         }
         if self.state == AgentState::Closed
-            && (self.unresolved_occurrence_count != 0 || self.open_stream_count != 0)
+            && (self.unresolved_occurrence_count != 0
+                || self.open_stream_count != 0
+                || !self.nonterminal_tools.is_empty())
         {
             return Err(ProtocolError::Validation(
-                "closed Agent Session cannot retain unresolved occurrences or open streams"
-                    .to_owned(),
+                "closed Agent Session cannot retain unresolved occurrences, open streams, or non-terminal tools".to_owned(),
             ));
         }
         if let Some(plan) = &self.plan {
@@ -1195,6 +1288,15 @@ impl AgentToolCurrent {
         validate_sha256("Agent tool command", &self.admitted_by)?;
         validate_canonical_size("Agent tool current", self, MAX_AGENT_CURRENT_BYTES)
     }
+
+    /// Return the exact bounded byte charge reserved for deterministic Session close.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this current is invalid or already terminal.
+    pub fn nonterminal_close_charge(&self) -> ProtocolResult<u64> {
+        tool_close_charge(self)
+    }
 }
 
 /// Keyed current projection for one elicitation.
@@ -1277,6 +1379,11 @@ impl AgentUpdateCurrent {
 pub enum AgentSessionEntrySource {
     /// State, Plan, or usage changes need metadata only.
     Metadata,
+    /// Complete bounded non-terminal Tool set used only by Session closure.
+    Close {
+        /// Exact independently keyed currents in Tool-identity order.
+        tools: Vec<AgentToolCurrent>,
+    },
     /// Existing message alias and ordinal entry, if any.
     Message {
         /// Current immutable message alias.
@@ -1308,6 +1415,11 @@ pub struct AgentSessionUpdateSource {
 pub enum AgentSessionUpdateEffect {
     /// Only bounded Session metadata changed.
     Metadata,
+    /// Session closure plus every deterministic Tool cancellation.
+    Closed {
+        /// Exact Cancelled successors in Tool-identity order.
+        tools: Vec<AgentToolCurrent>,
+    },
     /// One immutable message alias and order entry were admitted or replayed.
     Message {
         /// Exact current message authority.
@@ -1353,12 +1465,18 @@ impl AgentSessionCurrent {
             }
             AgentUpdate::State {
                 state, stop_reason, ..
-            } => reduce_state_update(&mut session, *state, *stop_reason, &source.entry)?,
+            } => reduce_state_update(
+                &mut session,
+                command_id,
+                *state,
+                *stop_reason,
+                &source.entry,
+            )?,
             AgentUpdate::Plan { plan, .. } => {
                 reduce_plan_update(&mut session, plan, &source.entry)?
             }
             AgentUpdate::Tool { tool, .. } => {
-                reduce_tool_update(&session, command_id, tool, &source.entry)?
+                reduce_tool_update(&mut session, command_id, tool, &source.entry)?
             }
             AgentUpdate::Usage { usage, .. } => {
                 reduce_usage_update(&mut session, usage, &source.entry)?
@@ -1457,10 +1575,14 @@ fn reduce_message_update(
 
 fn reduce_state_update(
     session: &mut AgentSessionCurrent,
+    command_id: &str,
     state: AgentState,
     stop_reason: Option<SessionStopReason>,
     entry: &AgentSessionEntrySource,
 ) -> ProtocolResult<AgentSessionUpdateEffect> {
+    if state == AgentState::Closed {
+        return reduce_session_close(session, command_id, stop_reason, entry);
+    }
     require_metadata_entry(entry)?;
     if session.state == state && session.stop_reason == stop_reason {
         return Err(ProtocolError::IllegalTransition(
@@ -1470,6 +1592,54 @@ fn reduce_state_update(
     session.state = state;
     session.stop_reason = stop_reason;
     Ok(AgentSessionUpdateEffect::Metadata)
+}
+
+fn reduce_session_close(
+    session: &mut AgentSessionCurrent,
+    command_id: &str,
+    stop_reason: Option<SessionStopReason>,
+    entry: &AgentSessionEntrySource,
+) -> ProtocolResult<AgentSessionUpdateEffect> {
+    let AgentSessionEntrySource::Close { tools } = entry else {
+        return Err(ProtocolError::Validation(
+            "Agent Session closure requires its complete bounded non-terminal Tool source"
+                .to_owned(),
+        ));
+    };
+    if stop_reason.is_some() {
+        return Err(ProtocolError::Validation(
+            "closed Agent Session cannot carry a stop reason".to_owned(),
+        ));
+    }
+    if tools.len() != session.nonterminal_tools.len() {
+        return Err(ProtocolError::IdentityMismatch(
+            "Agent Session close source does not contain every non-terminal Tool".to_owned(),
+        ));
+    }
+    let mut previous_tool_id: Option<&str> = None;
+    let mut cancelled = Vec::with_capacity(tools.len());
+    for current in tools {
+        current.verify()?;
+        let tool_call_id = current.tool.tool_call_id.as_str();
+        if current.session_id != session.session_id
+            || current.tool.status.is_terminal()
+            || previous_tool_id.is_some_and(|previous| previous >= tool_call_id)
+            || session
+                .nonterminal_tools
+                .get(tool_call_id)
+                .is_none_or(|entry| entry.verify_for(current).is_err())
+        {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent Session close source changed its bounded non-terminal Tool set".to_owned(),
+            ));
+        }
+        previous_tool_id = Some(tool_call_id);
+        cancelled.push(cancelled_tool_current(current, command_id)?);
+    }
+    session.state = AgentState::Closed;
+    session.stop_reason = None;
+    session.nonterminal_tools.clear();
+    Ok(AgentSessionUpdateEffect::Closed { tools: cancelled })
 }
 
 fn reduce_plan_update(
@@ -1503,7 +1673,7 @@ fn reduce_usage_update(
 }
 
 fn reduce_tool_update(
-    session: &AgentSessionCurrent,
+    session: &mut AgentSessionCurrent,
     command_id: &str,
     tool: &ToolCall,
     entry: &AgentSessionEntrySource,
@@ -1519,6 +1689,7 @@ fn reduce_tool_update(
             || current.tool.tool_call_id != tool.tool_call_id
             || current.tool.operation != tool.operation
             || current.tool.input != tool.input
+            || current.tool.locations != tool.locations
             || current.tool.status == tool.status
             || current.tool.status.is_terminal()
             || !valid_tool_transition(current.tool.status, tool.status)
@@ -1535,12 +1706,86 @@ fn reduce_tool_update(
         )));
     }
     validate_tool_projection(tool)?;
-    Ok(AgentSessionUpdateEffect::Tool {
-        current: AgentToolCurrent {
-            session_id: session.session_id.clone(),
-            tool: tool.clone(),
-            admitted_by: command_id.to_owned(),
-        },
+    let next = AgentToolCurrent {
+        session_id: session.session_id.clone(),
+        tool: tool.clone(),
+        admitted_by: command_id.to_owned(),
+    };
+    advance_nonterminal_tool_directory(session, current.as_ref(), &next)?;
+    Ok(AgentSessionUpdateEffect::Tool { current: next })
+}
+
+fn advance_nonterminal_tool_directory(
+    session: &mut AgentSessionCurrent,
+    previous: Option<&AgentToolCurrent>,
+    next: &AgentToolCurrent,
+) -> ProtocolResult<()> {
+    let tool_call_id = next.tool.tool_call_id.as_str();
+    match previous {
+        None => {
+            if session.nonterminal_tools.contains_key(tool_call_id)
+                || next.tool.status.is_terminal()
+            {
+                return Err(ProtocolError::IdentityMismatch(
+                    "Agent non-terminal Tool directory does not match first admission".to_owned(),
+                ));
+            }
+        }
+        Some(previous) => {
+            if session
+                .nonterminal_tools
+                .get(tool_call_id)
+                .is_none_or(|entry| entry.verify_for(previous).is_err())
+            {
+                return Err(ProtocolError::IdentityMismatch(
+                    "Agent non-terminal Tool directory does not match its exact current".to_owned(),
+                ));
+            }
+        }
+    }
+    if next.tool.status.is_terminal() {
+        session.nonterminal_tools.remove(tool_call_id);
+    } else {
+        session
+            .nonterminal_tools
+            .insert(tool_call_id.to_owned(), AgentNonterminalTool::new(next)?);
+    }
+    session.verify()
+}
+
+fn cancelled_tool_current(
+    current: &AgentToolCurrent,
+    command_id: &str,
+) -> ProtocolResult<AgentToolCurrent> {
+    validate_sha256("Agent Tool cancellation command", command_id)?;
+    let mut tool = current.tool.clone();
+    tool.status = ToolCallStatus::Cancelled;
+    tool.output = None;
+    let cancelled = AgentToolCurrent {
+        session_id: current.session_id.clone(),
+        tool,
+        admitted_by: command_id.to_owned(),
+    };
+    cancelled.verify()?;
+    Ok(cancelled)
+}
+
+fn tool_close_charge(current: &AgentToolCurrent) -> ProtocolResult<u64> {
+    current.verify()?;
+    if current.tool.status.is_terminal() {
+        return Err(ProtocolError::IllegalTransition(
+            "terminal Agent Tool cannot retain Session-close capacity".to_owned(),
+        ));
+    }
+    let cancelled = cancelled_tool_current(current, &current.admitted_by)?;
+    let bytes = cymule_core::canonical_bytes(current)?
+        .len()
+        .checked_add(cymule_core::canonical_bytes(&cancelled)?.len())
+        .ok_or_else(|| {
+            ProtocolError::Validation("Agent Tool close byte charge is exhausted".to_owned())
+        })?;
+    u64::try_from(bytes).map_err(|_| {
+        ProtocolError::Validation("Agent Tool close byte charge exceeds u64".to_owned())
     })
 }
 
@@ -1575,7 +1820,29 @@ impl AgentSessionPostcondition {
                     state, stop_reason, ..
                 },
                 AgentSessionUpdateEffect::Metadata,
-            ) if self.session.state == *state && self.session.stop_reason == *stop_reason => Ok(()),
+            ) if *state != AgentState::Closed
+                && self.session.state == *state
+                && self.session.stop_reason == *stop_reason =>
+            {
+                Ok(())
+            }
+            (
+                AgentUpdate::State {
+                    state: AgentState::Closed,
+                    stop_reason: None,
+                    ..
+                },
+                AgentSessionUpdateEffect::Closed { tools },
+            ) if self.session.state == AgentState::Closed
+                && self.session.stop_reason.is_none()
+                && self.session.nonterminal_tools.is_empty()
+                && tools.iter().all(|current| {
+                    current.session_id == self.session.session_id
+                        && current.tool.status == ToolCallStatus::Cancelled
+                }) =>
+            {
+                tools.iter().try_for_each(AgentToolCurrent::verify)
+            }
             (AgentUpdate::Plan { plan, .. }, AgentSessionUpdateEffect::Metadata)
                 if self.session.plan.as_ref() == Some(plan) =>
             {
@@ -5034,6 +5301,19 @@ fn validate_sha256(kind: &str, value: &str) -> ProtocolResult<()> {
     Ok(())
 }
 
+fn validate_canonical_digest(kind: &str, value: &str) -> ProtocolResult<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ProtocolError::Validation(format!(
+            "{kind} must contain 64 lowercase hexadecimal characters"
+        )));
+    }
+    Ok(())
+}
+
 /// Closed durable value delivered by one accepted or declined elicitation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
@@ -6588,9 +6868,9 @@ fn workspace_checkpoint_phase(
 }
 
 /// Closed Agent persistence command generation.
-pub const AGENT_COMMAND_VERSION: &str = "cymule.agent-command/1";
+pub const AGENT_COMMAND_VERSION: &str = "cymule.agent-command/2";
 /// Closed Agent persistence receipt generation.
-pub const AGENT_COMMAND_RECEIPT_VERSION: &str = "cymule.agent-command-receipt/1";
+pub const AGENT_COMMAND_RECEIPT_VERSION: &str = "cymule.agent-command-receipt/2";
 
 const AGENT_COMMAND_ID_DOMAIN: &str = "cymule.agent-command-id/1";
 const AGENT_COMMAND_RECEIPT_ID_DOMAIN: &str = "cymule.agent-command-receipt-id/1";
@@ -10016,6 +10296,451 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    fn advance_tool_fixture(
+        session: &AgentSessionCurrent,
+        current: Option<AgentToolCurrent>,
+        tool_call_id: &str,
+        status: ToolCallStatus,
+        command_digit: char,
+    ) -> (AgentSessionCurrent, AgentToolCurrent) {
+        let update = AgentUpdate::Tool {
+            update_id: format!("update:{tool_call_id}:{status:?}"),
+            tool: ToolCall {
+                tool_call_id: tool_call_id.to_owned(),
+                operation: "test.execute".to_owned(),
+                status,
+                input: serde_json::json!({"tool": tool_call_id}),
+                output: status.is_terminal().then(|| {
+                    vec![ContentBlock::Text {
+                        text: format!("{status:?}"),
+                    }]
+                }),
+                locations: vec!["workspace:fixture".to_owned()],
+            },
+        };
+        let postcondition = session
+            .reduce_update(
+                &revision(command_digit),
+                &update,
+                &AgentSessionUpdateSource {
+                    update: None,
+                    entry: AgentSessionEntrySource::Tool { current },
+                },
+            )
+            .expect("Tool fixture transition reduces");
+        let AgentSessionUpdateEffect::Tool { current } = postcondition.effect else {
+            panic!("Tool fixture transition returns its exact current")
+        };
+        (postcondition.session, current)
+    }
+
+    fn close_tool_set_fixture() -> (AgentSessionCurrent, Vec<AgentToolCurrent>) {
+        let session = AgentSessionCurrent::new("session:close-tools").expect("Session constructs");
+        let (session, pending) =
+            advance_tool_fixture(&session, None, "tool:pending", ToolCallStatus::Pending, '1');
+        let (session, in_progress_pending) = advance_tool_fixture(
+            &session,
+            None,
+            "tool:in-progress",
+            ToolCallStatus::Pending,
+            '2',
+        );
+        let (session, in_progress) = advance_tool_fixture(
+            &session,
+            Some(in_progress_pending),
+            "tool:in-progress",
+            ToolCallStatus::InProgress,
+            '3',
+        );
+        let (session, awaiting_pending) = advance_tool_fixture(
+            &session,
+            None,
+            "tool:awaiting-permission",
+            ToolCallStatus::Pending,
+            '4',
+        );
+        let (session, awaiting_permission) = advance_tool_fixture(
+            &session,
+            Some(awaiting_pending),
+            "tool:awaiting-permission",
+            ToolCallStatus::AwaitingPermission,
+            '5',
+        );
+
+        let mut terminal_session = session;
+        for (terminal, digits) in [
+            (ToolCallStatus::Completed, ['6', '7', 'a']),
+            (ToolCallStatus::Failed, ['8', '9', 'b']),
+            (ToolCallStatus::Cancelled, ['a', 'b', 'c']),
+        ] {
+            let tool_call_id = format!("tool:terminal:{terminal:?}");
+            let (session, pending) = advance_tool_fixture(
+                &terminal_session,
+                None,
+                &tool_call_id,
+                ToolCallStatus::Pending,
+                digits[0],
+            );
+            let (session, in_progress) = advance_tool_fixture(
+                &session,
+                Some(pending),
+                &tool_call_id,
+                ToolCallStatus::InProgress,
+                digits[1],
+            );
+            let (session, current) = advance_tool_fixture(
+                &session,
+                Some(in_progress),
+                &tool_call_id,
+                terminal,
+                digits[2],
+            );
+            assert_eq!(current.tool.status, terminal);
+            assert!(!session.nonterminal_tools.contains_key(&tool_call_id));
+            terminal_session = session;
+        }
+
+        (
+            terminal_session,
+            vec![awaiting_permission, in_progress, pending],
+        )
+    }
+
+    #[test]
+    fn session_close_atomically_cancels_every_nonterminal_tool_and_replays_exactly() {
+        let (terminal_session, nonterminal_tools) = close_tool_set_fixture();
+        assert_eq!(
+            terminal_session
+                .nonterminal_tools
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                "tool:awaiting-permission",
+                "tool:in-progress",
+                "tool:pending"
+            ]
+        );
+        let update = AgentUpdate::State {
+            update_id: "update:close-tools".to_owned(),
+            state: AgentState::Closed,
+            stop_reason: None,
+        };
+        let command = AgentCommand::new(
+            revision('e'),
+            AgentCommandAction::SessionUpdate {
+                session_id: terminal_session.session_id.clone(),
+                update: update.clone(),
+            },
+        )
+        .expect("close command seals");
+        let source = AgentSessionUpdateSource {
+            update: None,
+            entry: AgentSessionEntrySource::Close {
+                tools: nonterminal_tools,
+            },
+        };
+        let postcondition = terminal_session
+            .reduce_update(&command.command_id, &update, &source)
+            .expect("close atomically cancels the complete bounded Tool set");
+        assert_eq!(postcondition.session.state, AgentState::Closed);
+        assert!(postcondition.session.nonterminal_tools.is_empty());
+        let AgentSessionUpdateEffect::Closed { tools } = &postcondition.effect else {
+            panic!("Session close returns its explicit Tool terminalization set")
+        };
+        assert_eq!(
+            tools
+                .iter()
+                .map(|current| (current.tool.tool_call_id.as_str(), current.tool.status))
+                .collect::<Vec<_>>(),
+            vec![
+                ("tool:awaiting-permission", ToolCallStatus::Cancelled),
+                ("tool:in-progress", ToolCallStatus::Cancelled),
+                ("tool:pending", ToolCallStatus::Cancelled),
+            ]
+        );
+        assert!(tools.iter().all(|current| current.tool.output.is_none()));
+
+        let receipt = AgentCommandReceipt::new(
+            &command,
+            AgentCommandSource::Session {
+                session: terminal_session,
+                update: source,
+            },
+            AgentCommandOutcome::Session(postcondition),
+        )
+        .expect("close receipt replays the sole close reducer");
+        receipt
+            .verify_for(&command)
+            .expect("close receipt replays exactly");
+    }
+
+    #[test]
+    fn session_close_rejects_incomplete_reordered_or_nonterminal_source_conflicts() {
+        let session =
+            AgentSessionCurrent::new("session:close-conflicts").expect("Session constructs");
+        let (session, first) =
+            advance_tool_fixture(&session, None, "tool:first", ToolCallStatus::Pending, '1');
+        let (session, second) =
+            advance_tool_fixture(&session, None, "tool:second", ToolCallStatus::Pending, '2');
+        let update = AgentUpdate::State {
+            update_id: "update:close-conflicts".to_owned(),
+            state: AgentState::Closed,
+            stop_reason: None,
+        };
+        for entry in [
+            AgentSessionEntrySource::Metadata,
+            AgentSessionEntrySource::Close {
+                tools: vec![first.clone()],
+            },
+            AgentSessionEntrySource::Close {
+                tools: vec![second.clone(), first.clone()],
+            },
+        ] {
+            assert!(
+                session
+                    .reduce_update(
+                        &revision('3'),
+                        &update,
+                        &AgentSessionUpdateSource {
+                            update: None,
+                            entry,
+                        },
+                    )
+                    .is_err()
+            );
+        }
+
+        let mut mismatched = first.clone();
+        mismatched.tool.status = ToolCallStatus::InProgress;
+        assert!(
+            session
+                .reduce_update(
+                    &revision('4'),
+                    &update,
+                    &AgentSessionUpdateSource {
+                        update: None,
+                        entry: AgentSessionEntrySource::Close {
+                            tools: vec![mismatched, second.clone()],
+                        },
+                    },
+                )
+                .is_err()
+        );
+
+        let mut same_size_different_content = second.clone();
+        same_size_different_content.tool.operation = "test.executf".to_owned();
+        assert_eq!(
+            tool_close_charge(&same_size_different_content).unwrap(),
+            tool_close_charge(&second).unwrap()
+        );
+        assert!(
+            session
+                .reduce_update(
+                    &revision('5'),
+                    &update,
+                    &AgentSessionUpdateSource {
+                        update: None,
+                        entry: AgentSessionEntrySource::Close {
+                            tools: vec![first, same_size_different_content],
+                        },
+                    },
+                )
+                .is_err()
+        );
+    }
+
+    struct ComposedCloseFixture {
+        tool: AgentToolCurrent,
+        stream: AgentStreamCurrent,
+        prepared: AgentHostOccurrence,
+        prepared_postcondition: AgentOccurrencePostcondition,
+    }
+
+    fn composed_close_fixture() -> ComposedCloseFixture {
+        let session =
+            AgentSessionCurrent::new("session:close-composed").expect("Session constructs");
+        let (session, pending) = advance_tool_fixture(
+            &session,
+            None,
+            "tool:composed",
+            ToolCallStatus::Pending,
+            '1',
+        );
+        let (session, in_progress) = advance_tool_fixture(
+            &session,
+            Some(pending),
+            "tool:composed",
+            ToolCallStatus::InProgress,
+            '2',
+        );
+        let open = AgentStreamCommand::Open {
+            session_id: session.session_id.clone(),
+            stream_id: "stream:composed".to_owned(),
+            target: AgentStreamTarget::Tool {
+                tool_call_id: in_progress.tool.tool_call_id.clone(),
+            },
+            delivery: AgentStreamDelivery::Staged,
+        };
+        let opened = AgentStreamSource::Open {
+            session,
+            stream: None,
+            target: AgentStreamTargetSource::Tool {
+                current: Some(in_progress.clone()),
+            },
+        }
+        .reduce(&revision('3'), &open)
+        .expect("Tool stream opens");
+        let AgentStreamEffect::Opened {
+            session: stream_session,
+        } = opened.effect
+        else {
+            panic!("open returns Session metadata")
+        };
+
+        let prepared = AgentHostOccurrence::prepare(
+            "occurrence:composed",
+            "session:close-composed",
+            AgentHostRequest::Tool(ToolRequest {
+                tool_call_id: "tool:host-composed".to_owned(),
+                operation: "test.observe".to_owned(),
+                input: serde_json::json!({}),
+            }),
+            AgentHostBinding::standalone("tool:test/1", "binding:composed/1")
+                .expect("binding constructs"),
+        )
+        .expect("occurrence prepares");
+        let prepared_postcondition = AgentOccurrenceSource {
+            session: stream_session,
+            current: None,
+        }
+        .reduce(&revision('4'), &prepared)
+        .expect("occurrence Prepare reduces");
+
+        ComposedCloseFixture {
+            tool: in_progress,
+            stream: opened.stream,
+            prepared,
+            prepared_postcondition,
+        }
+    }
+
+    fn complete_composed_occurrence(
+        prepared: &AgentHostOccurrence,
+        prepared_postcondition: AgentOccurrencePostcondition,
+    ) -> AgentSessionCurrent {
+        let started = prepared.start().expect("occurrence starts");
+        let started_postcondition = AgentOccurrenceSource {
+            session: prepared_postcondition.session,
+            current: Some(prepared_postcondition.current),
+        }
+        .reduce(&revision('6'), &started)
+        .expect("occurrence Started reduces");
+        let completed = started
+            .complete(AgentHostResponse::Tool(ToolResponse {
+                tool_call_id: "tool:host-composed".to_owned(),
+                content: vec![ContentBlock::Text {
+                    text: "observed".to_owned(),
+                }],
+                occurrence_binding: "binding:composed/1".to_owned(),
+            }))
+            .expect("occurrence completes");
+        AgentOccurrenceSource {
+            session: started_postcondition.session,
+            current: Some(started_postcondition.current),
+        }
+        .reduce(&revision('7'), &completed)
+        .expect("occurrence Completed reduces")
+        .session
+    }
+
+    #[test]
+    fn session_close_waits_for_stream_and_occurrence_then_cancels_their_tool_target() {
+        let fixture = composed_close_fixture();
+
+        let close = AgentUpdate::State {
+            update_id: "update:close-composed".to_owned(),
+            state: AgentState::Closed,
+            stop_reason: None,
+        };
+        let close_source = || AgentSessionUpdateSource {
+            update: None,
+            entry: AgentSessionEntrySource::Close {
+                tools: vec![fixture.tool.clone()],
+            },
+        };
+        assert!(
+            fixture
+                .prepared_postcondition
+                .session
+                .reduce_update(&revision('5'), &close, &close_source())
+                .is_err(),
+            "open stream and unresolved occurrence both block Session close"
+        );
+
+        let completed_session =
+            complete_composed_occurrence(&fixture.prepared, fixture.prepared_postcondition);
+        assert!(
+            completed_session
+                .reduce_update(&revision('8'), &close, &close_source())
+                .is_err(),
+            "open stream independently blocks Session close"
+        );
+
+        let abort = AgentStreamCommand::Abort {
+            session_id: "session:close-composed".to_owned(),
+            stream_id: "stream:composed".to_owned(),
+            reason: "Session is closing".to_owned(),
+        };
+        let aborted = AgentStreamSource::Abort {
+            session: completed_session,
+            stream: fixture.stream,
+        }
+        .reduce(&revision('9'), &abort)
+        .expect("stream abort reduces");
+        let AgentStreamEffect::Aborted {
+            session: ready_to_close,
+        } = aborted.effect
+        else {
+            panic!("abort returns Session metadata")
+        };
+        let closed = ready_to_close
+            .reduce_update(&revision('a'), &close, &close_source())
+            .expect("Session closes after occurrence and stream are terminal");
+        let AgentSessionUpdateEffect::Closed { tools } = closed.effect else {
+            panic!("close returns Tool cancellations")
+        };
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool.status, ToolCallStatus::Cancelled);
+    }
+
+    #[test]
+    fn nonterminal_tool_directory_enforces_count_and_close_byte_reservation() {
+        let mut too_many =
+            AgentSessionCurrent::new("session:tool-directory-count").expect("Session constructs");
+        for index in 0..=MAX_AGENT_NONTERMINAL_TOOLS {
+            too_many.nonterminal_tools.insert(
+                format!("tool:{index:03}"),
+                AgentNonterminalTool {
+                    current_digest: "1".repeat(64),
+                    close_bytes: 1,
+                },
+            );
+        }
+        assert!(too_many.verify().is_err());
+
+        let mut too_large =
+            AgentSessionCurrent::new("session:tool-directory-bytes").expect("Session constructs");
+        too_large.nonterminal_tools.insert(
+            "tool:oversized-close".to_owned(),
+            AgentNonterminalTool {
+                current_digest: "2".repeat(64),
+                close_bytes: MAX_AGENT_TOOL_CLOSE_BYTES as u64 + 1,
+            },
+        );
+        assert!(too_large.verify().is_err());
     }
 
     fn commit_fixture() -> (AgentCommand, AgentCommandReceipt) {

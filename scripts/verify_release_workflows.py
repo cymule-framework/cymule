@@ -40,12 +40,16 @@ PUBLIC_MIRROR_SCANNER = ROOT / ".gitlab/scripts/verify_public_mirror_candidate.s
 PUBLIC_MIRROR_ARTIFACT_SCANNER = (
     ROOT / ".gitlab/scripts/scan_public_mirror_artifact.sh"
 )
+PINNED_GITLEAKS_VERSION_VERIFIER = (
+    ROOT / ".gitlab/scripts/verify_pinned_gitleaks_version.sh"
+)
 PUBLIC_MIRROR_BLACK_BOX = ROOT / ".gitlab/scripts/test_public_mirror_controller.sh"
 PUBLIC_SOURCE_SNAPSHOT_HELPER = (
     ROOT / ".gitlab/scripts/compute_public_source_snapshot.sh"
 )
 PNPM_INSTALLER = ROOT / ".gitlab/scripts/install_pinned_pnpm.sh"
 SDK_ENTRYPOINT = ROOT / "scripts/verify-sdk.sh"
+RELEASE_CONTRACTS = ROOT / "scripts/release_contracts.py"
 RUST_TOOLCHAIN = ROOT / "rust-toolchain.toml"
 SDK_TESTS = (
     ROOT / "crates/cymule-sdk/tests/cross_language.rs",
@@ -65,6 +69,30 @@ def workflow_paths(root: pathlib.Path = WORKFLOWS) -> list[pathlib.Path]:
     """Return every GitHub-executable workflow extension."""
 
     return sorted((*root.glob("*.yml"), *root.glob("*.yaml")))
+
+
+def verify_release_contract_selectors(text: str) -> None:
+    """Require one public source for every closed release-only selector."""
+
+    assignments = dict(
+        re.findall(
+            r'^([A-Z][A-Z0-9_]*) = "(cymule\.[a-z0-9.-]+/[1-9][0-9]*)"$',
+            text,
+            flags=re.MULTILINE,
+        )
+    )
+    expected = {
+        "FINALIZATION_STAGE_VERSION": "cymule.release-finalization-stage/3",
+        "CONTROL_PLANE_RECEIPT_VERSION": (
+            "cymule.github-release-control-plane-receipt/2"
+        ),
+        "CONTROL_PLANE_SETTINGS_VERSION": (
+            "cymule.github-release-settings-snapshot/2"
+        ),
+        "MIRROR_RECEIPT_VERSION": "cymule.public-mirror-receipt/2",
+    }
+    if assignments != expected or len(re.findall(r"^[A-Z][A-Z0-9_]* = ", text, re.MULTILINE)) != 4:
+        raise ValueError("release_contracts.py does not close four exact selectors")
 
 
 def job_bodies(text: str) -> dict[str, str]:
@@ -687,7 +715,14 @@ def verify_crates_controller_boundary(text: str) -> None:
     """Separate the current reviewed publisher from immutable tag payload."""
 
     jobs = job_bodies(text)
-    expected_jobs = {"verify", "stage", "close", "publish", "verify-published"}
+    expected_jobs = {
+        "verify",
+        "stage",
+        "close",
+        "executor-witness",
+        "publish",
+        "verify-published",
+    }
     if set(jobs) != expected_jobs:
         raise ValueError(
             "publish-crates.yml has an open or incomplete job set: "
@@ -701,6 +736,7 @@ def verify_crates_controller_boundary(text: str) -> None:
                 f"publish-crates.yml {name} may not use a protected environment"
             )
     verify = jobs.get("verify", "")
+    executor_witness = jobs.get("executor-witness", "")
     publish = jobs.get("publish", "")
     required_verify = (
         "controller_sha: ${{ steps.identity.outputs.controller_sha }}",
@@ -710,10 +746,13 @@ def verify_crates_controller_boundary(text: str) -> None:
         '          } >> "$GITHUB_OUTPUT"',
     )
     required_publish = (
+        "needs: [verify, close, executor-witness]",
         "ref: ${{ needs.verify.outputs.controller_sha }}",
         "ref: ${{ needs.verify.outputs.release_sha }}\n          path: release-payload",
         "CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload",
+        "EXECUTOR_WITNESS_SHA: ${{ needs.executor-witness.outputs.release_sha }}",
         'test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"',
+        'test "$EXECUTOR_WITNESS_SHA" = "$RELEASE_SHA"',
         'test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"',
         'test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"',
         "python3 scripts/crates_release.py publish",
@@ -724,6 +763,30 @@ def verify_crates_controller_boundary(text: str) -> None:
         raise ValueError(
             "publish-crates.yml does not separate current controller and tag payload: "
             f"{missing}"
+        )
+    required_executor_witness = (
+        "needs: verify",
+        "runs-on: macos-15",
+        "permissions:\n      contents: read",
+        "release_sha: ${{ steps.identity.outputs.release_sha }}",
+        "ref: ${{ needs.verify.outputs.release_sha }}",
+        "fetch-depth: 0",
+        'test "$(git rev-parse HEAD)" = "$RELEASE_SHA"',
+        'echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"',
+        "python3 scripts/test_harness.py run",
+        "rust-executor-plugin",
+        "--report .cache/test-harness/release-executor-macos.json",
+    )
+    if any(fragment not in executor_witness for fragment in required_executor_witness):
+        raise ValueError(
+            "publish-crates.yml lacks one exact-SHA credential-free macOS executor witness"
+        )
+    if action_names("publish-crates.yml executor-witness", executor_witness) != [
+        "actions/checkout",
+        "actions/upload-artifact",
+    ]:
+        raise ValueError(
+            "publish-crates.yml macOS executor witness has an unexpected action"
         )
     if (
         publish.count("actions/checkout@") != 2
@@ -764,6 +827,7 @@ def verify_crates_controller_boundary(text: str) -> None:
             )
     expected_rebind = """        run: |
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          test "$EXECUTOR_WITNESS_SHA" = "$RELEASE_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/crates_release.py scripts/version_domains.py
           git fetch --no-tags origin main
           test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
@@ -840,6 +904,9 @@ def verify_finalization_controller_boundary(text: str) -> None:
         "permissions:\n      contents: read",
         "controller_sha: ${{ steps.identity.outputs.controller_sha }}",
         "release_tag_sha: ${{ steps.identity.outputs.release_tag_sha }}",
+        "private_source_sha: ${{ steps.mirror.outputs.private_source_sha }}",
+        "mirror_receipt_tag_sha: ${{ steps.mirror.outputs.mirror_receipt_tag_sha }}",
+        "public_source_snapshot_digest: ${{ steps.mirror.outputs.public_source_snapshot_digest }}",
         "ref: ${{ steps.identity.outputs.release_sha }}",
         "path: release-payload",
         "CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload",
@@ -850,6 +917,9 @@ def verify_finalization_controller_boundary(text: str) -> None:
         '[[ "$release_tag_sha" =~ ^[0-9a-f]{40}$ ]]',
         'test "$release_tag_sha" != "$release_sha"',
         'test "$(git -C release-payload rev-parse "refs/tags/v$RELEASE_VERSION")" = "$RELEASE_TAG_SHA"',
+        'receipt_ref="refs/tags/cymule-mirror/$RELEASE_SHA"',
+        "python3 scripts/finalize_release.py verify-mirror-receipt",
+        '--github-output "$GITHUB_OUTPUT"',
         "scripts/version_domains.py verify",
         "scripts/version_domains.py verify-release",
         "python3 scripts/npm_release.py verify-registry",
@@ -869,6 +939,9 @@ def verify_finalization_controller_boundary(text: str) -> None:
         'test "$(git -C release-payload rev-parse HEAD)" = "$RELEASE_SHA"',
         'test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"',
         'RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}',
+        'PRIVATE_SOURCE_SHA: ${{ needs.verify.outputs.private_source_sha }}',
+        'MIRROR_RECEIPT_TAG_SHA: ${{ needs.verify.outputs.mirror_receipt_tag_sha }}',
+        'PUBLIC_SOURCE_SNAPSHOT_DIGEST: ${{ needs.verify.outputs.public_source_snapshot_digest }}',
         'test "$remote_tag_sha" = "$RELEASE_TAG_SHA"',
         'test "$remote_release_sha" = "$RELEASE_SHA"',
         "scripts/version_domains.py verify",
@@ -878,6 +951,8 @@ def verify_finalization_controller_boundary(text: str) -> None:
         "--publication-output",
         "python3 scripts/crates_release.py registry-evidence",
         "scripts/version_domains.py bom",
+        '--source-sha "$PRIVATE_SOURCE_SHA"',
+        '--public-source-sha "$RELEASE_SHA"',
         '--controller-sha "$CONTROLLER_SHA"',
         '--publications "$evidence_dir/npm-cymule.json"',
         '--publications "$evidence_dir/npm-cymule-sdk.json"',
@@ -886,6 +961,9 @@ def verify_finalization_controller_boundary(text: str) -> None:
         'test "$(npm --version)" = 11.19.0',
         "uv run --project sdk/python --frozen python3 scripts/finalize_release.py stage",
         '--release-tag-sha "$RELEASE_TAG_SHA"',
+        '--private-source-sha "$PRIVATE_SOURCE_SHA"',
+        '--mirror-receipt-tag-sha "$MIRROR_RECEIPT_TAG_SHA"',
+        '--public-source-snapshot-digest "$PUBLIC_SOURCE_SNAPSHOT_DIGEST"',
         "name: release-evidence-${{ needs.verify.outputs.version }}",
         "path: ${{ runner.temp }}/release-evidence",
         "name: release-finalization-${{ needs.verify.outputs.version }}",
@@ -901,6 +979,7 @@ def verify_finalization_controller_boundary(text: str) -> None:
         "ref: ${{ needs.verify.outputs.controller_sha }}",
         "ref: ${{ needs.verify.outputs.release_sha }}",
         "path: release-authority",
+        "fetch-depth: 0",
         "actions/download-artifact@",
         "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
         "version: 0.7.2",
@@ -909,6 +988,14 @@ def verify_finalization_controller_boundary(text: str) -> None:
         "CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-authority",
         'test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"',
         'RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}',
+        'PRIVATE_SOURCE_SHA: ${{ needs.verify.outputs.private_source_sha }}',
+        'MIRROR_RECEIPT_TAG_SHA: ${{ needs.verify.outputs.mirror_receipt_tag_sha }}',
+        'PUBLIC_SOURCE_SNAPSHOT_DIGEST: ${{ needs.verify.outputs.public_source_snapshot_digest }}',
+        "python3 scripts/finalize_release.py verify-mirror-receipt",
+        '--expected-tag-sha "$MIRROR_RECEIPT_TAG_SHA"',
+        '--private-source-sha "$PRIVATE_SOURCE_SHA"',
+        '--mirror-receipt-tag-sha "$MIRROR_RECEIPT_TAG_SHA"',
+        '--public-source-snapshot-digest "$PUBLIC_SOURCE_SNAPSHOT_DIGEST"',
         "Close the attestation bundle for the projection writer",
         'ATTESTATION_BUNDLE: ${{ steps.bom-attestation.outputs.bundle-path }}',
         "name: release-attestation-${{ needs.verify.outputs.version }}",
@@ -938,6 +1025,9 @@ def verify_finalization_controller_boundary(text: str) -> None:
         '--controller-sha "$CONTROLLER_SHA"',
         '--release-sha "$RELEASE_SHA"',
         '--release-tag-sha "$RELEASE_TAG_SHA"',
+        '--private-source-sha "$PRIVATE_SOURCE_SHA"',
+        '--mirror-receipt-tag-sha "$MIRROR_RECEIPT_TAG_SHA"',
+        '--public-source-snapshot-digest "$PUBLIC_SOURCE_SNAPSHOT_DIGEST"',
         "name: release-control-plane-${{ needs.verify.outputs.version }}",
         "path: ${{ runner.temp }}/release-control-plane",
     )
@@ -949,7 +1039,8 @@ def verify_finalization_controller_boundary(text: str) -> None:
         'controller_dir="$RUNNER_TEMP/release-controller"',
         'authority_dir="$RUNNER_TEMP/release-authority"',
         'git -C "$controller_dir" fetch --no-tags --depth=1 origin "$CONTROLLER_SHA"',
-        'git -C "$authority_dir" fetch --no-tags --depth=1 origin "$RELEASE_SHA"',
+        'git -C "$authority_dir" fetch --no-tags origin "$RELEASE_SHA"',
+        'git -C "$authority_dir" fetch --force origin "$receipt_ref:$receipt_ref"',
         'gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"',
         'release-finalization-$RELEASE_VERSION',
         'release-attestation-$RELEASE_VERSION',
@@ -960,6 +1051,9 @@ def verify_finalization_controller_boundary(text: str) -> None:
         'python3 "$controller_dir/scripts/finalize_release.py" publish',
         '--attestation-bundle "$attestation_dir/bundle.json"',
         '--control-plane-receipt "$control_plane_dir/receipt.json"',
+        '--private-source-sha "$PRIVATE_SOURCE_SHA"',
+        '--mirror-receipt-tag-sha "$MIRROR_RECEIPT_TAG_SHA"',
+        '--public-source-snapshot-digest "$PUBLIC_SOURCE_SNAPSHOT_DIGEST"',
         '--run-id "$GITHUB_RUN_ID"',
         '--run-attempt "$GITHUB_RUN_ATTEMPT"',
     )
@@ -1034,6 +1128,7 @@ def verify_finalization_controller_boundary(text: str) -> None:
         freeze.find(marker)
         for marker in (
             "actions/download-artifact@",
+            "python3 scripts/finalize_release.py verify-mirror-receipt",
             "python3 scripts/npm_release.py verify-registry",
             "python3 scripts/crates_release.py registry-evidence",
             "scripts/version_domains.py bom",
@@ -1047,12 +1142,13 @@ def verify_finalization_controller_boundary(text: str) -> None:
     ):
         raise ValueError(
             "finalize-release.yml must authenticate stages, read registries, "
-            "freeze BOM/2, and upload the closed bundle in exact order"
+            "freeze BOM/3, and upload the closed bundle in exact order"
         )
     if (
         attest.count("actions/checkout@") != 2
         or attest.count("ref: ${{ needs.verify.outputs.controller_sha }}") != 1
         or attest.count("ref: ${{ needs.verify.outputs.release_sha }}") != 1
+        or attest.count("fetch-depth: 0") != 2
         or attest.count("actions/download-artifact@") != 1
         or attest.count("actions/attest@") != 1
         or attest.count("actions/upload-artifact@") != 1
@@ -1061,11 +1157,26 @@ def verify_finalization_controller_boundary(text: str) -> None:
             "scripts/finalize_release.py verify-stage"
         )
         != 1
-        or attest.count("python3 ") != 1
+        or attest.count("python3 ") != 2
     ):
         raise ValueError(
             "finalize-release.yml attestation authority must use one current-main "
             "controller, one data-only source, and one immutable bundle"
+        )
+    attest_order = tuple(
+        attest.find(marker)
+        for marker in (
+            "python3 scripts/finalize_release.py verify-mirror-receipt",
+            "scripts/finalize_release.py verify-stage",
+            "actions/attest@",
+        )
+    )
+    if any(offset < 0 for offset in attest_order) or attest_order != tuple(
+        sorted(attest_order)
+    ):
+        raise ValueError(
+            "finalize-release.yml must authenticate the mirror receipt and stage "
+            "before BOM attestation"
         )
     if "sparse-checkout" in attest:
         raise ValueError(
@@ -1192,6 +1303,7 @@ def verify_finalization_controller_boundary(text: str) -> None:
         for marker in (
             "actions/create-github-app-token@",
             'git diff --quiet "$CONTROLLER_SHA" -- scripts/verify_github_release_settings.py',
+            "remote_mirror_receipt_tag_sha=",
             "python3 scripts/verify_github_release_settings.py",
             "actions/upload-artifact@",
         )
@@ -1266,9 +1378,11 @@ def verify_finalization_controller_boundary(text: str) -> None:
           git -C "$controller_dir" checkout --detach "$CONTROLLER_SHA"
           git init "$authority_dir"
           git -C "$authority_dir" remote add origin "$repository_url"
-          git -C "$authority_dir" fetch --no-tags --depth=1 origin "$RELEASE_SHA"
+          git -C "$authority_dir" fetch --no-tags origin "$RELEASE_SHA"
           test "$(git -C "$authority_dir" rev-parse FETCH_HEAD)" = "$RELEASE_SHA"
           git -C "$authority_dir" checkout --detach "$RELEASE_SHA"
+          receipt_ref="refs/tags/cymule-mirror/$RELEASE_SHA"
+          git -C "$authority_dir" fetch --force origin "$receipt_ref:$receipt_ref"
 
           mkdir "$stage_dir" "$attestation_dir" "$control_plane_dir"
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \\
@@ -1296,6 +1410,9 @@ def verify_finalization_controller_boundary(text: str) -> None:
             --version "$RELEASE_VERSION" \\
             --release-sha "$RELEASE_SHA" \\
             --release-tag-sha "$RELEASE_TAG_SHA" \\
+            --private-source-sha "$PRIVATE_SOURCE_SHA" \\
+            --mirror-receipt-tag-sha "$MIRROR_RECEIPT_TAG_SHA" \\
+            --public-source-snapshot-digest "$PUBLIC_SOURCE_SNAPSHOT_DIGEST" \\
             --controller-sha "$CONTROLLER_SHA" \\
             --stage "$stage_dir" \\
             --attestation-bundle "$attestation_dir/bundle.json" \\
@@ -1392,6 +1509,7 @@ def verify_private_mirror_ci(text: str) -> None:
         "shellcheck .gitlab/scripts/compute_public_source_snapshot.sh",
         "shellcheck .gitlab/scripts/publish-public-mirror.sh",
         "shellcheck .gitlab/scripts/scan_public_mirror_artifact.sh",
+        "shellcheck .gitlab/scripts/verify_pinned_gitleaks_version.sh",
         "shellcheck .gitlab/scripts/install_pinned_pnpm.sh",
         "shellcheck .gitlab/scripts/prepare_public_mirror_candidate.sh",
         "shellcheck .gitlab/scripts/verify_public_mirror_candidate.sh",
@@ -1404,7 +1522,7 @@ def verify_private_mirror_ci(text: str) -> None:
         'entrypoint: [""]',
         "needs: [mirror-candidate]",
         f'test -z "${{{mirror_token}:-}}"',
-        'test "$(gitleaks version)" = 8.24.3',
+        "verify_pinned_gitleaks_version.sh --oci-image /usr/bin/gitleaks",
         "./.gitlab/scripts/scan_public_mirror_artifact.sh",
         "CYMULE_PUBLIC_MIRROR_TEST_COMPONENT=scanner "
         "./.gitlab/scripts/test_public_mirror_controller.sh",
@@ -1497,6 +1615,7 @@ def verify_private_mirror_ci(text: str) -> None:
             '    - shellcheck .gitlab/scripts/compute_public_source_snapshot.sh\n'
             '    - shellcheck .gitlab/scripts/publish-public-mirror.sh\n'
             '    - shellcheck .gitlab/scripts/scan_public_mirror_artifact.sh\n'
+            '    - shellcheck .gitlab/scripts/verify_pinned_gitleaks_version.sh\n'
             '    - shellcheck .gitlab/scripts/install_pinned_pnpm.sh\n'
             '    - shellcheck .gitlab/scripts/prepare_public_mirror_candidate.sh\n'
             '    - shellcheck .gitlab/scripts/verify_public_mirror_candidate.sh\n'
@@ -1506,7 +1625,8 @@ def verify_private_mirror_ci(text: str) -> None:
             scanner,
             '  script:\n'
             '    - test -z "${' + mirror_token + ':-}"\n'
-            '    - test "$(gitleaks version)" = 8.24.3\n'
+            '    - test "$(./.gitlab/scripts/verify_pinned_gitleaks_version.sh '
+            '--oci-image /usr/bin/gitleaks)" = 8.24.3\n'
             '    - ./.gitlab/scripts/scan_public_mirror_artifact.sh\n'
             '    - CYMULE_PUBLIC_MIRROR_TEST_COMPONENT=scanner '
             './.gitlab/scripts/test_public_mirror_controller.sh\n',
@@ -1584,8 +1704,31 @@ def verify_private_mirror_ci(text: str) -> None:
         )
 
 
-def verify_private_mirror_controller(text: str) -> None:
+def verify_private_mirror_controller(
+    text: str, contracts: str | None = None
+) -> None:
     """Require closed Git execution plus leased response-loss closure."""
+
+    if contracts is None:
+        contracts = RELEASE_CONTRACTS.read_text(encoding="utf-8")
+    verify_release_contract_selectors(contracts)
+    selectors = re.findall(
+        r'^MIRROR_RECEIPT_VERSION = "(cymule\.public-mirror-receipt/[1-9][0-9]*)"$',
+        contracts,
+        flags=re.MULTILINE,
+    )
+    if len(selectors) != 1:
+        raise ValueError(
+            "public mirror receipt writer has no single registered public reader"
+        )
+    receipt_selector = selectors[0]
+    if (
+        text.count(f'"receipt_version":"{receipt_selector}"') != 1
+        or text.count(f'"receipt_version": "{receipt_selector}"') != 1
+    ):
+        raise ValueError(
+            "private mirror receipt selector differs from its public reader"
+        )
 
     required = (
         "readonly PRODUCTION_PYTHON_BINARY=/usr/local/bin/python3",
@@ -1624,14 +1767,22 @@ def verify_private_mirror_controller(text: str) -> None:
         'if test "$manifest_source_snapshot" != "$private_source_snapshot"; then',
         'if test "$candidate_source_snapshot" != "$private_source_snapshot"; then',
         "source_snapshot=$candidate_source_snapshot",
+        'receipt_tag_name="cymule-mirror/$source_tip"',
+        'receipt_ref="refs/tags/$receipt_tag_name"',
+        'hash-object -t tag -w "$receipt_tag_object"',
+        'update-ref "$receipt_ref" "$receipt_tag_sha"',
+        "push --atomic",
+        '--force-with-lease="$receipt_ref:"',
         '--force-with-lease="refs/heads/main:$public_tip"',
         '"$timeout_binary" 30 "$ENV_BINARY" -i',
         "|| push_status=$?",
         'observed_tip=$(read_tip "$public_repository" refs/heads/main) || readback_status=$?',
+        'observed_receipt_tag_sha=$(read_tip "$public_repository" "$receipt_ref")',
         'if test "$readback_status" -ne 0; then',
         'if test "$observed_tip" != "$source_tip"; then',
         'if test "$push_status" -eq 0; then',
         'confirmed_public_tip=$(read_tip "$public_repository" refs/heads/main)',
+        'confirmed_receipt_tag_sha=$(read_tip "$public_repository" "$receipt_ref")',
         'if test "$confirmed_public_tip" != "$source_tip"; then',
         "public mirror tip moved during no-op closure",
         "exit 75",
@@ -1655,15 +1806,23 @@ def verify_private_mirror_controller(text: str) -> None:
         'if test "$manifest_source_snapshot" != "$private_source_snapshot"; then',
         'if test "$candidate_source_snapshot" != "$private_source_snapshot"; then',
         "source_snapshot=$candidate_source_snapshot",
-        'public_tip=$(read_tip "$public_repository" refs/heads/main)\nassert_current_private_tip\nif test',
+        'receipt_tag_name="cymule-mirror/$source_tip"',
+        'receipt_tag_sha=$(authority_git -C "$candidate_checkout"',
+        'public_tip=$(read_tip "$public_repository" refs/heads/main)',
+        'public_receipt_tag_sha=$(read_tip "$public_repository" "$receipt_ref")',
+        "assert_current_private_tip\nif test -n \"$public_receipt_tag_sha\"",
         'confirmed_public_tip=$(read_tip "$public_repository" refs/heads/main)',
+        'confirmed_receipt_tag_sha=$(read_tip "$public_repository" "$receipt_ref")',
         'if test "$confirmed_public_tip" != "$source_tip"; then',
-        '\n  write_receipt\n  echo "public mirror already matches',
+        'if test "$confirmed_receipt_tag_sha" != "$receipt_tag_sha"; then',
+        '\n  write_receipt\n  echo "public mirror and authenticated receipt already match',
         "assert_current_private_tip\nauthorization=",
-        '--force-with-lease="refs/heads/main:$public_tip"',
-        "|| push_status=$?",
+        "push --atomic",
+        '--force-with-lease="$receipt_ref:"',
         'observed_tip=$(read_tip "$public_repository" refs/heads/main) || readback_status=$?',
+        'observed_receipt_tag_sha=$(read_tip "$public_repository" "$receipt_ref")',
         'if test "$observed_tip" != "$source_tip"; then',
+        'if test "$observed_receipt_tag_sha" != "$receipt_tag_sha"; then',
     )
     positions = [text.index(fragment) for fragment in ordered]
     receipt_position = text.rindex("\nwrite_receipt\n")
@@ -1732,6 +1891,30 @@ def verify_public_source_snapshot_helper(text: str) -> None:
         raise ValueError("public source snapshot helper executes artifact code")
 
 
+def verify_pinned_gitleaks_version_contract(text: str) -> None:
+    """Require one closed normalization contract for release and OCI binaries."""
+
+    required = (
+        "readonly PINNED_GITLEAKS_VERSION=8.24.3",
+        "readonly PINNED_GITLEAKS_OCI_VERSION=v8.24.3",
+        'if test "${1:-}" = --oci-image; then',
+        'case "$gitleaks_binary" in',
+        '"$gitleaks_binary" version > "$version_output"',
+        'printf \'%s\\n\' "$PINNED_GITLEAKS_OCI_VERSION" | cmp -s - "$version_output"',
+        'printf \'%s\\n\' "$PINNED_GITLEAKS_VERSION" | cmp -s - "$version_output"',
+        'if test "$require_oci_image" = 1; then',
+        'printf \'%s\\n\' "$PINNED_GITLEAKS_VERSION"',
+    )
+    missing = [fragment for fragment in required if fragment not in text]
+    if missing or text.count("cmp -s -") != 2:
+        raise ValueError(
+            f"pinned Gitleaks version verifier is not one closed contract: {missing}"
+        )
+    for forbidden in ("sed ", "tr ", "grep ", "[0-9]*", "8.24.*"):
+        if forbidden in text:
+            raise ValueError("pinned Gitleaks version verifier accepts an open version")
+
+
 def verify_public_mirror_artifact_scanner(text: str) -> None:
     """Require the no-credential scanner to bind and scan the actual artifact."""
 
@@ -1739,8 +1922,11 @@ def verify_public_mirror_artifact_scanner(text: str) -> None:
     required = (
         f'test -z "${{{private_push_token}:-}}"',
         "readonly PRODUCTION_GITLEAKS_BINARY=/usr/bin/gitleaks",
+        'gitleaks_version_options=(--oci-image)',
         "CYMULE_PUBLIC_TEST_GITLEAKS_BINARY",
-        'test "$($gitleaks_binary version)" = 8.24.3',
+        'gitleaks_version_options=()',
+        'verify_pinned_gitleaks_version.sh',
+        '"${gitleaks_version_options[@]}" "$gitleaks_binary"',
         "readonly GIT_BINARY=/usr/bin/git",
         '"$ENV_BINARY" -i',
         "GIT_CONFIG_NOSYSTEM=1",
@@ -1804,7 +1990,8 @@ def verify_private_mirror_scanner(text: str) -> None:
     """Require exact whole-history scanner coverage and live rule canaries."""
 
     required = (
-        'test "$(gitleaks version)" != 8.24.3',
+        'verify_pinned_gitleaks_version.sh',
+        'gitleaks_binary=$(command -v gitleaks)',
         "git -C \"$repository\" rev-list --reverse --topo-order \"$revision\"",
         "git -C \"$repository\" ls-tree -r -z \"$commit\"",
         ".gitlab* | .github/workflows/mirror.yml",
@@ -1817,7 +2004,15 @@ def verify_private_mirror_scanner(text: str) -> None:
         'git -C "$repository" cat-file blob "$blob" > "$blob_record"',
         'reject_unsupported_blob_container "$blob" "$blob_record"',
         "readonly GIT_LFS_POINTER_HEADER_HEX=",
-        "504b0304* | 504b0506* | 504b0708*",
+        "zip_container_present()",
+        "readonly MAX_ZIP_EOCD_CANDIDATES=4096",
+        "readonly MAX_ZIP_DIRECTORY_ENTRIES=4096",
+        "tail -c \"$tail_size\" \"$path\"",
+        "grep -aob $'PK\\005\\006'",
+        'archive_base=$((eocd_offset - central_size - central_offset))',
+        'test "$(read_hex_at "$path" "$cursor" 4)" != 504b0102',
+        'test "$(read_hex_at "$path" "$local_start" 4)" != 504b0304',
+        'if zip_container_present "$blob_record"; then',
         "28b52ffd* | 5[0-9a-f]2a4d18*",
         "213c617263683e0a* | 213c7468696e3e0a*",
         "tar_magic=$(od -An -v -tx1 -j 257 -N 5",
@@ -1982,6 +2177,44 @@ def verify_required_ci_source_closure(text: str) -> None:
         )
 
 
+def verify_required_ci_executor_macos(text: str) -> None:
+    """Require executor paths to close on the exact macOS candidate SHA."""
+
+    jobs = job_bodies(text)
+    witness = jobs.get("executor-macos", "")
+    required = jobs.get("required", "")
+    witness_required = (
+        "needs: plan",
+        "if: contains(needs.plan.outputs.rust_plugins, 'rust-executor-plugin')",
+        "runs-on: macos-15",
+        "permissions:\n      contents: read",
+        "source_sha: ${{ steps.identity.outputs.source_sha }}",
+        "ref: ${{ github.sha }}",
+        "fetch-depth: 0",
+        'test "$source_sha" = "$GITHUB_SHA"',
+        'echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"',
+        "python3 scripts/test_harness.py run",
+        "rust-executor-plugin",
+        "--report .cache/test-harness/executor-macos.json",
+    )
+    aggregator_required = (
+        "      - executor-macos\n",
+        "GITHUB_SOURCE_SHA: ${{ github.sha }}",
+        'executor_result = needs["executor-macos"]["result"]',
+        'needs["executor-macos"]["outputs"].get(',
+        '!= os.environ["GITHUB_SOURCE_SHA"]',
+    )
+    if (
+        any(fragment not in witness for fragment in witness_required)
+        or any(fragment not in required for fragment in aggregator_required)
+        or action_names("ci.yml executor-macos", witness)
+        != ["actions/checkout", "actions/upload-artifact"]
+    ):
+        raise ValueError(
+            "ci.yml does not close executor changes through one exact-SHA macos-15 witness"
+        )
+
+
 def verify_unique_release_writer(
     script_root: pathlib.Path = ROOT / "scripts",
 ) -> None:
@@ -2097,6 +2330,7 @@ def verify_unique_release_writer(
 
 
 def verify() -> None:
+    verify_release_contract_selectors(RELEASE_CONTRACTS.read_text(encoding="utf-8"))
     mirror = WORKFLOWS / "mirror.yml"
     if mirror.exists():
         raise ValueError(
@@ -2113,13 +2347,16 @@ def verify() -> None:
         if any(marker in text for marker in PRIVATE_CREDENTIAL_MARKERS):
             raise ValueError(f"{path.name} references private mirror credentials")
         verify_setup_uv_pins(path.name, text)
-    verify_required_ci_source_closure(CI_WORKFLOW.read_text(encoding="utf-8"))
+    ci_text = CI_WORKFLOW.read_text(encoding="utf-8")
+    verify_required_ci_source_closure(ci_text)
+    verify_required_ci_executor_macos(ci_text)
     if GITLAB_CI.exists():
         verify_private_mirror_ci(GITLAB_CI.read_text(encoding="utf-8"))
     if PUBLIC_MIRROR_CONTROLLER.exists():
         if (
             not PUBLIC_SOURCE_SNAPSHOT_HELPER.exists()
             or not PUBLIC_MIRROR_ARTIFACT_SCANNER.exists()
+            or not PINNED_GITLEAKS_VERSION_VERIFIER.exists()
         ):
             raise ValueError(
                 "private mirror controller omits its trusted snapshot or artifact scanner"
@@ -2134,6 +2371,10 @@ def verify() -> None:
     if PUBLIC_MIRROR_SCANNER.exists():
         verify_private_mirror_scanner(
             PUBLIC_MIRROR_SCANNER.read_text(encoding="utf-8")
+        )
+    if PINNED_GITLEAKS_VERSION_VERIFIER.exists():
+        verify_pinned_gitleaks_version_contract(
+            PINNED_GITLEAKS_VERSION_VERIFIER.read_text(encoding="utf-8")
         )
     if PUBLIC_MIRROR_ARTIFACT_SCANNER.exists():
         verify_public_mirror_artifact_scanner(
@@ -2238,7 +2479,11 @@ def verify_finalize_bom_readback(text: str, controller: str | None = None) -> No
             encoding="utf-8"
         )
     required = (
-        "FINALIZATION_STAGE_SCHEMA = 2",
+        "from release_contracts import (",
+        "FINALIZATION_STAGE_VERSION,",
+        "MIRROR_RECEIPT_VERSION,",
+        "load_mirror_receipt(",
+        "version_domains.commit_source_snapshot_digest(",
         "assert_remote_release_fence(",
         '"release_tag_sha": release_tag_sha',
         "if refs[tag_ref] != release_tag_sha:",
@@ -2262,6 +2507,8 @@ def verify_finalize_bom_readback(text: str, controller: str | None = None) -> No
         "verify_bom_attestation(",
         "assert_control_plane_receipt(",
         'publish.add_argument("--control-plane-receipt", type=pathlib.Path, required=True)',
+        'publish.add_argument("--private-source-sha", required=True)',
+        'publish.add_argument("--mirror-receipt-tag-sha", required=True)',
         "assert_control_plane=control_plane_fence",
         '"--signer-digest"',
         '"--deny-self-hosted-runners"',
@@ -2291,6 +2538,9 @@ def verify_finalize_bom_readback(text: str, controller: str | None = None) -> No
         controller.count('"--paginate"') != 2
         or controller.count("def exact_release_asset(") != 1
         or controller.count("def verify_bom_attestation(") != 1
+        or controller.count("load_mirror_receipt(") != 3
+        or controller.count("version_domains.commit_source_snapshot_digest(") != 1
+        or controller.count("FINALIZATION_STAGE_VERSION,") != 3
     ):
         raise ValueError(
             "Release finalization controller omits transitions: "
@@ -2306,6 +2556,7 @@ def verify_finalize_bom_readback(text: str, controller: str | None = None) -> No
     publish_order = tuple(
         main_body.find(marker)
         for marker in (
+            "receipt = load_mirror_receipt(",
             "frozen = _load_finalization_stage_files(",
             "control_plane_fence()",
             "verify_bom_attestation(",

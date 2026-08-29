@@ -44,3 +44,35 @@ jobs:
           name: test-harness-rust-portability-${{ matrix.os }}
           path: .cache/test-harness/rust-portability.json
           if-no-files-found: warn
+
+  directory-non-unix:
+    name: Compatibility / directory / windows-2025
+    runs-on: windows-2025
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install native Windows Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.97.1-x86_64-pc-windows-msvc --profile minimal
+          rustc +1.97.1-x86_64-pc-windows-msvc --version --verbose
+          cargo +1.97.1-x86_64-pc-windows-msvc --version --verbose
+      - name: Run the DirectoryStore non-Unix witness
+        shell: pwsh
+        run: |
+          if (-not $IsWindows) {
+            throw "DirectoryStore non-Unix witness requires a native Windows runner"
+          }
+          $output = & cargo +1.97.1-x86_64-pc-windows-msvc test --locked --package cymule-directory-store --lib non_unix_tests::writable_generation_fails_before_initialization -- --exact 2>&1
+          $exitCode = $LASTEXITCODE
+          $output | ForEach-Object { Write-Host $_ }
+          if ($exitCode -ne 0) {
+            exit $exitCode
+          }
+          if (($output -join "`n") -notmatch "test result: ok\. 1 passed; 0 failed;") {
+            throw "DirectoryStore non-Unix witness did not execute exactly one passing unit test"
+          }

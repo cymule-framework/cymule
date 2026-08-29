@@ -243,6 +243,43 @@ jobs:
           path: .cache/test-harness/rust-plugins.json
           if-no-files-found: warn
 
+  executor-macos:
+    name: Verify / executor-macos
+    needs: plan
+    if: contains(needs.plan.outputs.rust_plugins, 'rust-executor-plugin')
+    runs-on: macos-15
+    permissions:
+      contents: read
+    outputs:
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind the macOS executor witness to the exact candidate
+        id: identity
+        run: |
+          source_sha=$(git rev-parse HEAD)
+          test "$source_sha" = "$GITHUB_SHA"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.1
+      - name: Run the exact macOS executor witness
+        run: >-
+          python3 scripts/test_harness.py run
+          rust-executor-plugin
+          --report .cache/test-harness/executor-macos.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: test-harness-executor-macos
+          path: .cache/test-harness/executor-macos.json
+          if-no-files-found: error
+
   rust-package:
     name: Verify / rust-package
     needs: plan
@@ -477,6 +514,7 @@ jobs:
       - rust-semantic
       - rust-durable
       - rust-plugins
+      - executor-macos
       - rust-package
       - protocol
       - sdk-rust
@@ -490,6 +528,7 @@ jobs:
     steps:
       - name: Close every selected verification lane
         env:
+          GITHUB_SOURCE_SHA: ${{ github.sha }}
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           python3 - <<'PY'
@@ -525,5 +564,19 @@ jobs:
                       f"{job} result {observed!r}, expected {expected!r} "
                       f"for selected={selected}"
                   )
+          executor_selected = "rust-executor-plugin" in outputs.get(
+              "rust_plugins", ""
+          ).split()
+          executor_result = needs["executor-macos"]["result"]
+          expected_executor_result = "success" if executor_selected else "skipped"
+          if executor_result != expected_executor_result:
+              raise SystemExit(
+                  f"executor-macos result {executor_result!r}, expected "
+                  f"{expected_executor_result!r} for selected={executor_selected}"
+              )
+          if executor_selected and needs["executor-macos"]["outputs"].get(
+              "source_sha"
+          ) != os.environ["GITHUB_SOURCE_SHA"]:
+              raise SystemExit("executor-macos witness belongs to another source SHA")
           print("closed every selected verification lane")
           PY

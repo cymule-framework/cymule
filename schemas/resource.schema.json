@@ -66,7 +66,7 @@
         "inline": { "$ref": "#/$defs/inlineData" },
         "integrity": { "$ref": "#/$defs/integrity" },
         "manifest": { "$ref": "#/$defs/manifestDescriptor" },
-        "annotations": { "type": "object", "maxProperties": 64, "propertyNames": { "$ref": "#/$defs/extendedIdentity" }, "additionalProperties": { "$ref": "#/$defs/annotationValue" } }
+        "annotations": { "type": "object", "minProperties": 1, "maxProperties": 64, "propertyNames": { "$ref": "#/$defs/extendedIdentity" }, "additionalProperties": { "$ref": "#/$defs/annotationValue" } }
       },
       "allOf": [
         {

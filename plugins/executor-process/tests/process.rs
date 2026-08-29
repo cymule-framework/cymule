@@ -1,5 +1,7 @@
 //! Process environment, protocol, output-bound, and timeout tests.
 
+#![cfg(any(target_os = "linux", target_os = "macos"))]
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -255,6 +257,51 @@ fn world_mutating_effect_output_limit_remains_unknown_world() {
                 if code == "effect_dispatch_output_limit_exceeded"
         ));
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn cleanup_failure_after_real_effect_start_remains_unknown_world() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = tempfile::tempdir().expect("cleanup classification fixture creates");
+    let relocated = fixture.path().join("relocated-occurrence");
+    let executable = fixture.path().join("plugin.sh");
+    let attempt = serde_json::to_string(&effect_attempt()).expect("attempt serializes");
+    let response = format!(
+        "{{\"type\":\"effect_result\",\"attempt\":{attempt},\"outcome\":\"not_applied\",\"value\":null}}"
+    );
+    fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nrequest=$(/bin/cat)\ntest -n \"$request\" || exit 8\nroot=$(/bin/pwd)\n/bin/mv \"$root\" \"$1\" || exit 74\nprintf '%s' '{response}'\n"
+        ),
+    )
+    .expect("cleanup classification plugin writes");
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+        .expect("cleanup classification plugin executes");
+    let mut config = executor_config(executable);
+    config.arguments = vec![relocated.to_string_lossy().into_owned()];
+    let mut executor = ProcessExecutor::new(config).expect("executor configures");
+
+    let error = executor
+        .invoke(PluginRequest::DispatchEffect {
+            operation: "effect:test".to_owned(),
+            intent_id: TEST_INTENT_ID.to_owned(),
+            attempt: effect_attempt(),
+            input: serde_json::Value::Null,
+        })
+        .expect_err("renamed occurrence cannot authenticate cleanup root");
+    assert!(matches!(
+        error,
+        RuntimeError::UnknownWorld { code, .. } if code == "process_cleanup_failed"
+    ));
+    assert!(
+        relocated.is_dir(),
+        "the mismatched root is not path-deleted"
+    );
+    fs::remove_dir(&relocated).expect("empty relocated occurrence removes");
 }
 
 #[cfg(unix)]
@@ -1268,13 +1315,4 @@ fn stderr_is_never_projected_into_process_failures() {
         .expect_err("failed reconciliation process is ambiguous");
     assert!(matches!(error, RuntimeError::UnknownWorld { .. }));
     assert!(!error.to_string().contains(secret));
-}
-
-#[cfg(not(unix))]
-#[test]
-fn unsupported_platform_is_rejected_before_execution() {
-    assert!(matches!(
-        ProcessExecutor::new(executor_config(r"C:\plugin.exe")),
-        Err(RuntimeError::PluginDefect { .. })
-    ));
 }
