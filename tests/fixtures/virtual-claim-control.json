@@ -1,11 +1,20 @@
 {
-  "control_version": "cymule.virtual-claim-control/2",
+  "control_version": "cymule.virtual-claim-control/4",
   "command_id": "command:claim:fixture",
   "owner": "worker:fixture",
   "slot_id": "slot:worker-fixture:0",
-  "plan_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-  "occurrence_binding": "binding:worker/fixture@1",
+  "execution_binding": {
+    "identity_version": "cymule.artifact/2",
+    "artifact_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "kind": "cymule.execution-binding/2"
+  },
   "capabilities": ["cpu", "sandbox"],
-  "logical_now": 100,
+  "clock": {
+    "clock_version": "cymule.clock-observation/2",
+    "observation_id": "sha256:3f6791eb4b5bebb5dfadf9e46b732585738aa13300fdec718a8264ec14465a62",
+    "source_id": "clock:fixture",
+    "source_generation": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "scope": "slot:worker-fixture:0"
+  },
   "lease_ttl": 30
 }

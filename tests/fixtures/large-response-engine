@@ -3,12 +3,13 @@ import json
 import sys
 
 request = json.load(sys.stdin)["request"]
-candidate = request["candidate"]
+candidate = dict(request["candidate"])
 candidate["metadata"] = {"large": "x" * 262144}
 json.dump(
     {
-        "engine_protocol": "cymule.engine/2",
+        "engine_protocol": "cymule.engine/4",
         "outcome": "success",
+        "request": request,
         "response": {
             "type": "sealed",
             "plan": {"plan_id": "sha256:" + "0" * 64, "candidate": candidate},

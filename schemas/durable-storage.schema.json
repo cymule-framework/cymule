@@ -4,21 +4,952 @@
   "title": "Cymule Durable Storage Records",
   "$defs": {
     "identity": { "type": "string", "minLength": 1 },
+    "public_identity": {
+      "type": "string", "minLength": 1, "maxLength": 512,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "run_identity": {
+      "type": "string", "minLength": 1, "maxLength": 512,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "wait_identity": { "$ref": "#/$defs/content_id" },
+    "content_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "wait_owner": {
+      "type": "object", "additionalProperties": false,
+      "required": ["invocation_id", "definition_id", "site_id", "region_path", "step_index", "bind"],
+      "properties": {
+        "invocation_id": { "$ref": "#/$defs/public_identity" },
+        "definition_id": { "$ref": "#/$defs/public_identity" },
+        "site_id": { "$ref": "#/$defs/public_identity" },
+        "region_path": { "type": "array", "items": { "$ref": "#/$defs/exact_integer" } },
+        "step_index": { "$ref": "#/$defs/exact_integer" },
+        "bind": { "oneOf": [{ "$ref": "#/$defs/public_identity" }, { "type": "null" }] }
+      }
+    },
+    "artifact_ref": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity_version", "artifact_id", "kind"],
+      "properties": {
+        "identity_version": { "const": "cymule.artifact/2" },
+        "artifact_id": { "$ref": "#/$defs/content_id" },
+        "kind": { "type": "string", "maxLength": 255, "pattern": "^[a-z0-9._+-]+(?:/[a-z0-9._+-]+)+$" }
+      }
+    },
+    "effect_args_ref": {
+      "allOf": [
+        { "$ref": "#/$defs/artifact_ref" },
+        { "properties": { "kind": { "const": "cymule.effect-args/1" } } }
+      ]
+    },
+    "run_input_ref": {
+      "allOf": [
+        { "$ref": "#/$defs/artifact_ref" },
+        { "properties": { "kind": { "const": "cymule.input/1" } } }
+      ]
+    },
+    "artifact_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "bytes"],
+      "properties": {
+        "reference": { "$ref": "#/$defs/artifact_ref" },
+        "bytes": {
+          "type": "string", "maxLength": 11184812,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?(?![\\s\\S])",
+          "allOf": [{ "if": { "minLength": 11184812 }, "then": { "pattern": "=$" } }]
+        }
+      }
+    },
+    "exact_integer": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "invocation_path_segment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["site_id", "region_path", "scope_id"],
+      "properties": {
+        "site_id": { "$ref": "#/$defs/public_identity" },
+        "region_path": { "type": "array", "items": { "$ref": "#/$defs/exact_integer" } },
+        "scope_id": { "$ref": "#/$defs/public_identity" }
+      }
+    },
+    "run_failure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["class", "code", "detail"],
+      "properties": {
+        "class": { "enum": ["declared_failure", "runtime_defect", "substrate"] },
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,199}$" },
+        "detail": { "$ref": "#/$defs/artifact_ref" }
+      }
+    },
+    "run_execution_status": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["status"], "properties": { "status": { "const": "active" } } },
+        { "type": "object", "additionalProperties": false, "required": ["status"], "properties": { "status": { "const": "completed" } } },
+        { "type": "object", "additionalProperties": false, "required": ["status", "failure"], "properties": { "status": { "const": "failed" }, "failure": { "$ref": "#/$defs/run_failure" } } },
+        { "type": "object", "additionalProperties": false, "required": ["status", "reason"], "properties": { "status": { "const": "cancelled" }, "reason": { "$ref": "#/$defs/artifact_ref" } } }
+      ]
+    },
+    "nullable_content_id": {
+      "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }]
+    },
+    "nullable_artifact_ref": {
+      "oneOf": [{ "$ref": "#/$defs/artifact_ref" }, { "type": "null" }]
+    },
+    "obligation_projection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["obligation_id", "intent_id", "blocking", "resolved"],
+      "properties": {
+        "obligation_id": { "$ref": "#/$defs/content_id" },
+        "intent_id": { "$ref": "#/$defs/content_id" },
+        "blocking": { "type": "boolean" },
+        "resolved": { "type": "boolean" }
+      }
+    },
+    "scope_projection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scope_id", "parent_scope", "invocation_id", "invocation_path", "definition_id", "region_path", "site_id", "status", "intents"],
+      "properties": {
+        "scope_id": { "$ref": "#/$defs/public_identity" },
+        "parent_scope": { "oneOf": [{ "$ref": "#/$defs/public_identity" }, { "type": "null" }] },
+        "invocation_id": { "$ref": "#/$defs/content_id" },
+        "invocation_path": { "type": "array", "items": { "$ref": "#/$defs/invocation_path_segment" } },
+        "definition_id": { "$ref": "#/$defs/public_identity" },
+        "region_path": { "type": "array", "items": { "$ref": "#/$defs/exact_integer" } },
+        "site_id": { "oneOf": [{ "$ref": "#/$defs/public_identity" }, { "type": "null" }] },
+        "status": { "enum": ["open", "closed_committed", "closed_aborted"] },
+        "intents": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } }
+      }
+    },
+    "effect_projection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["intent_id", "origin_plan_id", "scope_id", "invocation_id", "invocation_path", "definition_id", "region_path", "site_id", "occurrence", "effect_schema_version", "operation", "profile", "args", "execution_binding", "occurrence_binding", "execution_availability", "phase", "outcome", "reconciliation"],
+      "properties": {
+        "intent_id": { "$ref": "#/$defs/content_id" },
+        "origin_plan_id": { "$ref": "#/$defs/content_id" },
+        "scope_id": { "$ref": "#/$defs/public_identity" },
+        "invocation_id": { "$ref": "#/$defs/content_id" },
+        "invocation_path": { "type": "array", "items": { "$ref": "#/$defs/invocation_path_segment" } },
+        "definition_id": { "$ref": "#/$defs/public_identity" },
+        "region_path": { "type": "array", "items": { "$ref": "#/$defs/exact_integer" } },
+        "site_id": { "$ref": "#/$defs/public_identity" },
+        "occurrence": { "$ref": "#/$defs/public_identity" },
+        "effect_schema_version": { "const": "cymule.effect-schema/1" },
+        "operation": { "$ref": "#/$defs/public_identity" },
+        "profile": { "$ref": "plan-candidate.schema.json#/$defs/effectProfile" },
+        "args": { "$ref": "#/$defs/effect_args_ref" },
+        "execution_binding": { "$ref": "#/$defs/artifact_ref" },
+        "occurrence_binding": { "$ref": "#/$defs/content_id" },
+        "execution_availability": { "enum": ["available", "unavailable"] },
+        "phase": { "enum": ["admitted", "prepared", "release_authorized", "dispatch_started", "cancelled_before_release"] },
+        "outcome": { "enum": ["unobserved", "applied", "not_applied", "unknown"] },
+        "reconciliation": { "enum": ["not_required", "pending", "resolved", "governance_required"] }
+      }
+    },
+    "attempt_projection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["attempt_id", "continuation_id", "occurrence_binding", "continuation_epoch", "execution_fence", "active"],
+      "properties": {
+        "attempt_id": { "$ref": "#/$defs/content_id" },
+        "continuation_id": { "$ref": "#/$defs/content_id" },
+        "occurrence_binding": { "$ref": "#/$defs/content_id" },
+        "continuation_epoch": { "$ref": "#/$defs/exact_integer" },
+        "execution_fence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "active": { "type": "boolean" }
+      }
+    },
+    "run_projection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "initial_plan", "current_plan", "plan_lineage", "initial_binding_context", "current_binding_context", "binding_lineage", "epoch", "execution_status", "world_settlement", "scopes", "effects", "obligations", "attempts", "result", "last_event"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/run_identity" },
+        "initial_plan": { "$ref": "#/$defs/content_id" },
+        "current_plan": { "$ref": "#/$defs/content_id" },
+        "plan_lineage": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/content_id" } },
+        "initial_binding_context": { "$ref": "#/$defs/content_id" },
+        "current_binding_context": { "$ref": "#/$defs/content_id" },
+        "binding_lineage": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/content_id" } },
+        "epoch": { "$ref": "#/$defs/exact_integer" },
+        "execution_status": { "$ref": "#/$defs/run_execution_status" },
+        "world_settlement": { "enum": ["settled", "pending", "unknown", "governance_required"] },
+        "scopes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/scope_projection" } },
+        "effects": { "type": "object", "propertyNames": { "$ref": "#/$defs/content_id" }, "additionalProperties": { "$ref": "#/$defs/effect_projection" } },
+        "obligations": { "type": "object", "propertyNames": { "$ref": "#/$defs/content_id" }, "additionalProperties": { "$ref": "#/$defs/obligation_projection" } },
+        "attempts": { "type": "object", "propertyNames": { "$ref": "#/$defs/content_id" }, "additionalProperties": { "$ref": "#/$defs/attempt_projection" } },
+        "result": { "$ref": "#/$defs/nullable_artifact_ref" },
+        "last_event": { "$ref": "#/$defs/content_id" }
+      }
+    },
+    "projection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["runs", "facts"],
+      "properties": {
+        "runs": { "type": "object", "propertyNames": { "$ref": "#/$defs/run_identity" }, "additionalProperties": { "$ref": "#/$defs/run_projection" } },
+        "facts": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "machine_base": {
+      "type": "object", "additionalProperties": false,
+      "required": ["prefix_digest", "archive_head", "archive_count", "archive_event_count", "admission_head", "command_index_root", "plan_admission_commitment", "plan_count", "artifact_admission_commitment", "artifact_count", "batch_admission_commitment", "batch_count", "projection", "projection_digest", "projection_root"],
+      "properties": {
+        "prefix_digest": { "$ref": "#/$defs/content_id" },
+        "archive_head": { "$ref": "#/$defs/content_id" },
+        "archive_count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "archive_event_count": { "$ref": "#/$defs/exact_integer" },
+        "admission_head": { "$ref": "#/$defs/nullable_content_id" },
+        "command_index_root": { "$ref": "#/$defs/content_id" },
+        "plan_admission_commitment": { "$ref": "#/$defs/content_id" },
+        "plan_count": { "$ref": "#/$defs/exact_integer" },
+        "artifact_admission_commitment": { "$ref": "#/$defs/content_id" },
+        "artifact_count": { "$ref": "#/$defs/exact_integer" },
+        "batch_admission_commitment": { "$ref": "#/$defs/content_id" },
+        "batch_count": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "projection": { "$ref": "#/$defs/projection" },
+        "projection_digest": { "$ref": "#/$defs/digest" },
+        "projection_root": { "$ref": "#/$defs/digest" }
+      },
+      "allOf": [{ "$ref": "#/$defs/machine_archive_admission_head" }]
+    },
+    "machine_archive_admission_head": {
+      "if": { "properties": { "archive_count": { "const": 0 } } },
+      "then": { "properties": { "admission_head": { "type": "null" }, "archive_event_count": { "const": 0 } } },
+      "else": { "properties": { "admission_head": { "$ref": "#/$defs/content_id" } } }
+    },
+    "effect_transition": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "prepare" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "authorize_release" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "start_dispatch" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "mark_unavailable" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "observe" }, "value": { "enum": ["unobserved", "applied", "not_applied", "unknown"] } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "reconcile" }, "value": { "enum": ["resolved_applied", "resolved_not_applied", "still_unknown", "governance_required"] } } }
+      ]
+    },
+    "core_command": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["type", "plan_id", "binding_context", "input"], "properties": { "type": { "const": "start_run" }, "plan_id": { "$ref": "#/$defs/content_id" }, "binding_context": { "$ref": "#/$defs/content_id" }, "input": { "$ref": "#/$defs/run_input_ref" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "attempt_id", "continuation_id", "occurrence_binding", "continuation_epoch", "execution_fence"], "properties": { "type": { "const": "begin_attempt" }, "attempt_id": { "$ref": "#/$defs/content_id" }, "continuation_id": { "$ref": "#/$defs/content_id" }, "occurrence_binding": { "$ref": "#/$defs/content_id" }, "continuation_epoch": { "$ref": "#/$defs/exact_integer" }, "execution_fence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "attempt_id", "continuation_epoch", "execution_fence"], "properties": { "type": { "const": "yield_attempt" }, "attempt_id": { "$ref": "#/$defs/content_id" }, "continuation_epoch": { "$ref": "#/$defs/exact_integer" }, "execution_fence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 } } },
+        { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "advance_epoch" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "scope_id", "parent_scope", "invocation_id", "invocation_path", "definition_id", "region_path", "site_id"], "properties": { "type": { "const": "open_scope" }, "scope_id": { "$ref": "#/$defs/public_identity" }, "parent_scope": { "$ref": "#/$defs/public_identity" }, "invocation_id": { "$ref": "#/$defs/content_id" }, "invocation_path": { "type": "array", "items": { "$ref": "#/$defs/invocation_path_segment" } }, "definition_id": { "$ref": "#/$defs/public_identity" }, "region_path": { "type": "array", "items": { "$ref": "#/$defs/exact_integer" } }, "site_id": { "$ref": "#/$defs/public_identity" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "scope_id", "invocation_id", "invocation_path", "definition_id", "region_path", "site_id", "occurrence", "operation", "args", "execution_binding", "occurrence_binding"], "properties": { "type": { "const": "propose_effect" }, "scope_id": { "$ref": "#/$defs/public_identity" }, "invocation_id": { "$ref": "#/$defs/content_id" }, "invocation_path": { "type": "array", "items": { "$ref": "#/$defs/invocation_path_segment" } }, "definition_id": { "$ref": "#/$defs/public_identity" }, "region_path": { "type": "array", "items": { "$ref": "#/$defs/exact_integer" } }, "site_id": { "$ref": "#/$defs/public_identity" }, "occurrence": { "$ref": "#/$defs/public_identity" }, "operation": { "$ref": "#/$defs/public_identity" }, "args": { "$ref": "#/$defs/effect_args_ref" }, "execution_binding": { "$ref": "#/$defs/artifact_ref" }, "occurrence_binding": { "$ref": "#/$defs/content_id" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "intent_id", "transition"], "properties": { "type": { "const": "transition_effect" }, "intent_id": { "$ref": "#/$defs/content_id" }, "transition": { "$ref": "#/$defs/effect_transition" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "scope_id"], "properties": { "type": { "const": "commit_scope" }, "scope_id": { "$ref": "#/$defs/public_identity" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "scope_id"], "properties": { "type": { "const": "abort_scope" }, "scope_id": { "$ref": "#/$defs/public_identity" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "binding_context"], "properties": { "type": { "const": "update_binding" }, "binding_context": { "$ref": "#/$defs/content_id" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "from_plan", "to_plan", "from_binding", "to_binding", "safe_point_id", "target_epoch", "target_continuation_digest"], "properties": { "type": { "const": "migrate_run" }, "from_plan": { "$ref": "#/$defs/content_id" }, "to_plan": { "$ref": "#/$defs/content_id" }, "from_binding": { "$ref": "#/$defs/content_id" }, "to_binding": { "$ref": "#/$defs/content_id" }, "safe_point_id": { "$ref": "#/$defs/content_id" }, "target_epoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "target_continuation_digest": { "$ref": "#/$defs/digest" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "key", "value"], "properties": { "type": { "const": "record_fact" }, "key": { "$ref": "#/$defs/public_identity" }, "value": { "type": "string" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "result"], "properties": { "type": { "const": "complete_run" }, "result": { "$ref": "#/$defs/nullable_artifact_ref" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "failure"], "properties": { "type": { "const": "fail_run" }, "failure": { "$ref": "#/$defs/run_failure" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "reason"], "properties": { "type": { "const": "cancel_run" }, "reason": { "$ref": "#/$defs/artifact_ref" } } }
+      ]
+    },
+    "command_envelope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["command_version", "command_id", "actor", "run_id", "expected_precondition", "command"],
+      "properties": {
+        "command_version": { "const": "cymule.command/6" },
+        "command_id": { "$ref": "#/$defs/public_identity" },
+        "actor": { "$ref": "#/$defs/public_identity" },
+        "run_id": { "$ref": "#/$defs/run_identity" },
+        "expected_precondition": { "oneOf": [{ "$ref": "#/$defs/public_identity" }, { "type": "null" }] },
+        "command": { "$ref": "#/$defs/core_command" }
+      }
+    },
+    "command_receipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["command_id", "status", "event_ids", "error_code", "message", "observed_precondition", "current_precondition"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "applied" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "event_ids": { "minItems": 1, "maxItems": 2 },
+              "error_code": { "type": "null" },
+              "message": { "type": "null" },
+              "current_precondition": { "$ref": "#/$defs/public_identity" }
+            }
+          },
+          "else": {
+            "properties": {
+              "event_ids": { "maxItems": 0 },
+              "error_code": { "const": "stale_action" },
+              "message": { "const": "the Run changed after the caller's view" },
+              "observed_precondition": { "$ref": "#/$defs/public_identity" }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "command_id": { "$ref": "#/$defs/public_identity" },
+        "status": { "enum": ["applied", "conflict"] },
+        "event_ids": { "type": "array", "maxItems": 2, "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } },
+        "error_code": { "oneOf": [{ "type": "string" }, { "type": "null" }] },
+        "message": { "oneOf": [{ "type": "string" }, { "type": "null" }] },
+        "observed_precondition": { "oneOf": [{ "$ref": "#/$defs/public_identity" }, { "type": "null" }] },
+        "current_precondition": { "oneOf": [{ "$ref": "#/$defs/public_identity" }, { "type": "null" }] }
+      }
+    },
+    "command_record": {
+      "type": "object", "additionalProperties": false,
+      "required": ["envelope", "semantic_hash", "receipt", "batch_id", "batch_position", "batch_len"],
+      "properties": {
+        "envelope": { "$ref": "#/$defs/command_envelope" },
+        "semantic_hash": { "$ref": "#/$defs/digest" },
+        "receipt": { "$ref": "#/$defs/command_receipt" },
+        "batch_id": { "$ref": "#/$defs/content_id" },
+        "batch_position": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "batch_len": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      }
+    },
+    "command_batch_member": {
+      "type": "object", "additionalProperties": false,
+      "required": ["position", "command_id", "intent_hash", "semantic_hash"],
+      "properties": {
+        "position": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "command_id": { "$ref": "#/$defs/public_identity" },
+        "intent_hash": { "$ref": "#/$defs/digest" },
+        "semantic_hash": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "command_batch_material_source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_command_id", "plan_ids", "artifacts"],
+      "properties": {
+        "source_command_id": { "$ref": "#/$defs/public_identity" },
+        "plan_ids": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } },
+        "artifacts": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/artifact_ref" } }
+      },
+      "anyOf": [
+        { "properties": { "plan_ids": { "minItems": 1 } } },
+        { "properties": { "artifacts": { "minItems": 1 } } }
+      ]
+    },
+    "command_batch_material_pair": {
+      "oneOf": [
+        { "properties": { "material_digest": { "type": "null" }, "material_source": { "type": "null" } } },
+        { "properties": { "material_digest": { "$ref": "#/$defs/content_id" }, "material_source": { "$ref": "#/$defs/command_batch_material_source" } } }
+      ]
+    },
+    "command_batch": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "batch_version", "batch_id", "parent_authority_root", "admission_parent_authority_root", "members",
+        "material_digest", "material_source", "plan_ids", "artifacts", "receipts", "event_ids",
+        "result_authority_root", "batch_receipt_id"
+      ],
+      "properties": {
+        "batch_version": { "const": "cymule.command-batch/1" },
+        "batch_id": { "$ref": "#/$defs/content_id" },
+        "parent_authority_root": { "$ref": "#/$defs/digest" },
+        "admission_parent_authority_root": { "$ref": "#/$defs/digest" },
+        "members": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/command_batch_member" } },
+        "material_digest": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
+        "material_source": { "oneOf": [{ "$ref": "#/$defs/command_batch_material_source" }, { "type": "null" }] },
+        "plan_ids": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } },
+        "artifacts": { "type": "array", "maxItems": 320, "uniqueItems": true, "items": { "$ref": "#/$defs/artifact_ref" } },
+        "receipts": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/command_receipt" } },
+        "event_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/content_id" } },
+        "result_authority_root": { "$ref": "#/$defs/digest" },
+        "batch_receipt_id": { "$ref": "#/$defs/content_id" }
+      },
+      "allOf": [
+        { "$ref": "#/$defs/command_batch_material_pair" },
+        {
+          "if": { "properties": { "members": { "maxItems": 0 } } },
+          "then": { "properties": { "material_source": { "$ref": "#/$defs/command_batch_material_source" }, "receipts": { "maxItems": 0 }, "event_ids": { "maxItems": 0 } } },
+          "else": { "properties": { "receipts": { "minItems": 1 } } }
+        }
+      ]
+    },
+    "command_admission": {
+      "type": "object", "additionalProperties": false,
+      "required": ["admission_version", "admission_id", "sequence", "command_id", "semantic_hash", "command_record_digest", "batch_id", "batch_position", "batch_len", "before_projection_digest", "after_projection_digest", "status", "event_ids"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "sequence": { "const": 1 } },
+            "required": ["sequence"]
+          },
+          "then": { "not": { "required": ["parent_admission"] } },
+          "else": {
+            "required": ["parent_admission"],
+            "properties": { "sequence": { "minimum": 2 } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "applied" } },
+            "required": ["status"]
+          },
+          "then": { "properties": { "event_ids": { "minItems": 1, "maxItems": 2 } } },
+          "else": { "properties": { "event_ids": { "maxItems": 0 } } }
+        }
+      ],
+      "properties": {
+        "admission_version": { "const": "cymule.command-admission/3" },
+        "admission_id": { "$ref": "#/$defs/content_id" },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "parent_admission": { "$ref": "#/$defs/content_id" },
+        "command_id": { "$ref": "#/$defs/public_identity" },
+        "semantic_hash": { "$ref": "#/$defs/digest" },
+        "command_record_digest": { "$ref": "#/$defs/digest" },
+        "batch_id": { "$ref": "#/$defs/content_id" },
+        "batch_position": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "batch_len": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "before_projection_digest": { "$ref": "#/$defs/digest" },
+        "after_projection_digest": { "$ref": "#/$defs/digest" },
+        "status": { "enum": ["applied", "conflict"] },
+        "event_ids": { "type": "array", "maxItems": 2, "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } }
+      }
+    },
+    "event_payload": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["type", "plan_id", "entry_definition", "binding_context", "input"], "properties": { "type": { "const": "run_started" }, "plan_id": { "$ref": "#/$defs/content_id" }, "entry_definition": { "$ref": "#/$defs/public_identity" }, "binding_context": { "$ref": "#/$defs/content_id" }, "input": { "$ref": "#/$defs/run_input_ref" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "attempt_id", "continuation_id", "occurrence_binding", "continuation_epoch", "execution_fence"], "properties": { "type": { "const": "attempt_started" }, "attempt_id": { "$ref": "#/$defs/content_id" }, "continuation_id": { "$ref": "#/$defs/content_id" }, "occurrence_binding": { "$ref": "#/$defs/content_id" }, "continuation_epoch": { "$ref": "#/$defs/exact_integer" }, "execution_fence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "attempt_id", "continuation_epoch", "execution_fence"], "properties": { "type": { "const": "attempt_yielded" }, "attempt_id": { "$ref": "#/$defs/content_id" }, "continuation_epoch": { "$ref": "#/$defs/exact_integer" }, "execution_fence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "epoch"], "properties": { "type": { "const": "epoch_advanced" }, "epoch": { "$ref": "#/$defs/exact_integer" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "scope_id", "parent_scope", "invocation_id", "invocation_path", "definition_id", "region_path", "site_id"], "properties": { "type": { "const": "scope_opened" }, "scope_id": { "$ref": "#/$defs/public_identity" }, "parent_scope": { "$ref": "#/$defs/public_identity" }, "invocation_id": { "$ref": "#/$defs/content_id" }, "invocation_path": { "type": "array", "items": { "$ref": "#/$defs/invocation_path_segment" } }, "definition_id": { "$ref": "#/$defs/public_identity" }, "region_path": { "type": "array", "items": { "$ref": "#/$defs/exact_integer" } }, "site_id": { "$ref": "#/$defs/public_identity" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "intent_id", "origin_plan_id", "scope_id", "invocation_id", "invocation_path", "definition_id", "region_path", "site_id", "occurrence", "effect_schema_version", "operation", "profile", "args", "execution_binding", "occurrence_binding"], "properties": { "type": { "const": "effect_proposed" }, "intent_id": { "$ref": "#/$defs/content_id" }, "origin_plan_id": { "$ref": "#/$defs/content_id" }, "scope_id": { "$ref": "#/$defs/public_identity" }, "invocation_id": { "$ref": "#/$defs/content_id" }, "invocation_path": { "type": "array", "items": { "$ref": "#/$defs/invocation_path_segment" } }, "definition_id": { "$ref": "#/$defs/public_identity" }, "region_path": { "type": "array", "items": { "$ref": "#/$defs/exact_integer" } }, "site_id": { "$ref": "#/$defs/public_identity" }, "occurrence": { "$ref": "#/$defs/public_identity" }, "effect_schema_version": { "const": "cymule.effect-schema/1" }, "operation": { "$ref": "#/$defs/public_identity" }, "profile": { "$ref": "plan-candidate.schema.json#/$defs/effectProfile" }, "args": { "$ref": "#/$defs/effect_args_ref" }, "execution_binding": { "$ref": "#/$defs/artifact_ref" }, "occurrence_binding": { "$ref": "#/$defs/content_id" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "intent_id", "transition"], "properties": { "type": { "const": "effect_transitioned" }, "intent_id": { "$ref": "#/$defs/content_id" }, "transition": { "$ref": "#/$defs/effect_transition" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "scope_id", "obligations"], "properties": { "type": { "const": "scope_committed" }, "scope_id": { "$ref": "#/$defs/public_identity" }, "obligations": { "type": "array", "items": { "$ref": "#/$defs/obligation_projection" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "scope_id"], "properties": { "type": { "const": "scope_aborted" }, "scope_id": { "$ref": "#/$defs/public_identity" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "previous", "current"], "properties": { "type": { "const": "binding_updated" }, "previous": { "$ref": "#/$defs/content_id" }, "current": { "$ref": "#/$defs/content_id" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "from_plan", "to_plan", "from_binding", "to_binding", "safe_point_id", "target_epoch", "target_continuation_digest"], "properties": { "type": { "const": "run_migrated" }, "from_plan": { "$ref": "#/$defs/content_id" }, "to_plan": { "$ref": "#/$defs/content_id" }, "from_binding": { "$ref": "#/$defs/content_id" }, "to_binding": { "$ref": "#/$defs/content_id" }, "safe_point_id": { "$ref": "#/$defs/content_id" }, "target_epoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "target_continuation_digest": { "$ref": "#/$defs/digest" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "key", "value"], "properties": { "type": { "const": "fact_recorded" }, "key": { "$ref": "#/$defs/public_identity" }, "value": { "type": "string" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "result"], "properties": { "type": { "const": "run_completed" }, "result": { "$ref": "#/$defs/nullable_artifact_ref" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "failure", "epoch"], "properties": { "type": { "const": "run_failed" }, "failure": { "$ref": "#/$defs/run_failure" }, "epoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "reason", "epoch"], "properties": { "type": { "const": "run_cancelled" }, "reason": { "$ref": "#/$defs/artifact_ref" }, "epoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 } } }
+      ]
+    },
+    "core_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event_id", "event_version", "command_id", "command_hash", "run_id", "parents", "reads", "writes", "coordination_key", "payload"],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/content_id" },
+        "event_version": { "const": "cymule.event/8" },
+        "command_id": { "$ref": "#/$defs/public_identity" },
+        "command_hash": { "$ref": "#/$defs/digest" },
+        "run_id": { "$ref": "#/$defs/run_identity" },
+        "parents": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } },
+        "reads": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "writes": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "coordination_key": { "oneOf": [{ "type": "string" }, { "type": "null" }] },
+        "payload": { "$ref": "#/$defs/event_payload" }
+      }
+    },
+    "command_index_value": {
+      "type": "object", "additionalProperties": false,
+      "required": ["admission_id", "archive_entry_digest"],
+      "properties": {
+        "admission_id": { "$ref": "#/$defs/content_id" },
+        "archive_entry_digest": { "$ref": "#/$defs/content_id" }
+      }
+    },
+    "command_index_proof": {
+      "type": "object", "additionalProperties": false,
+      "required": ["proof_version", "command_id", "empty_depth", "siblings"],
+      "oneOf": [
+        {
+          "required": ["value"],
+          "properties": {
+            "empty_depth": { "type": "null" },
+            "siblings": { "minItems": 256, "maxItems": 256 }
+          }
+        },
+        {
+          "not": { "required": ["value"] },
+          "properties": {
+            "empty_depth": { "type": "integer", "minimum": 0, "maximum": 256 },
+            "siblings": { "maxItems": 256 }
+          }
+        }
+      ],
+      "properties": {
+        "proof_version": { "const": "cymule.command-index-proof/2" },
+        "command_id": { "$ref": "#/$defs/public_identity" },
+        "value": { "$ref": "#/$defs/command_index_value" },
+        "empty_depth": { "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 256 }, { "type": "null" }] },
+        "siblings": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/content_id" } }
+      }
+    },
+    "machine_snapshot": {
+      "description": "Closed materialized Machine projection for genesis, open, and audit; it is never a standalone physical storage record.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_version", "plans", "artifacts", "batches", "events", "admissions", "commands", "command_index_proofs"],
+      "properties": {
+        "snapshot_version": { "const": "cymule.machine-snapshot/11" },
+        "plans": { "type": "array", "items": { "$ref": "sealed-plan.schema.json" } },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact_record" } },
+        "batches": { "type": "array", "items": { "$ref": "#/$defs/command_batch" } },
+        "base": { "$ref": "#/$defs/machine_base" },
+        "base_anchor": { "$ref": "#/$defs/machine_base_anchor" },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/core_event" } },
+        "admissions": { "type": "array", "items": { "$ref": "#/$defs/command_admission" } },
+        "commands": { "type": "object", "propertyNames": { "$ref": "#/$defs/public_identity" }, "additionalProperties": { "$ref": "#/$defs/command_record" } },
+        "command_index_proofs": { "type": "object", "propertyNames": { "$ref": "#/$defs/public_identity" }, "additionalProperties": { "$ref": "#/$defs/command_index_proof" } }
+      }
+    },
+    "clock_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clock_version", "observation_id", "source_id", "source_generation", "scope", "logical_time", "observed_unix_ms"],
+      "properties": {
+        "clock_version": { "const": "cymule.clock-observation/2" },
+        "observation_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "source_id": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$" },
+        "source_generation": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "scope": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$" },
+        "logical_time": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "observed_unix_ms": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      }
+    },
+    "coordination_lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource", "owner", "epoch", "expires_at"],
+      "properties": {
+        "resource": { "$ref": "#/$defs/public_identity" },
+        "owner": { "$ref": "#/$defs/public_identity" },
+        "epoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "expires_at": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      }
+    },
+    "snapshot_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_id", "source_revision", "causal_frontier", "continuation_ids", "unresolved_obligations", "occurrence_bindings"],
+      "properties": {
+        "snapshot_id": { "$ref": "#/$defs/content_id" },
+        "source_revision": { "$ref": "#/$defs/content_id" },
+        "causal_frontier": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } },
+        "continuation_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/run_identity" } },
+        "unresolved_obligations": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } },
+        "occurrence_bindings": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } }
+      }
+    },
+    "command_archive_header": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["segment_version", "segment_id", "parent_count", "parent_event_count", "parent_command_index_root", "entry_count", "event_count", "batch_count", "batches_root", "entries_root", "result_count", "result_event_count", "result_admission_head", "result_command_index_root"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "parent_count": { "const": 0 } },
+            "required": ["parent_count"]
+          },
+          "then": {
+            "properties": { "parent_event_count": { "const": 0 } },
+            "not": { "required": ["parent_admission_head"] }
+          },
+          "else": {
+            "required": ["parent_segment", "parent_admission_head"],
+            "properties": { "parent_count": { "minimum": 1 } }
+          }
+        },
+        {
+          "if": { "properties": { "result_count": { "const": 0 } } },
+          "then": { "properties": { "result_admission_head": { "type": "null" }, "result_event_count": { "const": 0 } } },
+          "else": { "properties": { "result_admission_head": { "$ref": "#/$defs/content_id" } } }
+        },
+        {
+          "if": { "properties": { "entry_count": { "const": 0 } } },
+          "then": { "properties": { "event_count": { "const": 0 } } }
+        }
+      ],
+      "properties": {
+        "segment_version": { "const": "cymule.command-archive-segment/4" },
+        "segment_id": { "$ref": "#/$defs/content_id" },
+        "parent_segment": { "$ref": "#/$defs/content_id" },
+        "parent_count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "parent_event_count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "parent_admission_head": { "$ref": "#/$defs/content_id" },
+        "parent_command_index_root": { "$ref": "#/$defs/content_id" },
+        "entry_count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "event_count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "batch_count": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "batches_root": { "$ref": "#/$defs/content_id" },
+        "entries_root": { "$ref": "#/$defs/content_id" },
+        "result_count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "result_event_count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "result_admission_head": { "$ref": "#/$defs/nullable_content_id" },
+        "result_command_index_root": { "$ref": "#/$defs/content_id" }
+      }
+    },
+    "history_compaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compaction_version", "compaction_id", "parent_compaction", "kind", "source_revision", "requested_suffix", "result"],
+      "properties": {
+        "compaction_version": { "const": "cymule.history-compaction/2" },
+        "compaction_id": { "$ref": "#/$defs/public_identity" },
+        "parent_compaction": { "oneOf": [{ "$ref": "#/$defs/public_identity" }, { "type": "null" }] },
+        "kind": { "enum": ["event_prefix", "event_free_admissions"] },
+        "source_revision": { "$ref": "#/$defs/content_id" },
+        "requested_suffix": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base_id", "compacted_events", "retained_events", "causal_frontier", "projection_digest", "archive_segment"],
+          "properties": {
+            "base_id": { "$ref": "#/$defs/content_id" },
+            "compacted_events": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+            "retained_events": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+            "causal_frontier": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } },
+            "projection_digest": { "$ref": "#/$defs/digest" },
+            "archive_segment": { "$ref": "#/$defs/command_archive_header" }
+          }
+        }
+      }
+    },
+    "wait_activation_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt_version", "activation", "applied_wait_ids", "ready_run_ids"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "applied_wait_ids": { "maxItems": 0 } },
+            "required": ["applied_wait_ids"]
+          },
+          "then": {
+            "properties": { "ready_run_ids": { "maxItems": 0 } }
+          }
+        }
+      ],
+      "properties": {
+        "receipt_version": { "const": "cymule.wait-activation-receipt/3" },
+        "activation": { "$ref": "wait-activation.schema.json" },
+        "applied_wait_ids": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/wait_identity" },
+          "uniqueItems": true
+        },
+        "ready_run_ids": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/run_identity" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "journal_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "schema", "payload", "content_digest"],
+      "properties": {
+        "record_id": { "$ref": "#/$defs/public_identity" },
+        "schema": { "$ref": "#/$defs/public_identity" },
+        "payload": true,
+        "content_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "journal_batch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["journal_id", "records"],
+      "properties": {
+        "journal_id": { "$ref": "#/$defs/public_identity" },
+        "records": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/journal_record" }
+        }
+      }
+    },
+    "journal_record_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "schema", "content_digest", "record_digest"],
+      "properties": {
+        "record_id": { "$ref": "#/$defs/public_identity" },
+        "schema": { "$ref": "#/$defs/public_identity" },
+        "content_digest": { "$ref": "#/$defs/digest" },
+        "record_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "journal_batch_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["journal_id", "records"],
+      "properties": {
+        "journal_id": { "$ref": "#/$defs/public_identity" },
+        "records": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/journal_record_manifest" } }
+      }
+    },
+    "agent_workspace_checkpoint": {
+      "description": "Exact bounded Agent/M1 source and result neighborhood. Its enclosing coupled receipt admits at most 12 canonical MiB; Rust verifies content identities and source/result equality at the pinned StateRoot.",
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "agent_command_id", "run_id", "scope_id", "occurrence_id", "phase",
+        "source_machine_authority_root", "machine_authority_root",
+        "core_batch_id", "core_batch_receipt_id", "dispatch_clock",
+        "source_continuation_digest", "continuation", "continuation_digest",
+        "effect_before", "effect_after", "outbox_before", "outbox_after",
+        "lease_before", "lease_after"
+      ],
+      "properties": {
+        "agent_command_id": { "$ref": "#/$defs/content_id" },
+        "run_id": { "$ref": "#/$defs/run_identity" },
+        "scope_id": { "$ref": "#/$defs/public_identity" },
+        "occurrence_id": { "$ref": "#/$defs/public_identity" },
+        "phase": { "enum": ["start_effect_dispatch", "settle_effect_applied", "settle_effect_not_applied", "settle_effect_unknown", "start_abort_dispatch", "settle_abort_applied", "settle_abort_not_applied", "settle_abort_unknown"] },
+        "source_machine_authority_root": { "$ref": "#/$defs/digest" },
+        "machine_authority_root": { "$ref": "#/$defs/digest" },
+        "core_batch_id": { "$ref": "#/$defs/nullable_content_id" },
+        "core_batch_receipt_id": { "$ref": "#/$defs/nullable_content_id" },
+        "dispatch_clock": { "oneOf": [{ "$ref": "#/$defs/clock_observation" }, { "type": "null" }] },
+        "source_continuation_digest": { "$ref": "#/$defs/content_id" },
+        "continuation": { "$ref": "engine-protocol.schema.json#/$defs/continuation" },
+        "continuation_digest": { "$ref": "#/$defs/content_id" },
+        "effect_before": { "oneOf": [{ "$ref": "#/$defs/effect_projection" }, { "type": "null" }] },
+        "effect_after": { "oneOf": [{ "$ref": "#/$defs/effect_projection" }, { "type": "null" }] },
+        "outbox_before": { "oneOf": [{ "$ref": "engine-protocol.schema.json#/$defs/effectDispatch" }, { "type": "null" }] },
+        "outbox_after": { "oneOf": [{ "$ref": "engine-protocol.schema.json#/$defs/effectDispatch" }, { "type": "null" }] },
+        "lease_before": { "oneOf": [{ "$ref": "#/$defs/coordination_lease" }, { "type": "null" }] },
+        "lease_after": { "oneOf": [{ "$ref": "#/$defs/coordination_lease" }, { "type": "null" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "core_batch_id": { "type": "null" } } },
+          "then": { "properties": { "core_batch_receipt_id": { "type": "null" }, "phase": { "enum": ["start_abort_dispatch", "settle_abort_not_applied", "settle_abort_unknown", "settle_effect_unknown"] } } },
+          "else": { "properties": { "core_batch_receipt_id": { "$ref": "#/$defs/content_id" } } }
+        },
+        {
+          "if": { "properties": { "phase": { "const": "start_effect_dispatch" } } },
+          "then": { "properties": { "dispatch_clock": { "$ref": "#/$defs/clock_observation" }, "lease_after": { "$ref": "#/$defs/coordination_lease" } } },
+          "else": { "properties": { "dispatch_clock": { "type": "null" } } }
+        }
+      ]
+    },
+    "coupled_checkpoint": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "checkpoint"],
+          "properties": {
+            "kind": { "const": "agent_workspace" },
+            "checkpoint": { "$ref": "#/$defs/agent_workspace_checkpoint" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "wait", "journal"],
+          "properties": {
+            "kind": { "const": "journal_wait" },
+            "wait": { "$ref": "engine-protocol.schema.json#/$defs/waitCondition" },
+            "journal": { "$ref": "#/$defs/journal_batch_manifest" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "machine_authority_root", "continuation", "dispatch", "journal"],
+          "properties": {
+            "kind": { "const": "journal_effect_enqueue" },
+            "machine_authority_root": { "$ref": "#/$defs/digest" },
+            "continuation": { "$ref": "engine-protocol.schema.json#/$defs/continuation" },
+            "dispatch": { "$ref": "engine-protocol.schema.json#/$defs/effectDispatch" },
+            "journal": { "$ref": "#/$defs/journal_batch_manifest" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "machine_authority_root", "continuation", "intent_id", "owner", "lease_epoch", "outcome", "result", "journal"],
+          "properties": {
+            "kind": { "const": "journal_effect_settlement" },
+            "machine_authority_root": { "$ref": "#/$defs/digest" },
+            "continuation": { "$ref": "engine-protocol.schema.json#/$defs/continuation" },
+            "intent_id": { "$ref": "#/$defs/content_id" },
+            "owner": { "$ref": "#/$defs/public_identity" },
+            "lease_epoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "outcome": { "enum": ["applied", "not_applied", "unknown"] },
+            "result": { "oneOf": [{ "$ref": "#/$defs/artifact_ref" }, { "type": "null" }] },
+            "journal": { "$ref": "#/$defs/journal_batch_manifest" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "machine_authority_root", "activation", "journals"],
+          "properties": {
+            "kind": { "const": "wait_activation_journals" },
+            "machine_authority_root": { "$ref": "#/$defs/digest" },
+            "activation": { "$ref": "#/$defs/wait_activation_receipt" },
+            "journals": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/journal_batch_manifest" } }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "machine_authority_root", "suspension_receipt_id", "result", "wait_id", "journals"],
+          "properties": {
+            "kind": { "const": "input_wait_journals" },
+            "machine_authority_root": { "$ref": "#/$defs/digest" },
+            "suspension_receipt_id": { "$ref": "#/$defs/content_id" },
+            "result": { "$ref": "#/$defs/artifact_ref" },
+            "wait_id": { "$ref": "#/$defs/wait_identity" },
+            "journals": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "$ref": "#/$defs/journal_batch_manifest" } }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "kind", "machine_authority_root", "transfer_id", "activation_id",
+            "source_coupling_id", "source_receipt_id", "run_id", "owner",
+            "wait_id", "result", "activation_authority", "activation_index"
+          ],
+          "properties": {
+            "kind": { "const": "resource_handoff_input" },
+            "machine_authority_root": { "$ref": "#/$defs/digest" },
+            "transfer_id": { "$ref": "#/$defs/public_identity" },
+            "activation_id": { "$ref": "#/$defs/content_id" },
+            "source_coupling_id": { "$ref": "#/$defs/content_id" },
+            "source_receipt_id": { "$ref": "#/$defs/content_id" },
+            "run_id": { "$ref": "#/$defs/run_identity" },
+            "owner": { "$ref": "#/$defs/wait_owner" },
+            "wait_id": { "$ref": "#/$defs/wait_identity" },
+            "result": { "$ref": "#/$defs/artifact_ref" },
+            "activation_authority": { "$ref": "#/$defs/journal_batch_manifest" },
+            "activation_index": { "$ref": "#/$defs/journal_batch_manifest" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "coupling_key", "source_revision", "result_revision", "manifest"],
+          "properties": {
+            "kind": { "const": "journal_set" },
+            "coupling_key": { "$ref": "#/$defs/content_id" },
+            "source_revision": { "$ref": "#/$defs/content_id" },
+            "result_revision": { "$ref": "#/$defs/content_id" },
+            "manifest": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/journal_batch_manifest" } }
+          }
+        }
+      ]
+    },
+    "coupled_checkpoint_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt_version", "coupling_id", "checkpoint", "receipt_id"],
+      "properties": {
+        "receipt_version": { "const": "cymule.coupled-checkpoint-receipt/3" },
+        "coupling_id": { "$ref": "#/$defs/content_id" },
+        "checkpoint": { "$ref": "#/$defs/coupled_checkpoint" },
+        "receipt_id": { "$ref": "#/$defs/content_id" }
+      }
+    },
+    "journal_record_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "content_digest"],
+      "properties": {
+        "record_id": { "$ref": "#/$defs/public_identity" },
+        "content_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "journal_prefix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prefix_version", "record_count", "first", "last", "ordered_root"],
+      "properties": {
+        "prefix_version": { "const": "cymule.application-journal-prefix/1" },
+        "record_count": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "first": { "$ref": "#/$defs/journal_record_ref" },
+        "last": { "$ref": "#/$defs/journal_record_ref" },
+        "ordered_root": { "$ref": "#/$defs/content_id" }
+      }
+    },
+    "journal_prefix_replacement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replacement_id", "journal_id", "parent_replacement_id", "expected_prefix", "replacement"],
+      "properties": {
+        "replacement_id": { "$ref": "#/$defs/public_identity" },
+        "journal_id": { "$ref": "#/$defs/public_identity" },
+        "parent_replacement_id": { "oneOf": [{ "$ref": "#/$defs/public_identity" }, { "type": "null" }] },
+        "expected_prefix": { "$ref": "#/$defs/journal_prefix" },
+        "replacement": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/journal_record" }
+        }
+      }
+    },
+    "journal_prefix_replacement_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt_version", "replacement", "result", "receipt_id"],
+      "properties": {
+        "receipt_version": { "const": "cymule.application-journal-prefix-replacement-receipt/2" },
+        "replacement": { "$ref": "#/$defs/journal_prefix_replacement" },
+        "result": { "$ref": "#/$defs/journal_prefix" },
+        "receipt_id": { "$ref": "#/$defs/content_id" }
+      }
+    },
+    "journal_prefix_replacement_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority_version", "replacement_id", "journal_id", "receipt_id", "replacement_digest", "result"],
+      "properties": {
+        "authority_version": { "const": "cymule.application-journal-prefix-replacement-authority/2" },
+        "replacement_id": { "$ref": "#/$defs/public_identity" },
+        "journal_id": { "$ref": "#/$defs/public_identity" },
+        "receipt_id": { "$ref": "#/$defs/content_id" },
+        "replacement_digest": { "$ref": "#/$defs/digest" },
+        "result": { "$ref": "#/$defs/journal_prefix" }
+      }
+    },
+    "machine_base_anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [{ "$ref": "#/$defs/machine_archive_admission_head" }],
+      "required": ["anchor_version", "anchor_id", "base_id", "archive_head", "archive_count", "archive_event_count", "archive_batch_count", "admission_head", "command_index_root", "prefix_digest", "projection_digest", "projection_root"],
+      "properties": {
+        "anchor_version": { "const": "cymule.machine-base-anchor/2" },
+        "anchor_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "base_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "archive_head": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "archive_count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "archive_event_count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "archive_batch_count": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "admission_head": { "$ref": "#/$defs/nullable_content_id" },
+        "command_index_root": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "prefix_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "projection_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "projection_root": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
     "machine_delta": {
+      "description": "Admitted semantic Machine transition lowered directly into StateRoot paths; it is not a persisted segment payload.",
       "type": "object",
       "properties": {
-        "delta_version": { "const": "cymule.machine-delta/1" },
-        "plans": { "type": "array", "items": { "type": "object" } },
-        "artifacts": { "type": "array", "items": { "type": "object" } },
-        "compacted_event_ids": { "type": "array", "items": { "$ref": "#/$defs/identity" }, "uniqueItems": true },
-        "base": { "type": "object" },
-        "events": { "type": "array", "items": { "type": "object" } },
-        "commands": { "type": "object" }
+        "delta_version": { "const": "cymule.machine-delta/6" },
+        "parent_snapshot_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "result_snapshot_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "parent_anchor_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "result_anchor_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "plans": { "type": "array", "items": { "$ref": "sealed-plan.schema.json" } },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact_record" } },
+        "batches": { "type": "array", "items": { "$ref": "#/$defs/command_batch" } },
+        "compacted_event_ids": { "type": "array", "items": { "$ref": "#/$defs/content_id" }, "uniqueItems": true },
+        "compacted_admission_ids": { "type": "array", "items": { "$ref": "#/$defs/content_id" }, "uniqueItems": true },
+        "compacted_command_ids": { "type": "array", "items": { "$ref": "#/$defs/public_identity" }, "uniqueItems": true },
+        "compacted_batch_ids": { "type": "array", "items": { "$ref": "#/$defs/content_id" }, "uniqueItems": true },
+        "compacted_command_index_proof_ids": { "type": "array", "items": { "$ref": "#/$defs/public_identity" }, "uniqueItems": true },
+        "base": { "$ref": "#/$defs/machine_base" },
+        "base_anchor": { "$ref": "#/$defs/machine_base_anchor" },
+        "archive_segment": { "$ref": "#/$defs/command_archive_header" },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/core_event" } },
+        "admissions": { "type": "array", "items": { "$ref": "#/$defs/command_admission" } },
+        "commands": { "type": "object", "propertyNames": { "$ref": "#/$defs/public_identity" }, "additionalProperties": { "$ref": "#/$defs/command_record" } },
+        "command_index_proofs": { "type": "object", "propertyNames": { "$ref": "#/$defs/public_identity" }, "additionalProperties": { "$ref": "#/$defs/command_index_proof" } }
       },
-      "required": ["delta_version", "plans", "artifacts", "compacted_event_ids", "events", "commands"],
+      "required": ["delta_version", "parent_snapshot_digest", "result_snapshot_digest", "plans", "artifacts", "batches", "compacted_event_ids", "compacted_admission_ids", "compacted_command_ids", "compacted_batch_ids", "compacted_command_index_proof_ids", "events", "admissions", "commands", "command_index_proofs"],
       "additionalProperties": false
     },
     "durable_delta": {
+      "description": "Closed semantic transition consumed by StateRoot lowering; providers never persist it as a recursive delta or suffix authority.",
       "type": "object",
       "properties": {
         "operations": {
@@ -35,8 +966,114 @@
               {
                 "type": "object",
                 "properties": {
-                  "op": { "enum": ["put_continuation", "put_wait", "put_wait_activation", "put_lease", "put_outbox", "put_component_occurrence", "put_snapshot", "put_history_compaction"] },
-                  "value": { "type": "object" }
+                  "op": { "const": "put_wait" },
+                  "value": { "$ref": "engine-protocol.schema.json#/$defs/waitCondition" }
+                },
+                "required": ["op", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "put_outbox" },
+                  "value": { "$ref": "engine-protocol.schema.json#/$defs/effectDispatch" }
+                },
+                "required": ["op", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "put_snapshot" },
+                  "value": { "$ref": "#/$defs/snapshot_record" }
+                },
+                "required": ["op", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "put_history_compaction" },
+                  "value": { "$ref": "#/$defs/history_compaction" }
+                },
+                "required": ["op", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "put_wait_activation" },
+                  "value": { "$ref": "#/$defs/wait_activation_receipt" }
+                },
+                "required": ["op", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object", "additionalProperties": false,
+                "required": ["op", "value"],
+                "properties": {
+                  "op": { "const": "put_cancellation_receipt" },
+                  "value": { "$ref": "engine-protocol.schema.json#/$defs/cancellationReceipt" }
+                }
+              },
+              {
+                "type": "object", "additionalProperties": false,
+                "required": ["op", "value"],
+                "properties": {
+                  "op": { "const": "put_effect_resolution_receipt" },
+                  "value": { "$ref": "engine-protocol.schema.json#/$defs/effectResolutionReceipt" }
+                }
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "remove_clock_observation" },
+                  "observation_id": { "$ref": "#/$defs/content_id" }
+                },
+                "required": ["op", "observation_id"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "put_lease" },
+                  "value": { "$ref": "#/$defs/coordination_lease" }
+                },
+                "required": ["op", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "put_continuation" },
+                  "value": { "$ref": "engine-protocol.schema.json#/$defs/continuation" }
+                },
+                "required": ["op", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "put_component_occurrence" },
+                  "value": { "$ref": "engine-protocol.schema.json#/$defs/componentOccurrence" }
+                },
+                "required": ["op", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "put_operation_attempt" },
+                  "value": { "$ref": "engine-protocol.schema.json#/$defs/operationAttempt" }
+                },
+                "required": ["op", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "put_clock_observation" },
+                  "value": { "$ref": "#/$defs/clock_observation" }
                 },
                 "required": ["op", "value"],
                 "additionalProperties": false
@@ -45,10 +1082,28 @@
                 "type": "object",
                 "properties": {
                   "op": { "const": "append_journal" },
-                  "journal_id": { "$ref": "#/$defs/identity" },
-                  "records": { "type": "array", "minItems": 1, "items": { "type": "object" } }
+                  "journal_id": { "$ref": "#/$defs/public_identity" },
+                  "records": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/journal_record" } }
                 },
                 "required": ["op", "journal_id", "records"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "replace_journal_prefix" },
+                  "receipt": { "$ref": "#/$defs/journal_prefix_replacement_receipt" }
+                },
+                "required": ["op", "receipt"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": { "const": "put_coupled_checkpoint_receipt" },
+                  "value": { "$ref": "#/$defs/coupled_checkpoint_receipt" }
+                },
+                "required": ["op", "value"],
                 "additionalProperties": false
               }
             ]
@@ -58,72 +1113,1076 @@
       "required": ["operations"],
       "additionalProperties": false
     },
+    "durable_state": {
+      "description": "Materialized semantic projection used only for genesis, open, and audit; it is not a checkpoint envelope or physical authority.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["durable_version", "machine", "continuations", "waits", "leases", "outbox", "component_occurrences", "operation_attempts", "clock_observations", "snapshots"],
+      "properties": {
+        "durable_version": { "const": "cymule.durable-state/7" },
+        "machine": { "$ref": "#/$defs/machine_snapshot" },
+        "continuations": { "type": "object", "propertyNames": { "$ref": "#/$defs/run_identity" }, "additionalProperties": { "$ref": "engine-protocol.schema.json#/$defs/continuation" } },
+        "waits": { "type": "object", "propertyNames": { "$ref": "#/$defs/wait_identity" }, "additionalProperties": { "$ref": "engine-protocol.schema.json#/$defs/waitCondition" } },
+        "wait_activations": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/public_identity" }, "additionalProperties": { "$ref": "#/$defs/wait_activation_receipt" } },
+        "leases": { "type": "object", "propertyNames": { "$ref": "#/$defs/public_identity" }, "additionalProperties": { "$ref": "#/$defs/coordination_lease" } },
+        "outbox": { "type": "object", "propertyNames": { "$ref": "#/$defs/content_id" }, "additionalProperties": { "$ref": "engine-protocol.schema.json#/$defs/effectDispatch" } },
+        "component_occurrences": { "type": "object", "propertyNames": { "$ref": "#/$defs/content_id" }, "additionalProperties": { "$ref": "engine-protocol.schema.json#/$defs/componentOccurrence" } },
+        "operation_attempts": { "type": "object", "propertyNames": { "$ref": "#/$defs/content_id" }, "additionalProperties": { "$ref": "engine-protocol.schema.json#/$defs/operationAttempt" } },
+        "clock_observations": { "type": "object", "propertyNames": { "$ref": "#/$defs/content_id" }, "additionalProperties": { "$ref": "#/$defs/clock_observation" } },
+        "snapshots": { "type": "object", "propertyNames": { "$ref": "#/$defs/content_id" }, "additionalProperties": { "$ref": "#/$defs/snapshot_record" } },
+        "history_compactions": { "type": "object", "propertyNames": { "$ref": "#/$defs/public_identity" }, "additionalProperties": { "$ref": "#/$defs/history_compaction" } },
+        "cancellation_receipts": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/public_identity" }, "additionalProperties": { "$ref": "engine-protocol.schema.json#/$defs/cancellationReceipt" } },
+        "effect_resolution_receipts": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/public_identity" }, "additionalProperties": { "$ref": "engine-protocol.schema.json#/$defs/effectResolutionReceipt" } },
+        "application_journals": { "type": "object", "propertyNames": { "$ref": "#/$defs/public_identity" }, "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/journal_record" } } },
+        "application_journal_prefix_replacements": { "type": "object", "propertyNames": { "$ref": "#/$defs/public_identity" }, "additionalProperties": { "$ref": "#/$defs/journal_prefix_replacement_receipt" } }
+      }
+    },
+    "physical_token": {
+      "description": "Content identity derived under cymule.durable-physical-token/2.",
+      "$ref": "#/$defs/content_id"
+    },
+    "state_map_root": {
+      "type": "object", "additionalProperties": false,
+      "required": ["node", "entries"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "entries": { "const": 0 } },
+            "required": ["entries"]
+          },
+          "then": { "properties": { "node": { "type": "null" } } },
+          "else": {
+            "properties": {
+              "node": { "$ref": "#/$defs/content_id" },
+              "entries": { "minimum": 1 }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "node": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
+        "entries": { "$ref": "#/$defs/exact_integer" }
+      }
+    },
+    "state_map_child": {
+      "type": "object", "additionalProperties": false,
+      "required": ["object_id", "entries"],
+      "properties": {
+        "object_id": { "$ref": "#/$defs/content_id" },
+        "entries": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
+    "state_map_node_body": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "key", "key_hash", "value"],
+          "properties": {
+            "kind": { "const": "leaf" },
+            "key": { "$ref": "#/$defs/identity" },
+            "key_hash": { "$ref": "#/$defs/digest" },
+            "value": { "$ref": "#/$defs/content_id" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "depth", "prefix", "left", "right"],
+          "properties": {
+            "kind": { "const": "branch" },
+            "depth": { "type": "integer", "minimum": 0, "maximum": 255 },
+            "prefix": { "$ref": "#/$defs/digest" },
+            "left": { "$ref": "#/$defs/state_map_child" },
+            "right": { "$ref": "#/$defs/state_map_child" }
+          }
+        }
+      ]
+    },
+    "state_map_node": {
+      "type": "object", "additionalProperties": false,
+      "required": ["node_version", "object_id", "body"],
+      "properties": {
+        "node_version": { "const": "cymule.authenticated-map-node/1" },
+        "object_id": { "$ref": "#/$defs/content_id" },
+        "body": { "$ref": "#/$defs/state_map_node_body" }
+      }
+    },
+    "state_log_root": {
+      "type": "object", "additionalProperties": false,
+      "required": ["node", "len", "height", "ordered_root"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "len": { "const": 0 } },
+            "required": ["len"]
+          },
+          "then": {
+            "properties": {
+              "node": { "type": "null" },
+              "height": { "const": 0 },
+              "ordered_root": { "const": "sha256:7a11d3576de9d3ceced1159931491f51791f73910d49bbeca4862667158f8bd2" }
+            }
+          },
+          "else": {
+            "properties": {
+              "node": { "$ref": "#/$defs/content_id" },
+              "len": { "minimum": 1 },
+              "height": { "minimum": 1, "maximum": 76 }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "node": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
+        "len": { "$ref": "#/$defs/exact_integer" },
+        "height": { "type": "integer", "minimum": 0, "maximum": 76 },
+        "ordered_root": {
+          "description": "The canonical empty-log commitment when len is zero; otherwise exactly the node content identity. Rust verifies the cross-field equality.",
+          "$ref": "#/$defs/content_id"
+        }
+      }
+    },
+    "state_log_child": {
+      "type": "object", "additionalProperties": false,
+      "required": ["object_id", "len", "height"],
+      "properties": {
+        "object_id": { "$ref": "#/$defs/content_id" },
+        "len": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 76 }
+      }
+    },
+    "state_log_node_body": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "values"],
+          "properties": {
+            "kind": { "const": "leaf" },
+            "values": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "left", "right"],
+          "properties": {
+            "kind": { "const": "branch" },
+            "left": { "$ref": "#/$defs/state_log_child" },
+            "right": { "$ref": "#/$defs/state_log_child" }
+          }
+        }
+      ]
+    },
+    "state_log_node": {
+      "type": "object", "additionalProperties": false,
+      "required": ["node_version", "object_id", "body"],
+      "properties": {
+        "node_version": { "const": "cymule.authenticated-log-node/1" },
+        "object_id": { "$ref": "#/$defs/content_id" },
+        "body": { "$ref": "#/$defs/state_log_node_body" }
+      }
+    },
+    "state_root_leaf_kind": {
+      "enum": [
+        "machine_plan", "machine_artifact", "machine_event", "machine_admission",
+        "machine_command_batch",
+        "machine_effect", "machine_obligation", "machine_attempt", "machine_fact",
+        "continuation", "run_current", "wait", "wait_activation", "lease", "outbox", "outbox_owner",
+        "cancellation_receipt", "effect_resolution_receipt",
+        "component_occurrence", "operation_attempt", "clock_observation", "snapshot",
+        "history_compaction", "journal_record", "journal_prefix_replacement",
+        "journal_record_manifest", "journal_prefix_replacement_authority",
+        "coupled_checkpoint_receipt", "resource_command_receipt",
+        "resource_retention_current", "resource_pin_current", "resource_delete_current",
+        "resource_handoff_current", "resource_handoff_activation_current",
+        "resource_handoff_index", "resource_handoff_activation_index", "agent_command",
+        "agent_command_receipt", "agent_input_suspension_receipt",
+        "agent_input_completion_receipt", "agent_session_current", "agent_update_current",
+        "agent_message_current", "agent_tool_current", "agent_elicitation_current",
+        "agent_occurrence_current", "agent_stream_current", "agent_stream_chunk_current",
+        "evolution_current", "evolution_command_alias", "evolution_persistence_receipt",
+        "evolution_mutation", "virtual_current", "virtual_persistence_receipt",
+        "virtual_state_leaf", "resource_catalog_record"
+      ]
+    },
+    "machine_run_child_roots": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scopes", "effects", "obligations", "attempts"],
+      "properties": {
+        "scopes": { "$ref": "#/$defs/state_map_root" },
+        "effects": { "$ref": "#/$defs/state_map_root" },
+        "obligations": { "$ref": "#/$defs/state_map_root" },
+        "attempts": { "$ref": "#/$defs/state_map_root" }
+      }
+    },
+    "machine_run_order_roots": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scopes", "effects", "obligations", "attempts", "plans", "bindings"],
+      "properties": {
+        "scopes": { "$ref": "#/$defs/state_log_root" },
+        "effects": { "$ref": "#/$defs/state_log_root" },
+        "obligations": { "$ref": "#/$defs/state_log_root" },
+        "attempts": { "$ref": "#/$defs/state_log_root" },
+        "plans": { "$ref": "#/$defs/state_log_root" },
+        "bindings": { "$ref": "#/$defs/state_log_root" }
+      }
+    },
+    "machine_run_index_roots": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "governance_effects", "unknown_effects", "pending_effects",
+        "terminal_transition_effects", "open_scopes", "unresolved_obligations"
+      ],
+      "properties": {
+        "governance_effects": { "$ref": "#/$defs/state_map_root" },
+        "unknown_effects": { "$ref": "#/$defs/state_map_root" },
+        "pending_effects": { "$ref": "#/$defs/state_map_root" },
+        "terminal_transition_effects": { "$ref": "#/$defs/state_map_root" },
+        "open_scopes": { "$ref": "#/$defs/state_map_root" },
+        "unresolved_obligations": { "$ref": "#/$defs/state_map_root" }
+      }
+    },
+    "machine_run_reducer_state": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "ready" } } },
+        { "type": "object", "additionalProperties": false, "required": ["state", "transition_id"], "properties": { "state": { "const": "transitioning" }, "transition_id": { "$ref": "#/$defs/content_id" } } }
+      ]
+    },
+    "machine_run_current": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "run_current_version", "run_id", "initial_plan", "current_plan", "plan_lineage_root",
+        "plan_lineage_count", "plan_lineage", "initial_binding_context",
+        "current_binding_context", "binding_lineage_root", "binding_lineage_count",
+        "binding_lineage", "epoch", "execution_status", "world_settlement", "result",
+        "last_event", "active_attempt_id", "committed_effect_count", "reducer_state",
+        "children", "order", "indexes"
+      ],
+      "properties": {
+        "run_current_version": { "const": "cymule.machine-run-current/2" },
+        "run_id": { "$ref": "#/$defs/run_identity" },
+        "initial_plan": { "$ref": "#/$defs/content_id" },
+        "current_plan": { "$ref": "#/$defs/content_id" },
+        "plan_lineage_root": { "$ref": "#/$defs/content_id" },
+        "plan_lineage_count": { "$ref": "#/$defs/exact_integer" },
+        "plan_lineage": { "$ref": "#/$defs/state_log_root" },
+        "initial_binding_context": { "$ref": "#/$defs/content_id" },
+        "current_binding_context": { "$ref": "#/$defs/content_id" },
+        "binding_lineage_root": { "$ref": "#/$defs/content_id" },
+        "binding_lineage_count": { "$ref": "#/$defs/exact_integer" },
+        "binding_lineage": { "$ref": "#/$defs/state_log_root" },
+        "epoch": { "$ref": "#/$defs/exact_integer" },
+        "execution_status": { "$ref": "#/$defs/run_execution_status" },
+        "world_settlement": { "enum": ["settled", "pending", "unknown", "governance_required"] },
+        "result": { "$ref": "#/$defs/nullable_artifact_ref" },
+        "last_event": { "$ref": "#/$defs/content_id" },
+        "active_attempt_id": { "$ref": "#/$defs/nullable_content_id" },
+        "committed_effect_count": { "$ref": "#/$defs/exact_integer" },
+        "reducer_state": { "$ref": "#/$defs/machine_run_reducer_state" },
+        "children": { "$ref": "#/$defs/machine_run_child_roots" },
+        "order": { "$ref": "#/$defs/machine_run_order_roots" },
+        "indexes": { "$ref": "#/$defs/machine_run_index_roots" }
+      }
+    },
+    "machine_scope_current": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "scope_current_version", "scope_id", "parent_scope", "invocation_id",
+        "invocation_path_digest", "definition_id", "region_path_digest", "site_id", "status",
+        "effect_count", "direct_open_child_count", "effect_lineage_root", "effects",
+        "effect_order", "mutating_effect_lineage_root", "mutating_effects",
+        "mutating_effect_order", "abort_transitions", "abort_blockers"
+      ],
+      "properties": {
+        "scope_current_version": { "const": "cymule.machine-scope-current/1" },
+        "scope_id": { "$ref": "#/$defs/public_identity" },
+        "parent_scope": { "oneOf": [{ "$ref": "#/$defs/public_identity" }, { "type": "null" }] },
+        "invocation_id": { "$ref": "#/$defs/content_id" },
+        "invocation_path_digest": { "$ref": "#/$defs/digest" },
+        "definition_id": { "$ref": "#/$defs/public_identity" },
+        "region_path_digest": { "$ref": "#/$defs/digest" },
+        "site_id": { "oneOf": [{ "$ref": "#/$defs/public_identity" }, { "type": "null" }] },
+        "status": { "enum": ["open", "closed_committed", "closed_aborted"] },
+        "effect_count": { "$ref": "#/$defs/exact_integer" },
+        "direct_open_child_count": { "$ref": "#/$defs/exact_integer" },
+        "effect_lineage_root": { "$ref": "#/$defs/content_id" },
+        "effects": { "$ref": "#/$defs/state_map_root" },
+        "effect_order": { "$ref": "#/$defs/state_log_root" },
+        "mutating_effect_lineage_root": { "$ref": "#/$defs/content_id" },
+        "mutating_effects": { "$ref": "#/$defs/state_map_root" },
+        "mutating_effect_order": { "$ref": "#/$defs/state_log_root" },
+        "abort_transitions": { "$ref": "#/$defs/state_map_root" },
+        "abort_blockers": { "$ref": "#/$defs/state_map_root" }
+      }
+    },
+    "machine_run_index_selector": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["index"], "properties": { "index": { "enum": ["governance_effects", "unknown_effects", "pending_effects", "terminal_transition_effects", "open_scopes", "unresolved_obligations"] } } },
+        { "type": "object", "additionalProperties": false, "required": ["index", "scope_id"], "properties": { "index": { "enum": ["scope_effects", "scope_mutating_effects", "scope_abort_transitions", "scope_abort_blockers"] }, "scope_id": { "$ref": "#/$defs/public_identity" } } }
+      ]
+    },
+    "machine_run_log_selector": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["log"], "properties": { "log": { "enum": ["scopes", "effects", "obligations", "attempts", "plans", "bindings"] } } },
+        { "type": "object", "additionalProperties": false, "required": ["log", "scope_id"], "properties": { "log": { "enum": ["scope_effects", "scope_mutating_effects"] }, "scope_id": { "$ref": "#/$defs/public_identity" } } }
+      ]
+    },
+    "machine_paged_action": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["action", "scope_id"], "properties": { "action": { "enum": ["commit_scope", "abort_scope"] }, "scope_id": { "$ref": "#/$defs/public_identity" } } },
+        { "type": "object", "additionalProperties": false, "required": ["action"], "properties": { "action": { "enum": ["fail_run", "cancel_run"] } } }
+      ]
+    },
+    "machine_paged_shadow_roots": {
+      "type": "object", "additionalProperties": false,
+      "required": ["children", "order", "indexes"],
+      "properties": {
+        "children": { "$ref": "#/$defs/machine_run_child_roots" },
+        "order": { "$ref": "#/$defs/machine_run_order_roots" },
+        "indexes": { "$ref": "#/$defs/machine_run_index_roots" }
+      }
+    },
+    "machine_paged_batch_manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["batch_version", "batch_id", "parent_authority_root", "member", "material_digest", "material_source", "plan_ids", "artifacts"],
+      "properties": {
+        "batch_version": { "const": "cymule.command-batch/1" },
+        "batch_id": { "$ref": "#/$defs/content_id" },
+        "parent_authority_root": { "$ref": "#/$defs/digest" },
+        "member": {
+          "allOf": [
+            { "$ref": "#/$defs/command_batch_member" },
+            { "properties": { "position": { "const": 0 } } }
+          ]
+        },
+        "material_digest": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
+        "material_source": { "oneOf": [{ "$ref": "#/$defs/command_batch_material_source" }, { "type": "null" }] },
+        "plan_ids": { "type": "array", "maxItems": 66, "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } },
+        "artifacts": { "type": "array", "maxItems": 258, "uniqueItems": true, "items": { "$ref": "#/$defs/artifact_ref" } }
+      },
+      "allOf": [{ "$ref": "#/$defs/command_batch_material_pair" }]
+    },
+    "machine_paged_material_roots": {
+      "type": "object", "additionalProperties": false,
+      "required": ["plans", "artifacts"],
+      "properties": {
+        "plans": {
+          "allOf": [
+            { "$ref": "#/$defs/state_map_root" },
+            { "properties": { "entries": { "maximum": 64 } } }
+          ]
+        },
+        "artifacts": {
+          "allOf": [
+            { "$ref": "#/$defs/state_map_root" },
+            { "properties": { "entries": { "maximum": 256 } } }
+          ]
+        }
+      }
+    },
+    "machine_paged_transition_current": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "transition_version", "transition_id", "envelope", "batch_manifest", "staged_material", "command_id", "command_hash",
+        "run_id", "parent_revision", "source_run_current_digest", "action",
+        "target_action_digest", "phase", "effect_source", "scope_source", "next_index",
+        "processed_count", "processed_commitment", "obligation_count",
+        "obligation_commitment", "shadow"
+      ],
+      "properties": {
+        "transition_version": { "const": "cymule.machine-paged-transition/1" },
+        "transition_id": { "$ref": "#/$defs/content_id" },
+        "envelope": { "$ref": "#/$defs/command_envelope" },
+        "batch_manifest": { "$ref": "#/$defs/machine_paged_batch_manifest" },
+        "staged_material": { "$ref": "#/$defs/machine_paged_material_roots" },
+        "command_id": { "$ref": "#/$defs/public_identity" },
+        "command_hash": { "$ref": "#/$defs/digest" },
+        "run_id": { "$ref": "#/$defs/run_identity" },
+        "parent_revision": { "$ref": "#/$defs/content_id" },
+        "source_run_current_digest": { "$ref": "#/$defs/digest" },
+        "action": { "$ref": "#/$defs/machine_paged_action" },
+        "target_action_digest": { "$ref": "#/$defs/content_id" },
+        "phase": { "enum": ["effects", "scopes", "finalize"] },
+        "effect_source": { "$ref": "#/$defs/state_log_root" },
+        "scope_source": { "$ref": "#/$defs/state_log_root" },
+        "next_index": { "$ref": "#/$defs/exact_integer" },
+        "processed_count": { "$ref": "#/$defs/exact_integer" },
+        "processed_commitment": { "$ref": "#/$defs/content_id" },
+        "obligation_count": { "$ref": "#/$defs/exact_integer" },
+        "obligation_commitment": { "$ref": "#/$defs/content_id" },
+        "shadow": { "$ref": "#/$defs/machine_paged_shadow_roots" }
+      }
+    },
+    "run_terminal_sidecar": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "transition_id", "transition_digest", "source_continuation_digest",
+        "source_query_digest", "effects", "active_effects", "active_leases"
+      ],
+      "properties": {
+        "transition_id": { "$ref": "#/$defs/content_id" },
+        "transition_digest": { "$ref": "#/$defs/digest" },
+        "source_continuation_digest": { "$ref": "#/$defs/digest" },
+        "source_query_digest": { "$ref": "#/$defs/digest" },
+        "effects": { "$ref": "#/$defs/state_map_root" },
+        "active_effects": { "$ref": "#/$defs/state_map_root" },
+        "active_leases": { "$ref": "#/$defs/state_map_root" }
+      }
+    },
+    "run_query_indexes": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "value", "index_version", "run_id", "waits", "effects", "occurrences",
+        "attempts", "pending_waits", "active_effects", "active_leases", "terminal"
+      ],
+      "properties": {
+        "value": { "const": "run_query_indexes" },
+        "index_version": { "const": "cymule.run-query-indexes/2" },
+        "run_id": { "$ref": "#/$defs/run_identity" },
+        "waits": { "$ref": "#/$defs/state_map_root" },
+        "effects": { "$ref": "#/$defs/state_map_root" },
+        "occurrences": { "$ref": "#/$defs/state_map_root" },
+        "attempts": { "$ref": "#/$defs/state_map_root" },
+        "pending_waits": { "$ref": "#/$defs/state_map_root" },
+        "active_effects": { "$ref": "#/$defs/state_map_root" },
+        "active_leases": { "$ref": "#/$defs/state_map_root" },
+        "terminal": {
+          "oneOf": [
+            { "$ref": "#/$defs/run_terminal_sidecar" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "wait_activation_source": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "key"],
+          "properties": { "kind": { "const": "signal" }, "key": { "$ref": "#/$defs/run_identity" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "timer_id"],
+          "properties": { "kind": { "const": "timer" }, "timer_id": { "$ref": "#/$defs/run_identity" } }
+        }
+      ]
+    },
+    "pending_wait_source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["value", "source_version", "source", "waits"],
+      "properties": {
+        "value": { "const": "pending_wait_source" },
+        "source_version": { "const": "cymule.pending-wait-source/1" },
+        "source": { "$ref": "#/$defs/wait_activation_source" },
+        "waits": { "$ref": "#/$defs/state_map_root" }
+      }
+    },
+    "state_root_value": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "kind", "canonical_json"],
+          "properties": {
+            "value": { "const": "leaf" },
+            "kind": { "$ref": "#/$defs/state_root_leaf_kind" },
+            "canonical_json": {
+              "type": "string", "minLength": 1, "maxLength": 12582912,
+              "contentMediaType": "application/json",
+              "$comment": "Exact canonical UTF-8 JSON text. Rust additionally enforces the 12 MiB UTF-8 byte bound, strict typed decoding, and canonical round-trip equality; maxLength is only the necessary Unicode-scalar ceiling. Numeric byte arrays have no compatibility decoder."
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "record", "admission", "index_proof", "first_event_position"],
+          "properties": {
+            "value": { "const": "machine_command_current" },
+            "record": { "$ref": "#/$defs/command_record" },
+            "admission": { "$ref": "#/$defs/command_admission" },
+            "index_proof": { "$ref": "#/$defs/command_index_proof" },
+            "first_event_position": { "oneOf": [{ "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, { "type": "null" }] }
+          },
+          "allOf": [{
+            "if": { "properties": { "admission": { "properties": { "event_ids": { "maxItems": 0 } } } } },
+            "then": { "properties": { "first_event_position": { "type": "null" } } },
+            "else": { "properties": { "first_event_position": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 } } }
+          }]
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "current"],
+          "properties": {
+            "value": { "const": "machine_run_current" },
+            "current": { "$ref": "#/$defs/machine_run_current" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "current", "invocation_path", "region_path"],
+          "properties": {
+            "value": { "const": "machine_scope_current" },
+            "current": { "$ref": "#/$defs/machine_scope_current" },
+            "invocation_path": { "type": "array", "items": { "$ref": "#/$defs/invocation_path_segment" } },
+            "region_path": { "type": "array", "items": { "$ref": "#/$defs/exact_integer" } }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "command_id", "transition_id"],
+          "properties": {
+            "value": { "const": "machine_pending_command" },
+            "command_id": { "$ref": "#/$defs/public_identity" },
+            "transition_id": { "$ref": "#/$defs/content_id" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "current"],
+          "properties": {
+            "value": { "const": "machine_paged_transition_current" },
+            "current": { "$ref": "#/$defs/machine_paged_transition_current" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "run_id", "selector", "entry"],
+          "properties": {
+            "value": { "const": "machine_index_membership" },
+            "run_id": { "$ref": "#/$defs/run_identity" },
+            "selector": { "$ref": "#/$defs/machine_run_index_selector" },
+            "entry": { "$ref": "#/$defs/public_identity" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "run_id", "selector", "entry"],
+          "properties": {
+            "value": { "const": "machine_order_entry" },
+            "run_id": { "$ref": "#/$defs/run_identity" },
+            "selector": { "$ref": "#/$defs/machine_run_log_selector" },
+            "entry": { "$ref": "#/$defs/public_identity" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "to_run", "root"],
+          "properties": {
+            "value": { "const": "resource_handoff_index" },
+            "to_run": { "$ref": "#/$defs/run_identity" },
+            "root": { "$ref": "#/$defs/state_log_root" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "to_run", "root"],
+          "properties": {
+            "value": { "const": "resource_handoff_activation_index" },
+            "to_run": { "$ref": "#/$defs/run_identity" },
+            "root": { "$ref": "#/$defs/state_log_root" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "to_run", "root"],
+          "properties": {
+            "value": { "const": "resource_handoff_slots" },
+            "to_run": { "$ref": "#/$defs/run_identity" },
+            "root": { "$ref": "#/$defs/state_map_root" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "session_id", "root"],
+          "properties": {
+            "value": { "enum": ["agent_message_index", "agent_unresolved_occurrence_index", "agent_open_stream_index"] },
+            "session_id": { "$ref": "#/$defs/public_identity" },
+            "root": { "$ref": "#/$defs/state_log_root" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "index", "bytes"],
+          "properties": {
+            "value": { "const": "machine_base_chunk" },
+            "index": { "$ref": "#/$defs/exact_integer" },
+            "bytes": {
+              "type": "string", "minLength": 4, "maxLength": 5592408,
+              "contentEncoding": "base64",
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?(?![\\s\\S])",
+              "allOf": [{ "if": { "minLength": 5592408 }, "then": { "pattern": "==$" } }],
+              "$comment": "Nonempty arbitrary binary chunks use canonical padded standard Base64 and at most 4 MiB decoded bytes. A chunk may split UTF-8; at maximum encoded length two padding characters are required. Rust checks decoded length and unused padding bits before output allocation."
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "canonical_len", "canonical_digest", "chunk_count", "chunks"],
+          "properties": {
+            "value": { "const": "machine_base_descriptor" },
+            "canonical_len": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "canonical_digest": { "$ref": "#/$defs/digest" },
+            "chunk_count": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "chunks": { "$ref": "#/$defs/state_log_root" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "journal_id", "root"],
+          "properties": {
+            "value": { "const": "application_journal" },
+            "journal_id": { "$ref": "#/$defs/public_identity" },
+            "root": { "$ref": "#/$defs/state_log_root" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "journal_id", "root"],
+          "properties": {
+            "value": { "const": "application_journal_record_manifests" },
+            "journal_id": { "$ref": "#/$defs/public_identity" },
+            "root": { "$ref": "#/$defs/state_map_root" }
+          }
+        },
+        { "$ref": "#/$defs/run_query_indexes" },
+        { "$ref": "#/$defs/pending_wait_source" }
+      ]
+    },
+    "state_value_object": {
+      "type": "object", "additionalProperties": false,
+      "required": ["value_version", "object_id", "value"],
+      "properties": {
+        "value_version": { "const": "cymule.durable-state-value/3" },
+        "object_id": { "$ref": "#/$defs/content_id" },
+        "value": { "$ref": "#/$defs/state_root_value" }
+      }
+    },
+    "machine_authority_frontier": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "frontier_version", "authority_root", "plan_admission_commitment", "plan_count",
+        "artifact_admission_commitment", "artifact_count", "batch_admission_commitment",
+        "batch_count", "projection_root", "event_count",
+        "admission_sequence", "admission_head", "base_anchor_id", "command_index_root",
+        "runs", "facts", "pending_commands", "paged_transitions"
+      ],
+      "properties": {
+        "frontier_version": { "const": "cymule.machine-authority-frontier/3" },
+        "authority_root": { "$ref": "#/$defs/digest" },
+        "plan_admission_commitment": { "$ref": "#/$defs/content_id" },
+        "plan_count": { "$ref": "#/$defs/exact_integer" },
+        "artifact_admission_commitment": { "$ref": "#/$defs/content_id" },
+        "artifact_count": { "$ref": "#/$defs/exact_integer" },
+        "batch_admission_commitment": { "$ref": "#/$defs/content_id" },
+        "batch_count": { "$ref": "#/$defs/exact_integer" },
+        "projection_root": { "$ref": "#/$defs/digest" },
+        "event_count": { "$ref": "#/$defs/exact_integer" },
+        "admission_sequence": { "$ref": "#/$defs/exact_integer" },
+        "admission_head": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
+        "base_anchor_id": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
+        "command_index_root": { "$ref": "#/$defs/content_id" },
+        "runs": { "$ref": "#/$defs/state_map_root" },
+        "facts": { "$ref": "#/$defs/state_map_root" },
+        "pending_commands": { "$ref": "#/$defs/state_map_root" },
+        "paged_transitions": { "$ref": "#/$defs/state_map_root" }
+      }
+    },
+    "evolution_root_set": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "currents", "command_aliases", "receipts", "definition_current",
+        "definition_compatibility_current", "definition_record", "dependency_current",
+        "template_current", "link_record", "plan_record", "edge_record", "rollout_current",
+        "rollout_evidence_current", "rollout_decision", "occurrence_current",
+        "selection_current", "migration_record", "restart_record", "shadow_record",
+        "shadow_subject_current", "observation_record", "observation_occurrence_current",
+        "evidence_current", "decision_transition_current", "transition_record"
+      ],
+      "properties": {
+        "currents": { "$ref": "#/$defs/state_map_root" },
+        "command_aliases": { "$ref": "#/$defs/state_map_root" },
+        "receipts": { "$ref": "#/$defs/state_map_root" },
+        "definition_current": { "$ref": "#/$defs/state_map_root" },
+        "definition_compatibility_current": { "$ref": "#/$defs/state_map_root" },
+        "definition_record": { "$ref": "#/$defs/state_map_root" },
+        "dependency_current": { "$ref": "#/$defs/state_map_root" },
+        "template_current": { "$ref": "#/$defs/state_map_root" },
+        "link_record": { "$ref": "#/$defs/state_map_root" },
+        "plan_record": { "$ref": "#/$defs/state_map_root" },
+        "edge_record": { "$ref": "#/$defs/state_map_root" },
+        "rollout_current": { "$ref": "#/$defs/state_map_root" },
+        "rollout_evidence_current": { "$ref": "#/$defs/state_map_root" },
+        "rollout_decision": { "$ref": "#/$defs/state_map_root" },
+        "occurrence_current": { "$ref": "#/$defs/state_map_root" },
+        "selection_current": { "$ref": "#/$defs/state_map_root" },
+        "migration_record": { "$ref": "#/$defs/state_map_root" },
+        "restart_record": { "$ref": "#/$defs/state_map_root" },
+        "shadow_record": { "$ref": "#/$defs/state_map_root" },
+        "shadow_subject_current": { "$ref": "#/$defs/state_map_root" },
+        "observation_record": { "$ref": "#/$defs/state_map_root" },
+        "observation_occurrence_current": { "$ref": "#/$defs/state_map_root" },
+        "evidence_current": { "$ref": "#/$defs/state_map_root" },
+        "decision_transition_current": { "$ref": "#/$defs/state_map_root" },
+        "transition_record": { "$ref": "#/$defs/state_map_root" }
+      }
+    },
+    "virtual_root_set": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "currents", "receipts", "regions", "active_regions", "parked", "parked_indexes",
+        "work", "occurrences", "runs", "migrations", "certificates"
+      ],
+      "properties": {
+        "currents": { "$ref": "#/$defs/state_map_root" },
+        "receipts": { "$ref": "#/$defs/state_map_root" },
+        "regions": { "$ref": "#/$defs/state_map_root" },
+        "active_regions": { "$ref": "#/$defs/state_map_root" },
+        "parked": { "$ref": "#/$defs/state_map_root" },
+        "parked_indexes": { "$ref": "#/$defs/state_map_root" },
+        "work": { "$ref": "#/$defs/state_map_root" },
+        "occurrences": { "$ref": "#/$defs/state_map_root" },
+        "runs": { "$ref": "#/$defs/state_map_root" },
+        "migrations": { "$ref": "#/$defs/state_map_root" },
+        "certificates": { "$ref": "#/$defs/state_map_root" }
+      }
+    },
+    "state_roots": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "machine_plans", "machine_plan_admissions", "machine_artifacts",
+        "machine_artifact_admissions", "machine_base", "machine_events", "machine_admissions",
+        "machine_commands", "machine_command_batches", "machine_command_batch_admissions",
+        "continuations", "run_currents", "run_query_indexes", "waits",
+        "pending_signal_sources", "pending_timer_sources", "wait_activations", "leases",
+        "outbox", "component_occurrences", "operation_attempts",
+        "clock_observations", "snapshots", "history_compactions", "history_compaction_head", "cancellation_receipts", "effect_resolution_receipts", "application_journals",
+        "application_journal_prefix_replacements", "application_journal_record_manifests",
+        "application_journal_prefix_replacement_history", "coupled_checkpoint_receipts",
+        "resource_command_receipts", "resource_retention_current", "resource_pin_current",
+        "resource_delete_current", "resource_handoff_current", "resource_handoff_slots",
+        "resource_handoff_activation_current", "resource_handoff_activations_by_transfer",
+        "resource_handoff_indexes", "resource_handoff_activation_indexes", "agent_commands",
+        "agent_command_receipts", "agent_input_suspension_receipts",
+        "agent_input_completion_receipts", "agent_sessions", "agent_updates", "agent_messages",
+        "agent_message_indexes", "agent_tools", "agent_elicitations", "agent_occurrences",
+        "agent_unresolved_occurrence_indexes", "agent_streams", "agent_stream_chunks",
+        "agent_open_stream_indexes", "evolution", "virtual_work", "resource_catalog_records"
+      ],
+      "allOf": [
+        {
+          "if": { "properties": { "history_compaction_head": { "type": "null" } } },
+          "then": { "properties": {
+            "machine_base": { "type": "null" },
+            "history_compactions": { "properties": { "entries": { "const": 0 } } }
+          } },
+          "else": { "properties": {
+            "machine_base": { "$ref": "#/$defs/content_id" },
+            "history_compactions": { "properties": { "entries": { "minimum": 1 } } }
+          } }
+        }
+      ],
+      "properties": {
+        "machine_plans": { "$ref": "#/$defs/state_map_root" },
+        "machine_plan_admissions": { "$ref": "#/$defs/state_log_root" },
+        "machine_artifacts": { "$ref": "#/$defs/state_map_root" },
+        "machine_artifact_admissions": { "$ref": "#/$defs/state_log_root" },
+        "machine_base": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
+        "machine_events": { "$ref": "#/$defs/state_log_root" },
+        "machine_admissions": { "$ref": "#/$defs/state_log_root" },
+        "machine_commands": { "$ref": "#/$defs/state_map_root" },
+        "machine_command_batches": { "$ref": "#/$defs/state_map_root" },
+        "machine_command_batch_admissions": { "$ref": "#/$defs/state_log_root" },
+        "continuations": { "$ref": "#/$defs/state_map_root" },
+        "run_currents": { "$ref": "#/$defs/state_map_root" },
+        "run_query_indexes": { "$ref": "#/$defs/state_map_root" },
+        "waits": { "$ref": "#/$defs/state_map_root" },
+        "pending_signal_sources": { "$ref": "#/$defs/state_map_root" },
+        "pending_timer_sources": { "$ref": "#/$defs/state_map_root" },
+        "wait_activations": { "$ref": "#/$defs/state_map_root" },
+        "leases": { "$ref": "#/$defs/state_map_root" },
+        "outbox": { "$ref": "#/$defs/state_map_root" },
+        "component_occurrences": { "$ref": "#/$defs/state_map_root" },
+        "operation_attempts": { "$ref": "#/$defs/state_map_root" },
+        "clock_observations": { "$ref": "#/$defs/state_map_root" },
+        "snapshots": { "$ref": "#/$defs/state_map_root" },
+        "history_compactions": { "$ref": "#/$defs/state_map_root" },
+        "history_compaction_head": { "$ref": "#/$defs/nullable_content_id" },
+        "cancellation_receipts": { "$ref": "#/$defs/state_map_root" },
+        "effect_resolution_receipts": { "$ref": "#/$defs/state_map_root" },
+        "application_journals": { "$ref": "#/$defs/state_map_root" },
+        "application_journal_prefix_replacements": { "$ref": "#/$defs/state_map_root" },
+        "application_journal_record_manifests": { "$ref": "#/$defs/state_map_root" },
+        "application_journal_prefix_replacement_history": { "$ref": "#/$defs/state_map_root" },
+        "coupled_checkpoint_receipts": { "$ref": "#/$defs/state_map_root" },
+        "resource_command_receipts": { "$ref": "#/$defs/state_map_root" },
+        "resource_retention_current": { "$ref": "#/$defs/state_map_root" },
+        "resource_pin_current": { "$ref": "#/$defs/state_map_root" },
+        "resource_delete_current": { "$ref": "#/$defs/state_map_root" },
+        "resource_handoff_current": { "$ref": "#/$defs/state_map_root" },
+        "resource_handoff_slots": { "$ref": "#/$defs/state_map_root" },
+        "resource_handoff_activation_current": { "$ref": "#/$defs/state_map_root" },
+        "resource_handoff_activations_by_transfer": { "$ref": "#/$defs/state_map_root" },
+        "resource_handoff_indexes": { "$ref": "#/$defs/state_map_root" },
+        "resource_handoff_activation_indexes": { "$ref": "#/$defs/state_map_root" },
+        "agent_commands": { "$ref": "#/$defs/state_map_root" },
+        "agent_command_receipts": { "$ref": "#/$defs/state_map_root" },
+        "agent_input_suspension_receipts": { "$ref": "#/$defs/state_map_root" },
+        "agent_input_completion_receipts": { "$ref": "#/$defs/state_map_root" },
+        "agent_sessions": { "$ref": "#/$defs/state_map_root" },
+        "agent_updates": { "$ref": "#/$defs/state_map_root" },
+        "agent_messages": { "$ref": "#/$defs/state_map_root" },
+        "agent_message_indexes": { "$ref": "#/$defs/state_map_root" },
+        "agent_tools": { "$ref": "#/$defs/state_map_root" },
+        "agent_elicitations": { "$ref": "#/$defs/state_map_root" },
+        "agent_occurrences": { "$ref": "#/$defs/state_map_root" },
+        "agent_unresolved_occurrence_indexes": { "$ref": "#/$defs/state_map_root" },
+        "agent_streams": { "$ref": "#/$defs/state_map_root" },
+        "agent_stream_chunks": { "$ref": "#/$defs/state_map_root" },
+        "agent_open_stream_indexes": { "$ref": "#/$defs/state_map_root" },
+        "evolution": { "$ref": "#/$defs/evolution_root_set" },
+        "virtual_work": { "$ref": "#/$defs/virtual_root_set" },
+        "resource_catalog_records": { "$ref": "#/$defs/state_map_root" }
+      }
+    },
+    "state_root_manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "manifest_version", "manifest_id", "parent_manifest", "parent_revision", "delta_digest",
+        "durable_version", "revision", "sequence", "machine_snapshot_version",
+        "machine_frontier", "machine_base_anchor", "roots"
+      ],
+      "allOf": [{ "$ref": "#/$defs/state_root_manifest_lineage" }],
+      "properties": {
+        "manifest_version": { "const": "cymule.durable-state-root/3" },
+        "manifest_id": { "$ref": "#/$defs/content_id" },
+        "parent_manifest": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
+        "parent_revision": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
+        "delta_digest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "durable_version": { "const": "cymule.durable-state/7" },
+        "revision": { "$ref": "#/$defs/content_id" },
+        "sequence": { "$ref": "#/$defs/exact_integer" },
+        "machine_snapshot_version": { "const": "cymule.machine-snapshot/11" },
+        "machine_frontier": { "$ref": "#/$defs/machine_authority_frontier" },
+        "machine_base_anchor": { "oneOf": [{ "$ref": "#/$defs/machine_base_anchor" }, { "type": "null" }] },
+        "roots": { "$ref": "#/$defs/state_roots" }
+      }
+    },
+    "state_root_manifest_lineage": {
+      "if": {
+        "properties": { "sequence": { "const": 0 } },
+        "required": ["sequence"]
+      },
+      "then": {
+        "properties": {
+          "parent_manifest": { "type": "null" },
+          "parent_revision": { "type": "null" },
+          "delta_digest": { "type": "null" }
+        }
+      },
+      "else": {
+        "properties": {
+          "sequence": { "minimum": 1 },
+          "parent_manifest": { "$ref": "#/$defs/content_id" },
+          "parent_revision": { "$ref": "#/$defs/content_id" },
+          "delta_digest": { "$ref": "#/$defs/digest" }
+        }
+      }
+    },
+    "state_root_object": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["object", "value_version", "object_id", "value"],
+          "properties": {
+            "object": { "const": "value" },
+            "value_version": { "const": "cymule.durable-state-value/3" },
+            "object_id": { "$ref": "#/$defs/content_id" },
+            "value": { "$ref": "#/$defs/state_root_value" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["object", "node_version", "object_id", "body"],
+          "properties": {
+            "object": { "const": "map_node" },
+            "node_version": { "const": "cymule.authenticated-map-node/1" },
+            "object_id": { "$ref": "#/$defs/content_id" },
+            "body": { "$ref": "#/$defs/state_map_node_body" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["object", "node_version", "object_id", "body"],
+          "properties": {
+            "object": { "const": "log_node" },
+            "node_version": { "const": "cymule.authenticated-log-node/1" },
+            "object_id": { "$ref": "#/$defs/content_id" },
+            "body": { "$ref": "#/$defs/state_log_node_body" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "object", "manifest_version", "manifest_id", "parent_manifest", "parent_revision",
+            "delta_digest", "durable_version", "revision", "sequence", "machine_snapshot_version",
+            "machine_frontier", "machine_base_anchor", "roots"
+          ],
+          "allOf": [{ "$ref": "#/$defs/state_root_manifest_lineage" }],
+          "properties": {
+            "object": { "const": "manifest" },
+            "manifest_version": { "const": "cymule.durable-state-root/3" },
+            "manifest_id": { "$ref": "#/$defs/content_id" },
+            "parent_manifest": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
+            "parent_revision": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
+            "delta_digest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+            "durable_version": { "const": "cymule.durable-state/7" },
+            "revision": { "$ref": "#/$defs/content_id" },
+            "sequence": { "$ref": "#/$defs/exact_integer" },
+            "machine_snapshot_version": { "const": "cymule.machine-snapshot/11" },
+            "machine_frontier": { "$ref": "#/$defs/machine_authority_frontier" },
+            "machine_base_anchor": { "oneOf": [{ "$ref": "#/$defs/machine_base_anchor" }, { "type": "null" }] },
+            "roots": { "$ref": "#/$defs/state_roots" }
+          }
+        }
+      ]
+    },
+    "command_archive_entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["admission", "command", "events"],
+      "properties": {
+        "admission": { "$ref": "#/$defs/command_admission" },
+        "command": { "$ref": "#/$defs/command_record" },
+        "events": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/core_event" } }
+      }
+    },
+    "command_index_node": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "node_id", "depth", "left", "right"],
+          "properties": {
+            "kind": { "const": "branch" },
+            "node_id": { "$ref": "#/$defs/content_id" },
+            "depth": { "type": "integer", "minimum": 0, "maximum": 255 },
+            "left": { "$ref": "#/$defs/content_id" },
+            "right": { "$ref": "#/$defs/content_id" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "node_id", "key_hash", "command_id", "value"],
+          "properties": {
+            "kind": { "const": "member" },
+            "node_id": { "$ref": "#/$defs/content_id" },
+            "key_hash": { "$ref": "#/$defs/content_id" },
+            "command_id": { "$ref": "#/$defs/public_identity" },
+            "value": { "$ref": "#/$defs/command_index_value" }
+          }
+        }
+      ]
+    },
+    "command_archive_segment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["header", "entries", "batches", "command_index_updates"],
+      "properties": {
+        "header": { "$ref": "#/$defs/command_archive_header" },
+        "entries": { "type": "array", "items": { "$ref": "#/$defs/command_archive_entry" } },
+        "batches": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/command_batch" } },
+        "command_index_updates": { "type": "array", "items": { "$ref": "#/$defs/command_index_proof" } }
+      }
+    },
+    "command_archive_object": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["object_kind", "object"],
+          "properties": { "object_kind": { "const": "segment" }, "object": { "$ref": "#/$defs/command_archive_segment" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["object_kind", "object"],
+          "properties": { "object_kind": { "const": "entry" }, "object": { "$ref": "#/$defs/command_archive_entry" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["object_kind", "object"],
+          "properties": { "object_kind": { "const": "batch" }, "object": { "$ref": "#/$defs/command_batch" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["object_kind", "object"],
+          "properties": { "object_kind": { "const": "command_index_node" }, "object": { "$ref": "#/$defs/command_index_node" } }
+        }
+      ]
+    },
     "head": {
-      "type": "object",
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "head_version", "revision", "state_root_manifest_id", "machine_base_anchor",
+        "sequence", "gc_sequence", "physical_token", "gc_receipt"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "gc_sequence": { "const": 0 } },
+            "required": ["gc_sequence"]
+          },
+          "then": { "properties": { "gc_receipt": { "type": "null" } } }
+        }
+      ],
       "properties": {
-        "head_version": { "const": "cymule.durable-head/1" },
-        "revision": { "$ref": "#/$defs/identity" },
-        "checkpoint_id": { "$ref": "#/$defs/identity" },
-        "checkpoint_depth": { "type": "integer", "minimum": 0, "maximum": 31 },
-        "suffix_head": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
-        "suffix_len": { "type": "integer", "minimum": 0, "maximum": 31 },
-        "sequence": { "type": "integer", "minimum": 0 },
-        "gc_receipt": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] }
-      },
-      "required": ["head_version", "revision", "checkpoint_id", "checkpoint_depth", "suffix_head", "suffix_len", "sequence", "gc_receipt"],
-      "additionalProperties": false
-    },
-    "segment": {
-      "type": "object",
-      "properties": {
-        "segment_version": { "const": "cymule.durable-segment/2" },
-        "segment_id": { "$ref": "#/$defs/identity" },
-        "sequence": { "type": "integer", "minimum": 1 },
-        "parent_segment": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
-        "base_revision": { "$ref": "#/$defs/identity" },
-        "revision": { "$ref": "#/$defs/identity" },
-        "delta": { "$ref": "#/$defs/durable_delta" }
-      },
-      "required": ["segment_version", "segment_id", "sequence", "parent_segment", "base_revision", "revision", "delta"],
-      "additionalProperties": false
-    },
-    "checkpoint": {
-      "type": "object",
-      "properties": {
-        "checkpoint_version": { "const": "cymule.durable-checkpoint/1" },
-        "checkpoint_id": { "$ref": "#/$defs/identity" },
-        "parent_checkpoint": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
-        "covered_segment": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
-        "sequence": { "type": "integer", "minimum": 0 },
-        "revision": { "$ref": "#/$defs/identity" },
-        "state": { "oneOf": [{ "type": "object" }, { "type": "null" }] }
-      },
-      "required": ["checkpoint_version", "checkpoint_id", "parent_checkpoint", "covered_segment", "sequence", "revision", "state"],
-      "additionalProperties": false
+        "head_version": { "const": "cymule.durable-head/2" },
+        "revision": { "$ref": "#/$defs/content_id" },
+        "state_root_manifest_id": { "$ref": "#/$defs/content_id" },
+        "machine_base_anchor": { "oneOf": [{ "$ref": "#/$defs/machine_base_anchor" }, { "type": "null" }] },
+        "sequence": { "$ref": "#/$defs/exact_integer" },
+        "gc_sequence": { "$ref": "#/$defs/exact_integer" },
+        "physical_token": { "$ref": "#/$defs/physical_token" },
+        "gc_receipt": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] }
+      }
     },
     "gc_receipt": {
-      "type": "object",
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "receipt_version", "receipt_id", "revision", "retained_state_root",
+        "parent_physical_token", "result_physical_token", "gc_sequence", "sequence",
+        "reclaimed_digest", "reclaimed_ids", "reclaimed_objects", "remaining_objects"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "reclaimed_ids": { "maxItems": 0 } },
+            "required": ["reclaimed_ids"]
+          },
+          "then": {
+            "properties": {
+              "reclaimed_objects": { "const": 0 },
+              "remaining_objects": { "const": 0 }
+            }
+          },
+          "else": {
+            "properties": { "reclaimed_objects": { "minimum": 1 } }
+          }
+        }
+      ],
       "properties": {
-        "receipt_version": { "const": "cymule.durable-gc-receipt/1" },
-        "receipt_id": { "$ref": "#/$defs/identity" },
-        "revision": { "$ref": "#/$defs/identity" },
-        "retained_checkpoint": { "$ref": "#/$defs/identity" },
-        "reclaimed_digest": { "$ref": "#/$defs/identity" },
-        "reclaimed_ids": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/identity" },
-          "uniqueItems": true
-        },
-        "reclaimed_objects": { "type": "integer", "minimum": 0 }
-      },
-      "required": ["receipt_version", "receipt_id", "revision", "retained_checkpoint", "reclaimed_digest", "reclaimed_ids", "reclaimed_objects"],
-      "additionalProperties": false
+        "receipt_version": { "const": "cymule.durable-gc-receipt/2" },
+        "receipt_id": { "$ref": "#/$defs/content_id" },
+        "revision": { "$ref": "#/$defs/content_id" },
+        "retained_state_root": { "$ref": "#/$defs/content_id" },
+        "parent_physical_token": { "$ref": "#/$defs/physical_token" },
+        "result_physical_token": { "$ref": "#/$defs/physical_token" },
+        "gc_sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "sequence": { "$ref": "#/$defs/exact_integer" },
+        "reclaimed_digest": { "$ref": "#/$defs/digest" },
+        "reclaimed_ids": { "type": "array", "maxItems": 262144, "uniqueItems": true, "items": { "$ref": "#/$defs/content_id" } },
+        "reclaimed_objects": { "type": "integer", "minimum": 0, "maximum": 262144 },
+        "remaining_objects": { "$ref": "#/$defs/exact_integer" }
+      }
     }
   },
   "oneOf": [
     { "$ref": "#/$defs/head" },
-    { "$ref": "#/$defs/segment" },
-    { "$ref": "#/$defs/checkpoint" },
-    { "$ref": "#/$defs/gc_receipt" }
+    { "$ref": "#/$defs/state_root_object" },
+    { "$ref": "#/$defs/gc_receipt" },
+    { "$ref": "#/$defs/command_archive_object" }
   ]
 }

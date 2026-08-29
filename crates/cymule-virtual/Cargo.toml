@@ -1,6 +1,6 @@
 [package]
 name = "cymule-virtual"
-description = "Provider-neutral bounded virtual-work scheduling for Cymule"
+description = "Typed provider adapters for Cymule's normalized Virtual-work profile"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,15 +13,17 @@ publish.workspace = true
 
 [dependencies]
 cymule-core.workspace = true
-cymule-durable.workspace = true
+cymule-profile-protocol.workspace = true
 cymule-resource.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+cymule-durable.workspace = true
+cymule-durable-protocol.workspace = true
 cymule-resource-fs = { path = "../../plugins/resource-fs" }
+cymule-runtime.workspace = true
+serde_json.workspace = true
 tempfile = "3.27.0"

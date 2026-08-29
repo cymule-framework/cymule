@@ -1,2 +1,18 @@
-#!/bin/sh
-printf '%s\n' '{"outcome":"success","engine_protocol":"cymule.engine/2","response":{"type":"durable_executed","response":{"type":"run","run":{"revision":"sha256:fake","continuation":{"run_id":"run:fake","plan_id":"sha256:fake","binding_context":"sha256:fake","frames":[],"state":null,"wait_set":[],"scope_stack":[],"effect_obligations":[],"authority_leases":[],"budget":{},"causal_frontier":[],"epoch":0,"status":"ready","forged":true},"waits":[],"effects":[],"result":null}}}}'
+#!/usr/bin/python3
+import json
+import sys
+
+request = json.load(sys.stdin)["request"]
+forged_response = json.loads(
+    r'''{"type":"durable_executed","response":{"type":"run","run":{"revision":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","continuation":{"continuation_version":"cymule.continuation-state/1","run_id":"run:fake","plan_id":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","binding_context":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","frames":[{"definition_id":"main","invocation_id":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","invocation_path":[],"scope_id":"scope:root","input":{"identity_version":"cymule.artifact/2","artifact_id":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","kind":"cymule.input/1"},"region_path":[],"next_step":0,"locals":{}}],"state":null,"wait_set":["wait:fake"],"scope_stack":["scope:root"],"epoch":0,"execution_fence":0,"execution_claim":null,"status":"waiting"},"waits":[{"wait_id":"wait:fake","run_id":"run:fake","kind":{"kind":"signal","key":"signal:fake"},"consume_once":true,"owner":{"invocation_id":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","definition_id":"main","site_id":"wait.fake","region_path":[],"step_index":0,"bind":null},"state":"forged","result":null}],"effects":[],"component_occurrences":[],"operation_attempts":[],"result":null,"execution_status":{"status":"active"},"world_settlement":"settled"}}}'''
+)
+json.dump(
+    {
+        "outcome": "success",
+        "engine_protocol": "cymule.engine/4",
+        "request": request,
+        "response": forged_response,
+    },
+    sys.stdout,
+    separators=(",", ":"),
+)

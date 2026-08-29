@@ -8,6 +8,7 @@
   ],
   "$defs": {
     "schema": {
+      "description": "Rust admission bounds the complete schema Value before cloning, hashing, or compiling: at most 1048576 encoded bytes, 16384 JSON value nodes, and depth 64 with the root at depth one. Local schema references must resolve without cycles; expanded traversal admits at most depth 64, 65536 schema visits, and 16777216 cumulative canonical subschema bytes, counting each repeated reference. These aggregate semantic budgets are not expressible by JSON Schema shape validation alone.",
       "oneOf": [{ "type": "boolean" }, { "type": "object" }]
     },
     "kind": {

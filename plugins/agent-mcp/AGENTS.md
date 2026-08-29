@@ -7,9 +7,10 @@
   negotiation, transports, cancellation, tasks, or OAuth.
 - Preserve the caller's `tool_call_id` and the configured immutable MCP binding.
   MCP tool name and arguments map exactly; non-object arguments fail closed.
-- Text and structured JSON map directly. Resource links retain opaque URI and
-  MIME type. Inline binary/image/audio content requires a Resource adapter and
-  returns recovery-required instead of embedding unbounded base64 in Session.
+- Text and structured JSON map directly. Resource links and embedded Resource
+  content require an application Resource adapter to resolve and seal a
+  `ResourceHandle`; this adapter returns recovery-required instead of retaining
+  an opaque URI or embedding provider content in Session.
 - A tool-level MCP error is a host failure. `input_required` or task results are
   explicit incomplete work and must not be silently driven as an Agent Loop.
 - Sync calls own a private Tokio runtime and must run on a synchronous worker or

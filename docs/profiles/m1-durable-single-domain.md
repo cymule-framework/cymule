@@ -1,133 +1,211 @@
 # M1 Durable Single-Domain Profile
 
-Status: implemented for one production single-domain authority.
+Status: partial. The terminal implementation is integrated in the worktree;
+complete repository validation and independent review remain in progress. This
+document describes the current authority boundaries, not a production rollout
+or an assertion that every conformance gate has passed.
 
-## Implemented profile
+The [semantic specification](../specification.md) is the single normative
+source. This profile maps those laws to the current Durable control and Store
+boundaries rather than defining a second state machine.
 
-- portable `cymule.machine-snapshot/5` with deterministic projection rebuild,
-  restored command deduplication, full Effect preimages/profiles, authenticated
-  compacted command/Event evidence, and strict rejection of earlier versions;
-- cumulative causally closed Event-prefix compaction into an authenticated base
-  projection plus exact full suffix, with M1 receipts, stale-CAS rejection,
-  repeated compaction lineage, old-command replay, tamper rejection, and
-  lost-acknowledgement reopen;
-- provider-neutral segmented `DurableStore`: small CAS head, immutable
-  typed content-addressed deltas, incremental revision hash chain, fixed-size
-  checkpoint manifests at a fixed pack bound, authenticated reopen, and
-  explicit receipt-backed cold base compaction;
-- multi-Run domain creation: the first Run initializes the durable state and
-  every later Run atomically appends its exact Plan, input, start/attempt
-  Events, command receipts, and initial Continuation without resetting existing
-  Runs; identical start replay returns the retained boundary and conflicting
-  Plan/input reuse fails closed;
-- typed, self-validating higher-profile journals committed by the same M1 CAS,
-  allowing M2-M4 state to share one durable authority without entering the
-  semantic kernel;
-- atomic multi-journal checkpoints with conflict-before-CAS rollback, used when
-  one higher-profile transition publishes several typed projections;
-- complete typed Continuation fields for frame, state, waits, scopes,
-  obligations, leases, budget, causal frontier, and epoch;
-- `cymule.durable-state/3` frames with separate definition, structural
-  invocation, immutable input Artifact, nested Region path, locals, and next
-  step;
-- idempotent wait registration/completion;
-- identified `cymule.wait-activation/1` signal and timer receipts with declared
-  source matching, atomic result/wait/Continuation updates, broadcast delivery,
-  consume-once winner enforcement, redelivery idempotency, and stale-writer
-  rejection;
-- rebuildable parked signal/timer indexes with deterministic bounded selection,
-  exact target validation, one-consumer signal selection, and timer occurrence
-  isolation;
-- replaceable `WaitSourceDriver` receive/acknowledge interface with a hard
-  target bound and restart test proving acknowledgement loss redelivers one
-  already committed activation;
-- restart-safe `Ready` resumption that advances the epoch and commits a new
-  fenced Attempt after the wait-owning Attempt has yielded;
-- atomic wait-activation plus higher-profile journal checkpoints, used to keep
-  M1 Continuations and M3 indexed wake projections in one CAS revision;
-- exact-Artifact plus higher-profile journal checkpoints that reject unrelated
-  Machine mutations, used for M3 terminal and failure evidence;
-- logical-clock authority leases and fencing epochs;
-- previewed authority leases atomically committed with higher-profile journal
-  records, including stale-CAS rollback and lost-receipt reopen, used by M3
-  worker capacity-slot claims and renewals;
-- effect outbox enqueue, claim, settlement, and explicit `unknown`;
-- repeated reconciliation of an `unknown` outbox entry under its original
-  claim, including process reopen between `still_unknown` and terminal
-  resolution without a second dispatch;
-- canonical component occurrence inputs, outputs, binding, and revision;
-- portable snapshot metadata;
-- provider-neutral `cymule.resource/2` semantic handles for inline values, objects,
-  collections, directories, and sandbox/workspace snapshots, with
-  content-verified, resolver-required, and live-only replay classification;
-- separate replaceable locator sets, bounded chunk and content-manifest-proof
-  list resolution, chunked stores with verified staging/chunk cleanup, exact
-  lifecycle receipts, and M1 typed Run-to-Run handoff journals with producer
-  occurrence/result provenance, idempotent transfer IDs, and reopen replay;
-- atomic handoff-to-input activation that stores the canonical Resource Handle
-  Artifact, transfer and activation records, input-wait completion, and
-  Continuation readiness in one M1 CAS, including lost-receipt replay;
-- Rust, TypeScript, Python, and Go Resource builders sealed to one shared ID by
-  the trusted Rust Engine;
-- non-blocking shared-memory CAS reference and atomic directory-store adapter;
-- resumable sequential `call`/`wait` interpretation with process reopen, epoch
-  advance, and component-result replay without reinvocation;
-- nested Region interpretation with index-only persisted frame paths, durable
-  scope stacks, child-result binding, and restart-safe child commit;
-- reusable definition invocation with isolated input/locals, deterministic
-  invocation identity, result binding, wait/reopen recovery, and component
-  occurrence replay without reinvocation;
-- nested commit-gated effects that remain staged while their child scope is
-  open and dispatch exactly once after a durable child commit, including lost
-  enqueue and child-commit receipt recovery;
-- observational eager effects that settle and durably bind their result before
-  scope commit, including claim, `Unknown`, and settlement receipt loss;
-- explicit-release effects that remain prepared after scope commit, expose a
-  stable release-required outcome, and replay a caller-authorized release and
-  completed Result without duplicate dispatch;
-- commit-gated root effects with atomic outbox enqueue, fenced
-  `DispatchStarted`, settlement, and reconciliation recovery;
-- stage-specific canonical delta validation that permits only the exact effect
-  Events, command receipts, and input/result Artifacts corresponding to enqueue,
-  claim, observation, or reconciliation; unrelated Machine changes fail before
-  CAS;
-- atomic `Unknown` observation Event plus outbox publication, including the
-  recovery path from a committed `DispatchStarted` claim;
-- crash-after-provider-application tests proving one or more restarts perform
-  reconciliation without a second dispatch;
-- fault tests for lost prepare response and lost durable receipts after enqueue,
-  root scope commit, dispatch-start claim, Applied settlement, and Unknown
-  observation, with exact prepare/dispatch/reconcile call counts across reopen;
-- reopen, interrupted-staging, stale-writer, stale-claim, and idempotency tests.
-- lost-acknowledgement recovery for later Run creation, proving reopen resumes
-  one committed Run without duplicate start Events or component invocation.
-- closed `cymule.durable-control/1` start, resume, wait-admission,
-  effect-release, Run-query, and domain-query commands, with one Rust admission
-  authority and Rust, TypeScript, Python, and Go transport contracts;
-- real child-process death before and after every CAS in a complete mutating
-  effect Run, with SQLite reopen, Machine replay, terminal outbox inspection,
-  and independent provider dispatch/reconciliation counts;
-- official production adapters for SQLite/atomic-directory state, filesystem
-  and conditional object Resources, persistent HTTP signals, durable timers,
-  and restart-monotonic logical clock observations.
+## One durable authority
 
-No concrete storage product is part of this profile. An adapter conforms only
-when immutable-object insertion and head movement are atomic, reopen is bounded,
-and it passes the stale-head, acknowledgement-loss, crash, tamper, and GC suite.
+The semantic kernel owns Plans, admitted materials, Runs, Attempts, Scopes,
+Effects, Events, and complete command batches. It performs no provider I/O.
+`cymule-durable-protocol` owns the lower Clock, Continuation, execution-claim,
+wait-owner, and activation contracts. Higher profiles do not redefine them.
 
-Version decision: segmented storage uses independent
-`cymule.durable-head/1`, `cymule.durable-segment/2`,
-`cymule.durable-checkpoint/1`, and `cymule.durable-gc-receipt/1` physical
-contracts. Segment v2 replaces whole-Machine operations with the closed
-`cymule.machine-delta/1` transition and has no v1 reader or dual authority.
-This does not change `cymule.durable-state/2`. Terminal Resources replace the pre-release descriptor and
-handoff domains with `cymule.resource/2` and `cymule.resource-handoff/3`.
-There is no `/1` compatibility reader or dual authority. Locator sets,
-manifests/list proofs, and lifecycle receipts use independent `/1` domains.
-Identified signal/timer admission introduces
-the independent `cymule.wait-activation/1` record inside M1 durable state. The
-additive activation map defaults empty when older M1 state is read. The
-`cymule.durable-control/1` domain is additive and delegates all reduction to
-Rust. These additions do not further alter `cymule.semantic/4`, `cymule-core`,
-`ArtifactRef`, Event, or Continuation wire shapes; they implement the existing
-resource, durable-wait, consume-once, and epoch-fencing laws.
+`DurableCoordinator` owns admission against one pinned StateRoot. A runtime
+control binds the exact execution providers and Clock; store-only controls do
+not acquire execution authority merely to read or mutate unrelated profile
+state. The public controls accept closed commands, never caller-authored
+Continuations, postconditions, arbitrary transactions, or raw Event appends.
+
+The Store publishes immutable authenticated map/log objects and moves one small
+CAS head over a fixed manifest. Opening a coordinator authenticates that head
+and manifest. Commands resolve their bounded typed neighborhoods on demand;
+ordinary reopen does not reconstruct a whole Machine, profile snapshot,
+application journal, or complete parked-wait index. Exact historical reads and
+full offline audit are distinct operations.
+
+## Execution and recovery
+
+Parameter-free initialization may publish an empty domain first; it admits no
+Run or provider work. `StartRun` admits the exact sealed Plan, input, and
+execution-binding material together with `RunStarted`, the first
+`AttemptStarted`, the Running
+Continuation, and its execution claim in one CAS. Later Runs do not replace
+existing Runs or their material. Accepted Start replay preserves the exact
+Plan/input/binding and observes the retained boundary; a Running Run remains
+Busy, while an ordinary Ready Run requires Resume. Before consulting the Clock,
+Start performs one exact hot/cold command lookup. A retained command validates
+its complete singleton batch and exact Plan, binding, and input leaves; a truly
+absent command and Run proceeds to the fresh Clock-guarded admission without
+constructing and discarding a duplicate Machine stage. Exact replay therefore
+does no Clock or provider work, while a fresh Start remains subject to both the
+admitted execution capability and current-Clock guard.
+
+A Running Continuation has exactly one issued claim. Resume from Ready advances
+its epoch, starts a new Attempt, and acquires its fence in the same CAS.
+Unexpired ownership returns Busy before business Call or Effect invocation.
+CLI Describe preflight is separate from that admission. Recovery is an explicit
+takeover of the exact old fence after current-scope Clock evidence proves
+expiry. Expiry alone changes no state. A current-head Clock guard must enclose
+the final Store CAS; historical receipts are replay evidence, not new authority.
+
+A component Call persists a semantic occurrence and a provider Attempt before
+I/O. The occurrence is Pending or Completed; the Attempt is Running,
+Superseded, or Completed. Only a newly admitted Attempt permits provider
+invocation. Re-reading an existing Running Attempt returns InFlight, including
+after a lost CAS response. Takeover supersedes the old Attempt; later admission
+may create another Attempt for the same occurrence. A legacy Call can therefore
+repeat provider cost after recovery and is not an exactly-once world effect.
+
+The occurrence retains its Attempt count and exact latest-Attempt identity;
+each successor Attempt pins its predecessor. Admission resolves that bounded
+frontier rather than replaying every earlier Attempt.
+
+A component result, outcome, Attempt completion, occurrence completion, and
+post-call Continuation share one CAS under the current claim. The result must
+validate against the exact origin Plan's output schema before canonicalization
+under the declared Artifact kind. Invalid output completes neither record:
+the occurrence remains Pending and the Attempt remains Running under its
+retained claim. Execution status and world settlement remain separate axes.
+An admitted `ExpectedFailure` that crossed a paged Core reservation is recovered
+from that retained transition, its exact staged detail Artifact, occurrence,
+Attempt, claim, and Continuation. Recovery rederives the original command and
+material and advances the same pages; it never calls the component or Clock
+again and exposes no caller-authored failure finalizer.
+
+## Effects, Scopes, and waits
+
+Effect identity is derived from semantic control position, not a worker,
+execution epoch, provider generation, or physical Store revision. Each outbox
+entry separately retains the origin Plan, execution-binding Artifact, derived
+operation binding, and claim fence.
+
+The current outbox payload has one Run-local authority in
+`RunQueryIndexes.effects`; the global intent map is only an immutable
+`intent -> Run` locator for intent-only controls. Active-effect and active-lease
+roots are Run-local derived memberships. No current dispatch payload is mirrored
+in a global map or recovered through a fallback reader.
+
+Enqueue, dispatch admission, observation, and reconciliation each couple their
+exact Core batch to the matching outbox and required Continuation transition. An
+ambiguous dispatch remains Unknown under the original intent. Reopen and
+reconciliation never redispatch it. Applied output is a canonical Artifact;
+an absent provider value becomes JSON null only if the pinned output contract
+accepts null. Invalid output cannot become an Applied receipt.
+
+Exact implementation loss before dispatch terminalizes the Effect as
+CancelledBeforeRelease/NotApplied without a claim or result. After dispatch,
+implementation loss retains Unknown and its original claim for governance.
+Public ResolveEffect accepts only that claimed Unknown boundary and requires
+the historical provider ledger; it is not a pre-dispatch settlement API or a
+current-provider fallback. Its receipt distinguishes the requested resolution
+from the provider's actual terminal decision.
+
+Nested invocation frames inherit their actual enclosing Scope. Scope
+descriptors use the Core-admitted body location. Complete small Scope
+neighborhoods may use a bounded inline proof; a standalone larger closure uses
+typed persisted page progress and one final semantic decision. Its progress
+CASes are not completed commands. A multi-command composite that cannot satisfy
+its inline contract fails with PagedScopeRequired before publication or provider
+I/O, rather than silently expanding a read budget.
+
+A parked wait pins its complete Plan-derived structural owner. Activation
+commits its value Artifact, completed wait, optional local result, and Ready
+Continuation together. The lazy revision-pinned parked-wait index supports
+bounded source and target selection; stale cursors are explicit.
+
+An activation receipt retains the complete selected target set, newly applied
+subset, and original Ready-Run set. Already terminal targets are nonwinners and
+cannot block valid broadcast peers. Exact receipt replay precedes pending-wait
+lookup. Transport acknowledgement follows the activation CAS and a lost
+acknowledgement redelivers that same identity and selection.
+
+Cancellation fences execution, supersedes in-flight provider Attempts, cancels
+pending waits and undispatched Effects, and retains dispatched ambiguity for
+reconciliation. Cancellation and explicit Effect resolution have separate
+typed receipt maps; neither is a reserved application-journal record.
+
+Wide failure and cancellation use the same Core-owned paged transition as their
+semantic authority. A Durable-private companion, identified by that transition
+rather than by a second cursor, advances hidden Run-local outbox roots with each
+Effect page. The final CAS publishes only that Run's completed Effect roots,
+Continuation, Attempt and outer receipt, preserving unrelated Run commits made
+between pages. While the Core Run is `Transitioning`, ordinary same-Run result,
+Attempt, Wait and Effect sidecars are fenced; only the exact transition may
+advance or finalize them.
+
+## Coupled higher profiles
+
+Resource, Virtual, Evolution, and optional Agent state use their own bounded,
+normalized keyed families. Their pure profile reducers own profile semantics;
+Durable resolves exact inputs and commits the profile mutation, material, and
+any coupled M1 transition in one CAS. An embedded receipt chain, global
+lifecycle journal, scheduler snapshot, or generic prepared-postcondition write
+is not a second authority.
+
+Resource transfer may publish a future slot for an Active Running target.
+Activation additionally requires the exact pending input wait and Waiting
+Continuation. Resource retention and deletion use the physical binding/content
+family; the semantic Resource ID is provenance.
+
+Virtual claims, wakeups, leases, terminal work, and archive pins remain exact
+normalized transitions. Evolution selection or safe-point migration couples its
+exact Plan and binding with the M1 transition. Profile-specific provider I/O
+uses a retained occurrence or admitted command boundary, never a recovered
+ambient provider.
+
+## Complete batch replay and compaction
+
+A command receipt contains an ordered Event vector. One persistent batch owns
+its complete ordered members, member receipts, material proposal, admission
+parent, frozen source, and resulting authority. Material-only admission is a
+nonempty material proposal with zero command members, not an empty fake command.
+Staged material is not committed authority.
+
+A causally closed compaction cut preserves complete batches and every retained
+batch's authenticated frozen-source dependency. Cut-time Plan, Artifact, and
+batch commitments remain separate from the final hot material inventory.
+Compaction does not change the semantic authority root.
+
+The current public maintenance entry is the Rust-only
+`DurableStoreControl::compact_machine_history(HistoryCompactionRequest)`.
+Callers supply a stable ID, exact source revision, EventPrefix or
+EventFreeAdmissions kind and requested suffix, not a replacement Machine.
+Durable resolves the pinned source, checks that pending material and paged
+transitions are absent, and consumes Core-prepared compaction authority. The
+explicit offline operation may process the complete source/base once; ordinary
+open and execution do not inherit that traversal. There is no Engine or SDK
+transport for this maintenance operation.
+
+The exact Store-pinned base anchor binds the independently stored command
+archive and its cumulative counts. Hot restoration uses that anchor and the
+retained suffix without scanning the cold archive; full replay and offline
+audit verify the complete archive explicitly. Zero-Event material batches,
+conflict receipts, sparse command-index proofs, and independent batch records
+remain part of that closure. Physical cold reclamation must preserve every
+reachable index, entry, batch, and profile object.
+
+Cold reclamation has two operations: reconcile the bounded deletion page named
+by the current head, or explicitly advance to the next page and head.
+Reconciliation never selects new work or silently advances a generation.
+
+## Conformance and versions
+
+The current exact-reject generations and their ownership are registered in
+[Version domains](../version-domains.md). Pre-StateRoot stores, old snapshot and
+wire generations, fallback decoders, and dual-write compatibility are not
+supported. Operator-owned one-time transitions are documented in
+[Migration runbooks](../migrations/README.md).
+
+A complete profile claim requires focused and whole-workspace tests for
+ordinary execution, illegal transitions, exact replay, stale writers, claim
+takeover, response loss, real process death, tampered reachable objects,
+compaction, cold reclamation, and all four SDK chains against the current Rust
+Engine. A passing mock or an older binary does not establish that claim.
+Directory and SQLite adapter conformance includes full reachable-root audit;
+ordinary reads must remain bounded independently of that offline operation.

@@ -10,9 +10,11 @@ Its purpose is to keep one live computation coherent when durability,
 transactional state, ambiguous world effects, authority, replay and historical
 forks, large virtual work, and live Plan evolution interact. Cymule's central
 runtime object is a **versioned effectful continuation**: durable,
-version-bound execution state that carries Plan identity, typed state, waits,
-scope, outstanding effect obligations, authority, budget, causal position, and
-a fencing epoch.
+version-bound execution state that carries Plan identity, typed frame/state,
+waits, scope, epoch, execution fence, and at most one active driver claim.
+Effect obligations, coordination leases, budget, and causal position remain in
+their owning Machine or durable-profile authority and are derived together for
+an exact-head quiescence decision.
 
 The public model stays deliberately small - `Flow -> Run -> Result`, with
 `call / wait / effect / scope` inside a Flow and `observe / decide / change`
@@ -22,24 +24,32 @@ are rebuildable projections. Languages, databases, queues, sandboxes,
 providers, and deployment topologies remain replaceable realizations rather
 than framework semantics.
 
-> **Project status:** Cymule `0.2.x` implements the complete single-domain
-> execution profile: durable suspension and recovery, honest effect handling,
-> bounded virtual work, safe live evolution, and an optional Agent interaction
-> plugin. It is not a distributed consensus system or an untrusted-code
-> isolation boundary. See the [roadmap](docs/roadmap.md) for those separate
-> future profiles.
+> **Project status:** the current unreleased source targets the complete
+> single-domain execution profile: durable suspension and recovery, honest
+> effect handling, bounded virtual work, safe live evolution, and an optional
+> Agent interaction plugin. Final cross-language, package, and release gates are
+> still required before these source APIs belong to a published version. Cymule
+> is not a distributed consensus system or an untrusted-code isolation
+> boundary. See the [roadmap](docs/roadmap.md) for those separate future
+> profiles.
 
 ## What Cymule gives you
 
 - **One Flow format across languages.** TypeScript, Python, Rust, and Go SDKs
-  produce the same frozen `cymule.ir/2` Plan, including reusable definition
+  produce the same frozen `cymule.ir/3` Plan, including reusable definition
   declaration and invocation.
 - **Stable program identity.** Validated Plans are canonicalized and assigned a
   content-addressed `PlanId`.
+- **Closed Engine correlation.** Every Engine v4 success echoes the complete
+  inner request the strict decoder executed, and SDKs compare it with their
+  actual sent wire before accepting the response. Failures have no request echo
+  because decoding itself may fail; the older response-only v4 success shape is
+  rejected.
 - **Safe command retries.** Repeating the same command returns the original
   receipt; reusing its ID for different work fails.
-- **Stale-worker protection.** Attempts are fenced by an epoch, so an older
-  worker cannot commit after ownership changes.
+- **Stale-worker protection.** Provider Attempts carry an execution fence that
+  is separate from semantic occurrence identity, so an older driver cannot
+  commit after ownership changes.
 - **Identified durable wake-ups.** Signal and timer deliveries carry stable
   activation identities, so redelivery is idempotent and consume-once winners
   are decided by durable CAS rather than worker timing.
@@ -53,8 +63,8 @@ than framework semantics.
   provider in the framework.
 - **Replaceable integrations.** Plans name abstract operations rather than
   queues, object stores, vendors, endpoints, or credentials.
-- **Deterministic state replay.** Canonical Events rebuild the same Run
-  projection and digest.
+- **Deterministic state replay.** Exact command records, receipts, admissions,
+  and canonical Events rebuild the same Run projection and digest.
 - **Safe reusable evolution.** Logical module references follow the newest
   compatible revision by default when a new Plan is linked, while every sealed
   Plan and admitted occurrence remains immutable and replayable.
@@ -81,7 +91,7 @@ turn, or wire protocol. Those are application-domain concerns. The separately
 owned [`plugins/agent-interaction`](plugins/agent-interaction/README.md) package
 shows how an Agent integration can lower Session updates, input waits, host
 occurrences, workspace changes, and finalized streams onto generic Cymule waits,
-effects, resources, and durable application journals. ACP, MCP, A2A, editor, and
+effects, resources, and typed durable profile controls. ACP, MCP, A2A, editor, and
 provider support belongs in additional plugins above that package, not in
 framework core, CLI, or SDK semantics.
 
@@ -92,7 +102,9 @@ Cymule ships a day-one adapter set without making any provider canonical:
 - SQLite and atomic-directory durable stores;
 - content-addressed filesystem and Apache `object_store` Resources;
 - acknowledgement-coupled HTTP signals and durable logical timers;
-- a restart-monotonic logical clock for leases and scheduling observations;
+- an exact-generation, restart-monotonic Clock receipt ledger with current-head
+  execution admission, exact historical replay, and lease/scheduling
+  observations;
 - a bounded process executor;
 - composable OpenTelemetry/OTLP observation;
 - official RMCP tool mapping above the optional Agent contracts.
@@ -102,6 +114,10 @@ See the [official plugin catalog](docs/plugins.md) for exact guarantees,
 limitations, mature dependencies, and the RocksDB assessment.
 
 ## How live evolution works
+
+**Implementation status:** source integration is in progress. Branch-wide
+verification, version-domain closure, package witnesses, and release evidence
+remain pending until the final source generation is frozen and all gates pass.
 
 Application source can reference a reusable module with
 `latest_compatible` (the default) or pin one exact revision. `latest` is an
@@ -118,19 +134,29 @@ authoring convenience, never a runtime pointer:
    rollback decisions backed by immutable observations.
 
 When state must cross Plan versions, Cymule derives a content-addressed proof
-from a ready, root-scoped durable Continuation with no waits, effect obligations,
-or authority leases. A pinned migration plugin supplies the transformed
-Artifact and evidence only after that proof matches durable authority. An
-explicit `restart_under_new_plan` authorization can instead start a distinct
-replacement Run under an exact Plan without reinterpreting old state.
+from a coordinator-owned exact-domain preflight: the durable Continuation is
+ready, root-scoped, and framed, with no pending wait, pending/claimed/unknown
+outbox entry, nonterminal Effect, unresolved blocking obligation, active
+Attempt, active effect-dispatch claim lease, or open nested scope. The final CAS
+consumes that same exact-head receipt. A coordination lease owns only its
+coordination resource and fence; it grants no capability authorization. A
+pinned migration plugin supplies the transformed Artifact and evidence only
+after that proof matches durable authority. An explicit
+`restart_under_new_plan` authorization can instead start a distinct replacement
+Run under an exact Plan without reinterpreting old state.
 Shadow execution,
 metrics, deployment, and traffic movement are also replaceable plugins; Cymule
 owns only their contracts, immutable receipts, and deterministic admission
 rules. TypeScript, Python, Rust, and Go expose the same
-`cymule.evolution-control/4` transport commands without duplicating the Rust
-controller.
+`cymule.evolution-control/5` transport commands without duplicating the Rust
+controller. Stateful live-evolution control changes use only `cymule.engine/4`
+and return one complete receipt with the exact journal, submitted command, and
+original outcome. An exact retry returns that outcome while preserving the
+latest visible journal state; reusing an ID for different work fails before
+migration or shadow plugin I/O. Engine v3 and live-evolution checkpoint v4 have
+no compatibility fallback.
 
-## Five-minute installed-package quick start
+## Five-minute source-checkout quick start
 
 Imagine a team evaluating hundreds of support cases through a model, Agent, or
 rules engine. The run is expensive and may last for hours. Halfway through:
@@ -144,31 +170,41 @@ expensive completed work, maintaining its own recovery database, or accepting
 results whose meaning changed halfway through the run.
 
 Cymule keeps completed work, applies a compatible update only to work that has
-not started, and rejects an incompatible update before it changes the run. You
-can author and seal a real Plan from published packages without cloning this
-repository:
+not started, and rejects an incompatible update before it changes the run. The
+API below describes the current unreleased source generation. Build that exact
+checkout instead of attributing it to an older registry version:
 
 ```sh
-cargo install cymule-cli --version 0.2.0
-npm install cymule@0.2.0
+git clone https://github.com/cymule-framework/cymule.git
+cd cymule
+cargo build -p cymule-cli -p cymule-test-adapter
+pnpm --dir sdk/typescript install --frozen-lockfile
+pnpm --dir sdk/typescript run build
 cat > quickstart.mjs <<'EOF'
-import { CliEngine, FlowBuilder } from "cymule";
+import { CliEngine, FlowBuilder } from "./sdk/typescript/dist/src/index.js";
 
 const candidate = new FlowBuilder("hello", {}, {})
-  .component("example.echo", {}, {}, { capability: "echo" })
+  .component(
+    "example.echo",
+    {},
+    {},
+    "cymule.component-output/1",
+    { capability: "echo" },
+  )
   .call("call.echo", "example.echo", { kind: "input" }, "message")
   .finish({ kind: "binding", name: "message" });
 
-console.log(new CliEngine().seal(candidate).plan_id);
+const plan = await new CliEngine("./target/debug/cymule").seal(candidate);
+console.log(plan.plan_id);
 EOF
 node quickstart.mjs
 ```
 
-The command prints the content-addressed Plan ID produced by the installed Rust
-engine. `@cymule/sdk@0.2.0` exports the identical TypeScript API. Applications
-bind their own immutable process plugin and use `DurableEngine` for real
-`start`, `get`, `resume`, `signal`, `release`, and `evolve` calls; SDKs never
-reduce durable state locally.
+The command prints the content-addressed Plan ID produced by the same-checkout
+Rust engine. Applications bind their own immutable process plugin and use
+`DurableEngine` for real
+`observe_clock`, `start`, `get`, `resume`, `takeover`, `signal`, `release`,
+`cancel`, and `evolve` calls; SDKs never reduce durable state locally.
 The local CLI executes registry, relink, rollout, observation, gate, pin, and
 restart evolution operations. Migration and shadow variants require a
 separately bound adapter/driver transport and fail closed when the local CLI has
@@ -178,21 +214,27 @@ The repository's larger evaluation demo runs real work, stops the worker after
 three results, upgrades the scoring policy, resumes the evaluation, and tries
 an unsafe update:
 
+Expected tour output after the example gate passes:
+
 ```text
 Cymule: safely upgrade a running evaluation
 
 Scenario        Evaluate 12 support tickets while the scoring policy changes.
-✓ Crash recovery  The worker stopped after 3 results; restart reused all 3.
-✓ Safe upgrade    3 completed results kept the original policy;
-                  9 future results used the update.
-✓ Compatibility   An incompatible scoring update was blocked before it changed work.
-✓ Outcome         12/12 finished without repeating completed evaluations.
+Crash recovery  The worker stopped after 3 results; restart reused all 3.
+Safe upgrade    3 completed results kept the original policy;
+                9 future results used the update.
+Compatibility   An incompatible scoring update was blocked before it changed work.
+Outcome         12/12 finished without repeating completed evaluations.
 ```
 
 What this gives an application:
 
-- **No duplicate cost after a crash.** Finished model calls, tool executions,
-  or batch items do not run again merely because the worker restarted.
+- **No repeat after a committed result.** A completed component occurrence is
+  replayed after restart, and terminal virtual work resumes from its retained
+  boundary. If a legacy component returned before its result CAS committed,
+  expiry-proven takeover creates a later fenced Attempt for the same semantic
+  occurrence and may repeat provider cost. Provider observations should use an
+  observational Effect or an integration-owned identified occurrence.
 - **Comparable historical results.** Every result keeps the exact program and
   policy that produced it, so an upgrade cannot rewrite history.
 - **Safe changes during long-running work.** Compatible updates can serve new
@@ -222,12 +264,12 @@ cargo run -p cymule-example-hello-world -- Ada --unknown-once
 The example checks what happened to the original action instead of blindly
 sending it again.
 
-Install the published Rust facade and engine CLI when embedding Cymule in your
-own application:
+Published packages may trail this source generation. Check the registry's exact
+versioned API before embedding a published facade or CLI:
 
 ```sh
-cargo add cymule
-cargo install cymule-cli
+cargo search cymule
+npm view cymule version
 ```
 
 ## Development
@@ -249,17 +291,20 @@ conformance family with:
 ## Author a Flow
 
 A Flow declares contracts and semantic steps. It does not select a concrete
-provider.
+provider. The following snippets target the same current source checkout built
+in the quick start above.
 
-This TypeScript example calls an abstract echo component, stages a mutating
-capture effect, and returns the component result:
+This TypeScript example calls a repeatable abstract echo component, stages a
+mutating capture effect, and returns the component result:
 
 ```ts
+import { resolve } from "node:path";
 import {
   CliEngine,
   FlowBuilder,
+  processPlugin,
   type EffectProfile,
-} from "cymule";
+} from "./sdk/typescript/dist/src/index.js";
 
 const captureProfile: EffectProfile = {
   mutation: "mutating",
@@ -270,28 +315,43 @@ const captureProfile: EffectProfile = {
 };
 
 const candidate = new FlowBuilder("echo_and_capture", {}, {})
-  .component("example.echo", {}, {}, { capability: "echo" })
-  .effectContract("example.capture", {}, {}, captureProfile, {
-    capability: "capture",
-  })
-  .call("call.echo", "example.echo", { kind: "input" }, "echoed")
+  .component("test.echo", {}, {}, "cymule.component-output/1", {})
+  .effectContract("test.capture", {}, {}, captureProfile, {})
+  .call("call.echo", "test.echo", { kind: "input" }, "echoed")
   .effect(
     "effect.capture",
-    "example.capture",
+    "test.capture",
     { kind: "binding", name: "echoed" },
     "primary",
   )
   .finish({ kind: "binding", name: "echoed" });
 
-const engine = new CliEngine();
-const plan = engine.seal(candidate);
-const result = engine.run(
+const engine = new CliEngine("./target/debug/cymule");
+const plan = await engine.seal(candidate);
+const result = await engine.run(
   plan,
   { message: "hello" },
-  "./path/to/example-plugin",
+  processPlugin({
+    executable: "./target/debug/cymule-test-adapter",
+    arguments: [],
+    environment: {
+      CYMULE_TEST_EFFECT_LEDGER_PATH: resolve("quickstart-effect-ledger.sqlite3"),
+    },
+    working_directory: null,
+    runtime_closure: {
+      "test-adapter-runtime": `sha256:${"e".repeat(64)}`,
+    },
+    timeout_ms: 60_000,
+    message_limit: 8 * 1024 * 1024,
+    closure_limit: 64 * 1024 * 1024,
+  }),
   "run:example",
 );
 ```
+
+Each `runtime_closure` value is the lowercase SHA-256 identity of a frozen
+provider-owned closure descriptor. A platform or architecture label is mutable
+compatibility metadata and is rejected as execution authority.
 
 The Python, Rust, and Go SDKs expose the same concepts with idiomatic builders.
 All four SDKs send Plan Candidates to the Rust engine; none implements a second
@@ -316,10 +376,10 @@ Inside a Flow: call | wait | effect | scope
 
 | Operation | Use it for |
 | --- | --- |
-| `call` | Calling an abstract component and binding its typed result. |
+| `call` | Repeatable, unclassified component computation. A Call whose response is lost before its result/outcome checkpoint may be invoked again. |
 | `wait` | Suspending for a signal, timer, or typed external input. |
-| `effect` | Performing an observation or a world-mutating action. |
-| `scope` | Grouping state/evidence decisions and controlling effect release. |
+| `effect` | Performing an identified observation or world mutation with explicit ambiguity policy. Only eager observations may bind a result. |
+| `scope` | Grouping state/evidence decisions in one auto-commit nested scope and controlling effect release. |
 
 A `Run` is the live handle. It can accumulate state, history, waits, and effect
 obligations before it produces a terminal `Result`.
@@ -332,54 +392,64 @@ or replay it. The trusted Rust Engine seals Resource Candidates just as it seals
 Plans, so every SDK receives the same location-independent `ResourceId`.
 
 ```ts
-import { CliEngine, ResourceBuilder } from "cymule";
+import { CliEngine, ResourceBuilder } from "./sdk/typescript/dist/src/index.js";
 
 const engine = new CliEngine("./target/debug/cymule");
 
-const note = engine.sealResource(
+const note = await engine.sealResource(
   ResourceBuilder.text("reviewed input", { purpose: "next-run-input" }),
 );
 
-const dataset = engine.sealResource(
+const dataset = await engine.sealResource(
   ResourceBuilder.external(
     "directory",
     "application/vnd.example.dataset-directory",
     {
       kind: "content",
-      digest: "sha256:...",
+      digest: "sha256:1595ab81c8146c8d835f06f95b40ecd7af852024b050f9a0400380cae8b1f37a",
       size: 48291,
     },
     {
-      manifest_version: "cymule.resource-manifest/1",
+      manifest_version: "cymule.resource-manifest/3",
       media_type: "application/vnd.cymule.resource-manifest+jsonl",
-      digest: "sha256:...",
+      // content_id("cymule.resource-manifest/3", { root_digest, size,
+      // entry_count, media_type }); this is not a raw-byte SHA.
+      digest: "sha256:1595ab81c8146c8d835f06f95b40ecd7af852024b050f9a0400380cae8b1f37a",
       size: 48291,
       entry_count: 120,
-      root_digest: "sha256:...",
+      root_digest: `sha256:${"4".repeat(64)}`,
     },
   ),
 );
+
+// A producer Run stores the sealed Resource Handle as one typed JSON Artifact.
+// The handoff pins that exact producer result; SDKs never derive this identity.
+const resourceArtifact = {
+  identity_version: "cymule.artifact/2",
+  artifact_id: `sha256:${"0".repeat(64)}`,
+  kind: `cymule.typed-json/sha256-${"1".repeat(64)}`,
+};
 
 const handoff = ResourceBuilder.handoff(
   "transfer:analysis-input",
   {
     run_id: "run:prepare",
-    occurrence_id: "occurrence:prepare:dataset",
-    result: {
-      identity_version: "cymule.artifact/2",
-      artifact_id: "sha256:...",
-      kind: "cymule.component-output/1",
-    },
+    occurrence_id: `sha256:${"5".repeat(64)}`,
+    result: resourceArtifact,
   },
   "run:analyze",
   "input.dataset",
-  dataset,
+  resourceArtifact,
 );
 ```
 
 `inline` and verified `content` Resources carry exact evidence independently of
 location; replay still requires retained inline bytes or a separate usable
-`cymule.resource-locators/1` record.
+`cymule.resource-locators/2` record. A descriptor admits at most 64 semantic
+annotations and 4 MiB of canonical JSON; one locator set admits at most 16
+locations and 256 KiB of canonical JSON. Public URLs are canonical ASCII
+HTTP(S) wires of at most 8,192 bytes, with uppercase non-redundant percent
+escapes.
 An immutable `version` requires its original resolver binding. A mutable `live`
 Resource is intentionally live-only and never advertised as exact replay.
 Public URLs must contain no credentials, query, or fragment; private object
@@ -387,6 +457,9 @@ stores, remote drives, sandboxes, and signed URLs use opaque resolver plugins.
 Directory, collection, and snapshot adapters expose bounded cursor pages with
 Merkle inclusion proofs against the exact content manifest, and
 large object reads/writes are chunked rather than loaded into memory.
+Provider-side locator/proof metadata uses
+`cymule.resource-catalog-record/2` with one protocol-owned 16 MiB canonical JSON
+limit that adapters enforce before materializing provider bytes.
 
 ## How Cymule handles failures
 
@@ -419,8 +492,9 @@ keeps reconciliation attached to the original effect identity.
 
 When a scope commits, it commits the internal decision and transfers unresolved
 world actions into effect obligations. It does not pretend those actions are
-already settled. Blocking obligations must reach an authoritative terminal
-outcome before the Run can complete.
+already settled. Every admitted effect, including an observational effect that
+creates no blocking obligation, must reach an authoritative terminal outcome
+before the Run can complete.
 
 ## Plans stay portable
 
@@ -484,14 +558,14 @@ See [Architecture](docs/architecture.md) and the
 | TypeScript SDK | Implemented | Builder and CLI-backed engine client. |
 | Python SDK | Implemented | Dependency-light builder and engine client. |
 | Go SDK | Implemented | Builder and engine client. |
-| Cross-Run Resources | Implemented | Four SDK builders, Rust sealing, bounded resolver/store interfaces, durable handoff journal, atomic input activation, and official filesystem/object-store adapters. |
-| Durable execution control | Implemented | Four-language start, resume, wait admission, effect release, Run query, and domain query commands admitted by Rust. |
+| Cross-Run Resources | Implemented | Four SDK builders, Rust sealing, bounded resolver/store interfaces, keyed handoff authority with per-target indexes, atomic input activation, and official filesystem/object-store adapters. |
+| Durable execution control | Implemented | Four-language issued-Clock observation with current-head claim admission and historical replay, start, resume, explicit takeover, wait admission, effect release, cancellation, Run query, and domain query commands admitted by Rust. |
 | Durable wait activation | Implemented | Identified signal/timer records, bounded parked indexes, persistent HTTP/timer sources, exact acknowledgement-loss replay, and reopen-safe epoch advance. |
-| Durable effect policies | Implemented | Nested commit gates, eager observation binding, explicit caller release, exact outbox deltas, and ambiguity reconciliation. |
+| Durable effect policies | Implemented | Nested commit gates, eager observation binding, explicit caller release, Run-local outbox authority, Core-bound paged failure/cancellation, and ambiguity reconciliation. |
 | Large virtual work | Implemented | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker recovery, durable checkpoints, and four SDK controls. |
 | Virtual work control | Implemented | Binding-pinned attempts, work/lease fencing, explicit recovery, closed dispositions, and four SDK transport interfaces. |
-| Live evolution | Implemented | Unified definition/DAG/rollout authority, compatible transitive relinking, durable occurrence pins, content-backed safe-point migration and shadow evidence, canary gates, and rollback. |
-| Agent interaction plugin | Optional, implemented | Session, occurrence, input, workspace, and stream contracts with host-kind and real process-death fault matrices. |
+| Live evolution | Implemented | Unified definition/DAG/rollout authority, compatible transitive relinking, complete Engine `/4` receipts, atomic `cymule.live-evolution-checkpoint/6` state, current-head historical replay, durable occurrence pins, content-backed safe-point migration and shadow evidence, canary gates, and rollback. |
+| Agent interaction plugin | Optional, implemented | Fresh-only identified host dispatch, head/count-pinned Context history, input/workspace coupling, capacity-safe staged/external streams, and real process-death fault matrices. |
 | Process plugin protocol | Implemented | JSON request/response reference transport. |
 | JSON Schema contracts | Implemented | Draft 2020-12 Plan and protocol schemas. |
 | MLIR workbench | Partial | Generic-operation syntax and MLIR 22 smoke validation. |
@@ -511,9 +585,10 @@ Today Cymule provides:
 - **Exact semantic execution:** sealed Plans, canonical identities, typed
   idempotent Commands, causal replay, fenced attempts and effects, and explicit
   reconciliation of ambiguous outcomes.
-- **Durable single-domain execution:** immutable delta segments behind a small
-  CAS head, bounded authenticated checkpoint-plus-suffix reopen, receipt-backed
-  cold reclamation, multi-Run state, complete Continuations, waits, outbox records, component occurrences, compaction,
+- **Durable single-domain execution:** one small CAS head over an immutable typed
+  StateRoot object graph, bounded active-state reopen plus exact historical
+  lookup, explicit receipt-backed cold reclamation, multi-Run state, complete
+  Continuations, waits, outbox records, component occurrences, compaction,
   four-language controls, and process-death recovery across every Run CAS.
 - **Large virtual work:** bounded materialization, deterministic fairness,
   portable snapshots, verified region changes, cold-history archival, and
@@ -530,8 +605,14 @@ framework core.
 Cymule does not claim distributed consensus or failover, strong multi-tenant
 isolation, provider-level exactly-once behavior, certification of every
 third-party provider configuration, or a complete MLIR dialect and lowering
-pipeline. Exact replay requires retained Events and Artifacts; exact execution
-replay additionally requires a durably recorded component occurrence.
+pipeline. Exact replay requires retained command/admission/Event closure and
+Artifacts; exact execution
+replay additionally requires a durably completed component occurrence outcome.
+Legacy component Call is not a provider exactly-once primitive: response loss
+before that result/outcome checkpoint is duplicate-possible. Use an
+observational eager Effect for a provider result that needs durable ambiguity
+handling, a mutating Effect for external changes, or the Agent plugin's
+identified host occurrence for Agent-domain work.
 
 See [Conformance](docs/conformance.md) for precise behavioral claims and
 [Roadmap](docs/roadmap.md) for the implementation sequence.
@@ -540,6 +621,8 @@ See [Conformance](docs/conformance.md) for precise behavioral claims and
 
 ```text
 crates/cymule-core      trusted Rust semantic kernel
+crates/cymule-durable-protocol closed Clock, Continuation, claim, and wait contracts
+crates/cymule-profile-protocol shared typed profile wire authority
 crates/cymule-durable   provider-neutral persistence and recovery contracts
 crates/cymule-evolution provider-neutral Plan DAG and rollout semantics
 crates/cymule-runtime   embedded interpreter and plugin host
@@ -573,6 +656,8 @@ scripts                 complete repository verification
 - [Roadmap](docs/roadmap.md) — durable execution, agent integration, large
   virtual work, live evolution, isolation, and formalization.
 - [Releasing](docs/releasing.md) — immutable npm and crates.io publication.
+- [Version domains](docs/version-domains.md) — generated exact protocol,
+  persistence, binding, receipt, schema, and package ownership.
 - [Official plugins](docs/plugins.md) — day-one adapters and provider boundaries.
 - [ADR 0001](docs/decisions/0001-small-rust-kernel.md) — why the authoritative
   kernel is small and Rust-first.

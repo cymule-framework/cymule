@@ -9,10 +9,14 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{Display, Formatter},
+    marker::PhantomData,
 };
 
-use cymule_core::{ArtifactRef, artifact_ref, canonical_bytes, content_id, sha256_bytes};
-use serde::{Deserialize, Serialize};
+use cymule_core::{
+    ArtifactRef, MAX_ARTIFACT_BYTES, artifact_ref, canonical_bytes, content_id, sha256_bytes,
+    validate_semantic_id,
+};
+use serde::{Deserialize, Serialize, de};
 
 use crate::{PLUGIN_VERSION, PluginManifest};
 
@@ -23,13 +27,27 @@ pub const RUNTIME_COMPOSITION_VERSION: &str = "cymule.runtime-composition/1";
 pub const BINDING_CONTEXT_ID_DOMAIN: &str = "cymule.binding-context/1";
 
 /// Frozen executable binding descriptor version and Artifact kind.
-pub const EXECUTION_BINDING_VERSION: &str = "cymule.execution-binding/2";
+pub const EXECUTION_BINDING_VERSION: &str = cymule_core::EXECUTION_BINDING_ARTIFACT_KIND;
 
 /// Domain separator for exact component and effect occurrence bindings.
 pub const OCCURRENCE_BINDING_ID_DOMAIN: &str = "cymule.occurrence-binding/1";
 
 const COMPONENT_SERVICE_NAMESPACE: &str = "cymule.plugin.component";
 const EFFECT_SERVICE_NAMESPACE: &str = "cymule.plugin.effect";
+/// Maximum provider descriptors in one runtime composition.
+pub const MAX_RUNTIME_PROVIDERS: usize = 64;
+/// Maximum provided or required services retained by one provider.
+pub const MAX_PROVIDER_SERVICES: usize = 256;
+/// Maximum distinct services across one complete composition graph.
+pub const MAX_RUNTIME_SERVICES: usize = 4_096;
+/// Maximum exact provider properties retained by one provider or Plan requirement map.
+pub const MAX_PROVIDER_PROPERTIES: usize = 256;
+/// Maximum selected component or Effect operations in one execution binding.
+pub const MAX_EXECUTION_OPERATIONS_PER_KIND: usize = 128;
+/// Maximum Unicode scalars in one composition token.
+pub const MAX_COMPOSITION_TOKEN_SCALARS: usize = 256;
+/// Maximum Unicode scalars in one provider property value.
+pub const MAX_PROVIDER_PROPERTY_VALUE_SCALARS: usize = 1_024;
 
 /// A versioned, provider-neutral runtime service contract.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -99,10 +117,13 @@ pub struct RuntimeProviderDescriptor {
     /// Concrete implementation identity and immutable revision.
     pub implementation: RuntimeImplementation,
     /// Exact service contracts realized by this provider.
+    #[serde(deserialize_with = "deserialize_provider_services")]
     pub provides: Vec<ServiceKey>,
     /// Exact service contracts required by this provider.
+    #[serde(deserialize_with = "deserialize_provider_services")]
     pub requires: Vec<ServiceKey>,
     /// Provider properties eligible for exact Plan requirement matching.
+    #[serde(deserialize_with = "deserialize_provider_properties")]
     pub properties: BTreeMap<String, String>,
     /// Digest of the provider configuration schema, never configuration values.
     pub configuration_schema_digest: String,
@@ -122,6 +143,21 @@ impl RuntimeProviderDescriptor {
                 ),
             });
         }
+        ensure_composition_count(
+            "provider provided-service count",
+            self.provides.len(),
+            MAX_PROVIDER_SERVICES,
+        )?;
+        ensure_composition_count(
+            "provider required-service count",
+            self.requires.len(),
+            MAX_PROVIDER_SERVICES,
+        )?;
+        ensure_composition_count(
+            "provider property count",
+            self.properties.len(),
+            MAX_PROVIDER_PROPERTIES,
+        )?;
         validate_token("provider ID", &self.provider_id)
             .and_then(|()| {
                 validate_token("implementation ID", &self.implementation.implementation_id)
@@ -185,6 +221,7 @@ pub struct BindingContextDescriptor {
     /// Descriptor format version.
     pub version: String,
     /// Normalized provider inputs sorted by provider identity.
+    #[serde(deserialize_with = "deserialize_runtime_providers")]
     pub providers: Vec<RuntimeProviderDescriptor>,
 }
 
@@ -197,6 +234,11 @@ impl BindingContextDescriptor {
     /// [`CompositionError::NonCanonicalBindingDescriptor`] for a non-normalized
     /// serialized value.
     pub fn verify(&self) -> Result<(), CompositionError> {
+        ensure_composition_count(
+            "runtime provider count",
+            self.providers.len(),
+            MAX_RUNTIME_PROVIDERS,
+        )?;
         if self.version != RUNTIME_COMPOSITION_VERSION {
             return Err(CompositionError::NonCanonicalBindingDescriptor);
         }
@@ -204,7 +246,7 @@ impl BindingContextDescriptor {
         if rebuilt.descriptor != *self {
             return Err(CompositionError::NonCanonicalBindingDescriptor);
         }
-        Ok(())
+        verify_composition_canonical_bound("runtime composition descriptor", self)
     }
 
     /// Compute the immutable identity stored as core's opaque binding string.
@@ -263,6 +305,11 @@ impl RuntimeCompositionGraph {
     /// Returns deterministic admission errors for invalid providers, duplicate
     /// services, missing or mismatched service revisions, or dependency cycles.
     pub fn build(providers: Vec<RuntimeProviderDescriptor>) -> Result<Self, CompositionError> {
+        ensure_composition_count(
+            "runtime provider count",
+            providers.len(),
+            MAX_RUNTIME_PROVIDERS,
+        )?;
         let mut providers = providers
             .into_iter()
             .map(RuntimeProviderDescriptor::normalize)
@@ -273,6 +320,20 @@ impl RuntimeCompositionGraph {
                 provider_id: duplicate.provider_id.clone(),
             });
         }
+        let total_services = providers.iter().try_fold(0_usize, |total, provider| {
+            total
+                .checked_add(provider.provides.len())
+                .and_then(|total| total.checked_add(provider.requires.len()))
+                .ok_or(CompositionError::CompositionLimitExceeded {
+                    subject: "runtime service count",
+                    maximum: MAX_RUNTIME_SERVICES,
+                })
+        })?;
+        ensure_composition_count(
+            "runtime service count",
+            total_services,
+            MAX_RUNTIME_SERVICES,
+        )?;
 
         let (service_providers, revisions) = index_services(&providers)?;
         let topology_indexes = deterministic_topology(&providers, &service_providers, &revisions)?;
@@ -295,14 +356,16 @@ impl RuntimeCompositionGraph {
             .collect::<Vec<_>>();
         bindings.sort_by(|left, right| left.service.cmp(&right.service));
 
-        Ok(Self {
+        let graph = Self {
             descriptor: BindingContextDescriptor {
                 version: RUNTIME_COMPOSITION_VERSION.to_owned(),
                 providers,
             },
             topology,
             bindings,
-        })
+        };
+        verify_composition_canonical_bound("runtime composition descriptor", &graph.descriptor)?;
+        Ok(graph)
     }
 
     /// Return normalized provider input used for content identity.
@@ -441,8 +504,10 @@ pub struct ExecutionBinding {
     /// Normalized provider graph input.
     pub context: BindingContextDescriptor,
     /// Exact selected component implementations.
+    #[serde(deserialize_with = "deserialize_execution_operations")]
     pub components: BTreeMap<String, ExecutionOperationBinding>,
     /// Exact selected effect implementations.
+    #[serde(deserialize_with = "deserialize_execution_operations")]
     pub effects: BTreeMap<String, ExecutionOperationBinding>,
 }
 
@@ -453,11 +518,21 @@ impl ExecutionBinding {
     /// may advertise operations which are not selected by the graph; those
     /// capabilities do not enter this binding. Every selected plugin service,
     /// however, must have an exact advertisement from its selected provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns a composition error when the graph, a manifest, or any selected
+    /// operation is invalid or inconsistent.
     pub fn admit(
         graph: &RuntimeCompositionGraph,
         manifests: &BTreeMap<String, PluginManifest>,
     ) -> Result<Self, CompositionError> {
         graph.descriptor.verify()?;
+        ensure_composition_count(
+            "runtime manifest count",
+            manifests.len(),
+            MAX_RUNTIME_PROVIDERS,
+        )?;
         for (provider_id, manifest) in manifests {
             verify_manifest_shape(manifest)?;
             let provider = graph
@@ -533,13 +608,21 @@ impl ExecutionBinding {
 
     /// Build the explicit single-process provider graph used by the CLI.
     ///
-    /// `implementation_revision` must be the digest of the selected executable
-    /// bytes. The resulting provider has no Plan properties; callers requiring
+    /// `implementation_revision` must be the process executor's canonical
+    /// identity for the complete captured executable, ordered arguments,
+    /// explicit environment, working tree, runtime closure, deadline, and byte
+    /// limits. The resulting provider has no Plan properties; callers requiring
     /// properties must supply an explicitly reviewed graph to [`Self::admit`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a composition error when the manifest or immutable process
+    /// revision cannot form a canonical single-provider binding.
     pub fn for_local_process(
         manifest: &PluginManifest,
         implementation_revision: impl Into<String>,
     ) -> Result<Self, CompositionError> {
+        verify_manifest_shape(manifest)?;
         let empty_digest = format!("sha256:{}", sha256_bytes(b"{}"));
         let provides = manifest
             .components
@@ -572,6 +655,11 @@ impl ExecutionBinding {
     }
 
     /// Verify canonical graph input and every selected operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a composition error when the version, provider graph, or any
+    /// selected operation differs from its canonical derivation.
     pub fn verify(&self) -> Result<(), CompositionError> {
         if self.version != EXECUTION_BINDING_VERSION {
             return Err(CompositionError::InvalidExecutionBinding {
@@ -581,6 +669,16 @@ impl ExecutionBinding {
                 ),
             });
         }
+        ensure_composition_count(
+            "selected component operation count",
+            self.components.len(),
+            MAX_EXECUTION_OPERATIONS_PER_KIND,
+        )?;
+        ensure_composition_count(
+            "selected Effect operation count",
+            self.effects.len(),
+            MAX_EXECUTION_OPERATIONS_PER_KIND,
+        )?;
         self.context.verify()?;
         let graph = RuntimeCompositionGraph::build(self.context.providers.clone())?;
         for (kind, operations) in [
@@ -611,11 +709,45 @@ impl ExecutionBinding {
                 }
             }
         }
-        Ok(())
+        verify_composition_canonical_bound("execution binding", self)
+    }
+
+    /// Decode one untrusted immutable binding under the Core Artifact byte
+    /// bound, reject duplicate JSON members, require canonical bytes, and
+    /// validate every closed collection and semantic invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed composition error before an oversized or non-canonical
+    /// binding can become execution authority.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CompositionError> {
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(CompositionError::CompositionLimitExceeded {
+                subject: "execution binding Artifact bytes",
+                maximum: MAX_ARTIFACT_BYTES,
+            });
+        }
+        let binding: Self = cymule_core::decode_json(bytes)
+            .map_err(|error| CompositionError::Encoding(error.to_string()))?;
+        binding.verify()?;
+        if canonical_bytes(&binding)
+            .map_err(|error| CompositionError::Encoding(error.to_string()))?
+            != bytes
+        {
+            return Err(CompositionError::InvalidExecutionBinding {
+                reason: "execution binding Artifact bytes are not canonical".to_owned(),
+            });
+        }
+        Ok(binding)
     }
 
     /// Verify one provider's live advertisement against its immutable subset.
     /// Extra advertised capability remains non-authoritative.
+    ///
+    /// # Errors
+    ///
+    /// Returns a composition error when the binding or manifest is invalid, the
+    /// provider is absent, or an advertised selected operation does not match.
     pub fn verify_provider_manifest(
         &self,
         provider_id: &str,
@@ -661,8 +793,119 @@ impl ExecutionBinding {
         Ok(())
     }
 
+    /// Verify only the exact provider operation selected for one admitted
+    /// occurrence. Historical providers and operations unrelated to this
+    /// occurrence are deliberately not live-admission dependencies.
+    ///
+    /// # Errors
+    ///
+    /// Returns a composition error when the operation is not selected or its
+    /// provider, implementation, revision, or reconciliation shape differs.
+    pub fn verify_operation_manifest(
+        &self,
+        kind: ExecutionOperationKind,
+        operation: &str,
+        manifest: &PluginManifest,
+    ) -> Result<(), CompositionError> {
+        if self.version != EXECUTION_BINDING_VERSION
+            || manifest.plugin_version != PLUGIN_VERSION
+            || manifest.implementation_id.is_empty()
+        {
+            return Err(CompositionError::ManifestMismatch);
+        }
+        let selected = match kind {
+            ExecutionOperationKind::Component => self.components.get(operation),
+            ExecutionOperationKind::Effect => self.effects.get(operation),
+        }
+        .ok_or_else(|| CompositionError::MissingOperationBinding {
+            kind,
+            operation: operation.to_owned(),
+        })?;
+        if selected.service != kind.service_key(operation) {
+            return Err(CompositionError::ManifestMismatch);
+        }
+        let provider = self
+            .context
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == selected.provider_id)
+            .ok_or(CompositionError::ManifestMismatch)?;
+        if provider.implementation != selected.implementation
+            || manifest.implementation_id != selected.implementation.implementation_id
+        {
+            return Err(CompositionError::ManifestMismatch);
+        }
+        let advertised = match kind {
+            ExecutionOperationKind::Component => manifest
+                .components
+                .get(operation)
+                .filter(|_| selected.can_reconcile.is_none())
+                .map(|value| (value.implementation_revision.as_str(), None)),
+            ExecutionOperationKind::Effect => manifest.effects.get(operation).map(|value| {
+                (
+                    value.implementation_revision.as_str(),
+                    Some(value.can_reconcile),
+                )
+            }),
+        };
+        if advertised != Some((selected.operation_revision.as_str(), selected.can_reconcile)) {
+            return Err(CompositionError::ManifestMismatch);
+        }
+        Ok(())
+    }
+
+    /// Prove that one historical operation pin names exactly the executable
+    /// provider already admitted by the runtime owner. This compares the
+    /// complete selected operation binding and complete immutable provider
+    /// descriptor while deliberately ignoring unrelated providers and
+    /// operation bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns a composition error when either binding is invalid, the operation
+    /// is absent, or its selected provider closure is not exactly equivalent.
+    pub fn verify_selected_operation_equivalence(
+        &self,
+        historical: &Self,
+        kind: ExecutionOperationKind,
+        operation: &str,
+    ) -> Result<(), CompositionError> {
+        self.verify()?;
+        historical.verify()?;
+        let current = match kind {
+            ExecutionOperationKind::Component => self.components.get(operation),
+            ExecutionOperationKind::Effect => self.effects.get(operation),
+        }
+        .ok_or_else(|| CompositionError::MissingOperationBinding {
+            kind,
+            operation: operation.to_owned(),
+        })?;
+        let origin = match kind {
+            ExecutionOperationKind::Component => historical.components.get(operation),
+            ExecutionOperationKind::Effect => historical.effects.get(operation),
+        }
+        .ok_or_else(|| CompositionError::MissingOperationBinding {
+            kind,
+            operation: operation.to_owned(),
+        })?;
+        let current_closure = resolved_provider_closure(self, &current.provider_id)?;
+        let origin_closure = resolved_provider_closure(historical, &origin.provider_id)?;
+        if current != origin || current_closure != origin_closure {
+            return Err(CompositionError::SelectedOperationMismatch {
+                kind,
+                operation: operation.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Verify a direct single-provider host. Multi-provider bindings must be
     /// executed by an admitted router which verifies each child independently.
+    ///
+    /// # Errors
+    ///
+    /// Returns a composition error when this is not a single-provider binding
+    /// or the live manifest does not realize its immutable selections.
     pub fn verify_single_provider_manifest(
         &self,
         manifest: &PluginManifest,
@@ -691,6 +934,11 @@ impl ExecutionBinding {
     }
 
     /// Admit every component and effect requirement before Run creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a composition error when the binding is invalid, a Plan operation
+    /// is unbound, or a selected provider does not meet its exact requirements.
     pub fn admit_plan(&self, plan: &cymule_core::SealedPlan) -> Result<(), CompositionError> {
         self.verify()?;
         let graph = RuntimeCompositionGraph::build(self.context.providers.clone())?;
@@ -716,12 +964,22 @@ impl ExecutionBinding {
     }
 
     /// Canonical bytes stored as the immutable Machine Artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a composition error when the binding is invalid or canonical
+    /// encoding fails.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, CompositionError> {
         self.verify()?;
         canonical_bytes(self).map_err(|error| CompositionError::Encoding(error.to_string()))
     }
 
     /// Content-addressed reference pinned by Run, Continuation, and Attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a composition error when validation, canonical encoding, or
+    /// Artifact reference derivation fails.
     pub fn artifact_ref(&self) -> Result<ArtifactRef, CompositionError> {
         let bytes = self.canonical_bytes()?;
         artifact_ref(EXECUTION_BINDING_VERSION, &bytes)
@@ -729,6 +987,11 @@ impl ExecutionBinding {
     }
 
     /// Deterministically derive one exact operation occurrence binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a composition error when the operation is not selected or the
+    /// execution binding cannot be encoded and content-addressed.
     pub fn occurrence_binding(
         &self,
         kind: ExecutionOperationKind,
@@ -757,8 +1020,11 @@ fn select_operation(
     operation_revision: &str,
     can_reconcile: Option<bool>,
 ) -> Result<ExecutionOperationBinding, CompositionError> {
-    validate_token("operation ID", operation)
-        .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
+    validate_semantic_id("operation", operation).map_err(|error| {
+        CompositionError::InvalidExecutionBinding {
+            reason: error.to_string(),
+        }
+    })?;
     validate_token("operation revision", operation_revision)
         .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
     let service = kind.service_key(operation);
@@ -779,36 +1045,60 @@ fn select_operation(
 }
 
 fn verify_manifest_shape(manifest: &PluginManifest) -> Result<(), CompositionError> {
-    if manifest.plugin_version != PLUGIN_VERSION {
-        return Err(CompositionError::ManifestMismatch);
+    manifest
+        .verify()
+        .map_err(|error| CompositionError::InvalidExecutionBinding {
+            reason: error.to_string(),
+        })
+}
+
+type ResolvedProviderClosure = (
+    Vec<RuntimeProviderDescriptor>,
+    Vec<(String, ServiceBindingDescriptor)>,
+);
+
+fn resolved_provider_closure(
+    binding: &ExecutionBinding,
+    root_provider: &str,
+) -> Result<ResolvedProviderClosure, CompositionError> {
+    let graph = RuntimeCompositionGraph::build(binding.context.providers.clone())?;
+    let mut pending = vec![root_provider.to_owned()];
+    let mut visited = BTreeSet::new();
+    let mut providers = Vec::new();
+    let mut edges = Vec::new();
+    while let Some(provider_id) = pending.pop() {
+        if !visited.insert(provider_id.clone()) {
+            continue;
+        }
+        let provider = graph
+            .descriptor
+            .providers
+            .iter()
+            .find(|candidate| candidate.provider_id == provider_id)
+            .ok_or(CompositionError::NonCanonicalBindingDescriptor)?;
+        providers.push(provider.clone());
+        for required in &provider.requires {
+            let selected = graph
+                .bindings
+                .binary_search_by(|candidate| candidate.service.cmp(required))
+                .ok()
+                .map(|index| graph.bindings[index].clone())
+                .ok_or(CompositionError::NonCanonicalBindingDescriptor)?;
+            edges.push((provider_id.clone(), selected.clone()));
+            pending.push(selected.provider_id);
+        }
     }
-    validate_token("plugin implementation ID", &manifest.implementation_id)
-        .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
-    for (operation, advertised) in &manifest.components {
-        validate_token("component operation ID", operation)
-            .and_then(|()| {
-                validate_token(
-                    "component implementation revision",
-                    &advertised.implementation_revision,
-                )
-            })
-            .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
-    }
-    for (operation, advertised) in &manifest.effects {
-        validate_token("effect operation ID", operation)
-            .and_then(|()| {
-                validate_token(
-                    "effect implementation revision",
-                    &advertised.implementation_revision,
-                )
-            })
-            .map_err(|reason| CompositionError::InvalidExecutionBinding { reason })?;
-    }
-    Ok(())
+    providers.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+    edges.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.service.cmp(&right.1.service))
+    });
+    Ok((providers, edges))
 }
 
 /// Runtime provider binding admission error.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompositionError {
     /// One provider descriptor is invalid.
     InvalidProvider {
@@ -882,6 +1172,13 @@ pub enum CompositionError {
         /// Advertised exact value.
         actual: String,
     },
+    /// A closed composition collection or canonical envelope exceeded its bound.
+    CompositionLimitExceeded {
+        /// Bounded composition surface.
+        subject: &'static str,
+        /// Exact admitted maximum.
+        maximum: usize,
+    },
     /// Canonical descriptor encoding failed.
     Encoding(String),
     /// The selected executable binding is malformed or inconsistent.
@@ -896,40 +1193,67 @@ pub enum CompositionError {
         /// Abstract operation ID.
         operation: String,
     },
+    /// The historical operation pin differs from the runtime owner's exact
+    /// current executable descriptor.
+    SelectedOperationMismatch {
+        /// Operation class.
+        kind: ExecutionOperationKind,
+        /// Abstract operation ID.
+        operation: String,
+    },
     /// The live capability advertisement differs from the immutable selection.
     ManifestMismatch,
 }
 
-impl Display for CompositionError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+impl CompositionError {
+    /// Stable closed code owned by this exact composition failure variant.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidProvider { .. } => "invalid_runtime_provider",
+            Self::DuplicateProviderId { .. } => "duplicate_runtime_provider",
+            Self::DuplicateServiceProvider { .. } => "duplicate_service_provider",
+            Self::MissingRequirement { .. } => "missing_runtime_requirement",
+            Self::RevisionMismatch { .. } => "runtime_revision_mismatch",
+            Self::DependencyCycle { .. } => "runtime_dependency_cycle",
+            Self::NonCanonicalBindingDescriptor => "noncanonical_binding_descriptor",
+            Self::UnboundService { .. } => "runtime_service_unbound",
+            Self::InvalidPlanRequirement { .. } => "invalid_plan_requirement",
+            Self::MissingProviderProperty { .. } => "missing_provider_property",
+            Self::ProviderPropertyMismatch { .. } => "provider_property_mismatch",
+            Self::CompositionLimitExceeded { .. } => "composition_limit_exceeded",
+            Self::Encoding(_) => "composition_encoding_failed",
+            Self::InvalidExecutionBinding { .. } => "invalid_execution_binding",
+            Self::MissingOperationBinding { .. } => "missing_operation_binding",
+            Self::SelectedOperationMismatch { .. } => "selected_operation_mismatch",
+            Self::ManifestMismatch => "execution_manifest_mismatch",
+        }
+    }
+
+    /// Human-readable detail for this typed variant. Control flow must use
+    /// [`Self::code`] and the variant itself, never this message.
+    #[must_use]
+    pub fn message(&self) -> String {
         match self {
             Self::InvalidProvider {
                 provider_id,
                 reason,
-            } => write!(
-                formatter,
-                "invalid runtime provider {provider_id}: {reason}"
-            ),
+            } => format!("invalid runtime provider {provider_id}: {reason}"),
             Self::DuplicateProviderId { provider_id } => {
-                write!(formatter, "duplicate runtime provider {provider_id}")
+                format!("duplicate runtime provider {provider_id}")
             }
-            Self::DuplicateServiceProvider { service, providers } => write!(
-                formatter,
+            Self::DuplicateServiceProvider { service, providers } => format!(
                 "service {service} has duplicate providers {}",
                 providers.join(", ")
             ),
             Self::MissingRequirement { consumer, required } => {
-                write!(
-                    formatter,
-                    "provider {consumer} requires missing service {required}"
-                )
+                format!("provider {consumer} requires missing service {required}")
             }
             Self::RevisionMismatch {
                 consumer,
                 required,
                 available,
-            } => write!(
-                formatter,
+            } => format!(
                 "provider {consumer} requires {required}, but only {} is available",
                 available
                     .iter()
@@ -937,42 +1261,51 @@ impl Display for CompositionError {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Self::DependencyCycle { providers } => write!(
-                formatter,
+            Self::DependencyCycle { providers } => format!(
                 "runtime provider dependency cycle: {}",
                 providers.join(", ")
             ),
             Self::NonCanonicalBindingDescriptor => {
-                formatter.write_str("binding context descriptor is not canonical")
+                "binding context descriptor is not canonical".to_owned()
             }
-            Self::UnboundService { service } => {
-                write!(formatter, "service {service} is not bound")
-            }
+            Self::UnboundService { service } => format!("service {service} is not bound"),
             Self::InvalidPlanRequirement { key, reason } => {
-                write!(formatter, "invalid Plan requirement {key:?}: {reason}")
+                format!("invalid Plan requirement {key:?}: {reason}")
             }
             Self::MissingProviderProperty { provider_id, key } => {
-                write!(formatter, "provider {provider_id} lacks property {key}")
+                format!("provider {provider_id} lacks property {key}")
             }
             Self::ProviderPropertyMismatch {
                 provider_id,
                 key,
                 required,
                 actual,
-            } => write!(
-                formatter,
+            } => format!(
                 "provider {provider_id} property {key} is {actual:?}; required {required:?}"
             ),
-            Self::Encoding(message) => write!(formatter, "composition encoding failed: {message}"),
+            Self::CompositionLimitExceeded { subject, maximum } => {
+                format!("{subject} exceeds the fixed maximum of {maximum}")
+            }
+            Self::Encoding(message) => format!("composition encoding failed: {message}"),
             Self::InvalidExecutionBinding { reason } => {
-                write!(formatter, "invalid execution binding: {reason}")
+                format!("invalid execution binding: {reason}")
             }
             Self::MissingOperationBinding { kind, operation } => {
-                write!(formatter, "missing {kind:?} binding for {operation}")
+                format!("missing {kind:?} binding for {operation}")
             }
-            Self::ManifestMismatch => formatter
-                .write_str("live plugin manifest does not match the immutable execution binding"),
+            Self::SelectedOperationMismatch { kind, operation } => format!(
+                "historical {kind:?} binding for {operation} does not match the admitted executable descriptor"
+            ),
+            Self::ManifestMismatch => {
+                "live plugin manifest does not match the immutable execution binding".to_owned()
+            }
         }
+    }
+}
+
+impl Display for CompositionError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message())
     }
 }
 
@@ -1070,27 +1403,191 @@ fn deterministic_topology(
 }
 
 fn validate_requirements(requirements: &BTreeMap<String, String>) -> Result<(), CompositionError> {
+    ensure_composition_count(
+        "Plan requirement count",
+        requirements.len(),
+        MAX_PROVIDER_PROPERTIES,
+    )?;
     for (key, value) in requirements {
         validate_property_key(key).map_err(|reason| CompositionError::InvalidPlanRequirement {
             key: key.clone(),
             reason,
         })?;
-        if value.is_empty() {
-            return Err(CompositionError::InvalidPlanRequirement {
+        validate_property_value("Plan requirement value", value).map_err(|reason| {
+            CompositionError::InvalidPlanRequirement {
                 key: key.clone(),
-                reason: "value must not be empty".to_owned(),
-            });
-        }
+                reason,
+            }
+        })?;
     }
     Ok(())
 }
 
+fn deserialize_provider_services<'de, D>(deserializer: D) -> Result<Vec<ServiceKey>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, ServiceKey, MAX_PROVIDER_SERVICES>(
+        deserializer,
+        "provider services",
+    )
+}
+
+fn deserialize_runtime_providers<'de, D>(
+    deserializer: D,
+) -> Result<Vec<RuntimeProviderDescriptor>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, RuntimeProviderDescriptor, MAX_RUNTIME_PROVIDERS>(
+        deserializer,
+        "runtime providers",
+    )
+}
+
+fn deserialize_provider_properties<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_map::<D, String, String, MAX_PROVIDER_PROPERTIES>(
+        deserializer,
+        "provider properties",
+    )
+}
+
+fn deserialize_execution_operations<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, ExecutionOperationBinding>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_map::<D, String, ExecutionOperationBinding, MAX_EXECUTION_OPERATIONS_PER_KIND>(
+        deserializer,
+        "execution operations",
+    )
+}
+
+pub(crate) fn deserialize_bounded_vec<'de, D, T, const MAX: usize>(
+    deserializer: D,
+    label: &'static str,
+) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct BoundedVecVisitor<T, const MAX: usize> {
+        label: &'static str,
+        marker: PhantomData<T>,
+    }
+
+    impl<'de, T, const MAX: usize> de::Visitor<'de> for BoundedVecVisitor<T, MAX>
+    where
+        T: Deserialize<'de>,
+    {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "{} with at most {MAX} entries", self.label)
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            if sequence.size_hint().is_some_and(|size| size > MAX) {
+                return Err(de::Error::invalid_length(MAX + 1, &self));
+            }
+            let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(MAX));
+            for _ in 0..MAX {
+                let Some(value) = sequence.next_element()? else {
+                    return Ok(values);
+                };
+                values.push(value);
+            }
+            if sequence.next_element::<de::IgnoredAny>()?.is_some() {
+                return Err(de::Error::invalid_length(MAX + 1, &self));
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedVecVisitor::<T, MAX> {
+        label,
+        marker: PhantomData,
+    })
+}
+
+pub(crate) fn deserialize_bounded_map<'de, D, K, V, const MAX: usize>(
+    deserializer: D,
+    label: &'static str,
+) -> Result<BTreeMap<K, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    K: Deserialize<'de> + Ord,
+    V: Deserialize<'de>,
+{
+    struct BoundedMapVisitor<K, V, const MAX: usize> {
+        label: &'static str,
+        marker: PhantomData<(K, V)>,
+    }
+
+    impl<'de, K, V, const MAX: usize> de::Visitor<'de> for BoundedMapVisitor<K, V, MAX>
+    where
+        K: Deserialize<'de> + Ord,
+        V: Deserialize<'de>,
+    {
+        type Value = BTreeMap<K, V>;
+
+        fn expecting(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "{} with at most {MAX} entries", self.label)
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::MapAccess<'de>,
+        {
+            if map.size_hint().is_some_and(|size| size > MAX) {
+                return Err(de::Error::invalid_length(MAX + 1, &self));
+            }
+            let mut values = BTreeMap::new();
+            for _ in 0..MAX {
+                let Some((key, value)) = map.next_entry()? else {
+                    return Ok(values);
+                };
+                if values.insert(key, value).is_some() {
+                    return Err(de::Error::custom(format!(
+                        "{} contains a duplicate key",
+                        self.label
+                    )));
+                }
+            }
+            if map
+                .next_entry::<de::IgnoredAny, de::IgnoredAny>()?
+                .is_some()
+            {
+                return Err(de::Error::invalid_length(MAX + 1, &self));
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_map(BoundedMapVisitor::<K, V, MAX> {
+        label,
+        marker: PhantomData,
+    })
+}
+
 fn validate_properties(properties: &BTreeMap<String, String>) -> Result<(), String> {
+    if properties.len() > MAX_PROVIDER_PROPERTIES {
+        return Err(format!(
+            "provider property count exceeds {MAX_PROVIDER_PROPERTIES}"
+        ));
+    }
     for (key, value) in properties {
         validate_property_key(key)?;
-        if value.is_empty() {
-            return Err(format!("provider property {key} has an empty value"));
-        }
+        validate_property_value(&format!("provider property {key}"), value)?;
     }
     Ok(())
 }
@@ -1122,14 +1619,59 @@ fn validate_property_key(key: &str) -> Result<(), String> {
 }
 
 fn validate_token(label: &str, value: &str) -> Result<(), String> {
-    if value.is_empty() {
-        return Err(format!("{label} must not be empty"));
+    let scalar_count = value.chars().count();
+    if scalar_count == 0 || scalar_count > MAX_COMPOSITION_TOKEN_SCALARS {
+        return Err(format!(
+            "{label} must contain 1..={MAX_COMPOSITION_TOKEN_SCALARS} Unicode scalar values"
+        ));
     }
-    if value.len() > 256 {
-        return Err(format!("{label} exceeds 256 bytes"));
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(format!(
+            "{label} must not contain whitespace or control characters"
+        ));
     }
-    if value.chars().any(char::is_whitespace) {
-        return Err(format!("{label} must not contain whitespace"));
+    Ok(())
+}
+
+fn validate_property_value(label: &str, value: &str) -> Result<(), String> {
+    let scalar_count = value.chars().count();
+    if scalar_count == 0
+        || scalar_count > MAX_PROVIDER_PROPERTY_VALUE_SCALARS
+        || value.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "{label} must contain 1..={MAX_PROVIDER_PROPERTY_VALUE_SCALARS} non-control Unicode scalar values"
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_composition_count(
+    subject: &'static str,
+    actual: usize,
+    maximum: usize,
+) -> Result<(), CompositionError> {
+    if actual > maximum {
+        return Err(CompositionError::CompositionLimitExceeded { subject, maximum });
+    }
+    Ok(())
+}
+
+fn verify_composition_canonical_bound<T: Serialize>(
+    subject: &'static str,
+    value: &T,
+) -> Result<(), CompositionError> {
+    let size = canonical_bytes(value)
+        .map_err(|error| CompositionError::Encoding(error.to_string()))?
+        .len();
+    if size > MAX_ARTIFACT_BYTES {
+        return Err(CompositionError::CompositionLimitExceeded {
+            subject,
+            maximum: MAX_ARTIFACT_BYTES,
+        });
     }
     Ok(())
 }

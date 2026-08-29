@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/plan-candidate.schema.json",
-  "title": "Cymule Plan Candidate cymule.ir/2",
+  "title": "Cymule Plan Candidate cymule.ir/3",
   "type": "object",
   "additionalProperties": false,
   "required": ["ir_version", "name", "entry", "components", "effects", "definitions", "metadata"],
   "properties": {
-    "ir_version": { "const": "cymule.ir/2" },
+    "ir_version": { "const": "cymule.ir/3" },
     "name": { "$ref": "#/$defs/id" },
     "entry": { "$ref": "#/$defs/id" },
     "components": { "type": "array", "items": { "$ref": "#/$defs/component" } },
@@ -15,16 +15,27 @@
     "metadata": { "type": "object", "additionalProperties": { "type": "string" } }
   },
   "$defs": {
-    "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9._\\-/:]+$"
+    },
     "schema": { "oneOf": [{ "type": "boolean" }, { "type": "object" }] },
+    "artifactKind": {
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^[a-z0-9._+-]+(?:/[a-z0-9._+-]+)+$"
+    },
     "component": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "input_schema", "output_schema", "requirements"],
+      "required": ["id", "input_schema", "output_schema", "output_artifact_kind", "requirements"],
       "properties": {
         "id": { "$ref": "#/$defs/id" },
         "input_schema": { "$ref": "#/$defs/schema" },
         "output_schema": { "$ref": "#/$defs/schema" },
+        "output_artifact_kind": { "$ref": "#/$defs/artifactKind" },
         "requirements": { "type": "object", "additionalProperties": { "type": "string" } }
       }
     },
@@ -129,10 +140,9 @@
     "scope": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "op", "mode", "body"],
+      "required": ["id", "op", "body"],
       "properties": {
         "id": { "$ref": "#/$defs/id" }, "op": { "const": "scope" },
-        "mode": { "enum": ["transactional", "speculative"] },
         "body": { "$ref": "#/$defs/region" }, "bind": { "$ref": "#/$defs/id" }
       }
     },

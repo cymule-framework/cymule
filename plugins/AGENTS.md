@@ -28,3 +28,13 @@
   configuration, not only executable bytes. Unix process occurrences use a
   fresh captured closure and an isolated process group; platform sandboxes
   remain separate plugins.
+- Executable capture accepts only a bounded regular file through a nonblocking,
+  no-symlink descriptor. FIFO, device, symlink, and over-limit inputs fail
+  before any invocation deadline could be bypassed. The closure limit covers
+  executable bytes plus the optional working tree.
+- Malformed closed-protocol JSON is a deterministic plugin defect for describe,
+  Call, migration, and shadow operations. The same response loss after Effect
+  dispatch starts remains unknown-world reconciliation.
+- Process owner cancellation is a typed cancellation before provider start and
+  for non-mutating invocations. Cancellation after Effect dispatch starts is an
+  unknown world outcome under the original intent, never a substrate retry.

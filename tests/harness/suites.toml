@@ -1,11 +1,16 @@
 schema_version = 2
+required_suites = ["version-domain-source"]
 
 [execution_classes.deterministic]
 description = "Replayable in-process, compiler, packaging, or static evidence with no external service authority."
 suites = [
   "docs",
+  "version-domain-source",
   "harness",
   "test-world-deterministic",
+  "rust-authenticated-collections",
+  "rust-durable-protocol",
+  "rust-profile-protocol",
   "rust-core",
   "rust-workspace",
   "rust-durable",
@@ -37,6 +42,7 @@ suites = [
   "example",
   "rust-soak",
   "rust-store-plugins",
+  "rust-directory-plugin",
   "rust-resource-plugins",
   "rust-executor-plugin",
   "rust-activation-http",
@@ -47,7 +53,6 @@ suites = [
 [execution_classes.live_provider]
 description = "Evidence against a real adapter or provider boundary, kept independent from deterministic semantics."
 suites = [
-  "rust-directory-plugin",
   "rust-portability",
   "rust-observability-plugin",
 ]
@@ -58,11 +63,17 @@ lane = "meta"
 tools = []
 commands = [["python3", "scripts/validate_docs.py"]]
 
+[suites.version-domain-source]
+description = "Close the exact public source snapshot and version-domain registry for every Required CI plan."
+lane = "version-domain"
+tools = ["uv"]
+commands = [["uv", "run", "--project", "sdk/python", "--frozen", "python", "scripts/version_domains.py", "verify-source-closure"]]
+
 [suites.harness]
 description = "Validate change routing and harness behavior."
 lane = "meta"
-tools = []
-commands = [["python3", "-m", "unittest", "discover", "-s", "tests/harness", "-p", "test_*.py"]]
+tools = ["uv"]
+commands = [["uv", "run", "--project", "sdk/python", "--frozen", "python", "-m", "unittest", "discover", "-s", "tests/harness", "-p", "test_*.py"]]
 
 [suites.test-world-deterministic]
 description = "Validate owned clocks, seeded traces, fault schedules, observations, and temporary domains."
@@ -75,6 +86,24 @@ description = "Prove managed child teardown reaches a barrier and reaps a forgot
 lane = "rust-durable"
 tools = ["rust"]
 commands = [["cargo", "test", "--package", "cymule-test-world", "--test", "live_process"]]
+
+[suites.rust-authenticated-collections]
+description = "Run authenticated map and log proof, paging, and corruption tests."
+lane = "rust-semantic"
+tools = ["rust"]
+commands = [["./scripts/verify-rust.sh", "cymule-authenticated-collections"]]
+
+[suites.rust-durable-protocol]
+description = "Run closed Durable DTO, identity, bound, and wire validation tests."
+lane = "rust-semantic"
+tools = ["rust"]
+commands = [["./scripts/verify-rust.sh", "cymule-durable-protocol"]]
+
+[suites.rust-profile-protocol]
+description = "Run provider-neutral profile DTO, reducer, and persistence-contract tests."
+lane = "rust-semantic"
+tools = ["rust"]
+commands = [["./scripts/verify-rust.sh", "cymule-profile-protocol"]]
 
 [suites.rust-workspace]
 description = "Run formatting, static analysis, and documentation for the Rust workspace."
@@ -95,13 +124,13 @@ tools = ["rust"]
 commands = [["./scripts/verify-rust.sh", "cymule-durable"]]
 
 [suites.rust-virtual]
-description = "Run M3 bounded scheduling, migration, compaction, and fault tests."
+description = "Run Virtual archive providers and public Durable scheduling/archive fault tests."
 lane = "rust-durable"
 tools = ["rust"]
 commands = [["./scripts/verify-rust.sh", "cymule-virtual"]]
 
 [suites.rust-evolution]
-description = "Run M4 evolution semantics and fault tests."
+description = "Run the closed Evolution process-provider wire and admission tests."
 lane = "rust-durable"
 tools = ["rust"]
 commands = [["./scripts/verify-rust.sh", "cymule-evolution"]]
@@ -128,7 +157,10 @@ commands = [["./scripts/verify-rust.sh", "cymule-directory-store"]]
 description = "Build the engine and validate frozen schemas and semantic rejection."
 lane = "protocol"
 tools = ["rust", "uv"]
-commands = [["./scripts/verify-protocol.sh"]]
+commands = [
+  ["./scripts/verify-protocol.sh"],
+  ["./scripts/verify-rust.sh", "cymule-test-adapter"],
+]
 
 [suites.sdk-rust]
 description = "Run the Rust SDK against the freshly built Rust engine."
@@ -181,10 +213,10 @@ commands = [["./scripts/verify-crates-package.sh"]]
 [suites.release-workflows]
 description = "Validate immutable Actions pins, least-privilege publication jobs, and public/private mirror separation."
 lane = "meta"
-tools = []
+tools = ["uv"]
 commands = [
-  ["python3", "scripts/verify_release_workflows.py"],
-  ["python3", "-m", "unittest", "tests.harness.test_release_security", "tests.harness.test_crates_release"],
+  ["uv", "run", "--project", "sdk/python", "--frozen", "python", "scripts/verify_release_workflows.py"],
+  ["uv", "run", "--project", "sdk/python", "--frozen", "python", "-m", "unittest", "tests.harness.test_release_security", "tests.harness.test_crates_release"],
 ]
 
 [suites.mlir]
@@ -201,7 +233,7 @@ tools = ["rust"]
 commands = [["./scripts/verify-soak.sh"]]
 
 [suites.rust-coverage]
-description = "Measure semantic Rust coverage against the recorded non-regression floor."
+description = "Measure semantic Rust and independent profile-protocol M4 coverage against their non-regression floors."
 lane = "rust-semantic"
 tools = ["rust"]
 commands = [["./scripts/verify-analysis.sh", "coverage"]]
@@ -219,7 +251,7 @@ tools = ["rust"]
 commands = [["./scripts/verify-analysis.sh", "mutation"]]
 
 [suites.rust-mutation-evolution-m4]
-description = "Prove M4 compatibility, safe-point, relink, and restart tests kill semantic mutations."
+description = "Prove profile-protocol M4 compatibility, safe-point, relink, edge, rollout, and restart tests kill semantic mutations."
 lane = "rust-semantic"
 tools = ["rust"]
 commands = [["./scripts/verify-analysis.sh", "mutation-evolution-m4"]]
@@ -296,9 +328,13 @@ description = "Run every required Cymule verification family."
 abstract = true
 requires = [
   "docs",
+  "version-domain-source",
   "harness",
   "test-world-deterministic",
   "test-world-live-process",
+  "rust-authenticated-collections",
+  "rust-durable-protocol",
+  "rust-profile-protocol",
   "rust-workspace",
   "rust-core",
   "rust-durable",
@@ -316,6 +352,7 @@ requires = [
   "package-rust",
   "release-workflows",
   "rust-store-plugins",
+  "rust-directory-plugin",
   "rust-resource-plugins",
   "rust-activation-http",
   "rust-activation-timer",
@@ -327,7 +364,7 @@ requires = [
 ]
 
 [suites.catalog]
-description = "Run every normal and scheduled verification leaf after harness catalog or runner changes."
+description = "Run every normal and scheduled verification leaf only when explicitly requested outside ordinary Required CI."
 abstract = true
 requires = [
   "full",
@@ -344,7 +381,10 @@ requires = [
 # select the owner plus the complete transitive Cargo reverse-dependency closure
 # through this table; compilation alone is not a behavioral witness.
 [package_suites]
+"cymule-authenticated-collections" = ["rust-authenticated-collections"]
 "cymule-core" = ["rust-core"]
+"cymule-durable-protocol" = ["rust-durable-protocol"]
+"cymule-profile-protocol" = ["rust-profile-protocol"]
 "cymule-runtime" = ["protocol"]
 "cymule-durable" = ["rust-durable"]
 "cymule-evolution" = ["rust-evolution"]
@@ -381,15 +421,39 @@ suites = ["package-rust", "release-workflows"]
 
 [[routes]]
 patterns = ["sdk/typescript/package.json", "sdk/python/pyproject.toml"]
-suites = ["package-rust", "package-typescript", "release-workflows"]
+suites = ["package-rust", "package-typescript", "release-workflows", "harness"]
 
 [[routes]]
-patterns = ["scripts/npm_release.py", "scripts/verify_release_workflows.py", "scripts/verify_github_release_settings.py"]
+patterns = ["sdk/python/uv.lock"]
+suites = ["sdk-python", "harness", "release-workflows"]
+
+[[routes]]
+patterns = ["scripts/npm_release.py", "scripts/finalize_release.py", "scripts/verify_release_workflows.py", "scripts/verify_github_release_settings.py"]
 suites = ["package-typescript", "release-workflows"]
+
+[[routes]]
+patterns = ["versioning/**", "scripts/version_domains.py", "tests/harness/test_version_domains.py"]
+suites = ["full"]
+
+[[routes]]
+patterns = ["schemas/version-domain-registry.schema.json", "schemas/release-bom.schema.json"]
+suites = ["full"]
 
 [[routes]]
 patterns = ["crates/cymule-core/tests/**"]
 suites = ["rust-core"]
+
+[[routes]]
+patterns = ["crates/cymule-authenticated-collections/**"]
+suites = ["rust-authenticated-collections"]
+
+[[routes]]
+patterns = ["crates/cymule-durable-protocol/**"]
+suites = ["rust-durable-protocol"]
+
+[[routes]]
+patterns = ["crates/cymule-profile-protocol/**"]
+suites = ["rust-profile-protocol"]
 
 [[routes]]
 patterns = ["crates/cymule-core/src/**", "crates/cymule-core/Cargo.toml", "crates/cymule-runtime/**", "crates/cymule-cli/**"]
@@ -484,6 +548,10 @@ patterns = ["schemas/**", "tests/fixtures/**", "scripts/validate_schemas.py"]
 suites = ["protocol", "sdk-rust", "sdk-typescript", "sdk-python", "sdk-go"]
 
 [[routes]]
+patterns = ["tests/fixtures/applied-effect-summary.json"]
+suites = ["rust-durable"]
+
+[[routes]]
 patterns = ["examples/**"]
 suites = ["example"]
 
@@ -493,7 +561,15 @@ suites = ["mlir"]
 
 [[routes]]
 patterns = ["tests/harness/suites.toml", "scripts/test_harness.py"]
-suites = ["catalog"]
+suites = ["full"]
+
+[[routes]]
+patterns = ["tests/harness/fixtures/retired-virtual-contracts.json"]
+suites = ["protocol", "rust-virtual"]
+
+[[routes]]
+patterns = ["tests/harness/fixtures/agent-workspace-checkpoint.json"]
+suites = ["protocol", "rust-durable"]
 
 [[routes]]
 patterns = ["tests/harness/**"]
@@ -521,11 +597,11 @@ suites = ["docs"]
 
 [[routes]]
 patterns = ["scripts/verify-soak.sh"]
-suites = ["rust-soak"]
+suites = ["full"]
 
 [[routes]]
 patterns = ["scripts/verify-analysis.sh"]
-suites = ["rust-coverage", "rust-coverage-plugins", "rust-mutation", "rust-mutation-evolution-m4", "rust-mutation-plugins"]
+suites = ["full"]
 
 [[routes]]
 patterns = ["scripts/verify-sdk.sh"]

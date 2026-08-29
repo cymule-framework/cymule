@@ -1,14 +1,25 @@
 {
-  "occurrence_version": "cymule.virtual-work-occurrence/2",
-  "occurrence_id": "sha256:e5195c71618aad53a091450520d0bbc02c559042a40a91215f3451324d89a941",
+  "occurrence_version": "cymule.virtual-work-occurrence/3",
+  "occurrence_id": "sha256:7ef6e10b0dfa444061dbbfd6bef7eaf6b14ceae318e860bd29c03f140905ecdf",
   "work_id": "work:fixture",
   "region_id": "region:fixture",
   "run_id": "run:fixture",
   "owner": "worker:fixture",
   "epoch": 1,
   "lease_epoch": 1,
+  "lease_clock": {
+    "clock_version": "cymule.clock-observation/2",
+    "observation_id": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+    "source_id": "clock:fixture",
+    "source_generation": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "scope": "slot:worker-fixture:0"
+  },
   "plan_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-  "occurrence_binding": "binding:worker/fixture@1",
+  "execution_binding": {
+    "identity_version": "cymule.artifact/2",
+    "artifact_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "kind": "cymule.execution-binding/2"
+  },
   "state": "succeeded",
   "result": {
     "identity_version": "cymule.artifact/2",

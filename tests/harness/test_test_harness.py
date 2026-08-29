@@ -24,15 +24,37 @@ class ChangeRoutingTests(unittest.TestCase):
     def test_docs_change_stays_in_meta_lane(self) -> None:
         suites, _ = HARNESS.select_suites(["docs/architecture.md"])
         self.assertEqual(suites, ["docs"])
+        docs = HARNESS.load_manifest()["suites"]["docs"]
+        self.assertEqual(docs["tools"], [])
+        self.assertFalse(
+            any(command[0] == "cargo" for command in docs["commands"])
+        )
 
-    def test_virtual_semantics_select_every_language_contract(self) -> None:
-        suites, _ = HARNESS.select_suites(["crates/cymule-virtual/src/model.rs"])
+    def test_governance_schemas_select_full_registry_evidence(self) -> None:
+        for path in (
+            "schemas/version-domain-registry.schema.json",
+            "schemas/release-bom.schema.json",
+        ):
+            suites, _ = HARNESS.select_suites([path])
+            self.assertEqual(suites, ["full"], path)
+
+    def test_registry_authority_changes_select_full_evidence(self) -> None:
+        for path in (
+            "versioning/version-domains.json",
+            "scripts/version_domains.py",
+            "tests/harness/test_version_domains.py",
+        ):
+            suites, _ = HARNESS.select_suites([path])
+            self.assertEqual(suites, ["full"], path)
+
+    def test_virtual_semantics_select_every_language_and_behavioral_consumer(self) -> None:
+        suites, _ = HARNESS.select_suites(["crates/cymule-virtual/src/archive.rs"])
         self.assertEqual(
             set(suites),
             {
                 "example",
                 "protocol",
-                "rust-evolution",
+                "rust-resource-plugins",
                 "rust-virtual",
                 "sdk-go",
                 "sdk-python",
@@ -44,6 +66,50 @@ class ChangeRoutingTests(unittest.TestCase):
     def test_language_sdk_change_does_not_select_other_languages(self) -> None:
         suites, _ = HARNESS.select_suites(["sdk/go/cymule.go"])
         self.assertEqual(suites, ["sdk-go"])
+
+    def test_every_ci_plan_adds_only_the_lightweight_source_closure(self) -> None:
+        manifest = HARNESS.load_manifest()
+        self.assertEqual(manifest["required_suites"], ["version-domain-source"])
+        source_suite = manifest["suites"]["version-domain-source"]
+        self.assertEqual(source_suite["lane"], "version-domain")
+        self.assertEqual(source_suite["tools"], ["uv"])
+        self.assertEqual(
+            source_suite["commands"],
+            [[
+                "uv",
+                "run",
+                "--project",
+                "sdk/python",
+                "--frozen",
+                "python",
+                "scripts/version_domains.py",
+                "verify-source-closure",
+            ]],
+        )
+        for path, expected_path_suite in (
+            ("docs/architecture.md", "docs"),
+            ("sdk/go/cymule.go", "sdk-go"),
+            ("crates/cymule-core/tests/semantic_kernel.rs", "rust-core"),
+        ):
+            with self.subTest(path=path):
+                selected, evidence = HARNESS.select_suites([path], manifest)
+                planned, planned_evidence = HARNESS.plan_required_suites(
+                    selected, evidence, manifest
+                )
+                self.assertIn(expected_path_suite, planned)
+                self.assertIn("version-domain-source", planned)
+                self.assertNotIn("full", planned)
+                self.assertEqual(
+                    planned_evidence["version-domain-source"], ["<required>"]
+                )
+                expanded = HARNESS.expand_suites(planned, manifest)
+                self.assertIn("version-domain-source", expanded)
+
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("version_domain: ${{ steps.plan.outputs.version_domain }}", workflow)
+        self.assertIn("  version-domain:\n", workflow)
+        self.assertIn("      - version-domain\n", workflow)
+        self.assertIn('"version-domain": "version_domain"', workflow)
 
     def test_core_property_test_change_stays_in_core_suite(self) -> None:
         suites, _ = HARNESS.select_suites(["crates/cymule-core/tests/semantic_kernel.rs"])
@@ -95,6 +161,79 @@ class ChangeRoutingTests(unittest.TestCase):
         suites, _ = HARNESS.select_suites(["docs/architecture.md", "future-domain/meaning.rs"])
         self.assertEqual(suites, ["full"])
 
+    def test_name_status_z_retains_both_rename_and_copy_paths(self) -> None:
+        value = (
+            b"M\0docs/line\nbreak.md\0"
+            b"R100\0crates/old.rs\0crates/new.rs\0"
+            b"C075\0scripts/source.py\0scripts/copy.py\0"
+            b"D\0removed.txt\0"
+        )
+        self.assertEqual(
+            HARNESS.parse_name_status_z(value),
+            [
+                "docs/line\nbreak.md",
+                "crates/old.rs",
+                "crates/new.rs",
+                "scripts/source.py",
+                "scripts/copy.py",
+                "removed.txt",
+            ],
+        )
+
+    def test_name_status_z_rejects_a_truncated_rename(self) -> None:
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            HARNESS.parse_name_status_z(b"R100\0old.rs\0")
+
+    def test_name_status_copy_detection_retains_unchanged_source_and_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "config", "user.name", "Cymule Test"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=repository,
+                check=True,
+            )
+            source = repository / "source.txt"
+            source.write_text("copied authority\n", encoding="utf-8")
+            subprocess.run(["git", "add", "source.txt"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "Add source"], cwd=repository, check=True
+            )
+            base = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository,
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.strip()
+            (repository / "copy.txt").write_bytes(source.read_bytes())
+            subprocess.run(["git", "add", "copy.txt"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "Copy source"], cwd=repository, check=True
+            )
+            output = subprocess.run(
+                [
+                    "git",
+                    "diff",
+                    "--name-status",
+                    "-z",
+                    "--find-copies",
+                    "--find-copies-harder",
+                    f"{base}..HEAD",
+                ],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+            ).stdout
+        self.assertEqual(
+            HARNESS.parse_name_status_z(output), ["source.txt", "copy.txt"]
+        )
+
     def test_full_expands_to_independent_lanes(self) -> None:
         manifest = HARNESS.load_manifest()
         matrix = HARNESS.ci_matrix(["full"], manifest)
@@ -108,6 +247,7 @@ class ChangeRoutingTests(unittest.TestCase):
         self.assertIn("sdk-python", lanes)
         self.assertIn("sdk-go", lanes)
         self.assertIn("meta", lanes)
+        self.assertIn("version-domain", lanes)
         rust_lane = next(
             entry for entry in matrix["include"] if entry["lane"] == "rust-durable"
         )
@@ -115,6 +255,8 @@ class ChangeRoutingTests(unittest.TestCase):
             set(rust_lane["execution_classes"]),
             {"deterministic", "live_process"},
         )
+        expanded = HARNESS.expand_suites(["full"], manifest)
+        self.assertIn("rust-directory-plugin", expanded)
 
     def test_every_leaf_has_one_execution_class(self) -> None:
         manifest = HARNESS.load_manifest()
@@ -126,10 +268,58 @@ class ChangeRoutingTests(unittest.TestCase):
         }
         self.assertEqual(set(classes), leaves)
 
+    def test_package_suite_catalog_covers_the_exact_workspace(self) -> None:
+        manifest = HARNESS.load_manifest()
+        roots, _ = HARNESS.workspace_package_graph()
+        self.assertEqual(set(manifest["package_suites"]), set(roots.values()))
+        self.assertEqual(
+            manifest["package_suites"]["cymule-authenticated-collections"],
+            ["rust-authenticated-collections"],
+        )
+        self.assertEqual(
+            manifest["package_suites"]["cymule-durable-protocol"],
+            ["rust-durable-protocol"],
+        )
+        self.assertEqual(
+            manifest["package_suites"]["cymule-profile-protocol"],
+            ["rust-profile-protocol"],
+        )
+
+    def test_public_protocol_crates_have_independent_behavioral_leaves(self) -> None:
+        for path, expected in (
+            (
+                "crates/cymule-authenticated-collections/tests/map.rs",
+                "rust-authenticated-collections",
+            ),
+            (
+                "crates/cymule-durable-protocol/tests/model.rs",
+                "rust-durable-protocol",
+            ),
+            (
+                "crates/cymule-profile-protocol/tests/evolution.rs",
+                "rust-profile-protocol",
+            ),
+        ):
+            suites, _ = HARNESS.select_suites([path])
+            self.assertEqual(suites, [expected], path)
+
+    def test_protocol_leaf_executes_the_test_adapter_conformance_suite(self) -> None:
+        protocol = HARNESS.load_manifest()["suites"]["protocol"]
+        self.assertIn(
+            ["./scripts/verify-rust.sh", "cymule-test-adapter"],
+            protocol["commands"],
+        )
+
     def test_duplicate_execution_class_is_rejected(self) -> None:
         manifest = HARNESS.load_manifest()
         manifest["execution_classes"]["live_provider"]["suites"].append("rust-core")
         with self.assertRaisesRegex(ValueError, "duplicate execution classes"):
+            HARNESS.validate_manifest(manifest)
+
+    def test_required_ci_suite_must_be_a_deterministic_concrete_leaf(self) -> None:
+        manifest = HARNESS.load_manifest()
+        manifest["required_suites"] = ["rust-observability-plugin"]
+        with self.assertRaisesRegex(ValueError, "required suite.*deterministic"):
             HARNESS.validate_manifest(manifest)
 
     def test_route_catalog_rejects_unknown_suite(self) -> None:
@@ -137,6 +327,22 @@ class ChangeRoutingTests(unittest.TestCase):
         manifest["routes"][0]["suites"] = ["missing-suite"]
         with self.assertRaisesRegex(ValueError, "unknown suites"):
             HARNESS.validate_manifest(manifest)
+
+    def test_changed_paths_cannot_route_scheduled_or_catalog_evidence(self) -> None:
+        manifest = HARNESS.load_manifest()
+        for selected in (["rust-soak"], ["catalog"]):
+            candidate = {
+                **manifest,
+                "routes": [dict(route) for route in manifest["routes"]],
+            }
+            candidate["routes"][0] = {
+                **candidate["routes"][0],
+                "suites": selected,
+            }
+            with self.subTest(selected=selected), self.assertRaisesRegex(
+                ValueError, "non-ordinary suites"
+            ):
+                HARNESS.validate_manifest(candidate)
 
     def test_invalid_leaf_command_is_rejected_before_execution(self) -> None:
         manifest = self._run_manifest([])
@@ -164,17 +370,138 @@ class ChangeRoutingTests(unittest.TestCase):
         self.assertIn("rust-agent-plugin", suites)
         self.assertIn("rust-agent-mcp-plugin", suites)
 
-    def test_harness_authority_changes_select_the_complete_catalog(self) -> None:
+    def test_harness_authority_changes_select_normal_full_only(self) -> None:
         for path in ("scripts/test_harness.py", "tests/harness/suites.toml"):
             suites, _ = HARNESS.select_suites([path])
-            self.assertEqual(suites, ["catalog"])
+            self.assertEqual(suites, ["full"])
             expanded = HARNESS.expand_suites(suites, HARNESS.load_manifest())
-            self.assertIn("rust-soak", expanded)
-            self.assertIn("rust-mutation", expanded)
+            self.assertIn("rust-directory-plugin", expanded)
+            for scheduled in (
+                "rust-soak",
+                "rust-coverage",
+                "rust-coverage-plugins",
+                "rust-mutation",
+                "rust-mutation-evolution-m4",
+                "rust-mutation-plugins",
+                "rust-portability",
+            ):
+                self.assertNotIn(scheduled, expanded)
 
-    def test_soak_runner_change_selects_only_the_soak_leaf(self) -> None:
-        suites, _ = HARNESS.select_suites(["scripts/verify-soak.sh"])
-        self.assertEqual(suites, ["rust-soak"])
+    def test_catalog_retains_explicit_scheduled_and_normal_evidence(self) -> None:
+        expanded = HARNESS.expand_suites(["catalog"], HARNESS.load_manifest())
+        self.assertIn("rust-directory-plugin", expanded)
+        self.assertIn("rust-soak", expanded)
+        self.assertIn("rust-mutation", expanded)
+        self.assertIn("rust-portability", expanded)
+
+    def test_python_toolchain_authority_routes_every_uv_consumer(self) -> None:
+        suites, _ = HARNESS.select_suites(["sdk/python/uv.lock"])
+        self.assertEqual(
+            set(suites),
+            {"harness", "release-workflows", "sdk-python"},
+        )
+
+    def test_retired_virtual_fixture_selects_schema_and_rust_rejection(self) -> None:
+        suites, _ = HARNESS.select_suites(
+            ["tests/harness/fixtures/retired-virtual-contracts.json"]
+        )
+        self.assertEqual(
+            set(suites), {"docs", "harness", "protocol", "rust-virtual"}
+        )
+
+    def test_workspace_checkpoint_fixture_selects_schema_and_durable_roundtrip(self) -> None:
+        suites, _ = HARNESS.select_suites(
+            ["tests/harness/fixtures/agent-workspace-checkpoint.json"]
+        )
+        self.assertEqual(
+            set(suites), {"docs", "harness", "protocol", "rust-durable"}
+        )
+
+    def test_applied_effect_summary_fixture_selects_durable_and_all_sdk_readers(self) -> None:
+        suites, _ = HARNESS.select_suites(
+            ["tests/fixtures/applied-effect-summary.json"]
+        )
+        self.assertEqual(
+            set(suites),
+            {
+                "protocol",
+                "rust-durable",
+                "sdk-rust",
+                "sdk-typescript",
+                "sdk-python",
+                "sdk-go",
+            },
+        )
+
+    def test_scheduled_runner_changes_select_normal_full_without_running_scheduled_work(self) -> None:
+        for path in ("scripts/verify-soak.sh", "scripts/verify-analysis.sh"):
+            suites, _ = HARNESS.select_suites([path])
+            self.assertEqual(suites, ["full"])
+            expanded = HARNESS.expand_suites(suites, HARNESS.load_manifest())
+            self.assertNotIn("rust-soak", expanded)
+            self.assertNotIn("rust-coverage", expanded)
+            self.assertNotIn("rust-mutation", expanded)
+            self.assertNotIn("rust-portability", expanded)
+
+    def test_m4_mutation_route_targets_the_real_profile_reducer_inventory(self) -> None:
+        script = (ROOT / "scripts" / "verify-analysis.sh").read_text(encoding="utf-8")
+        route = script.split("mutation-evolution-m4)", 1)[1].split(";;", 1)[0]
+        self.assertIn("require_mutant_inventory", route)
+        self.assertGreaterEqual(route.count("cymule-profile-protocol"), 2)
+        self.assertNotIn("cymule-evolution", route)
+        for symbol in (
+            "analyze_relink",
+            "validate_migration_no_widening",
+            "MigrationSafePoint::verify ->",
+            "MigrationSafePoint::derived_id",
+            "prepare_definition_publication",
+            "build_relink_edge",
+            "update_decision",
+            "provider_required_artifacts",
+            "prepare_evolution_migration_target",
+            "admit_evolution_target_binding",
+            "verify_evolution_target_binding_record",
+            "EvolutionReductionSource::retained_migration",
+            "prevalidate_migration_source",
+            "reduce_migration_command",
+            "reduce_new_migration",
+            "prepare_evolution_selection",
+            "reduce_evolution_selection",
+            "verify_migration_material_authority",
+            "EvolutionPostcondition::migration_sidecar",
+            "reduce_restart_command",
+            "derive_plan_edge_id",
+            "verify_plan_edge",
+            "verify_edge_mutation_authority",
+            "derive_rollout_evaluation_id",
+            "derive_rollout_transition_id",
+            "verify_rollout_transition",
+        ):
+            self.assertIn(symbol, route)
+        for retired in (
+            "link_registered",
+            "restart_under_new_plan",
+            "compatibility\\.rs",
+        ):
+            self.assertNotIn(retired, route)
+
+    def test_m4_coverage_has_an_independent_nonempty_artifact(self) -> None:
+        script = (ROOT / "scripts" / "verify-analysis.sh").read_text(encoding="utf-8")
+        route = script.split("coverage)", 1)[1].split(";;", 1)[0]
+        self.assertIn("--package cymule-profile-protocol", route)
+        self.assertIn("coverage-evolution-m4.json", route)
+        self.assertIn("src/(agent|error|lib|resource|virtual_work)", route)
+        self.assertIn("--fail-under-lines 63", route)
+        self.assertIn("--fail-under-regions 64", route)
+        self.assertIn(
+            'require_nonempty_artifact "$OUTPUT_DIR/coverage-evolution-m4.json"',
+            route,
+        )
+        self.assertIn('if [ ! -s "$artifact_path" ]', script)
+        workflow = (ROOT / ".github" / "workflows" / "analysis.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(".cache/test-analysis/coverage-evolution-m4.json", workflow)
 
     def test_release_scripts_select_their_package_and_security_witnesses(self) -> None:
         npm_suites, _ = HARNESS.select_suites(["scripts/npm_release.py"])
@@ -204,6 +531,7 @@ class ChangeRoutingTests(unittest.TestCase):
     def _run_manifest(command: list[str], *, allow_skip: bool = False) -> dict:
         return {
             "schema_version": 2,
+            "required_suites": ["leaf"],
             "suites": {
                 "leaf": {
                     "description": "synthetic leaf",

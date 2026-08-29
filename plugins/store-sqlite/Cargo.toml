@@ -16,11 +16,14 @@ cymule-core.workspace = true
 cymule-durable.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 
 [dev-dependencies]
+cymule-clock-system.workspace = true
+cymule-durable-protocol.workspace = true
+cymule-profile-protocol.workspace = true
 cymule-runtime.workspace = true
 cymule-test-world = { path = "../../tests/test-world" }
+serde_json.workspace = true
 tempfile = "3.27.0"
 
 [lints]

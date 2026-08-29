@@ -30,6 +30,7 @@ jobs:
       sdk_python: ${{ steps.plan.outputs.sdk_python }}
       sdk_rust: ${{ steps.plan.outputs.sdk_rust }}
       sdk_typescript: ${{ steps.plan.outputs.sdk_typescript }}
+      version_domain: ${{ steps.plan.outputs.version_domain }}
       workbench: ${{ steps.plan.outputs.workbench }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,7 +73,7 @@ jobs:
           for lane in (
               "meta", "package-typescript", "protocol", "rust-static",
               "rust-semantic", "rust-durable", "rust-plugins", "rust-package", "sdk-go",
-              "sdk-python", "sdk-rust", "sdk-typescript", "workbench",
+              "sdk-python", "sdk-rust", "sdk-typescript", "version-domain", "workbench",
           ):
               print(f"{lane.replace('-', '_')}={lanes.get(lane, '')}")
           PY
@@ -97,6 +98,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        if: contains(needs.plan.outputs.meta, 'harness') || contains(needs.plan.outputs.meta, 'release-workflows')
+        with:
+          version: 0.7.2
       - name: Run selected verification suites
         run: >-
           python3 scripts/test_harness.py run
@@ -108,6 +113,30 @@ jobs:
         with:
           name: test-harness-meta
           path: .cache/test-harness/meta.json
+          if-no-files-found: warn
+
+  version-domain:
+    name: Verify / version-domain source closure
+    needs: plan
+    if: needs.plan.outputs.version_domain != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: 0.7.2
+      - name: Close the exact public source generation
+        run: >-
+          python3 scripts/test_harness.py run
+          ${{ needs.plan.outputs.version_domain }}
+          --report .cache/test-harness/version-domain.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: test-harness-version-domain
+          path: .cache/test-harness/version-domain.json
           if-no-files-found: warn
 
   rust-static:
@@ -455,6 +484,7 @@ jobs:
       - sdk-python
       - sdk-go
       - package-typescript
+      - version-domain
       - workbench
     runs-on: ubuntu-24.04
     steps:
@@ -482,6 +512,7 @@ jobs:
               "sdk-python": "sdk_python",
               "sdk-go": "sdk_go",
               "package-typescript": "package_typescript",
+              "version-domain": "version_domain",
               "workbench": "workbench",
           }
           outputs = needs["plan"]["outputs"]

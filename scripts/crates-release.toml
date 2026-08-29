@@ -1,44 +1,102 @@
 schema = 1
 
 [[crate]]
+name = "cymule-authenticated-collections"
+path = "crates/cymule-authenticated-collections"
+dependencies = []
+
+[[crate]]
 name = "cymule-core"
 path = "crates/cymule-core"
-dependencies = []
+dependencies = ["cymule-authenticated-collections"]
 
 [[crate]]
 name = "cymule-runtime"
 path = "crates/cymule-runtime"
-dependencies = ["cymule-core"]
+dependencies = ["cymule-authenticated-collections", "cymule-core"]
+
+[[crate]]
+name = "cymule-durable-protocol"
+path = "crates/cymule-durable-protocol"
+dependencies = ["cymule-authenticated-collections", "cymule-core"]
+
+[[crate]]
+name = "cymule-profile-protocol"
+path = "crates/cymule-profile-protocol"
+dependencies = ["cymule-authenticated-collections", "cymule-core", "cymule-durable-protocol", "cymule-runtime"]
 
 [[crate]]
 name = "cymule-durable"
 path = "crates/cymule-durable"
-dependencies = ["cymule-core", "cymule-runtime"]
+dependencies = [
+  "cymule-authenticated-collections",
+  "cymule-core",
+  "cymule-durable-protocol",
+  "cymule-profile-protocol",
+  "cymule-runtime",
+]
 
 [[crate]]
 name = "cymule-resource"
 path = "crates/cymule-resource"
-dependencies = ["cymule-core", "cymule-durable"]
+dependencies = [
+  "cymule-core",
+  "cymule-durable",
+  "cymule-durable-protocol",
+  "cymule-profile-protocol",
+  "cymule-runtime",
+]
 
 [[crate]]
 name = "cymule-virtual"
 path = "crates/cymule-virtual"
-dependencies = ["cymule-core", "cymule-durable", "cymule-resource"]
+dependencies = [
+  "cymule-core",
+  "cymule-durable",
+  "cymule-durable-protocol",
+  "cymule-profile-protocol",
+  "cymule-resource",
+  "cymule-runtime",
+]
 
 [[crate]]
 name = "cymule-evolution"
 path = "crates/cymule-evolution"
-dependencies = ["cymule-core", "cymule-durable", "cymule-runtime", "cymule-virtual"]
+dependencies = [
+  "cymule-core",
+  "cymule-durable-protocol",
+  "cymule-profile-protocol",
+  "cymule-runtime",
+]
+
+[[crate]]
+name = "cymule-clock-system"
+path = "plugins/clock-system"
+dependencies = ["cymule-core", "cymule-durable", "cymule-durable-protocol"]
 
 [[crate]]
 name = "cymule-directory-store"
 path = "plugins/directory-store"
-dependencies = ["cymule-core", "cymule-durable"]
+dependencies = [
+  "cymule-clock-system",
+  "cymule-core",
+  "cymule-durable",
+  "cymule-durable-protocol",
+  "cymule-profile-protocol",
+  "cymule-runtime",
+]
 
 [[crate]]
 name = "cymule-store-sqlite"
 path = "plugins/store-sqlite"
-dependencies = ["cymule-core", "cymule-durable"]
+dependencies = [
+  "cymule-clock-system",
+  "cymule-core",
+  "cymule-durable",
+  "cymule-durable-protocol",
+  "cymule-profile-protocol",
+  "cymule-runtime",
+]
 
 [[crate]]
 name = "cymule-resource-fs"
@@ -48,22 +106,34 @@ dependencies = ["cymule-core", "cymule-resource"]
 [[crate]]
 name = "cymule-resource-object-store"
 path = "plugins/resource-object-store"
-dependencies = ["cymule-core", "cymule-resource"]
+dependencies = [
+  "cymule-core",
+  "cymule-durable-protocol",
+  "cymule-resource",
+  "cymule-virtual",
+]
 
 [[crate]]
 name = "cymule-activation-http"
 path = "plugins/activation-http"
-dependencies = ["cymule-core", "cymule-durable"]
-
-[[crate]]
-name = "cymule-clock-system"
-path = "plugins/clock-system"
-dependencies = ["cymule-core", "cymule-durable"]
+dependencies = [
+  "cymule-clock-system",
+  "cymule-core",
+  "cymule-durable",
+  "cymule-durable-protocol",
+  "cymule-runtime",
+]
 
 [[crate]]
 name = "cymule-activation-timer"
 path = "plugins/activation-timer"
-dependencies = ["cymule-clock-system", "cymule-core", "cymule-durable"]
+dependencies = [
+  "cymule-clock-system",
+  "cymule-core",
+  "cymule-durable",
+  "cymule-durable-protocol",
+  "cymule-runtime",
+]
 
 [[crate]]
 name = "cymule-executor-process"
@@ -78,7 +148,12 @@ dependencies = []
 [[crate]]
 name = "cymule-agent"
 path = "plugins/agent-interaction"
-dependencies = ["cymule-core", "cymule-durable", "cymule-resource"]
+dependencies = [
+  "cymule-core",
+  "cymule-durable",
+  "cymule-durable-protocol",
+  "cymule-profile-protocol",
+]
 
 [[crate]]
 name = "cymule-agent-mcp"
@@ -91,6 +166,7 @@ path = "crates/cymule-sdk"
 dependencies = [
   "cymule-core",
   "cymule-durable",
+  "cymule-durable-protocol",
   "cymule-evolution",
   "cymule-resource",
   "cymule-runtime",
@@ -101,9 +177,12 @@ dependencies = [
 name = "cymule-cli"
 path = "crates/cymule-cli"
 dependencies = [
+  "cymule-authenticated-collections",
+  "cymule-clock-system",
   "cymule-core",
   "cymule-directory-store",
   "cymule-durable",
+  "cymule-durable-protocol",
   "cymule-evolution",
   "cymule-executor-process",
   "cymule-resource",

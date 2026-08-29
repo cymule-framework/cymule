@@ -160,6 +160,21 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     )
     if unclassified:
         raise ValueError(f"suites lack an execution class: {', '.join(unclassified)}")
+    required_suites = manifest.get("required_suites")
+    if (
+        not isinstance(required_suites, list)
+        or not required_suites
+        or not all(isinstance(name, str) and name for name in required_suites)
+        or required_suites != sorted(set(required_suites))
+    ):
+        raise ValueError("test harness required_suites must be one sorted unique list")
+    for name in required_suites:
+        if name not in suites:
+            raise ValueError(f"required suite {name} is unknown")
+        if suites[name].get("abstract", False):
+            raise ValueError(f"required suite {name} must be one concrete leaf")
+        if classified[name] != "deterministic":
+            raise ValueError(f"required suite {name} must be deterministic")
     routes = manifest.get("routes")
     if not isinstance(routes, list) or not routes:
         raise ValueError("test harness manifest must define routes")
@@ -203,6 +218,19 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         if unknown:
             raise ValueError(
                 f"package {package} references unknown suites: {', '.join(unknown)}"
+            )
+    ordinary = set(expand_suites(["full"], manifest))
+    for index, route in enumerate(routes):
+        scheduled = sorted(set(expand_suites(route["suites"], manifest)) - ordinary)
+        if scheduled:
+            raise ValueError(
+                f"route {index} selects non-ordinary suites: {', '.join(scheduled)}"
+            )
+    for package, selected in package_suites.items():
+        scheduled = sorted(set(expand_suites(selected, manifest)) - ordinary)
+        if scheduled:
+            raise ValueError(
+                f"package {package} selects non-ordinary suites: {', '.join(scheduled)}"
             )
     return manifest
 
@@ -280,6 +308,24 @@ def expand_suites(names: list[str], manifest: dict[str, Any]) -> list[str]:
     return result
 
 
+def plan_required_suites(
+    names: list[str],
+    evidence: dict[str, list[str]],
+    manifest: dict[str, Any],
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Attach mandatory lightweight leaves to one path-selected CI plan."""
+
+    expanded = set(expand_suites(names, manifest))
+    selected = list(names)
+    closed_evidence = {name: list(paths) for name, paths in evidence.items()}
+    for required in manifest["required_suites"]:
+        if required not in expanded:
+            selected.append(required)
+            expanded.add(required)
+        closed_evidence.setdefault(required, ["<required>"])
+    return sorted(set(selected)), closed_evidence
+
+
 def git(*args: str) -> str:
     """Run one read-only Git query without optional repository locks."""
     environment = dict(os.environ)
@@ -295,6 +341,59 @@ def git(*args: str) -> str:
     return result.stdout.strip()
 
 
+def git_bytes(*args: str) -> bytes:
+    """Run one read-only Git query while preserving NUL-delimited path bytes."""
+    environment = dict(os.environ)
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+    )
+    return result.stdout
+
+
+def parse_name_status_z(value: bytes) -> list[str]:
+    """Decode `git diff --name-status -z`, retaining both rename/copy paths."""
+    if not value:
+        return []
+    fields = value.split(b"\0")
+    if fields[-1] != b"":
+        raise ValueError("NUL-delimited Git name-status output is truncated")
+    fields.pop()
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        try:
+            status = fields[index].decode("ascii")
+        except UnicodeDecodeError as error:
+            raise ValueError("Git name-status contains a non-ASCII status") from error
+        index += 1
+        if not status or status[0] not in "ACDMRTUXB":
+            raise ValueError(f"Git name-status contains unsupported status {status!r}")
+        path_count = 2 if status[0] in "RC" else 1
+        if len(fields) - index < path_count:
+            raise ValueError(f"Git name-status entry {status!r} is truncated")
+        for raw_path in fields[index : index + path_count]:
+            if not raw_path:
+                raise ValueError(f"Git name-status entry {status!r} has an empty path")
+            paths.append(os.fsdecode(raw_path))
+        index += path_count
+    return paths
+
+
+def parse_paths_z(value: bytes) -> list[str]:
+    """Decode a NUL-delimited Git path list without newline or quoting loss."""
+    if not value:
+        return []
+    fields = value.split(b"\0")
+    if fields[-1] != b"":
+        raise ValueError("NUL-delimited Git path output is truncated")
+    return [os.fsdecode(path) for path in fields[:-1] if path]
+
+
 def changed_paths(base: str, head: str, include_worktree: bool) -> tuple[list[str], dict[str, str]]:
     """Resolve committed and optional worktree changes against a unique merge base."""
     base_sha = git("rev-parse", "--verify", f"{base}^{{commit}}")
@@ -303,11 +402,27 @@ def changed_paths(base: str, head: str, include_worktree: bool) -> tuple[list[st
     if len(merge_bases) != 1:
         raise ValueError(f"base and head require one merge base; found {len(merge_bases)}")
     merge_base = merge_bases[0]
-    paths = set(filter(None, git("diff", "--name-only", "--diff-filter=ACDMRTUXB", f"{merge_base}..{head_sha}").splitlines()))
+    diff_arguments = (
+        "--name-status",
+        "-z",
+        "--find-renames",
+        "--find-copies",
+        "--find-copies-harder",
+        "--diff-filter=ACDMRTUXB",
+    )
+    paths = set(
+        parse_name_status_z(
+            git_bytes("diff", *diff_arguments, f"{merge_base}..{head_sha}")
+        )
+    )
     if include_worktree:
-        paths.update(filter(None, git("diff", "--name-only", "--diff-filter=ACDMRTUXB").splitlines()))
-        paths.update(filter(None, git("diff", "--cached", "--name-only", "--diff-filter=ACDMRTUXB").splitlines()))
-        paths.update(filter(None, git("ls-files", "--others", "--exclude-standard").splitlines()))
+        paths.update(parse_name_status_z(git_bytes("diff", *diff_arguments)))
+        paths.update(
+            parse_name_status_z(git_bytes("diff", "--cached", *diff_arguments))
+        )
+        paths.update(
+            parse_paths_z(git_bytes("ls-files", "--others", "--exclude-standard", "-z"))
+        )
     return sorted(paths), {"base": base_sha, "head": head_sha, "merge_base": merge_base}
 
 
@@ -531,6 +646,7 @@ def main(argv: list[str] | None = None) -> int:
         names, evidence = select_suites(paths, manifest)
         if not names and arguments.full_if_empty:
             names, evidence = ["full"], {"full": []}
+        names, evidence = plan_required_suites(names, evidence, manifest)
         payload = {
             "schema_version": 1,
             "revisions": revisions,

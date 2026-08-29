@@ -5,7 +5,6 @@ use std::future::Future;
 use cymule_agent::{AgentError, AgentResult, ContentBlock, ToolRequest, ToolResponse};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock as McpContentBlock,
-    ResourceContents,
 };
 use rmcp::{Peer, RoleClient};
 use tokio::runtime::{Builder, Runtime};
@@ -64,7 +63,7 @@ impl<C: McpToolCaller> McpToolAdapter<C> {
     pub fn new(caller: C, occurrence_binding: impl Into<String>) -> AgentResult<Self> {
         let occurrence_binding = occurrence_binding.into();
         if occurrence_binding.is_empty()
-            || occurrence_binding.len() > 512
+            || occurrence_binding.chars().count() > 512
             || occurrence_binding.chars().any(char::is_control)
         {
             return Err(AgentError::Validation(
@@ -162,7 +161,10 @@ fn validate_tool_request(request: &ToolRequest) -> AgentResult<()> {
         ("call", request.tool_call_id.as_str()),
         ("operation", request.operation.as_str()),
     ] {
-        if identity.is_empty() || identity.len() > 512 || identity.chars().any(char::is_control) {
+        if identity.is_empty()
+            || identity.chars().count() > 512
+            || identity.chars().any(char::is_control)
+        {
             return Err(AgentError::Validation(format!(
                 "MCP tool {kind} identity must be printable and non-empty"
             )));
@@ -174,26 +176,12 @@ fn validate_tool_request(request: &ToolRequest) -> AgentResult<()> {
 fn map_content(block: McpContentBlock, output: &mut Vec<ContentBlock>) -> AgentResult<()> {
     match block {
         McpContentBlock::Text(text) => output.push(ContentBlock::Text { text: text.text }),
-        McpContentBlock::ResourceLink(resource) => output.push(ContentBlock::Resource {
-            uri: resource.uri,
-            mime_type: resource.mime_type,
-        }),
-        McpContentBlock::Resource(resource) => match resource.resource {
-            ResourceContents::TextResourceContents {
-                uri,
-                mime_type,
-                text,
-                ..
-            } => {
-                output.push(ContentBlock::Resource { uri, mime_type });
-                output.push(ContentBlock::Text { text });
-            }
-            _ => {
-                return Err(AgentError::RecoveryRequired(
-                    "unsupported future MCP Resource content requires an adapter update".to_owned(),
-                ));
-            }
-        },
+        McpContentBlock::ResourceLink(_) | McpContentBlock::Resource(_) => {
+            return Err(AgentError::RecoveryRequired(
+                "MCP Resource content must be resolved and sealed as a Cymule ResourceHandle"
+                    .to_owned(),
+            ));
+        }
         _ => {
             return Err(AgentError::RecoveryRequired(
                 "unsupported future MCP content requires an adapter update".to_owned(),

@@ -1,0 +1,29 @@
+#!/usr/bin/python3
+import json
+import sys
+
+
+envelope = json.load(sys.stdin)
+request = envelope["request"]
+if request.get("type") != "run":
+    raise SystemExit("malicious effect fixture requires a run request")
+json.dump(
+    {
+        "outcome": "success",
+        "engine_protocol": "cymule.engine/4",
+        "request": request,
+        "response": {
+            "type": "execution_boundary",
+            "execution": {
+                "status": "release_required",
+                "release": {
+                    "run_id": request["run_id"],
+                    "plan_id": "not-a-content-id",
+                    "intent_ids": ["also-not-a-content-id"],
+                },
+            },
+        },
+    },
+    sys.stdout,
+    separators=(",", ":"),
+)

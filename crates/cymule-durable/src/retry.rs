@@ -1,20 +1,22 @@
 use std::collections::BTreeSet;
+use std::ops::Deref;
 
 use cymule_core::content_id;
 use serde::{Deserialize, Serialize};
 
-use crate::{DurableError, DurableResult};
+use crate::{
+    ClockObservation, ClockObservationAuthority, ClockObservationRef, DurableError, DurableResult,
+};
 
 /// Frozen provider-neutral retry policy version.
 pub const RETRY_POLICY_VERSION: &str = "cymule.retry-policy/1";
 /// Serializable retry decision record version.
-pub const RETRY_DECISION_VERSION: &str = "cymule.retry-decision/1";
-/// Content-addressed logical Clock observation version.
-pub const CLOCK_OBSERVATION_VERSION: &str = "cymule.clock-observation/1";
+pub const RETRY_DECISION_VERSION: &str = "cymule.retry-decision/2";
 /// Content-addressed recorded jitter evidence version.
 pub const JITTER_EVIDENCE_VERSION: &str = "cymule.jitter-evidence/1";
 /// Serializable retry stream reducer state version.
-pub const RETRY_STREAM_VERSION: &str = "cymule.retry-stream/1";
+pub const RETRY_STREAM_VERSION: &str = "cymule.retry-stream/2";
+const RETRY_CLOCK_SCOPE_ID_DOMAIN: &str = "cymule.retry-clock-scope/1";
 
 /// Closed failure classes used by retry admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -58,14 +60,9 @@ impl FailureOperation {
     fn verify(&self) -> DurableResult<()> {
         match self {
             Self::Computation => Ok(()),
-            Self::ObservationalEffect { intent_id } | Self::MutatingEffect { intent_id }
-                if !intent_id.is_empty() =>
-            {
-                Ok(())
+            Self::ObservationalEffect { intent_id } | Self::MutatingEffect { intent_id } => {
+                crate::model::validate_sha256_identity("retry effect intent", intent_id)
             }
-            Self::ObservationalEffect { .. } | Self::MutatingEffect { .. } => Err(
-                DurableError::Validation("effect intent identity must not be empty".to_owned()),
-            ),
         }
     }
 }
@@ -127,7 +124,7 @@ impl RetryDelay {
     fn verify(&self) -> DurableResult<()> {
         match self {
             Self::Immediate => Ok(()),
-            Self::Fixed { delay } if *delay > 0 => Ok(()),
+            Self::Fixed { delay } if *delay > 0 && *delay <= crate::MAX_EXACT_INTEGER => Ok(()),
             Self::Fixed { .. } => Err(DurableError::Validation(
                 "fixed retry delay must be positive".to_owned(),
             )),
@@ -135,36 +132,58 @@ impl RetryDelay {
                 initial_delay,
                 multiplier,
                 max_delay,
-            } if *initial_delay > 0 && *multiplier > 0 && *initial_delay <= *max_delay => Ok(()),
+            } if *initial_delay > 0
+                && *multiplier > 0
+                && *initial_delay <= *max_delay
+                && *max_delay <= crate::MAX_EXACT_INTEGER =>
+            {
+                Ok(())
+            }
             Self::Exponential { .. } => Err(DurableError::Validation(
                 "exponential retry delay requires a positive initial delay and multiplier, with initial_delay <= max_delay".to_owned(),
             )),
         }
     }
 
-    fn delay_for_attempt(&self, attempt: u32) -> u64 {
-        match self {
+    fn delay_for_attempt(&self, attempt: u32) -> DurableResult<u64> {
+        let exponent = attempt.checked_sub(1).ok_or_else(|| {
+            DurableError::Validation("retry delay requires a positive attempt ordinal".to_owned())
+        })?;
+        Ok(match self {
             Self::Immediate => 0,
             Self::Fixed { delay } => *delay,
             Self::Exponential {
                 initial_delay,
                 multiplier,
                 max_delay,
-            } => {
-                let mut delay = *initial_delay;
-                for _ in 1..attempt {
-                    delay = match delay.checked_mul(u64::from(*multiplier)) {
-                        Some(next) if next < *max_delay => next,
-                        Some(_) | None => *max_delay,
-                    };
-                    if delay == *max_delay {
-                        break;
-                    }
-                }
-                delay
-            }
+            } => capped_exponential_delay(
+                *initial_delay,
+                u64::from(*multiplier),
+                exponent,
+                *max_delay,
+            ),
+        })
+    }
+}
+
+fn capped_exponential_delay(initial: u64, multiplier: u64, mut exponent: u32, cap: u64) -> u64 {
+    let capped_mul = |left: u64, right: u64| {
+        left.checked_mul(right)
+            .filter(|value| *value < cap)
+            .unwrap_or(cap)
+    };
+    let mut result = initial.min(cap);
+    let mut factor = multiplier.min(cap);
+    while exponent != 0 && result != cap {
+        if exponent & 1 == 1 {
+            result = capped_mul(result, factor);
+        }
+        exponent >>= 1;
+        if exponent != 0 {
+            factor = capped_mul(factor, factor);
         }
     }
+    result
 }
 
 /// Jitter policy. Randomness is never sampled by the retry reducer.
@@ -184,94 +203,15 @@ impl JitterStrategy {
     fn verify(&self) -> DurableResult<()> {
         match self {
             Self::None => Ok(()),
-            Self::Recorded { max_delay } if *max_delay > 0 => Ok(()),
+            Self::Recorded { max_delay }
+                if *max_delay > 0 && *max_delay <= crate::MAX_EXACT_INTEGER =>
+            {
+                Ok(())
+            }
             Self::Recorded { .. } => Err(DurableError::Validation(
                 "recorded jitter maximum must be positive".to_owned(),
             )),
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct ClockObservationIdentity<'a> {
-    clock_observation_version: &'a str,
-    source_binding: &'a str,
-    logical_time: u64,
-}
-
-/// Immutable, content-addressed logical Clock observation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClockObservation {
-    /// Frozen observation version.
-    pub clock_observation_version: String,
-    /// Content identity of the complete observation.
-    pub evidence_id: String,
-    /// Immutable Clock implementation binding that produced the observation.
-    pub source_binding: String,
-    /// Observed logical time.
-    pub logical_time: u64,
-}
-
-impl ClockObservation {
-    /// Seal one logical Clock observation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the source binding is empty or the observation
-    /// cannot be canonically encoded.
-    pub fn seal(source_binding: impl Into<String>, logical_time: u64) -> DurableResult<Self> {
-        let source_binding = source_binding.into();
-        if source_binding.is_empty() {
-            return Err(DurableError::Validation(
-                "Clock observation source binding must not be empty".to_owned(),
-            ));
-        }
-        let clock_observation_version = CLOCK_OBSERVATION_VERSION.to_owned();
-        let evidence_id = content_id(
-            CLOCK_OBSERVATION_VERSION,
-            &ClockObservationIdentity {
-                clock_observation_version: &clock_observation_version,
-                source_binding: &source_binding,
-                logical_time,
-            },
-        )?;
-        Ok(Self {
-            clock_observation_version,
-            evidence_id,
-            source_binding,
-            logical_time,
-        })
-    }
-
-    /// Verify the observation version and content identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the source binding is empty or the identity does
-    /// not match the complete observation content.
-    pub fn verify(&self) -> DurableResult<()> {
-        if self.clock_observation_version != CLOCK_OBSERVATION_VERSION
-            || self.source_binding.is_empty()
-        {
-            return Err(DurableError::Validation(
-                "Clock observation version or source binding is invalid".to_owned(),
-            ));
-        }
-        let expected = content_id(
-            CLOCK_OBSERVATION_VERSION,
-            &ClockObservationIdentity {
-                clock_observation_version: &self.clock_observation_version,
-                source_binding: &self.source_binding,
-                logical_time: self.logical_time,
-            },
-        )?;
-        if self.evidence_id != expected {
-            return Err(DurableError::Validation(
-                "Clock observation identity does not match its content".to_owned(),
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -305,9 +245,9 @@ impl JitterEvidence {
     /// be canonically encoded.
     pub fn seal(source_binding: impl Into<String>, delay: u64) -> DurableResult<Self> {
         let source_binding = source_binding.into();
-        if source_binding.is_empty() {
+        if source_binding.is_empty() || delay > crate::MAX_EXACT_INTEGER {
             return Err(DurableError::Validation(
-                "jitter evidence source binding must not be empty".to_owned(),
+                "jitter evidence requires a source and exact-range delay".to_owned(),
             ));
         }
         let jitter_evidence_version = JITTER_EVIDENCE_VERSION.to_owned();
@@ -334,7 +274,9 @@ impl JitterEvidence {
     /// Returns an error when the source binding is empty or the identity does
     /// not match the complete jitter evidence content.
     pub fn verify(&self) -> DurableResult<()> {
-        if self.jitter_evidence_version != JITTER_EVIDENCE_VERSION || self.source_binding.is_empty()
+        if self.jitter_evidence_version != JITTER_EVIDENCE_VERSION
+            || self.source_binding.is_empty()
+            || self.delay > crate::MAX_EXACT_INTEGER
         {
             return Err(DurableError::Validation(
                 "jitter evidence version or source binding is invalid".to_owned(),
@@ -458,14 +400,26 @@ impl RetryPolicy {
         Ok(())
     }
 
-    /// Evaluate one failed attempt without reading ambient time or randomness.
+    /// Resolve and evaluate one failed attempt without reading ambient time or
+    /// randomness outside the selected Clock authority.
     ///
     /// # Errors
     ///
     /// Returns an error for malformed failure evidence, missing or out-of-bound
     /// recorded jitter, or logical-time arithmetic overflow.
-    pub fn evaluate(&self, command: &RetryCommand) -> DurableResult<RetryDisposition> {
+    pub fn evaluate<C: ClockObservationAuthority>(
+        &self,
+        command: RetryCommand,
+        authority: &mut C,
+    ) -> DurableResult<RetryDisposition> {
+        let admission = command.admit(authority)?;
+        self.evaluate_admitted(&admission)
+    }
+
+    fn evaluate_admitted(&self, admission: &RetryAdmission) -> DurableResult<RetryDisposition> {
         self.verify()?;
+        admission.verify()?;
+        let command = &admission.command;
         command.verify()?;
         match (&self.jitter, &command.jitter_evidence) {
             (JitterStrategy::None, Some(_)) => {
@@ -506,7 +460,7 @@ impl RetryPolicy {
             });
         }
 
-        let base_delay = self.delay.delay_for_attempt(command.attempt);
+        let base_delay = self.delay.delay_for_attempt(command.attempt)?;
         let jitter_delay = match (&self.jitter, &command.jitter_evidence) {
             (JitterStrategy::None, None) => 0,
             (JitterStrategy::None, Some(_)) => {
@@ -524,13 +478,17 @@ impl RetryPolicy {
                 evidence.delay
             }
         };
-        let delay = base_delay.checked_add(jitter_delay).ok_or_else(|| {
-            DurableError::Validation("retry delay exceeds logical time range".to_owned())
-        })?;
-        let next_due_at = command
-            .clock
+        let delay = base_delay
+            .checked_add(jitter_delay)
+            .filter(|value| *value <= crate::MAX_EXACT_INTEGER)
+            .ok_or_else(|| {
+                DurableError::Validation("retry delay exceeds logical time range".to_owned())
+            })?;
+        let next_due_at = admission
+            .observation
             .logical_time
             .checked_add(delay)
+            .filter(|value| *value <= crate::MAX_EXACT_INTEGER)
             .ok_or_else(|| {
                 DurableError::Validation("retry due time exceeds logical time range".to_owned())
             })?;
@@ -554,11 +512,12 @@ pub struct RetryCommand {
     pub attempt: u32,
     /// Classified failure evidence.
     pub failure: RetryFailure,
-    /// Content-addressed logical Clock observation.
-    pub clock: ClockObservation,
+    /// Opaque reference to a receipt already issued by the selected Clock.
+    pub clock: ClockObservationRef,
     /// Immutable binding used by the failed occurrence.
     pub occurrence_binding: String,
     /// Optional jitter observation required by a recorded-jitter policy.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub jitter_evidence: Option<JitterEvidence>,
 }
 
@@ -576,8 +535,94 @@ impl RetryCommand {
         }
         self.failure.verify()?;
         self.clock.verify()?;
+        if self.clock.scope != retry_clock_scope(&self.retry_id)? {
+            return Err(DurableError::Validation(
+                "retry Clock reference does not match its exact stream scope".to_owned(),
+            ));
+        }
         if let Some(evidence) = &self.jitter_evidence {
             evidence.verify()?;
+        }
+        Ok(())
+    }
+}
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+impl RetryCommand {
+    /// Resolve this command through the selected issued-receipt authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command or its evidence is malformed, the
+    /// Clock cannot resolve the reference, or the issued observation does not
+    /// exactly match that reference.
+    pub fn admit<C: ClockObservationAuthority>(
+        self,
+        authority: &mut C,
+    ) -> DurableResult<RetryAdmission> {
+        self.verify()?;
+        let observation = authority.resolve(&self.clock)?;
+        observation.verify()?;
+        if observation.reference() != self.clock {
+            return Err(DurableError::Validation(
+                "Clock authority returned a different retry observation".to_owned(),
+            ));
+        }
+        let admission = RetryAdmission {
+            command: self,
+            observation,
+        };
+        admission.verify()?;
+        Ok(admission)
+    }
+}
+
+/// One retry command admitted by a selected issued-receipt Clock authority.
+/// The full receipt is retained for pure replay only after that admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryAdmission {
+    command: RetryCommand,
+    observation: ClockObservation,
+}
+
+impl RetryAdmission {
+    /// Borrow the caller command and opaque Clock reference.
+    pub const fn command(&self) -> &RetryCommand {
+        &self.command
+    }
+
+    /// Borrow the full receipt retained after authority resolution.
+    pub const fn observation(&self) -> &ClockObservation {
+        &self.observation
+    }
+
+    fn verify(&self) -> DurableResult<()> {
+        self.command.verify()?;
+        self.observation.verify()?;
+        if self.observation.reference() != self.command.clock {
+            return Err(DurableError::Validation(
+                "retry admission receipt does not match its command reference".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_issued<C: ClockObservationAuthority>(&self, authority: &mut C) -> DurableResult<()> {
+        self.verify()?;
+        let retained = authority.resolve(&self.command.clock)?;
+        retained.verify()?;
+        if retained != self.observation {
+            return Err(DurableError::Validation(
+                "retained retry admission does not match the selected Clock ledger".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -627,14 +672,14 @@ pub struct RetryDecision {
     pub retry_decision_version: String,
     /// Content-addressed Policy selected for this retry stream.
     pub policy_id: String,
-    /// Original command, including failure, Clock, jitter, and binding evidence.
-    pub command: RetryCommand,
+    /// Original command plus the Clock receipt retained after authority admission.
+    pub admission: RetryAdmission,
     /// Deterministic policy result.
     pub disposition: RetryDisposition,
 }
 
 impl RetryDecision {
-    fn verify(&self, policy: &RetryPolicy) -> DurableResult<()> {
+    fn verify_admitted(&self, policy: &RetryPolicy) -> DurableResult<()> {
         if self.retry_decision_version != RETRY_DECISION_VERSION
             || self.policy_id != policy.policy_id
         {
@@ -642,11 +687,11 @@ impl RetryDecision {
                 "retry decision version or policy identity does not match".to_owned(),
             ));
         }
-        self.command.verify()?;
-        if self.disposition != policy.evaluate(&self.command)? {
+        self.admission.verify()?;
+        if self.disposition != policy.evaluate_admitted(&self.admission)? {
             return Err(DurableError::Validation(format!(
                 "retry decision {} does not match its policy",
-                self.command.decision_id
+                self.admission.command.decision_id
             )));
         }
         Ok(())
@@ -655,7 +700,9 @@ impl RetryDecision {
 
 /// Serializable state of one retry policy reducer.
 ///
-/// This type deliberately does not perform a durable write. An executor must
+/// This type deliberately does not perform a durable write or trust serialized
+/// time evidence by itself. Apply and restore verification resolve every opaque
+/// Clock reference through the selected issuance authority. An executor must
 /// checkpoint the updated stream together with the failed occurrence,
 /// Continuation/timer state, and next-attempt admission in its owning CAS.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -672,99 +719,84 @@ pub struct RetryStream {
 }
 
 impl RetryStream {
-    /// Create one empty retry stream with its complete canonical Policy.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the retry identity or Policy is invalid.
-    pub fn new(retry_id: impl Into<String>, policy: RetryPolicy) -> DurableResult<Self> {
-        let stream = Self {
-            retry_stream_version: RETRY_STREAM_VERSION.to_owned(),
-            retry_id: retry_id.into(),
-            policy,
-            decisions: Vec::new(),
-        };
-        stream.verify()?;
-        Ok(stream)
-    }
-
-    /// Verify the complete stream from its retained Policy and decision history.
+    /// Verify the complete stream from its retained Policy, issued Clock
+    /// receipts, and decision history.
     ///
     /// # Errors
     ///
     /// Returns an error for a malformed version or identity, altered Policy,
     /// non-sequential attempt, early Clock observation, duplicate decision, or
     /// a decision after a terminal result.
-    pub fn verify(&self) -> DurableResult<()> {
+    pub fn verify<C: ClockObservationAuthority>(
+        self,
+        authority: &mut C,
+    ) -> DurableResult<VerifiedRetryStream> {
+        self.verify_header()?;
+        let mut replay = VerifiedRetryStream::from_empty(Self {
+            retry_stream_version: self.retry_stream_version.clone(),
+            retry_id: self.retry_id.clone(),
+            policy: self.policy.clone(),
+            decisions: Vec::new(),
+        });
+        for expected in self.decisions {
+            expected.admission.verify_issued(authority)?;
+            let previous_len = replay.stream.decisions.len();
+            let actual = replay
+                .apply_admitted(expected.admission.clone())
+                .map_err(|error| {
+                    DurableError::Validation(format!(
+                        "retry decision {} is duplicated or invalid: {error}",
+                        expected.admission.command.decision_id
+                    ))
+                })?;
+            if actual != expected || replay.stream.decisions.len() != previous_len + 1 {
+                return Err(DurableError::Validation(format!(
+                    "retry decision {} is duplicated or does not match replay",
+                    expected.admission.command.decision_id
+                )));
+            }
+        }
+        Ok(replay)
+    }
+
+    fn verify_header(&self) -> DurableResult<()> {
         if self.retry_stream_version != RETRY_STREAM_VERSION || self.retry_id.is_empty() {
             return Err(DurableError::Validation(
                 "retry stream version or identity is invalid".to_owned(),
             ));
         }
         self.policy.verify()?;
-        let mut replay = Self {
-            retry_stream_version: self.retry_stream_version.clone(),
-            retry_id: self.retry_id.clone(),
-            policy: self.policy.clone(),
-            decisions: Vec::new(),
-        };
-        for expected in &self.decisions {
-            let previous_len = replay.decisions.len();
-            let actual = replay.apply(expected.command.clone())?;
-            if &actual != expected || replay.decisions.len() != previous_len + 1 {
-                return Err(DurableError::Validation(format!(
-                    "retry decision {} is duplicated or does not match replay",
-                    expected.command.decision_id
-                )));
-            }
-        }
         Ok(())
     }
 
-    /// Apply one failed attempt to the pure retry reducer.
-    ///
-    /// An identical decision command replays the original result. The returned
-    /// updated stream remains process-independent and can be included in a
-    /// broader executor-owned atomic checkpoint.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when command evidence is malformed, an identity is
-    /// reused with different content, attempt order or due-time admission
-    /// fails, or the stream is already terminal.
-    pub fn apply(&mut self, command: RetryCommand) -> DurableResult<RetryDecision> {
-        self.policy.verify()?;
-        command.verify()?;
+    fn apply_admitted(&mut self, admission: RetryAdmission) -> DurableResult<RetryDecision> {
+        admission.verify()?;
+        let command = &admission.command;
         if command.retry_id != self.retry_id {
             return Err(DurableError::IllegalTransition(format!(
                 "retry command {} does not belong to stream {}",
                 command.retry_id, self.retry_id
             )));
         }
-        if let Some(existing) = self
-            .decisions
-            .iter()
-            .find(|decision| decision.command.decision_id == command.decision_id)
-        {
-            if existing.command == command {
-                return Ok(existing.clone());
-            }
+        if self.decisions.iter().any(|decision| {
+            decision.admission.command.decision_id == command.decision_id
+                || decision.admission.command.failure.failure_id == command.failure.failure_id
+        }) {
             return Err(DurableError::IllegalTransition(format!(
-                "retry decision {} was reused with different content",
-                command.decision_id
+                "retry decision {} or failure {} is duplicated",
+                command.decision_id, command.failure.failure_id
             )));
         }
-        if self
-            .decisions
-            .iter()
-            .any(|decision| decision.command.failure.failure_id == command.failure.failure_id)
+        if let Some(previous) = self.decisions.last()
+            && (previous.admission.command.clock.source_id != command.clock.source_id
+                || previous.admission.command.clock.source_generation
+                    != command.clock.source_generation
+                || previous.admission.command.clock.scope != command.clock.scope)
         {
-            return Err(DurableError::IllegalTransition(format!(
-                "retry failure {} already has a decision",
-                command.failure.failure_id
-            )));
+            return Err(DurableError::IllegalTransition(
+                "retry stream cannot change its Clock source generation or scope".to_owned(),
+            ));
         }
-
         match self.decisions.last() {
             None if command.attempt != 1 => {
                 return Err(DurableError::IllegalTransition(
@@ -779,8 +811,12 @@ impl RetryStream {
                     )));
                 }
                 RetryDisposition::RetryAt { next_due_at, .. } => {
-                    let expected_attempt =
-                        previous.command.attempt.checked_add(1).ok_or_else(|| {
+                    let expected_attempt = previous
+                        .admission
+                        .command
+                        .attempt
+                        .checked_add(1)
+                        .ok_or_else(|| {
                             DurableError::Validation(
                                 "retry attempt exceeds supported range".to_owned(),
                             )
@@ -791,7 +827,7 @@ impl RetryStream {
                             command.retry_id, command.attempt
                         )));
                     }
-                    if command.clock.logical_time < *next_due_at {
+                    if admission.observation.logical_time < *next_due_at {
                         return Err(DurableError::IllegalTransition(format!(
                             "retry attempt {} was observed before its admitted due time",
                             command.attempt
@@ -802,14 +838,233 @@ impl RetryStream {
             None => {}
         }
 
+        let retry_decision_version = RETRY_DECISION_VERSION.to_owned();
+        let policy_id = self.policy.policy_id.clone();
+        let disposition = self.policy.evaluate_admitted(&admission)?;
         let decision = RetryDecision {
-            retry_decision_version: RETRY_DECISION_VERSION.to_owned(),
-            policy_id: self.policy.policy_id.clone(),
-            disposition: self.policy.evaluate(&command)?,
-            command,
+            retry_decision_version,
+            policy_id,
+            admission,
+            disposition,
         };
-        decision.verify(&self.policy)?;
+        decision.verify_admitted(&self.policy)?;
         self.decisions.push(decision.clone());
         Ok(decision)
+    }
+}
+
+/// Runtime-verified retry reducer. Deserialization always yields an untrusted
+/// [`RetryStream`]; callers must verify it once against the selected Clock
+/// authority to obtain this wrapper. Each later command resolves and verifies
+/// only its new observation instead of replaying the full retained prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRetryStream {
+    stream: RetryStream,
+    decision_ids: BTreeSet<String>,
+    failure_ids: BTreeSet<String>,
+}
+
+impl VerifiedRetryStream {
+    /// Create one empty verified retry stream with its canonical Policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the retry identity or Policy is invalid.
+    pub fn new(retry_id: impl Into<String>, policy: RetryPolicy) -> DurableResult<Self> {
+        let stream = RetryStream {
+            retry_stream_version: RETRY_STREAM_VERSION.to_owned(),
+            retry_id: retry_id.into(),
+            policy,
+            decisions: Vec::new(),
+        };
+        stream.verify_header()?;
+        Ok(Self::from_empty(stream))
+    }
+
+    fn from_empty(stream: RetryStream) -> Self {
+        debug_assert!(stream.decisions.is_empty());
+        Self {
+            stream,
+            decision_ids: BTreeSet::new(),
+            failure_ids: BTreeSet::new(),
+        }
+    }
+
+    /// Borrow the serializable stream checkpoint.
+    pub const fn stream(&self) -> &RetryStream {
+        &self.stream
+    }
+
+    /// Consume this verified runtime view into its serializable checkpoint.
+    pub fn into_stream(self) -> RetryStream {
+        self.stream
+    }
+
+    /// Admit and incrementally apply one failed attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed or conflicting command evidence, a
+    /// failure already decided, a changed Clock source, a non-sequential or
+    /// early attempt, a terminal stream, or failed Clock or policy admission.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the private verified decision index refers to a decision
+    /// missing from the retained stream.
+    pub fn apply<C: ClockObservationAuthority>(
+        &mut self,
+        command: RetryCommand,
+        authority: &mut C,
+    ) -> DurableResult<RetryDecision> {
+        command.verify()?;
+        if command.retry_id != self.stream.retry_id {
+            return Err(DurableError::IllegalTransition(format!(
+                "retry command {} does not belong to stream {}",
+                command.retry_id, self.stream.retry_id
+            )));
+        }
+        if self.decision_ids.contains(&command.decision_id) {
+            let existing = self
+                .stream
+                .decisions
+                .iter()
+                .find(|decision| decision.admission.command.decision_id == command.decision_id)
+                .expect("verified decision index points to retained decision");
+            if existing.admission.command == command {
+                return Ok(existing.clone());
+            }
+            return Err(DurableError::IllegalTransition(format!(
+                "retry decision {} was reused with different content",
+                command.decision_id
+            )));
+        }
+        if self.failure_ids.contains(&command.failure.failure_id) {
+            return Err(DurableError::IllegalTransition(format!(
+                "retry failure {} already has a decision",
+                command.failure.failure_id
+            )));
+        }
+        if let Some(previous) = self.stream.decisions.last()
+            && (previous.admission.command.clock.source_id != command.clock.source_id
+                || previous.admission.command.clock.source_generation
+                    != command.clock.source_generation
+                || previous.admission.command.clock.scope != command.clock.scope)
+        {
+            return Err(DurableError::IllegalTransition(
+                "retry stream cannot change its Clock source generation or scope".to_owned(),
+            ));
+        }
+        let admission = command.admit(authority)?;
+        self.apply_admitted(admission)
+    }
+
+    fn apply_admitted(&mut self, admission: RetryAdmission) -> DurableResult<RetryDecision> {
+        let decision_id = admission.command.decision_id.clone();
+        let failure_id = admission.command.failure.failure_id.clone();
+        let decision = self.stream.apply_admitted(admission)?;
+        if !self.decision_ids.insert(decision_id) || !self.failure_ids.insert(failure_id) {
+            return Err(DurableError::Integrity {
+                code: "verified_retry_index_diverged".to_owned(),
+                message: "verified retry identity index diverged from its stream".to_owned(),
+            });
+        }
+        Ok(decision)
+    }
+
+    /// Re-audit the complete serializable prefix against cold Clock authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when retained policy or decision evidence is invalid,
+    /// replay diverges, or the Clock cannot authenticate an issued observation.
+    pub fn audit<C: ClockObservationAuthority>(&self, authority: &mut C) -> DurableResult<()> {
+        self.stream.clone().verify(authority).map(|_| ())
+    }
+}
+
+impl Deref for VerifiedRetryStream {
+    type Target = RetryStream;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stream
+    }
+}
+
+impl Serialize for VerifiedRetryStream {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.stream.serialize(serializer)
+    }
+}
+
+fn retry_clock_scope(retry_id: &str) -> DurableResult<String> {
+    if retry_id.is_empty() {
+        return Err(DurableError::Validation(
+            "retry identity must not be empty".to_owned(),
+        ));
+    }
+    content_id(RETRY_CLOCK_SCOPE_ID_DOMAIN, &retry_id).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capped_exponential_delay_is_exact_and_logarithmic_at_u32_max() {
+        let unchanged = RetryDelay::Exponential {
+            initial_delay: 7,
+            multiplier: 1,
+            max_delay: 100,
+        };
+        assert_eq!(
+            unchanged
+                .delay_for_attempt(u32::MAX)
+                .expect("positive attempt derives delay"),
+            7
+        );
+
+        let capped = RetryDelay::Exponential {
+            initial_delay: 3,
+            multiplier: 2,
+            max_delay: 1_000_000,
+        };
+        assert_eq!(
+            capped
+                .delay_for_attempt(1)
+                .expect("first attempt derives delay"),
+            3
+        );
+        assert_eq!(
+            capped
+                .delay_for_attempt(4)
+                .expect("later attempt derives delay"),
+            24
+        );
+        assert_eq!(
+            capped
+                .delay_for_attempt(u32::MAX)
+                .expect("maximum attempt derives capped delay"),
+            1_000_000
+        );
+
+        let overflowing = RetryDelay::Exponential {
+            initial_delay: crate::MAX_EXACT_INTEGER - 1,
+            multiplier: u32::MAX,
+            max_delay: crate::MAX_EXACT_INTEGER,
+        };
+        assert_eq!(
+            overflowing
+                .delay_for_attempt(u32::MAX)
+                .expect("overflowing exponent saturates only at the declared semantic cap"),
+            crate::MAX_EXACT_INTEGER
+        );
+        assert!(matches!(
+            capped.delay_for_attempt(0),
+            Err(DurableError::Validation(_))
+        ));
     }
 }

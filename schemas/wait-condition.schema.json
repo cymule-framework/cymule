@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": ["wait_id", "run_id", "kind", "consume_once", "owner", "state", "result"],
   "properties": {
-    "wait_id": { "$ref": "#/$defs/identity" },
+    "wait_id": { "$ref": "#/$defs/contentId" },
     "run_id": { "$ref": "#/$defs/identity" },
     "kind": { "$ref": "#/$defs/waitKind" },
     "consume_once": { "type": "boolean" },
@@ -22,7 +22,10 @@
   "$defs": {
     "identity": {
       "type": "string", "minLength": 1, "maxLength": 512,
-      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "contentId": {
+      "type": "string", "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "waitOwner": {
       "type": "object",
@@ -34,9 +37,9 @@
         "site_id": { "$ref": "#/$defs/identity" },
         "region_path": {
           "type": "array",
-          "items": { "type": "integer", "minimum": 0 }
+          "items": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
         },
-        "step_index": { "type": "integer", "minimum": 0 },
+        "step_index": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
         "bind": {
           "oneOf": [
             { "type": "null" },

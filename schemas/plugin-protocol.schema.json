@@ -1,25 +1,82 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/plugin-protocol.schema.json",
-  "title": "Cymule Process Plugin Protocol cymule.plugin/2",
+  "title": "Cymule Process Plugin Protocol cymule.plugin/3",
   "oneOf": [
     { "$ref": "#/$defs/request" },
     { "$ref": "#/$defs/response" }
   ],
   "$defs": {
-    "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "operationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9._\\-/:]+$"
+    },
+    "manifestToken": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "publicIdentity": {
+      "type": "string", "minLength": 1, "maxLength": 512,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "contentId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "effectProviderAttempt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["attempt_version", "attempt_id", "claim_owner", "claim_epoch"],
+      "properties": {
+        "attempt_version": { "const": "cymule.effect-provider-attempt/1" },
+        "attempt_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "claim_owner": { "$ref": "#/$defs/publicIdentity" },
+        "claim_epoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
     "code": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[a-z][a-z0-9_]*$" },
-    "message": { "type": "string", "minLength": 1, "maxLength": 8192 },
+    "message": { "type": "string", "minLength": 1, "maxLength": 2000 },
     "request": {
       "oneOf": [
         { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "describe" } } },
         {
           "type": "object", "additionalProperties": false, "required": ["type", "component", "input"],
-          "properties": { "type": { "const": "call" }, "component": { "$ref": "#/$defs/id" }, "input": true }
+          "properties": { "type": { "const": "call" }, "component": { "$ref": "#/$defs/operationId" }, "input": true }
         },
         {
           "type": "object", "additionalProperties": false, "required": ["type", "operation", "intent_id", "input"],
-          "properties": { "type": { "enum": ["prepare_effect", "dispatch_effect", "reconcile_effect"] }, "operation": { "$ref": "#/$defs/id" }, "intent_id": { "$ref": "#/$defs/id" }, "input": true }
+          "properties": { "type": { "const": "prepare_effect" }, "operation": { "$ref": "#/$defs/operationId" }, "intent_id": { "$ref": "#/$defs/contentId" }, "input": true }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "operation", "intent_id", "attempt", "input"],
+          "properties": {
+            "type": { "const": "dispatch_effect" },
+            "operation": { "$ref": "#/$defs/operationId" },
+            "intent_id": { "$ref": "#/$defs/contentId" },
+            "attempt": { "$ref": "#/$defs/effectProviderAttempt" },
+            "input": true
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "operation", "intent_id", "attempt", "decision", "resolution_value", "input"],
+          "properties": {
+            "type": { "const": "reconcile_effect" },
+            "operation": { "$ref": "#/$defs/operationId" },
+            "intent_id": { "$ref": "#/$defs/contentId" },
+            "attempt": { "$ref": "#/$defs/effectProviderAttempt" },
+            "decision": { "enum": ["observe", "resolve_applied", "resolve_not_applied"] },
+            "resolution_value": true,
+            "input": true
+          },
+          "allOf": [{
+            "oneOf": [
+              { "properties": { "decision": { "const": "observe" }, "resolution_value": { "type": "null" } } },
+              { "properties": { "decision": { "const": "resolve_not_applied" }, "resolution_value": { "type": "null" } } },
+              { "properties": { "decision": { "const": "resolve_applied" } } }
+            ]
+          }]
         }
       ]
     },
@@ -39,20 +96,34 @@
         },
         { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "prepared" } } },
         {
-          "type": "object", "additionalProperties": false, "required": ["type", "outcome"],
+          "type": "object", "additionalProperties": false, "required": ["type", "attempt", "outcome", "value"],
           "properties": {
             "type": { "const": "effect_result" },
+            "attempt": { "$ref": "#/$defs/effectProviderAttempt" },
             "outcome": { "enum": ["applied", "not_applied", "unknown"] },
             "value": true
-          }
+          },
+          "allOf": [{
+            "oneOf": [
+              { "properties": { "outcome": { "const": "applied" } } },
+              { "properties": { "outcome": { "enum": ["not_applied", "unknown"] }, "value": { "type": "null" } } }
+            ]
+          }]
         },
         {
-          "type": "object", "additionalProperties": false, "required": ["type", "resolution"],
+          "type": "object", "additionalProperties": false, "required": ["type", "attempt", "resolution", "value"],
           "properties": {
             "type": { "const": "reconciliation_result" },
-            "resolution": { "enum": ["resolved_applied", "resolved_not_applied", "still_unknown", "governance_required"] },
+            "attempt": { "$ref": "#/$defs/effectProviderAttempt" },
+            "resolution": { "enum": ["resolved_applied", "resolved_not_applied", "still_unknown"] },
             "value": true
-          }
+          },
+          "allOf": [{
+            "oneOf": [
+              { "properties": { "resolution": { "const": "resolved_applied" } } },
+              { "properties": { "resolution": { "enum": ["resolved_not_applied", "still_unknown"] }, "value": { "type": "null" } } }
+            ]
+          }]
         },
         {
           "type": "object", "additionalProperties": false, "required": ["type", "code", "message"],
@@ -68,18 +139,18 @@
       "type": "object", "additionalProperties": false,
       "required": ["plugin_version", "implementation_id", "components", "effects"],
       "properties": {
-        "plugin_version": { "const": "cymule.plugin/2" },
-        "implementation_id": { "$ref": "#/$defs/id" },
+        "plugin_version": { "const": "cymule.plugin/3" },
+        "implementation_id": { "$ref": "#/$defs/manifestToken" },
         "components": {
-          "type": "object", "additionalProperties": {
+          "type": "object", "maxProperties": 128, "propertyNames": { "$ref": "#/$defs/operationId" }, "additionalProperties": {
             "type": "object", "additionalProperties": false, "required": ["implementation_revision"],
-            "properties": { "implementation_revision": { "$ref": "#/$defs/id" } }
+            "properties": { "implementation_revision": { "$ref": "#/$defs/manifestToken" } }
           }
         },
         "effects": {
-          "type": "object", "additionalProperties": {
+          "type": "object", "maxProperties": 128, "propertyNames": { "$ref": "#/$defs/operationId" }, "additionalProperties": {
             "type": "object", "additionalProperties": false, "required": ["implementation_revision", "can_reconcile"],
-            "properties": { "implementation_revision": { "$ref": "#/$defs/id" }, "can_reconcile": { "type": "boolean" } }
+            "properties": { "implementation_revision": { "$ref": "#/$defs/manifestToken" }, "can_reconcile": { "type": "boolean" } }
           }
         }
       }

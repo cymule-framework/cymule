@@ -1,0 +1,27 @@
+name: Publish npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version without the v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-npm-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    permissions:
+      contents: read
+      id-token: write
+    uses: cymule-framework/cymule/.github/workflows/publish-npm-controller.yml@main
+    with:
+      version: ${{ inputs.version }}
+      caller_generation: cymule.npm-release-caller/1

@@ -8,21 +8,26 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::thread;
 use std::time::Duration;
 
+use cymule_clock_system::SqliteClock;
 use cymule_core::{
-    Definition, DispatchPolicy, EffectContract, EffectProfile, Expression, MutationKind, Operation,
-    PlanCandidate, ReconciliationMode, ReconciliationResolution, Region, Step, WorldOutcome,
-    sha256_bytes,
+    Definition, DispatchPolicy, EffectContract, EffectProfile, Expression,
+    MachineCommandArchiveSegment, MutationKind, Operation, PlanCandidate, ReconciliationMode,
+    ReconciliationResolution, Region, Step, WorldOutcome, sha256_bytes,
 };
 use cymule_durable::{
-    DriveOutcome, DurableResult, DurableStore, OutboxState, ResumableRuntime, StoreCommit,
-    StoredState,
+    ApplicationJournalPrefix, ApplicationJournalPrefixReplacementAuthority,
+    CoupledCheckpointReceipt, DURABLE_CONTROL_VERSION, DurableBoundary, DurableCommand,
+    DurableResponse, DurableResult, DurableRuntimeControl, DurableStore, JournalRecordManifest,
+    MAX_DURABLE_QUERY_PAGE_BYTES, OutboxState, StateRootManifest, StateRootResolver, StoreCommit,
+    StoreHead, StoreReclamation, StoreStats, StoredState,
 };
+use cymule_durable_protocol::{ContinuationStatus, ExecutionClaimRequest, execution_clock_scope};
 use cymule_runtime::{
     ExecutionBinding, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginRequest,
     PluginResponse, RuntimeError, RuntimeResult,
@@ -31,6 +36,12 @@ use cymule_store_sqlite::SqliteStore;
 use cymule_test_world::{ManagedChild, TestWorld};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
+
+const CLOCK_SOURCE: &str = "clock:store-sqlite-process-kill";
+const CLOCK_GENERATION: &str =
+    "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+const CLAIM_TTL: u64 = 1;
+static PROCESS_DEATH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KillPhase {
@@ -56,8 +67,88 @@ impl KillStore {
 }
 
 impl DurableStore for KillStore {
-    fn load(&mut self) -> DurableResult<Option<StoredState>> {
-        self.inner.load()
+    fn load_head(&mut self) -> DurableResult<Option<StoreHead>> {
+        self.inner.load_head()
+    }
+
+    fn load_state_root_manifest(
+        &mut self,
+        manifest_id: &str,
+    ) -> DurableResult<Option<StateRootManifest>> {
+        self.inner.load_state_root_manifest(manifest_id)
+    }
+
+    fn with_state_root_resolver<T>(
+        &mut self,
+        current: &StateRootManifest,
+        read: impl FnOnce(&mut dyn StateRootResolver) -> DurableResult<T>,
+    ) -> DurableResult<T> {
+        self.inner.with_state_root_resolver(current, read)
+    }
+
+    fn application_journal_prefix(
+        &mut self,
+        manifest: &StateRootManifest,
+        journal_id: &str,
+        count: u64,
+    ) -> DurableResult<ApplicationJournalPrefix> {
+        self.inner
+            .application_journal_prefix(manifest, journal_id, count)
+    }
+
+    fn application_journal_record_manifest(
+        &mut self,
+        manifest: &StateRootManifest,
+        journal_id: &str,
+        record_id: &str,
+    ) -> DurableResult<Option<JournalRecordManifest>> {
+        self.inner
+            .application_journal_record_manifest(manifest, journal_id, record_id)
+    }
+
+    fn application_journal_prefix_replacement_authority(
+        &mut self,
+        manifest: &StateRootManifest,
+        replacement_id: &str,
+    ) -> DurableResult<Option<ApplicationJournalPrefixReplacementAuthority>> {
+        self.inner
+            .application_journal_prefix_replacement_authority(manifest, replacement_id)
+    }
+
+    fn coupled_checkpoint_receipt(
+        &mut self,
+        manifest: &StateRootManifest,
+        coupling_id: &str,
+    ) -> DurableResult<Option<CoupledCheckpointReceipt>> {
+        self.inner.coupled_checkpoint_receipt(manifest, coupling_id)
+    }
+
+    fn load_machine_command_archive_segment(
+        &mut self,
+        segment_id: &str,
+    ) -> DurableResult<Option<MachineCommandArchiveSegment>> {
+        self.inner.load_machine_command_archive_segment(segment_id)
+    }
+
+    fn load_machine_command_archive_entry(
+        &mut self,
+        entry_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandArchiveEntry>> {
+        self.inner.load_machine_command_archive_entry(entry_id)
+    }
+
+    fn load_machine_command_archive_batch(
+        &mut self,
+        batch_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandBatchRecord>> {
+        self.inner.load_machine_command_archive_batch(batch_id)
+    }
+
+    fn load_machine_command_index_node(
+        &mut self,
+        node_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandIndexNode>> {
+        self.inner.load_machine_command_index_node(node_id)
     }
 
     fn compare_and_commit(
@@ -77,16 +168,122 @@ impl DurableStore for KillStore {
             }
         }
     }
+
+    fn reconcile_cold_reclamation(
+        &mut self,
+        request: &StoreReclamation,
+    ) -> DurableResult<cymule_durable::GcReceipt> {
+        self.inner.reconcile_cold_reclamation(request)
+    }
+
+    fn advance_cold_reclamation(
+        &mut self,
+        request: &StoreReclamation,
+    ) -> DurableResult<cymule_durable::GcReceipt> {
+        self.inner.advance_cold_reclamation(request)
+    }
+
+    fn stats(&self) -> DurableResult<StoreStats> {
+        self.inner.stats()
+    }
 }
 
 struct CountingStore {
     inner: SqliteStore,
     calls: Arc<AtomicUsize>,
+    head_loads: Arc<AtomicUsize>,
+    full_audits: Arc<AtomicUsize>,
 }
 
 impl DurableStore for CountingStore {
-    fn load(&mut self) -> DurableResult<Option<StoredState>> {
-        self.inner.load()
+    fn load_head(&mut self) -> DurableResult<Option<StoreHead>> {
+        self.head_loads.fetch_add(1, Ordering::SeqCst);
+        self.inner.load_head()
+    }
+
+    fn load_full_audit(&mut self) -> DurableResult<Option<StoredState>> {
+        self.full_audits.fetch_add(1, Ordering::SeqCst);
+        self.inner.load_full_audit()
+    }
+
+    fn load_state_root_manifest(
+        &mut self,
+        manifest_id: &str,
+    ) -> DurableResult<Option<StateRootManifest>> {
+        self.inner.load_state_root_manifest(manifest_id)
+    }
+
+    fn with_state_root_resolver<T>(
+        &mut self,
+        current: &StateRootManifest,
+        read: impl FnOnce(&mut dyn StateRootResolver) -> DurableResult<T>,
+    ) -> DurableResult<T> {
+        self.inner.with_state_root_resolver(current, read)
+    }
+
+    fn application_journal_prefix(
+        &mut self,
+        manifest: &StateRootManifest,
+        journal_id: &str,
+        count: u64,
+    ) -> DurableResult<ApplicationJournalPrefix> {
+        self.inner
+            .application_journal_prefix(manifest, journal_id, count)
+    }
+
+    fn application_journal_record_manifest(
+        &mut self,
+        manifest: &StateRootManifest,
+        journal_id: &str,
+        record_id: &str,
+    ) -> DurableResult<Option<JournalRecordManifest>> {
+        self.inner
+            .application_journal_record_manifest(manifest, journal_id, record_id)
+    }
+
+    fn application_journal_prefix_replacement_authority(
+        &mut self,
+        manifest: &StateRootManifest,
+        replacement_id: &str,
+    ) -> DurableResult<Option<ApplicationJournalPrefixReplacementAuthority>> {
+        self.inner
+            .application_journal_prefix_replacement_authority(manifest, replacement_id)
+    }
+
+    fn coupled_checkpoint_receipt(
+        &mut self,
+        manifest: &StateRootManifest,
+        coupling_id: &str,
+    ) -> DurableResult<Option<CoupledCheckpointReceipt>> {
+        self.inner.coupled_checkpoint_receipt(manifest, coupling_id)
+    }
+
+    fn load_machine_command_archive_segment(
+        &mut self,
+        segment_id: &str,
+    ) -> DurableResult<Option<MachineCommandArchiveSegment>> {
+        self.inner.load_machine_command_archive_segment(segment_id)
+    }
+
+    fn load_machine_command_archive_entry(
+        &mut self,
+        entry_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandArchiveEntry>> {
+        self.inner.load_machine_command_archive_entry(entry_id)
+    }
+
+    fn load_machine_command_archive_batch(
+        &mut self,
+        batch_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandBatchRecord>> {
+        self.inner.load_machine_command_archive_batch(batch_id)
+    }
+
+    fn load_machine_command_index_node(
+        &mut self,
+        node_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandIndexNode>> {
+        self.inner.load_machine_command_index_node(node_id)
     }
 
     fn compare_and_commit(
@@ -96,6 +293,24 @@ impl DurableStore for CountingStore {
     ) -> DurableResult<StoreCommit> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inner.compare_and_commit(expected, batch)
+    }
+
+    fn reconcile_cold_reclamation(
+        &mut self,
+        request: &StoreReclamation,
+    ) -> DurableResult<cymule_durable::GcReceipt> {
+        self.inner.reconcile_cold_reclamation(request)
+    }
+
+    fn advance_cold_reclamation(
+        &mut self,
+        request: &StoreReclamation,
+    ) -> DurableResult<cymule_durable::GcReceipt> {
+        self.inner.advance_cold_reclamation(request)
+    }
+
+    fn stats(&self) -> DurableResult<StoreStats> {
+        self.inner.stats()
     }
 }
 
@@ -228,24 +443,35 @@ impl PluginHost for LedgerPlugin {
             }),
             PluginRequest::PrepareEffect { .. } => Ok(PluginResponse::Prepared),
             PluginRequest::DispatchEffect {
-                intent_id, input, ..
+                intent_id,
+                attempt,
+                input,
+                ..
             } => {
                 self.dispatch(&intent_id, &input)?;
                 Ok(PluginResponse::EffectResult {
+                    attempt,
                     outcome: WorldOutcome::Applied,
                     value: Some(input),
                 })
             }
             PluginRequest::ReconcileEffect {
-                intent_id, input, ..
-            } => Ok(PluginResponse::ReconciliationResult {
-                resolution: if self.reconcile(&intent_id)? {
-                    ReconciliationResolution::ResolvedApplied
-                } else {
-                    ReconciliationResolution::ResolvedNotApplied
-                },
-                value: Some(input),
-            }),
+                intent_id,
+                attempt,
+                input,
+                ..
+            } => {
+                let applied = self.reconcile(&intent_id)?;
+                Ok(PluginResponse::ReconciliationResult {
+                    attempt,
+                    resolution: if applied {
+                        ReconciliationResolution::ResolvedApplied
+                    } else {
+                        ReconciliationResolution::ResolvedNotApplied
+                    },
+                    value: applied.then_some(input),
+                })
+            }
             request @ PluginRequest::Call { .. } => Err(RuntimeError::plugin_defect(format!(
                 "unexpected process-kill plugin request {request:?}"
             ))),
@@ -253,20 +479,75 @@ impl PluginHost for LedgerPlugin {
     }
 }
 
-fn open_runtime<S: DurableStore>(
+fn open_runtime<
+    S: DurableStore,
+    P: PluginHost,
+    C: cymule_durable::ExecutionClockAuthority + 'static,
+>(
     store: S,
-    mut plugin: LedgerPlugin,
-) -> ResumableRuntime<S, LedgerPlugin> {
-    let manifest = plugin.describe().expect("ledger manifest describes");
-    let binding = ExecutionBinding::for_local_process(
-        &manifest,
-        format!(
-            "sha256:{}",
-            sha256_bytes(b"cymule-store-sqlite-process-kill-ledger/1")
-        ),
-    )
+    plugin: P,
+    clock: C,
+) -> DurableRuntimeControl<S, P> {
+    let admission = cymule_runtime::ExecutionBindingAdmission::from_manifest(plugin, |manifest| {
+        ExecutionBinding::for_local_process(
+            manifest,
+            format!(
+                "sha256:{}",
+                sha256_bytes(manifest.implementation_id.as_bytes())
+            ),
+        )
+        .map_err(cymule_runtime::RuntimeError::from)
+    })
     .expect("ledger execution binding admits");
-    ResumableRuntime::open(store, plugin, binding).expect("runtime opens")
+    DurableRuntimeControl::open(store, admission, clock).expect("runtime opens")
+}
+
+fn open_clock(path: &Path) -> SqliteClock {
+    SqliteClock::open(path, CLOCK_SOURCE, CLOCK_GENERATION).expect("SQLite clock opens")
+}
+
+fn issue_execution(
+    clock: &mut SqliteClock,
+    run_id: &str,
+    owner: impl Into<String>,
+) -> ExecutionClaimRequest {
+    let observation = clock
+        .observe(&execution_clock_scope(run_id).expect("execution Clock scope derives"))
+        .expect("execution Clock observation is issued");
+    ExecutionClaimRequest {
+        owner: owner.into(),
+        clock: observation.reference(),
+        ttl: CLAIM_TTL,
+    }
+}
+
+fn start_command(execution: &ExecutionClaimRequest) -> DurableCommand {
+    DurableCommand::StartRun {
+        control_version: DURABLE_CONTROL_VERSION.to_owned(),
+        run_id: "run:m1-kill".to_owned(),
+        candidate: effect_candidate(),
+        input: json!({"message": "process kill"}),
+        execution: execution.clone(),
+    }
+}
+
+fn current_command() -> DurableCommand {
+    DurableCommand::RunCurrent {
+        control_version: DURABLE_CONTROL_VERSION.to_owned(),
+        run_id: "run:m1-kill".to_owned(),
+        expected_revision: None,
+    }
+}
+
+fn effect_page_command() -> DurableCommand {
+    DurableCommand::RunEffectPage {
+        control_version: DURABLE_CONTROL_VERSION.to_owned(),
+        run_id: "run:m1-kill".to_owned(),
+        expected_revision: None,
+        cursor: None,
+        limit: 256,
+        max_canonical_bytes: MAX_DURABLE_QUERY_PAGE_BYTES,
+    }
 }
 
 fn effect_candidate() -> PlanCandidate {
@@ -314,6 +595,8 @@ fn m1_process_kill_worker_entry() {
     let Ok(database) = std::env::var("CYMULE_M1_KILL_DB") else {
         return;
     };
+    let clock_database =
+        PathBuf::from(std::env::var("CYMULE_M1_KILL_CLOCK_DB").expect("Clock database exists"));
     let phase = match std::env::var("CYMULE_M1_KILL_PHASE")
         .expect("kill phase exists")
         .as_str()
@@ -330,152 +613,266 @@ fn m1_process_kill_worker_entry() {
     let ledger =
         PathBuf::from(std::env::var("CYMULE_M1_KILL_LEDGER").expect("effect ledger exists"));
     let store = KillStore {
-        inner: SqliteStore::open(database, "domain:m1-kill").expect("durable store opens"),
+        inner: SqliteStore::open(&database, "domain:m1-kill").expect("durable store opens"),
         phase,
         fail_at,
         calls: 0,
         marker,
     };
-    let mut runtime = open_runtime(store, LedgerPlugin { database: ledger });
+    let mut clock = open_clock(&clock_database);
+    let execution = issue_execution(&mut clock, "run:m1-kill", "driver:m1-kill-worker");
+    let mut runtime = open_runtime(store, LedgerPlugin { database: ledger }, clock);
     runtime
-        .start(
-            effect_candidate(),
-            &json!({"message": "process kill"}),
-            "run:m1-kill",
-        )
+        .submit(start_command(&execution))
         .expect("worker reaches its selected M1 CAS boundary");
     panic!("M1 kill worker unexpectedly completed");
 }
 
-#[test]
-fn every_m1_effect_run_cas_boundary_survives_real_process_death() {
+fn m1_cas_boundary_count() -> usize {
     let baseline = TestWorld::new(0).expect("baseline test world creates");
     let baseline_database = baseline
         .domain()
         .path("durable.sqlite")
         .expect("baseline database path resolves");
+    let baseline_clock_database = baseline
+        .domain()
+        .path("clock.sqlite")
+        .expect("baseline Clock database path resolves");
     let baseline_ledger = baseline
         .domain()
         .path("effects.sqlite")
         .expect("baseline ledger path resolves");
     LedgerPlugin::initialize(&baseline_ledger);
     let calls = Arc::new(AtomicUsize::new(0));
+    let head_loads = Arc::new(AtomicUsize::new(0));
+    let full_audits = Arc::new(AtomicUsize::new(0));
+    let mut baseline_clock = open_clock(&baseline_clock_database);
+    let baseline_execution = issue_execution(
+        &mut baseline_clock,
+        "run:m1-kill",
+        "driver:m1-kill-baseline",
+    );
     let mut runtime = open_runtime(
         CountingStore {
             inner: SqliteStore::open(&baseline_database, "domain:m1-kill")
                 .expect("baseline store opens"),
             calls: Arc::clone(&calls),
+            head_loads: Arc::clone(&head_loads),
+            full_audits: Arc::clone(&full_audits),
         },
         LedgerPlugin {
             database: baseline_ledger,
         },
+        baseline_clock,
     );
     assert!(matches!(
         runtime
-            .start(
-                effect_candidate(),
-                &json!({"message": "process kill"}),
-                "run:m1-kill",
-            )
+            .submit(start_command(&baseline_execution))
             .expect("baseline Run completes"),
-        DriveOutcome::Completed(_)
+        DurableResponse::RunBoundary {
+            boundary: DurableBoundary::Completed { .. }
+        }
     ));
+    assert!(
+        head_loads.load(Ordering::SeqCst) > 0,
+        "ordinary runtime reopen must authenticate the bounded Store head"
+    );
+    assert_eq!(
+        full_audits.load(Ordering::SeqCst),
+        0,
+        "ordinary runtime reopen must not traverse the full durable projection"
+    );
     let boundary_count = calls.load(Ordering::SeqCst);
     assert!(boundary_count >= 5, "effect Run crosses all durable stages");
+    boundary_count
+}
+
+struct M1FaultCase {
+    _world: TestWorld,
+    database: PathBuf,
+    clock_database: PathBuf,
+    ledger: PathBuf,
+    marker: PathBuf,
+}
+
+impl M1FaultCase {
+    fn new(phase: &str, fail_at: usize, boundary_count: usize) -> Self {
+        let phase_seed = usize::from(phase == "after_commit") * boundary_count + fail_at;
+        let world =
+            TestWorld::new(u64::try_from(phase_seed).expect("fault-matrix position fits u64"))
+                .expect("fault test world creates");
+        let database = world
+            .domain()
+            .path("durable.sqlite")
+            .expect("durable database path resolves");
+        let clock_database = world
+            .domain()
+            .path("clock.sqlite")
+            .expect("Clock database path resolves");
+        let ledger = world
+            .domain()
+            .path("effects.sqlite")
+            .expect("effect ledger path resolves");
+        let marker = world
+            .domain()
+            .path("kill-ready")
+            .expect("kill marker path resolves");
+        LedgerPlugin::initialize(&ledger);
+        Self {
+            _world: world,
+            database,
+            clock_database,
+            ledger,
+            marker,
+        }
+    }
+
+    fn kill_at(&self, phase: &str, fail_at: usize) {
+        let mut command = Command::new(std::env::current_exe().expect("test executable resolves"));
+        command
+            .arg("--exact")
+            .arg("m1_process_kill_worker_entry")
+            .arg("--nocapture")
+            .env("CYMULE_M1_KILL_DB", &self.database)
+            .env("CYMULE_M1_KILL_CLOCK_DB", &self.clock_database)
+            .env("CYMULE_M1_KILL_LEDGER", &self.ledger)
+            .env("CYMULE_M1_KILL_PHASE", phase)
+            .env("CYMULE_M1_KILL_AT", fail_at.to_string())
+            .env("CYMULE_M1_KILL_MARKER", &self.marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        let mut child = ManagedChild::spawn(&mut command).expect("kill worker starts");
+        child
+            .wait_for_content(
+                &self.marker,
+                fail_at.to_string().as_bytes(),
+                Duration::from_secs(20),
+            )
+            .expect("kill worker reaches the selected CAS barrier");
+        assert_eq!(
+            child.terminate().expect("worker is reaped").signal(),
+            Some(9)
+        );
+        assert!(child.is_reaped());
+        assert_sqlite_integrity(&self.database);
+        assert_sqlite_integrity(&self.clock_database);
+    }
+
+    fn recover(&self, phase: &str, fail_at: usize) {
+        let mut store =
+            SqliteStore::open(&self.database, "domain:m1-kill").expect("durable store reopens");
+        let initialized = store
+            .load_head()
+            .expect("bounded durable head reads")
+            .is_some();
+        let mut clock = open_clock(&self.clock_database);
+        let execution = issue_execution(
+            &mut clock,
+            "run:m1-kill",
+            format!("driver:recovery:{phase}:{fail_at}"),
+        );
+        let mut runtime = open_runtime(
+            store,
+            LedgerPlugin {
+                database: self.ledger.clone(),
+            },
+            clock,
+        );
+        let outcome = if initialized {
+            recover_m1_after_kill(&mut runtime, &execution)
+        } else {
+            runtime.submit(start_command(&execution))
+        }
+        .unwrap_or_else(|error| panic!("recovery converges after {phase} CAS {fail_at}: {error}"));
+        assert!(matches!(
+            outcome,
+            DurableResponse::RunBoundary {
+                boundary: DurableBoundary::Completed { .. }
+            }
+        ));
+        assert_m1_recovery(&mut runtime, &self.ledger, phase, fail_at);
+        drop(runtime);
+        assert_sqlite_integrity(&self.database);
+        assert_sqlite_integrity(&self.clock_database);
+    }
+}
+
+fn recover_m1_after_kill(
+    runtime: &mut DurableRuntimeControl<SqliteStore, LedgerPlugin>,
+    execution: &ExecutionClaimRequest,
+) -> DurableResult<DurableResponse> {
+    let DurableResponse::RunCurrent { current, .. } = runtime.submit(current_command())? else {
+        return Err(cymule_durable::DurableError::RuntimeDefect {
+            code: "process_kill_query_mismatch".to_owned(),
+            message: "Run-current query returned another response variant".to_owned(),
+        });
+    };
+    let Some(current) = current else {
+        // Genesis can commit before StartRun. The typed Run query, not the
+        // physical head's existence, decides whether a Run must be recovered.
+        return runtime.submit(start_command(execution));
+    };
+    match current.continuation_status {
+        ContinuationStatus::Running => runtime.submit(DurableCommand::TakeoverRun {
+            control_version: DURABLE_CONTROL_VERSION.to_owned(),
+            run_id: "run:m1-kill".to_owned(),
+            expected_fence: current.execution_fence,
+            execution: execution.clone(),
+        }),
+        _ => runtime.submit(DurableCommand::ResumeRun {
+            control_version: DURABLE_CONTROL_VERSION.to_owned(),
+            run_id: "run:m1-kill".to_owned(),
+            execution: execution.clone(),
+        }),
+    }
+}
+
+fn assert_m1_recovery(
+    runtime: &mut DurableRuntimeControl<SqliteStore, LedgerPlugin>,
+    ledger: &Path,
+    phase: &str,
+    fail_at: usize,
+) {
+    let DurableResponse::RunEffectPage { page, .. } = runtime
+        .submit(effect_page_command())
+        .expect("terminal Effect page reads")
+    else {
+        panic!("Effect page query returned another response variant");
+    };
+    assert!(!page.items.is_empty());
+    assert!(
+        page.items
+            .iter()
+            .all(|effect| matches!(effect.state, OutboxState::Applied | OutboxState::NotApplied))
+    );
+    assert!(page.next_cursor.is_none());
+    let (dispatches, reconciliations) = LedgerPlugin::counts(ledger);
+    assert!(
+        dispatches <= 1,
+        "provider dispatch must remain at most once for {phase} CAS {fail_at}"
+    );
+    assert!(reconciliations <= 1);
+    if dispatches == 0 {
+        assert_eq!(
+            reconciliations, 1,
+            "a killed post-claim/pre-dispatch window settles only through reconciliation"
+        );
+    }
+}
+
+#[test]
+fn every_m1_effect_run_cas_boundary_survives_real_process_death() {
+    let _process_test = PROCESS_DEATH_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let boundary_count = m1_cas_boundary_count();
 
     for phase in ["before_commit", "after_commit"] {
         for fail_at in 1..=boundary_count {
-            let phase_seed = usize::from(phase == "after_commit") * boundary_count + fail_at;
-            let world =
-                TestWorld::new(u64::try_from(phase_seed).expect("fault-matrix position fits u64"))
-                    .expect("fault test world creates");
-            let database = world
-                .domain()
-                .path("durable.sqlite")
-                .expect("durable database path resolves");
-            let ledger = world
-                .domain()
-                .path("effects.sqlite")
-                .expect("effect ledger path resolves");
-            let marker = world
-                .domain()
-                .path("kill-ready")
-                .expect("kill marker path resolves");
-            LedgerPlugin::initialize(&ledger);
-            let mut command =
-                Command::new(std::env::current_exe().expect("test executable resolves"));
-            command
-                .arg("--exact")
-                .arg("m1_process_kill_worker_entry")
-                .arg("--nocapture")
-                .env("CYMULE_M1_KILL_DB", &database)
-                .env("CYMULE_M1_KILL_LEDGER", &ledger)
-                .env("CYMULE_M1_KILL_PHASE", phase)
-                .env("CYMULE_M1_KILL_AT", fail_at.to_string())
-                .env("CYMULE_M1_KILL_MARKER", &marker)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit());
-            let mut child = ManagedChild::spawn(&mut command).expect("kill worker starts");
-            child
-                .wait_for_content(
-                    &marker,
-                    fail_at.to_string().as_bytes(),
-                    Duration::from_secs(20),
-                )
-                .expect("kill worker reaches the selected CAS barrier");
-            assert_eq!(
-                child.terminate().expect("worker is reaped").signal(),
-                Some(9)
-            );
-            assert!(child.is_reaped());
-            assert_sqlite_integrity(&database);
-
-            let store =
-                SqliteStore::open(&database, "domain:m1-kill").expect("durable store reopens");
-            let mut runtime = open_runtime(
-                store,
-                LedgerPlugin {
-                    database: ledger.clone(),
-                },
-            );
-            let outcome = if runtime.coordinator().revision().is_some() {
-                runtime.resume("run:m1-kill")
-            } else {
-                runtime.start(
-                    effect_candidate(),
-                    &json!({"message": "process kill"}),
-                    "run:m1-kill",
-                )
-            }
-            .expect("recovery converges");
-            assert!(matches!(outcome, DriveOutcome::Completed(_)));
-            let state = runtime
-                .coordinator()
-                .state()
-                .expect("durable state validates");
-            assert!(state.outbox.values().all(|dispatch| matches!(
-                dispatch.state,
-                OutboxState::Applied | OutboxState::NotApplied
-            )));
-            runtime
-                .coordinator()
-                .restore_machine()
-                .expect("Machine replays");
-            let (dispatches, reconciliations) = LedgerPlugin::counts(&ledger);
-            assert!(
-                dispatches <= 1,
-                "provider dispatch must remain at most once for {phase} CAS {fail_at}"
-            );
-            assert!(reconciliations <= 1);
-            if dispatches == 0 {
-                assert_eq!(
-                    reconciliations, 1,
-                    "a killed post-claim/pre-dispatch window settles only through reconciliation"
-                );
-            }
-            drop(runtime);
-            assert_sqlite_integrity(&database);
+            let case = M1FaultCase::new(phase, fail_at, boundary_count);
+            case.kill_at(phase, fail_at);
+            case.recover(phase, fail_at);
         }
     }
 }

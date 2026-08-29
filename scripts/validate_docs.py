@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import subprocess
 import sys
 from urllib.parse import unquote
 
@@ -52,6 +53,11 @@ def main() -> int:
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts/version_domains.py"), "check-docs"],
+        cwd=ROOT,
+        check=True,
+    )
     print(f"validated local links in {len(files)} Markdown files")
     return 0
 

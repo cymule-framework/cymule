@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cymule_core::decode_json;
 use cymule_example_durable_evaluation_campaign::{
     CampaignOptions, CampaignReport, EvolutionReport, FaultPoint, RunDisposition,
-    plugin::EvaluationPlugin,
+    campaign::BUNDLED_PLUGIN_RUNTIME_REVISION, plugin::EvaluationPlugin,
 };
-use cymule_runtime::PluginHost;
+use cymule_runtime::{MAX_PLUGIN_MESSAGE_BYTES, PluginHost, decode_plugin_request};
 
 fn main() {
     if let Err(error) = dispatch() {
@@ -37,12 +38,11 @@ fn dispatch() -> Result<(), Box<dyn std::error::Error>> {
     if command == "demo" {
         return demo(&arguments[1..], &executable);
     }
+    reject_unknown_options(&arguments[1..])?;
+    reject_irrelevant_options(command, &arguments[1..])?;
     let mut options = parse_options(&arguments[1..], executable)?;
     match command {
         "run" => {
-            if options.suite_path.is_none() {
-                return Err("run requires --suite for a new campaign".into());
-            }
             let result = cymule_example_durable_evaluation_campaign::campaign::run(&options)?;
             println!("{}", serde_json::to_string_pretty(&result.report)?);
             if result.disposition == RunDisposition::SimulatedCrash {
@@ -112,7 +112,7 @@ fn demo(arguments: &[String], executable: &Path) -> Result<(), Box<dyn std::erro
     if crashed.status.code() != Some(75) {
         return Err(child_failure("crash phase", &crashed).into());
     }
-    let before: CampaignReport = serde_json::from_slice(&crashed.stdout)?;
+    let before: CampaignReport = decode_json(&crashed.stdout)?;
     if before.succeeded != 3 {
         return Err("crash phase did not retain exactly three completed cases".into());
     }
@@ -126,7 +126,7 @@ fn demo(arguments: &[String], executable: &Path) -> Result<(), Box<dyn std::erro
             ],
         )?,
     )?;
-    let compatible: EvolutionReport = serde_json::from_slice(&compatible.stdout)?;
+    let compatible: EvolutionReport = decode_json(&compatible.stdout)?;
     if !compatible.advanced {
         return Err("compatible scorer revision did not advance future work".into());
     }
@@ -150,7 +150,7 @@ fn demo(arguments: &[String], executable: &Path) -> Result<(), Box<dyn std::erro
             ],
         )?,
     )?;
-    let final_report: CampaignReport = serde_json::from_slice(&resumed.stdout)?;
+    let final_report: CampaignReport = decode_json(&resumed.stdout)?;
     let strict = final_report
         .cases
         .iter()
@@ -192,7 +192,7 @@ fn demo(arguments: &[String], executable: &Path) -> Result<(), Box<dyn std::erro
             ],
         )?,
     )?;
-    let incompatible: EvolutionReport = serde_json::from_slice(&incompatible.stdout)?;
+    let incompatible: EvolutionReport = decode_json(&incompatible.stdout)?;
     if incompatible.advanced || incompatible.current_plan_id != compatible.current_plan_id {
         return Err("incompatible scorer revision changed the future Plan".into());
     }
@@ -250,15 +250,28 @@ fn parse_options(
     let state = option_value(arguments, "--state").ok_or("--state is required")?;
     let run_id = option_value(arguments, "--run-id").unwrap_or("run:evaluation-demo");
     let suite = option_value(arguments, "--suite").map(PathBuf::from);
-    let plugin_executable = option_value(arguments, "--plugin").map_or_else(
-        || Ok(executable),
-        |path| fs::canonicalize(path).map_err(Box::<dyn std::error::Error>::from),
-    )?;
+    let plugin = option_value(arguments, "--plugin");
+    let configured_runtime_revision = option_value(arguments, "--plugin-runtime-revision");
+    let (plugin_executable, plugin_runtime_revision) = match plugin {
+        Some(path) => {
+            let revision = configured_runtime_revision
+                .ok_or("--plugin requires --plugin-runtime-revision")?
+                .to_owned();
+            (fs::canonicalize(path)?, revision)
+        }
+        None => (
+            executable,
+            configured_runtime_revision
+                .unwrap_or(BUNDLED_PLUGIN_RUNTIME_REVISION)
+                .to_owned(),
+        ),
+    };
     let mut options = CampaignOptions {
         state_dir: PathBuf::from(state),
         suite_path: suite,
         run_id: run_id.to_owned(),
         plugin_executable,
+        plugin_runtime_revision,
         worker_id: option_value(arguments, "--worker-id").map_or_else(
             || format!("worker:local:{}", std::process::id()),
             str::to_owned,
@@ -281,7 +294,6 @@ fn parse_options(
         }
         options.fault = FaultPoint::AfterCommit(count.parse()?);
     }
-    reject_unknown_options(arguments)?;
     Ok(options)
 }
 
@@ -299,6 +311,7 @@ fn reject_unknown_options(arguments: &[String]) -> Result<(), Box<dyn std::error
         "--run-id",
         "--worker-id",
         "--plugin",
+        "--plugin-runtime-revision",
         "--logical-now",
         "--lease-ttl",
         "--policy",
@@ -323,14 +336,50 @@ fn reject_unknown_options(arguments: &[String]) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+fn reject_irrelevant_options(
+    command: &str,
+    arguments: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let allowed: &[&str] = match command {
+        "run" => &[
+            "--state",
+            "--suite",
+            "--run-id",
+            "--worker-id",
+            "--plugin",
+            "--plugin-runtime-revision",
+            "--logical-now",
+            "--lease-ttl",
+            "--simulate-crash-after-claim",
+            "--simulate-crash-after-commit",
+        ],
+        "status" => &["--state", "--suite", "--run-id"],
+        "evolve" => &["--state", "--run-id", "--policy"],
+        _ => return Ok(()),
+    };
+    for option in arguments.iter().step_by(2) {
+        if option.starts_with("--") && !allowed.contains(&option.as_str()) {
+            return Err(format!("option {option} is not valid for {command}").into());
+        }
+    }
+    Ok(())
+}
+
 fn plugin_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
-    io::stdin().take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 1024 * 1024 {
-        return Err("plugin request exceeds 1 MiB".into());
+    io::stdin()
+        .take(u64::try_from(MAX_PLUGIN_MESSAGE_BYTES + 1)?)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PLUGIN_MESSAGE_BYTES {
+        return Err(format!(
+            "plugin request exceeds the {MAX_PLUGIN_MESSAGE_BYTES} byte protocol bound"
+        )
+        .into());
     }
-    let request = serde_json::from_slice(&bytes)?;
+    let request = decode_plugin_request(&bytes)?;
+    let admitted = request.clone();
     let response = EvaluationPlugin.invoke(request)?;
+    response.verify_for(&admitted)?;
     serde_json::to_writer(io::stdout().lock(), &response)?;
     Ok(())
 }
@@ -340,7 +389,7 @@ fn print_help() {
         "Cymule durable evaluation campaign\n\n\
          Usage:\n\
            cymule-example-durable-evaluation-campaign demo [--state NEW_DIR]\n\
-           cymule-example-durable-evaluation-campaign run --state DIR --suite FILE [--run-id ID] [--plugin EXECUTABLE]\n\
+           cymule-example-durable-evaluation-campaign run --state DIR [--suite FILE] [--run-id ID] [--plugin EXECUTABLE --plugin-runtime-revision REVISION]\n\
            cymule-example-durable-evaluation-campaign status --state DIR [--suite FILE] [--run-id ID]\n\
            cymule-example-durable-evaluation-campaign evolve --state DIR --policy weighted|incompatible [--run-id ID]\n\n\
          The child subject/scorer is a process plugin. Simulated crash flags are documented in the example README."

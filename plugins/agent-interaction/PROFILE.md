@@ -1,93 +1,361 @@
 # Agent Interaction Plugin Profile
 
-Status: implemented optional plugin profile.
+Status: implemented optional profile.
 
-This profile belongs to `plugins/agent-interaction`, not to the Cymule
-framework, semantic kernel, CLI, or language SDKs. It defines one possible
-Agent-domain integration over the generic M1 durability interfaces.
+This profile belongs to `plugins/agent-interaction` and
+`crates/cymule-profile-protocol::agent`. It does not change Cymule's semantic
+kernel or define a universal Agent loop.
 
-## Boundary
+## Authority boundary
 
-The plugin owns:
+The profile has one mutation union: `AgentCommandAction`. It contains direct
+Session updates, standalone host-occurrence transitions, streams, M1 input, and
+M1 workspace commands. `AgentCommand` binds the complete action to the exact
+source StateRoot revision and a content-derived command ID.
 
-- typed Agent content, messages, plans, tool lifecycle, usage, and Session
-  projections;
-- Agent-host occurrences and controllers for context, model, permission, tool,
-  elicitation, and workspace interactions;
-- Session input suspension and completion;
-- Agent message and tool-output stream staging and finalization;
-- the `cymule.agent-stream/1` domain version, Agent protocol schema, fixtures,
-  and plugin conformance suite.
+`AgentCommandReceipt` embeds only bounded exact before witnesses and the exact
+reducer result. `verify_for` replays the profile reducer and compares the whole
+postcondition; membership or same-owner checks are not sufficient. The receipt
+has its own content identity and never embeds the result StateRoot revision,
+which would create a content-addressed fixed point. `AgentCommit` is a
+non-persisted envelope whose `observed_revision` means the head observed by that
+call: first commit normally returns the resulting head, while a later replay
+returns the then-current head with the original receipt and no write.
+Its required-nullable `committed_revision` is that same observed revision only
+when this invocation newly committed the command and received a verified
+acknowledgement. Exact replay carries explicit null even at the original result
+head. Neither receipt presence nor a source/result revision difference proves
+fresh dispatch ownership. The physical envelope never enters receipt identity.
 
-The plugin does not own the Cymule execution model. It lowers its state through
-M1 application journals, waits, bindings, effects, scopes, resources, outbox
-records, and segmented head CAS checkpoints. It cannot widen authority, treat a
-catalog entry as permission, or bypass a Plan-declared world effect.
+The public persistence capability exposes only:
 
-The framework does not interpret Agent Loop phases, model/tool ordering,
-strategy, program counters, or termination. The included `AgentTurnDriver` is a
-bounded reference convenience for plugin tests, not framework semantics.
+- ordinary `commit_agent` for commands requiring no provider product;
+- specialized stream finalization, observe-only publication reconciliation,
+  and workspace commit methods whose provider registries are framework-owned
+  and binding-keyed;
+- exact Session, message, tool, elicitation, occurrence, and stream reads;
+- bounded message and unresolved-occurrence pages; and
+- an M1-derived workspace-admission read.
 
-ACP, MCP, A2A, editor, model-provider, and concrete Agent Loop support belongs
-in separate adapters or plugins above this package. Those adapters are not
-completion gates for this protocol-neutral plugin.
+The production writer is the provider- and Clock-bound
+`cymule_durable::DurableAgentControl` borrowed from its owning Runtime. Store
+control exposes Agent reads only and does not implement `AgentPersistence`.
+This plugin implements `AgentPersistence` for the typed Runtime writer and maps
+every method directly to the matching closed Durable seam; Durable does not
+depend back on the optional Agent plugin, and there is no generic transaction
+fallback.
+Profile `Conflict`, `Substrate`, `Persistence`, and `Integrity` failures map
+one-for-one into the corresponding structured `AgentError`; identity mismatch
+maps to Integrity with a stable code, Encoding remains distinct, and `NotFound`
+plus `CommitOutcomeUnknown` remain typed. Durable Busy, Substrate, Persistence,
+RuntimeDefect, Integrity, history conflict, reconciliation, archived replay,
+Cancelled, TimedOut, and Encoding failures retain their closed category and
+original fields rather than a display-rendered string.
 
-## Implemented profile
+There is no Agent journal trait, raw `JournalRecord`, `JournalBatch`,
+`DurableTransaction`, arbitrary StateRoot delta, prefix replacement, or
+Session-wide enumeration boundary.
 
-- ordered Session projection with validate-before-append updates, idempotent
-  update IDs, conflicting-reuse rejection, tool lifecycle checks, and replay;
-- `AgentJournal` and `AgentOccurrenceStore` interfaces with non-blocking memory
-  references and M1 `DurableCoordinator` integration;
-- request-digested, binding-pinned Agent-host occurrences with retained typed
-  responses and `prepared -> started -> completed | unknown | not_applied`
-  persistence;
-- a caller-driven `AgentInteractionController` that replays completed or
-  reconciled responses, rejects conflicting IDs, and never advances a loop;
-- query-only recovery against the original pinned binding, including explicit
-  non-dispatch evidence for prepared-call cancellation and no redispatch after
-  ambiguity;
-- input checkpoints that atomically couple the Session projection to an M1
-  input wait and Continuation state across suspend, complete, reopen, and stale
-  CAS attempts;
-- self-contained Draft 2020-12 input schema compilation and accepted-value
-  validation with filesystem and HTTP resolution disabled;
-- workspace overlay commit and abort controllers that lower mutations to
-  Plan-declared effects, scope obligations, outbox records, retained
-  occurrences, Machine snapshots, and Continuations under one M1 CAS;
-- `cymule.agent-stream/1` open, chunk, finalized, and aborted records with
-  stable targets, contiguous sequence identity, immutable final content, and
-  Resource Handles for large output;
-- multi-journal stream finalization that keeps staged chunks outside Session
-  authority and publishes the terminal stream record plus exact Session update
-  atomically;
-- plugin-owned JSON Schema validation for Agent occurrence and stream fixtures;
-- fault-oriented Rust tests for reopen, retry, conflicting reuse, stale CAS,
-  receipt loss, unknown reconciliation, abort, and immutable output identity.
-- cancellation, refusal, and host-failure matrices across context, model,
-  permission, tool, elicitation, and workspace calls, including proof that
-  ambiguous retries never redispatch;
-- real child-process death on both sides of every prepared/started/completed
-  occurrence checkpoint plus the Session journal and atomic stream-finalization
-  checkpoint, with SQLite reopen and provider-call counts;
-- field-complete Session JSON Schema and fixture, including stop reason,
-  ordered finalized messages, Plan, tools, usage, elicitations, and applied
-  update identities;
-- complete public rustdoc without incubation allowances.
+Controller creation has two non-overlapping operations. `open` proves the
+Session key is absent at one exact revision and admits the first command over
+that explicit genesis; `resume` requires an existing bounded Session current.
+Neither operation silently converts missing durable state into the other.
+The first Prepare must acknowledge the original absence-pinned source before
+that opening pin is consumed. An unknown initial acknowledgement keeps the pin;
+neither controller may join a subsequently created same-named Session by
+rereading its latest revision.
 
-Protocol-specific clients remain optional adapter work, not a gap in this
-protocol-neutral profile.
+## Keyed bounded state
 
-Capability advertisement, authentication, permission, credential access, and
-effect release remain separate decisions. A tool or model catalog entry never
-grants execution authority.
+`AgentSessionCurrent` is metadata only: state, stop reason, bounded Plan and
+usage, sequence counters, message head/count, pending-input count,
+unresolved-occurrence count/generation, open-stream count/generation, and one
+typed last-transition witness. It never embeds message, tool, elicitation,
+occurrence, stream, or chunk history.
 
-## Compatibility
+The remaining authorities are keyed independently:
 
-The Rust package and crate names remain `cymule-agent` and `cymule_agent` for
-source compatibility. Location and ownership, rather than the crate identifier,
-define the boundary: the package lives under `plugins/`, is an optional
-workspace member, and is not a dependency of the framework CLI or SDK crates.
+- immutable message payload plus ordinal/order-head entry;
+- update-ID alias and complete update digest;
+- exact tool and elicitation currents;
+- exact occurrence current with a bounded append-only recovery-observation
+  list, plus a deletable unresolved ordinal index;
+- exact stream current plus immutable ordinal chunks; and
+- exact command and receipt entries.
 
-Streaming uses the plugin-owned `cymule.agent-stream/1` version domain. Changes
-to Session, occurrence, or stream semantics require a plugin version decision;
-they do not change `cymule.semantic/4` unless the generic framework laws change.
+Message history is read backward through a fixed `(message_head,
+message_count)` source descriptor and StateRoot revision. A newer current
+revision can read an older retained immutable prefix only by exact terminal
+ordinal/head membership; the Session's latest head is not substituted for the
+requested prefix. Unresolved occurrences are read forward through a fixed
+index generation and revision. Cursors cannot reset the context reader's
+cumulative entry or message-current byte budget. Complete page wire bytes have
+their own independent bound, so splitting the same source into one-entry or
+256-entry pages does not change which messages fit the cumulative scan. No
+ordinary turn path materializes all historical messages or occurrences.
+
+The protocol enforces these hard bounds before Store serialization:
+
+- 256 entries and 4 MiB canonical bytes per ordinary page;
+- 256 KiB per ordinary Agent value;
+- 512 KiB per keyed current/read wrapper;
+- 2 MiB per command and 10 MiB per semantic receipt;
+- 256 entries per bounded content or Plan vector;
+- 64 append-only recovery observations per occurrence, with the final slot
+  reserved for NotApplied evidence; and
+- 4,096 entries / 16 MiB per pinned context scan capability.
+
+A staged stream contains at most 64 chunks and at most 256 KiB of cumulative
+canonical chunk bytes. Page builders stop at an item boundary; a query budget
+which cannot fit one otherwise valid item fails explicitly instead of returning
+a non-advancing cursor.
+
+## Direct Session updates
+
+Update IDs have independent keyed authority containing the digest of the whole
+typed update. Reusing an admitted ID, reusing an immutable message alias,
+repeating a tool state, or submitting a new command that does not change State,
+Plan, or usage is rejected. Exact retry uses the retained command receipt, not a
+second transition.
+
+A Tool current can enter the Session only as `Pending`. Every later transition
+keeps the same `tool_call_id`, operation, and immutable input while following
+the closed lifecycle through permission, execution, and one terminal state.
+
+Generic Session updates cannot mutate elicitations. Input suspend/complete is
+the only authority which changes an elicitation current, pending count,
+Session state, M1 Wait, result Artifact, and Continuation together.
+
+## Host occurrences and recovery
+
+Every replaceable context, model, permission, tool, elicitation, or standalone
+workspace call records an immutable request digest and complete
+`AgentHostBinding`. The lifecycle is:
+
+`Prepared -> Started -> Completed | Unknown | NotApplied`
+
+Provider dispatch occurs only after `Prepared` is durable and this invocation
+receives a verified fresh `Started` acknowledgement. A competing same-command
+replay cannot dispatch, even at the same observed head; it reads the retained
+current and returns a completed response or requires recovery. Losing a
+Prepared or Started acknowledgement also requires recovery, while losing a
+Completed acknowledgement returns its retained response on exact occurrence
+replay. Any
+ordinary error after Started persists Unknown and returns only
+`HostOutcomeUnknown { occurrence_id }`; timeout or cancellation cannot claim
+that dispatch did not apply. A lost result blocks redispatch. Recovery
+exact-matches the retained binding and may only complete the original
+occurrence, prove it did not apply, or preserve ambiguity. Context is narrower:
+an unresolved recovery-time Completed snapshot cannot be admitted because the
+recovery call no longer owns the original pinned message-reader evidence. A
+Started Context is durably marked Unknown with one stable reason; an already
+Unknown Context returns `HostOutcomeUnknown` without another write. A retained
+terminal Context completion still replays directly, and NotApplied remains a
+valid terminal proof. No serialized proof DTO substitutes for the original
+reader capability. Each non-empty
+reconciliation observation has a content-derived identity over the occurrence,
+closed disposition, and exact evidence. The list is append-only and bounded to
+64 total entries, with one slot reserved for terminal NotApplied proof. An
+exact duplicate is a zero-write replay; a new observation advances the current
+and remains readable after reopen. Generic occurrence and recovery paths reject
+M1-owned workspace requests; their full lifecycle belongs to the workspace
+command union.
+
+Permission requests offer only the closed `AllowOnce`/`Deny` decision enum,
+and a retained response must select one decision present in that exact request.
+Arbitrary option strings are not a second policy-result authority.
+
+The reference turn driver checks the bounded unresolved index (limit one)
+instead of scanning all occurrences. Context selection receives a
+`PinnedAgentMessageReader`; the host cannot change its revision or source
+head/count, reset its cursor, or renew its cumulative scan budget. One turn
+admits `1..=64` model rounds; the builder rejects zero or a larger value before
+execution.
+All six driver host operations and the standalone controller delegate their
+Prepared/Started admission, provider dispatch, and terminal persistence to one
+internal execution path. The driver keeps no second occurrence writer or
+state-only dispatch fast path. Its no-ID calls create the next occurrence;
+after a lost result, callers correlate and recover the original occurrence
+instead of treating a new call as a retry.
+The retained context response must echo the exact source message head and count
+pinned by its request, and every selected message id/index/digest must
+exact-match an entry actually returned through that single pinned reader. A
+response cannot relabel content selected from another source descriptor, cite
+an unread entry, or fabricate a persisted message binding.
+
+## Streams and Resource retention
+
+Opening a stream fixes its Session, target, and delivery authority. A message
+target must not already exist; a tool target must be the exact in-progress tool
+current. Open increments the Session open-stream index, and abort/finalize
+removes it in the same transition. A closed Session can neither open nor retain
+an open stream.
+
+Staged delivery admits contiguous immutable chunks and finalizes their exact
+ordered content into one message or tool update. External delivery admits no
+chunks. Open pins the resolver binding plus exact media type, digest, and byte
+size. Its serialized Finalize command carries only Session/stream identity;
+framework preflight derives a closed serializable intent binding source
+revision/digest, Session, stream, command, target, resolver, and content. The
+provider product remains non-Serde. The provider accepts only that intent,
+publishes idempotently, and may return only Published with exact readback,
+NotApplied, or Unknown.
+
+The external path is a two-stage read inside one pinned commit attempt. Before
+provider I/O the stream source has `resource: null`, because no Resource family
+or pin key exists until the verified publication is known. The publication
+derives the exact `ResourceProfilePin`; Durable then reads retention and pin
+currents from the original source revision, constructs the complete bounded
+before witness, and runs the pure reducer. Only that complete source enters the
+semantic receipt.
+
+Published followed by any Resource read, Agent reduction, or CAS failure
+returns `PublicationOutcomeUnknown` with the same intent. The dedicated
+reconciliation method requires that restored intent, rereads the touched
+Finalize source, exact-matches its digest and derived identity, and calls only
+provider observation. It never invokes publish; a restart therefore cannot
+turn an unknown write into a second write.
+
+External finalization is one StateRoot CAS over:
+
+- command and semantic receipt;
+- stream and Session/update/message-or-tool currents;
+- exact `ResourceCatalogRecord` publication;
+- content-derived `ResourcePinKind::AgentStream`; and
+- Resource pin and retention currents.
+
+The shared Resource reducer rejects deleted/fenced families, duplicate pins,
+wrong physical families, and released pins. Resource GC resolves the retained
+Agent command/receipt reference before treating the pin as authority. A
+caller-authored publication or a split Agent/Resource commit cannot become
+terminal output.
+
+## Input waits
+
+Suspend and Complete commands bind `session_id`, `wait_id`, exact `run_id`, and
+the complete structural `WaitOwner`. Suspend rejects an existing request alias
+and a closed Session. Complete requires the exact pending request, validates the
+accepted value against its retained local Draft 2020-12 schema, derives the
+closed accepted/declined result, and exact-matches its
+`cymule.wait-result/1` Artifact.
+
+The checkpoint carries typed suspension/completion receipt references, owner,
+Run, and result. Profile verification validates their self-contained shape;
+every authoritative Durable commit/read additionally resolves and exact-matches
+the underlying M1 receipts, Wait, Continuation, and result. Accepted JSON null
+is distinct from decline. Every schema-required nullable member must be present
+as either a value or explicit JSON `null`; omission is rejected.
+
+## Workspace effects
+
+Workspace commands contain semantic intent and exact M1 structural bindings,
+not provider responses. StartEffect alone requires a dispatch lease request
+containing the framework-derived occurrence owner, exact Run-scoped
+`ClockObservationRef`, and positive TTL; StartAbort and both settlement phases
+require explicit null. Runtime resolves the current Clock while its guard still
+encloses the final CAS. StartEffect atomically stages Propose, Prepare,
+CommitScope, AuthorizeRelease, and StartDispatch, then commits the resulting
+Continuation, obligation, claimed outbox, lease, and Started Agent occurrence.
+StartAbort obtains the active host binding without creating an Effect. Settle
+commands resolve the original binding and observe that original provider
+occurrence; callers cannot submit a Completed response, NotApplied evidence, or
+Unknown evidence as commit input.
+
+Source-only preflight prepares the full bounded inline Core Scope proof before
+any provider binding or dispatch. StartEffect must own the current frame's final
+Effect site and the exact Plan-derived Effect-args Artifact. A bound Scope result
+is evaluated by the existing pure interpreter and admitted in the same CAS.
+Abort is supported only when an unbound child Scope with no pre-existing Effect
+neighborhood can unwind to its real parent. Root abort, required abort result
+bindings, non-final Effect sites, and oversized inline closure fail before any
+business provider I/O or durable mutation.
+
+Only a fresh acknowledged Start dispatches, after its Clock guard has returned
+successfully. The closed Submitted and Unknown submission results both leave the
+occurrence Started; neither supplies terminal workspace evidence. A provider
+error after that admission preserves Started and returns an unknown-outcome
+error identifying the occurrence. Replaying the exact Start returns its original
+receipt without binding, dispatch, observation, or Clock I/O. Explicit Settle
+alone asks the original occurrence's pinned observer for a resolution.
+
+An observer returns a non-Serde `AgentWorkspaceObservation`: the closed
+resolution plus the immutable Artifact records it newly produced. Only actual
+typed Artifact references are accepted, not apparent references inside generic
+JSON. Durable combines exact parent reuse with the complete supplied records,
+verifies reference/byte equality, uniqueness, and the aggregate 4 MiB material
+budget, and admits new evidence with its terminal or Unknown observation CAS.
+There is no separate evidence registration or pre-existing-evidence requirement.
+The complete retained typed Artifact closure, including prior observations,
+overlay, binding, and Effect result, has one shared 64 MiB raw-byte budget on
+admission and receipt reads. A non-terminal occurrence reserves the exported
+4 MiB observation-material limit and, only for its frozen M1 Effect-result path,
+Core's 8 MiB Artifact limit for a legal terminal successor. Terminal phases use
+their actual deduplicated closure size. A proposal exceeding its phase budget is
+rejected before CAS; previous evidence stays unchanged and reopenable, and an
+accepted Unknown retains enough material budget to settle Applied.
+The same rule applies independently to the occurrence's 256 KiB canonical body.
+The pure Workspace reducer encodes a Completed capacity probe using the exact
+frozen change ID, commit decision, host binding, and the largest legal
+ArtifactRef under Core's exported kind bound. Non-terminal admission and source
+or receipt verification reject a body that could not retain that successor.
+The probe only measures capacity: it is never an observation, an admitted
+Artifact, or a real receipt, and no prior evidence is removed to make room.
+
+Every `WorkspaceScopeCheckpoint` includes a bounded `AgentWorkspaceM1Witness`
+binding Run, scope, terminal phase, Continuation digest, Effect intent,
+obligation, and the exact closed M1 receipt ID. The Durable façade resolves that
+receipt on commit and read and exact-matches scope, Effect, outbox, obligation,
+lease, and Continuation changes. Generic Agent occurrence mutation cannot
+advance any M1 workspace lifecycle state.
+
+The M1 witness points to the real closed Agent-workspace coupled receipt. Its
+StartEffect form retains the actual issued Clock observation so later store-only
+reads can verify the original scope, reference, and TTL/expiry equation without
+asking a current Clock provider. Command-bearing phases resolve their complete
+ordered Core batch through authenticated hot or cold lookup. New evidence without
+a semantic Core command uses the real material-only batch, whose material source
+is non-empty; a fabricated empty command batch is never accepted.
+
+`AgentWorkspaceCommitOutcome::Committed` carries the exact retained Agent
+receipt. A fresh settlement whose Unknown evidence identity already exists
+returns `Unchanged` with the current revision and occurrence, performs no CAS,
+and creates no synthetic command or M1 receipt. New evidence remains an atomic
+Agent/M1 transition.
+
+## Wire and compatibility
+
+Current persisted command and receipt selectors are `cymule.agent-command/1`
+and `cymule.agent-command-receipt/1`; bounded Session metadata is
+`cymule.agent-session-current/1`, and the current closed schema generation is
+`cymule.agent/5`. Recovery observations and publication intents use their own
+content-ID generations. All persisted unions deny unknown fields.
+There is no reader or writer for the removed aggregate Session, recursive
+journal-base, or stream-record formats. This profile is still internal, so the
+terminal keyed model is a deliberate historical incompatibility rather than a
+compatibility layer.
+
+`schemas/agent-protocol.schema.json` covers the public Agent content,
+host-interaction, bounded current, query-facing, and stream-command shapes. Rust
+Serde/reducer tests additionally cover the complete persistence command/source/
+receipt hard cut, the non-persisted `AgentCommit` envelope, and provider-product
+exclusion. `AgentCommit` is a Rust persistence-facade result, not an Engine wire
+branch or a branch of that JSON Schema. Its required-nullable freshness field
+does not introduce a persisted identity or a new protocol generation.
+
+## Validation
+
+The profile is gated by:
+
+```sh
+cargo check -p cymule-profile-protocol --all-targets --locked
+cargo test -p cymule-profile-protocol --lib --locked
+cargo test -p cymule-agent --all-targets --locked
+```
+
+Durable integration tests must additionally prove late replay performs no CAS,
+input/workspace receipt references fail closed when missing or mismatched, and
+external finalization survives reopen/GC with its Agent-stream pin while a
+delete-fenced family rejects a later finalization. Publication Unknown must
+reopen through observe-only reconciliation with zero additional publish calls;
+repeated recovery evidence must perform zero writes while new evidence remains
+append-only and reopenable.

@@ -1,13 +1,29 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 
-use cymule_core::{Operation, PlanCandidate, Region, WaitSpec};
+use cymule_core::{Operation, PlanCandidate, Region, WaitSpec, canonical_bytes, validate_identity};
 use jsonschema::{Retrieve, Uri, Validator};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::composition::deserialize_bounded_vec;
+
 /// JSON Schema dialect used by every executable Plan contract.
 pub const CONTRACT_SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
+/// Maximum concrete validation issues retained by the contract authority.
+pub const MAX_CONCRETE_CONTRACT_ISSUES: usize = 99;
+/// Maximum complete issue set, including one omission summary.
+pub const MAX_CONTRACT_ISSUES: usize = MAX_CONCRETE_CONTRACT_ISSUES + 1;
+/// Maximum Unicode scalars in one retained JSON Pointer.
+pub const MAX_CONTRACT_POINTER_SCALARS: usize = 1_000;
+/// Maximum Unicode scalars in one retained issue message.
+pub const MAX_CONTRACT_MESSAGE_SCALARS: usize = 2_000;
+/// Maximum canonical bytes in one complete structured contract violation.
+pub const MAX_CONTRACT_VIOLATION_BYTES: usize = 1024 * 1024;
+const CONTRACT_ISSUE_BYTE_BUDGET: usize = MAX_CONTRACT_VIOLATION_BYTES - 16 * 1024;
+const INVALID_CONTRACT_TARGET_ID: &str = "invalid-contract-target";
+const CONTRACT_ISSUES_OMITTED_MESSAGE: &str =
+    "additional contract issues were omitted after the fixed validation budget";
 
 /// Result type for executable contract compilation and validation.
 pub type ContractResult<T> = std::result::Result<T, ContractViolation>;
@@ -126,12 +142,42 @@ impl ContractTarget {
             side: ContractSide::Input,
         }
     }
+
+    /// Validate the exact semantic target identity before authority lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the target identity is empty, control-bearing, or
+    /// exceeds the shared 512-scalar semantic identity bound.
+    pub fn verify(&self) -> Result<(), String> {
+        validate_identity("contract target", &self.id).map_err(|error| error.to_string())
+    }
+
+    fn invalid_projection(&self) -> Self {
+        Self {
+            boundary: self.boundary,
+            id: INVALID_CONTRACT_TARGET_ID.to_owned(),
+            side: self.side,
+        }
+    }
 }
 
 /// One path-addressed JSON Schema issue without retaining the checked value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractIssueKind {
+    /// One concrete validator issue.
+    Validation,
+    /// Fixed terminal summary indicating that the source issue budget ended.
+    Omitted,
+}
+
+/// One path-addressed JSON Schema issue without retaining the checked value.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContractIssue {
+    /// Closed issue class.
+    pub kind: ContractIssueKind,
     /// JSON Pointer into the submitted schema during admission or checked value
     /// during execution.
     pub instance_path: String,
@@ -139,6 +185,39 @@ pub struct ContractIssue {
     pub schema_path: String,
     /// Human-readable issue summary with instance content masked.
     pub message: String,
+}
+
+impl ContractIssue {
+    /// Validate one retained masked issue independently of its source validator.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either path or the message is outside the closed
+    /// bounded projection contract.
+    pub fn verify(&self) -> Result<(), String> {
+        verify_contract_pointer(&self.instance_path, "contract instance path")?;
+        verify_contract_pointer(&self.schema_path, "contract schema path")?;
+        let message_scalars = self.message.chars().count();
+        if message_scalars == 0
+            || message_scalars > MAX_CONTRACT_MESSAGE_SCALARS
+            || self.message.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "contract issue message must contain 1..={MAX_CONTRACT_MESSAGE_SCALARS} non-control Unicode scalar values"
+            ));
+        }
+        match self.kind {
+            ContractIssueKind::Validation => {}
+            ContractIssueKind::Omitted
+                if self.instance_path.is_empty()
+                    && self.schema_path.is_empty()
+                    && self.message == CONTRACT_ISSUES_OMITTED_MESSAGE => {}
+            ContractIssueKind::Omitted => {
+                return Err("contract omission issue has invalid fields".to_owned());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Structured failure at one exact semantic contract boundary.
@@ -150,7 +229,64 @@ pub struct ContractViolation {
     /// Exact contract that failed.
     pub target: ContractTarget,
     /// All validation issues reported for the value.
+    #[serde(deserialize_with = "deserialize_contract_issues")]
     pub issues: Vec<ContractIssue>,
+}
+
+fn deserialize_contract_issues<'de, D>(deserializer: D) -> Result<Vec<ContractIssue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, ContractIssue, MAX_CONTRACT_ISSUES>(
+        deserializer,
+        "contract issues",
+    )
+}
+
+impl ContractViolation {
+    /// Validate one complete closed violation after deserialization or before
+    /// cross-boundary projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the target, issue set, or canonical byte envelope
+    /// exceeds the contract authority's fixed bounds.
+    pub fn verify(&self) -> Result<(), String> {
+        self.target.verify()?;
+        if self.issues.is_empty() || self.issues.len() > MAX_CONTRACT_ISSUES {
+            return Err(format!(
+                "contract violation must contain 1..={MAX_CONTRACT_ISSUES} issues"
+            ));
+        }
+        let mut previous = None;
+        for (index, issue) in self.issues.iter().enumerate() {
+            issue.verify()?;
+            if matches!(issue.kind, ContractIssueKind::Omitted) {
+                if index + 1 != self.issues.len() {
+                    return Err("contract omission summary must be the final issue".to_owned());
+                }
+                continue;
+            }
+            if index >= MAX_CONCRETE_CONTRACT_ISSUES {
+                return Err(format!(
+                    "contract violation exceeds {MAX_CONCRETE_CONTRACT_ISSUES} concrete issues"
+                ));
+            }
+            if previous.is_some_and(|previous: &ContractIssue| previous >= issue) {
+                return Err("contract concrete issues are not strictly ordered".to_owned());
+            }
+            previous = Some(issue);
+        }
+        let canonical_size = canonical_bytes(self)
+            .map_err(|error| error.to_string())?
+            .len();
+        if canonical_size > MAX_CONTRACT_VIOLATION_BYTES {
+            return Err(format!(
+                "contract violation uses {canonical_size} canonical bytes, above the {MAX_CONTRACT_VIOLATION_BYTES} byte bound"
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Display for ContractViolation {
@@ -194,52 +330,52 @@ pub struct ContractValidator {
 impl ContractValidator {
     /// Compile a schema without permitting filesystem, network, or ambient
     /// registry resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract violation when the dialect is not exact or the schema
+    /// cannot be compiled under the closed Draft 2020-12 resolver.
     pub fn compile(target: ContractTarget, schema: &Value) -> ContractResult<Self> {
+        if let Err(message) = target.verify() {
+            return Err(admission_issue(target.invalid_projection(), "", &message));
+        }
         if let Some(declared) = schema.get("$schema")
             && declared.as_str() != Some(CONTRACT_SCHEMA_DIALECT)
         {
-            return Err(admission_issue(
-                target,
-                "/$schema",
-                format!(
-                    "schema dialect must be exactly {CONTRACT_SCHEMA_DIALECT:?}, received {declared}"
-                ),
-            ));
+            let message = format!(
+                "schema dialect must be exactly {CONTRACT_SCHEMA_DIALECT:?}, received {declared}"
+            );
+            return Err(admission_issue(target, "/$schema", &message));
         }
         let validator = jsonschema::draft202012::options()
             .with_retriever(DenyExternalReferences)
             .build(schema)
-            .map_err(|error| ContractViolation {
-                phase: ContractPhase::Admission,
-                target: target.clone(),
-                issues: vec![issue_from_error(&error)],
+            .map_err(|error| {
+                closed_violation(
+                    ContractPhase::Admission,
+                    target.clone(),
+                    vec![issue_from_error(&error)],
+                )
             })?;
         Ok(Self { target, validator })
     }
 
-    /// Validate one boundary value and retain every path-addressed issue.
+    /// Validate one boundary value and retain a fixed bounded issue prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an execution-phase contract violation containing at most 99
+    /// concrete path-addressed issues plus one omission summary.
     pub fn validate(&self, value: &Value) -> ContractResult<()> {
-        let mut issues = self
-            .validator
-            .iter_errors(value)
-            .map(|error| issue_from_error(&error))
-            .collect::<Vec<_>>();
+        let issues = bounded_validation_issues(&self.validator, value);
         if issues.is_empty() {
             return Ok(());
         }
-        issues.sort_by(|left, right| {
-            (&left.instance_path, &left.schema_path, &left.message).cmp(&(
-                &right.instance_path,
-                &right.schema_path,
-                &right.message,
-            ))
-        });
-        issues.dedup();
-        Err(ContractViolation {
-            phase: ContractPhase::Execution,
-            target: self.target.clone(),
+        Err(closed_violation(
+            ContractPhase::Execution,
+            self.target.clone(),
             issues,
-        })
+        ))
     }
 
     /// Return the exact semantic boundary owned by this validator.
@@ -260,6 +396,11 @@ impl PlanContracts {
     /// Compile all definition, component, effect, and typed-wait schemas from a
     /// candidate. This never normalizes or rewrites the candidate used for its
     /// canonical Plan identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract violation when any executable schema or typed wait
+    /// schema cannot be compiled under the closed resolver.
     pub fn compile(candidate: &PlanCandidate) -> ContractResult<Self> {
         let mut definitions = BTreeMap::new();
         for definition in &candidate.definitions {
@@ -325,6 +466,11 @@ impl PlanContracts {
     }
 
     /// Validate input entering a named definition, including the Run entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract violation when the definition has no compiled input
+    /// contract or the value fails it.
     pub fn validate_definition_input(&self, id: &str, value: &Value) -> ContractResult<()> {
         validate_selected(
             &self.definitions,
@@ -335,6 +481,11 @@ impl PlanContracts {
 
     /// Validate a named definition result before it returns to its caller or
     /// becomes the terminal Run result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract violation when the definition has no compiled output
+    /// contract or the value fails it.
     pub fn validate_definition_output(&self, id: &str, value: &Value) -> ContractResult<()> {
         validate_selected(
             &self.definitions,
@@ -344,6 +495,11 @@ impl PlanContracts {
     }
 
     /// Validate component input before invoking its plugin realization.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract violation when the component has no compiled input
+    /// contract or the value fails it.
     pub fn validate_component_input(&self, id: &str, value: &Value) -> ContractResult<()> {
         validate_selected(
             &self.components,
@@ -353,6 +509,11 @@ impl PlanContracts {
     }
 
     /// Validate a component response before recording or binding it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract violation when the component has no compiled output
+    /// contract or the value fails it.
     pub fn validate_component_output(&self, id: &str, value: &Value) -> ContractResult<()> {
         validate_selected(
             &self.components,
@@ -362,6 +523,11 @@ impl PlanContracts {
     }
 
     /// Validate effect input before preparation or dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract violation when the effect has no compiled input
+    /// contract or the value fails it.
     pub fn validate_effect_input(&self, id: &str, value: &Value) -> ContractResult<()> {
         validate_selected(
             &self.effects,
@@ -371,6 +537,11 @@ impl PlanContracts {
     }
 
     /// Validate an observed or reconciled effect result before recording it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract violation when the effect has no compiled output
+    /// contract or the value fails it.
     pub fn validate_effect_output(&self, id: &str, value: &Value) -> ContractResult<()> {
         validate_selected(
             &self.effects,
@@ -380,8 +551,16 @@ impl PlanContracts {
     }
 
     /// Validate typed external input completing a stable wait site.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract violation when the wait site has no compiled contract
+    /// or the external value fails it.
     pub fn validate_wait_input(&self, site_id: &str, value: &Value) -> ContractResult<()> {
         let target = ContractTarget::wait(site_id);
+        if let Err(message) = target.verify() {
+            return Err(execution_issue(target.invalid_projection(), &message));
+        }
         let Some(validator) = self.waits.get(site_id) else {
             return Err(missing_contract(target));
         };
@@ -394,6 +573,9 @@ fn validate_selected(
     target: ContractTarget,
     value: &Value,
 ) -> ContractResult<()> {
+    if let Err(message) = target.verify() {
+        return Err(execution_issue(target.invalid_projection(), &message));
+    }
     let key = (target.id.clone(), target.side);
     let Some(validator) = validators.get(&key) else {
         return Err(missing_contract(target));
@@ -402,31 +584,46 @@ fn validate_selected(
 }
 
 fn missing_contract(target: ContractTarget) -> ContractViolation {
-    ContractViolation {
-        phase: ContractPhase::Execution,
+    closed_violation(
+        ContractPhase::Execution,
         target,
-        issues: vec![ContractIssue {
+        vec![ContractIssue {
+            kind: ContractIssueKind::Validation,
             instance_path: String::new(),
             schema_path: String::new(),
             message: "contract target was not compiled from the admitted Plan".to_owned(),
         }],
-    }
+    )
 }
 
 fn admission_issue(
     target: ContractTarget,
     instance_path: &str,
-    message: String,
+    message: &str,
 ) -> ContractViolation {
-    ContractViolation {
-        phase: ContractPhase::Admission,
+    closed_violation(
+        ContractPhase::Admission,
         target,
-        issues: vec![ContractIssue {
-            instance_path: instance_path.to_owned(),
+        vec![ContractIssue {
+            kind: ContractIssueKind::Validation,
+            instance_path: bounded_pointer(instance_path),
             schema_path: String::new(),
-            message,
+            message: bounded_message(message),
         }],
-    }
+    )
+}
+
+fn execution_issue(target: ContractTarget, message: &str) -> ContractViolation {
+    closed_violation(
+        ContractPhase::Execution,
+        target,
+        vec![ContractIssue {
+            kind: ContractIssueKind::Validation,
+            instance_path: String::new(),
+            schema_path: String::new(),
+            message: bounded_message(message),
+        }],
+    )
 }
 
 fn compile_waits(
@@ -454,10 +651,111 @@ fn compile_waits(
     Ok(())
 }
 
+fn closed_violation(
+    phase: ContractPhase,
+    target: ContractTarget,
+    issues: Vec<ContractIssue>,
+) -> ContractViolation {
+    let violation = ContractViolation {
+        phase,
+        target,
+        issues,
+    };
+    debug_assert!(violation.verify().is_ok());
+    violation
+}
+
+fn bounded_validation_issues(validator: &Validator, value: &Value) -> Vec<ContractIssue> {
+    let mut errors = validator.iter_errors(value);
+    let mut unique = BTreeSet::new();
+    let mut retained_bytes = 0_usize;
+    let mut omitted = false;
+    for _ in 0..MAX_CONCRETE_CONTRACT_ISSUES {
+        let Some(error) = errors.next() else {
+            break;
+        };
+        let issue = issue_from_error(&error);
+        if unique.contains(&issue) {
+            continue;
+        }
+        let issue_bytes =
+            canonical_bytes(&issue).map_or(CONTRACT_ISSUE_BYTE_BUDGET, |bytes| bytes.len());
+        let Some(next_bytes) = retained_bytes.checked_add(issue_bytes) else {
+            omitted = true;
+            break;
+        };
+        if next_bytes > CONTRACT_ISSUE_BYTE_BUDGET {
+            omitted = true;
+            break;
+        }
+        retained_bytes = next_bytes;
+        unique.insert(issue);
+    }
+    if !omitted && errors.next().is_some() {
+        omitted = true;
+    }
+    let mut issues = unique.into_iter().collect::<Vec<_>>();
+    if omitted {
+        issues.push(ContractIssue {
+            kind: ContractIssueKind::Omitted,
+            instance_path: String::new(),
+            schema_path: String::new(),
+            message: CONTRACT_ISSUES_OMITTED_MESSAGE.to_owned(),
+        });
+    }
+    issues
+}
+
+fn verify_contract_pointer(value: &str, label: &str) -> Result<(), String> {
+    if value.chars().count() > MAX_CONTRACT_POINTER_SCALARS
+        || value.chars().any(char::is_control)
+        || !value.is_empty() && !value.starts_with('/')
+    {
+        return Err(format!(
+            "{label} must be an empty or slash-prefixed JSON Pointer of at most {MAX_CONTRACT_POINTER_SCALARS} non-control Unicode scalar values"
+        ));
+    }
+    Ok(())
+}
+
+fn bounded_pointer(value: &str) -> String {
+    if value.chars().any(char::is_control) {
+        return String::new();
+    }
+    let value = value
+        .chars()
+        .take(MAX_CONTRACT_POINTER_SCALARS)
+        .collect::<String>();
+    if value.is_empty() || value.starts_with('/') {
+        value
+    } else {
+        String::new()
+    }
+}
+
+fn bounded_message(value: &str) -> String {
+    let mut message = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(MAX_CONTRACT_MESSAGE_SCALARS)
+        .collect::<String>();
+    if message.trim().is_empty() {
+        "contract validation failed".clone_into(&mut message);
+    }
+    message
+}
+
 fn issue_from_error(error: &jsonschema::ValidationError<'_>) -> ContractIssue {
     ContractIssue {
-        instance_path: error.instance_path().to_string(),
-        schema_path: error.schema_path().to_string(),
-        message: error.masked().to_string(),
+        kind: ContractIssueKind::Validation,
+        instance_path: bounded_pointer(&error.instance_path().to_string()),
+        schema_path: bounded_pointer(&error.schema_path().to_string()),
+        message: bounded_message(&error.masked().to_string()),
     }
 }

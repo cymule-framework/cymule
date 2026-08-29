@@ -2,7 +2,8 @@
 
 This review treats the example as a user-visible recovery application rather
 than a happy-path demo. The assertions below are backed by
-`tests/adversarial.rs` unless a residual limit is stated explicitly.
+`tests/adversarial.rs` and focused module tests unless a residual limit is
+stated explicitly.
 
 ## Authority and identity
 
@@ -13,6 +14,9 @@ than a happy-path demo. The assertions below are backed by
 - A claim records the exact immutable linked Plan and execution-binding
   Artifact as separate identities before the process plugin is invoked. An
   evolution command cannot reinterpret an already admitted case.
+- The strict scorer and exact campaign template are committed before a suite
+  region can become visible. Reopen accepts only that exact baseline receipt
+  prefix and rejects foreign evolution topology before mutation.
 - Command, checkpoint, revision, occurrence, Plan, Resource, and Artifact
   identities occupy separate domain-separated namespaces.
 
@@ -21,10 +25,11 @@ than a happy-path demo. The assertions below are backed by
 | Boundary | Allowed state after exit | Reopen behavior |
 | --- | --- | --- |
 | Before claim CAS | case remains ready | another worker may claim it |
+| After suite Resource commit, before region CAS | exact unreferenced content plus complete evolution baseline | the same write identity reopens, verifies the bytes, and publishes the sole region once |
 | After claim CAS, before plugin | one running fenced occurrence | no stealing before expiry; explicit retry after expiry |
 | After pure plugin, before result CAS | running occurrence, outcome unrecorded | the pure subject may be invoked again after fenced recovery |
 | After result CAS, before caller sees output | terminal occurrence and Artifact | report replays the retained result; no new occurrence |
-| External process kill at the exact pre-invocation barrier | three terminal results plus one active claim | read-only observation remains non-mutating; expiry fences one explicit retry; all cases finish once |
+| External process kill at the exact pre-invocation barrier | two terminal results plus one active claim | read-only observation remains non-mutating; expiry fences one explicit retry; all cases finish once |
 | During compatible publication | old or new complete registry checkpoint | future work uses one verified immutable head |
 | After compatible publication | earlier occurrences retain old Plan | later claims pin the new Plan |
 
@@ -42,16 +47,19 @@ admission authority. Two contenders can prepare locally, but only one claim CAS
 can commit before any plugin call.
 
 A third review finding covered acknowledgement loss between publishing the
-suite Resource and checkpointing campaign metadata. Whole-file filesystem
+suite Resource and registering the campaign region. Whole-file filesystem
 imports now replay a committed write ID only when every chunk and the final
-length match the already published object. The campaign can therefore retry
-that boundary without creating different bytes or becoming stuck behind its
-own committed upload.
+length match the already published object. The region checkpoint atomically
+retains the exact campaign-metadata Artifact that the region names as its
+required source. The campaign can therefore retry the Resource-to-region
+boundary without creating different bytes, exposing a region without its
+metadata, or becoming stuck behind its own committed upload.
 
-The suite file is read and validated once, and those exact bytes are submitted
-to the Resource store. The store does not reopen the caller's path after
-parsing, so a path replacement cannot make current work differ from the pinned
-Resource.
+The suite file is read and validated once from one no-follow regular-file
+descriptor. The read rejects a changed inode, size, mtime, or ctime generation,
+and those exact captured bytes are submitted to the Resource store. The store
+does not reopen the caller's path after parsing, so a path replacement cannot
+make current work differ from the pinned Resource.
 
 ## Malformed and hostile inputs
 
@@ -63,10 +71,23 @@ The application fails closed on:
 - a suite path that is not a regular non-symlink file;
 - a local suite whose bytes differ from the campaign's pinned Resource;
 - a retained Resource whose content no longer matches its size or SHA-256;
-- process-plugin output outside the protocol, over 1 MiB, after five seconds,
-  or from a non-zero exit;
-- an occurrence referring to a Plan absent from verified registry history;
-- an active lease that has not expired under the caller-supplied logical time.
+- a durable domain with an additional region or a region whose Run, source,
+  metadata, cursor, exhaustion state, or estimated total differs from the
+  pinned suite;
+- an evolution request whose policy is outside the closed selector or whose
+  campaign metadata/region/Resource authority is incomplete;
+- an Evolution partition whose exact baseline/publication receipts or scalar
+  revision accounting include an application-unknown command;
+- process-plugin output outside the protocol, over the exact 8 MiB bound,
+  after the `ProcessExecutorConfig` framework-owned default deadline, or from a
+  non-zero exit;
+- protocol-valid plugin output that violates the closed component schema or
+  the exact scoring policy selected by the occurrence Plan; the error becomes
+  one terminal Failed occurrence and is not reinvoked on reopen;
+- an occurrence referring to a Plan absent from the exact baseline and named
+  publication receipts;
+- an active lease that has not expired under the selected Clock's current-head
+  issued receipt.
 
 ## Evolution attacks
 
@@ -75,7 +96,7 @@ A compatible definition produces a new immutable parent Plan for future claims.
 A definition with a changed input schema is stored as history but cannot move
 the current link. Existing occurrence bindings never change in either case.
 
-The broader live-evolution controller additionally checks new component, effect,
+The framework's typed Evolution reducer and Durable control additionally check new component, effect,
 capability, authority, migration, canary, shadow, and rollback evidence. This
 example focuses on reusable-definition compatibility and occurrence pinning;
 it does not pretend to demonstrate every rollout mode in one CLI flow.

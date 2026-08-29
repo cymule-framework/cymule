@@ -1,193 +1,330 @@
 # Durable Single-Domain Guidance
 
-- This crate owns provider-neutral persistence and recovery contracts. It must
-  not name a database, queue, object store, cloud, or transport product.
-- A durable write inserts one immutable content-addressed delta and
-  compare-and-swaps a small head. The head authenticates a complete checkpoint
-  plus a bounded suffix; adapters must not acknowledge a partial segment/head
-  transition or rewrite the complete `DurableState` on each mutation.
-- `cymule.durable-segment/2` carries `cymule.machine-delta/1`, never a complete
-  Machine replacement. A coordinator restores the semantic Machine once on
-  open, validates later deltas against that live projection, and advances the
-  cache only after the exact store receipt commits.
-- Manifest rotation is bounded twice: at most `MAX_HOT_SEGMENTS` deltas per
-  pack and at most `MAX_CHECKPOINT_PACKS` packs per materialized base. Build a
-  new base outside provider writer exclusion at that boundary; reopen never
-  depends on an operator running GC first.
-- Every Run creation includes its Plan/input/start Events and initial
-  Continuation in one state CAS. The first Run initializes the domain; later
-  Runs append an exact Machine delta under the same authority. Both pre-commit
-  failure and post-commit acknowledgement loss must reopen to a retryable or
-  resumable state, and an identical start must never reset existing progress.
-- Continuations contain only typed canonical references and explicit logical
-  positions. Never persist process memory, closures, host-language stacks, or
-  ambient time.
-- Nested interpreter frames persist an index-only `region_path` into the sealed
-  Plan and a matching scope stack. Resume must re-resolve that path from the
-  immutable Plan; never serialize nested Region bodies into Continuations.
-- Each durable frame separates `definition_id`, structural `invocation_id`, and
-  immutable input Artifact. Invoked definitions push frames without pushing a
-  scope; nested scopes retain the current definition, invocation, and input.
-- Run creation stores the canonical `cymule.execution-binding/2` Artifact in
-  the same Machine delta as the input, Plan, start Event, Attempt, and initial
-  Continuation. Reopen must resolve and verify that exact Artifact; a newly
-  selected provider revision cannot reinterpret historical work. The
-  coordinator itself must use that resolved binding to admit the Plan before
-  the creation CAS; callers cannot bypass authority admission by avoiding the
-  resumable executor.
-- Every `ArtifactRef` persisted outside the canonical Machine must validate as
-  `cymule.artifact/2` and resolve to the exact typed record in that same
-  Machine snapshot. This includes Continuation state, frame inputs and locals,
-  wait/activation results, outbox inputs/results, and component occurrence
-  inputs/outputs. Public coordinator methods never accept dangling or legacy
-  references.
-- Every persisted Continuation re-resolves its Plan, binding, epoch, frame
-  invocation path, nested Region, next step, and lexical scope against the
-  canonical Machine. A Wait owner is evidence only after that frame is
-  authenticated; self-consistent unreachable frames fail before CAS.
-- Component results enter only through `checkpoint_component`. The coordinator
-  derives the occurrence identity, Plan, invocation, site, step, epoch,
-  execution binding, implementation revision, and post-call Continuation
-  digest, then commits the Machine Artifacts, occurrence, and Continuation in
-  one CAS. Raw occurrence insertion and detached result recording are invalid.
-- Compile the admitted Plan through `cymule-runtime` and validate Run,
-  invocation, component, effect, typed-wait, definition-result, and terminal
-  Result values at their exact boundary. Invalid input may not create its
-  Artifact, occurrence, outbox entry, or plugin dispatch; invalid output may
-  not enter a checkpoint or settle an outbox claim.
-- Wait completion, lease acquisition, outbox claims, occurrence recording, and
-  snapshot publication must be idempotent and fenced.
-- Event-prefix compaction retains an authenticated Machine base and full suffix
-  under one CAS. Keep cumulative receipt lineage, exact compacted identities,
-  old command receipts, and the suffix parent closure; receipt loss reopens to
-  the committed base and stale writers do not alter it.
-- Higher profiles that couple a logical lease to journal state must preview the
-  exact next lease and use `checkpoint_lease_journals`; acquiring a lease and
-  appending its claim/renewal in separate CAS revisions is invalid. Receipt loss
-  may leave the transition committed, so reopen and stable command replay are
-  required before proposing another lease epoch.
-- Signal and timer waits complete only through an identified
-  `cymule.wait-activation/1` record. Match the declared source, atomically store
-  its result and ready every selected Continuation, and allow one signal token
-  to consume at most one consume-once wait. Stable activation redelivery is
-  idempotent; conflicting ID reuse and stale writers fail closed.
-- Every wait pins an exact owner: frame invocation, definition, Region path,
-  site, and step. Only `owner.bind` is optional. Registration, parking,
-  completion, activation, and state restore verify that owner; completion writes
-  a local only when the bind is present.
-- `ParkedWaitIndex` is derived from pending waits and Continuation wait sets; it
-  is never a second durable authority. Source drivers may poll or receive by
-  any transport, but must return exact indexed targets within the framework
-  bound and acknowledge only after admission succeeds.
-- Activation admission may add only its result Artifact to the current Machine
-  snapshot. Reject a caller snapshot that also changes Plans, Events, commands,
-  or unrelated Artifacts; wait ingress is not a raw Machine mutation surface.
-- A `Ready` Continuation resumed after a crash must advance its epoch and commit
-  a new fenced Attempt before interpretation. Never reuse the yielded Attempt
-  that originally parked the wait.
-- `unknown` outbox entries remain active reconciliation work under their
-  original claim. Reopen must query them again and may settle them as applied or
-  not applied; it must never redispatch the original Effect or reuse one command
-  ID for different reconciliation decisions.
-- After `StartDispatch` is claimed, a missing, malformed, timed-out, or defective
-  plugin response commits `Unknown` with the outbox settlement before returning
-  `ReconciliationRequired`; it never reports same-request retry.
-- A schema-invalid dispatch output commits the same `Unknown` settlement. A
-  schema-invalid reconciliation output leaves that settlement unchanged so a
-  later resume retries reconciliation and never provider dispatch.
-- Retry policy is a content-addressed, provider-neutral algebra, not a
-  scheduler. `RetryStream` is only its serializable pure reducer state: it
-  retains the complete canonical Policy, consumes a closed failure class, the
-  failed occurrence binding, content-addressed logical Clock observation, and
-  optional content-addressed jitter evidence, then produces an exact
-  stop-or-retry-at transition. Do not claim durable retry from this reducer
-  alone. An executor must checkpoint it with the failed occurrence,
-  Continuation/timer state, and next-attempt admission in one owning CAS. One
-  stream pins one Policy ID, advances one attempt at a time after its admitted
-  due time, and becomes immutable after stopping. Any `unknown_world` external
-  Effect stops with its original Effect intent retained for reconciliation,
-  even when that failure class appears in the Policy's retryable set.
-- Effect enqueue, claim, observation, and reconciliation checkpoints validate
-  the exact appended Machine Events, command receipts, and allowed Artifacts
-  against the proposed outbox transition. Never use a generic Machine write for
-  `Unknown`; its observation Event and outbox state share one CAS.
-- There is no public raw Machine replacement. Generic semantic checkpoints
-  accept only canonical non-Effect Event suffixes and Artifacts referenced by
-  the exact Continuation/component occurrence; every Effect transition uses
-  its dedicated Machine-plus-outbox atomic checkpoint.
-- No public coordinator method may mutate outbox state without its exact
-  canonical Machine delta. External attestation or governance resolves only the
-  original unknown intent through the provider-neutral resolution control and
-  the same settlement CAS.
-- Exact Machine-delta checkpoints preserve the current compacted base. Effect,
-  wait, journal, and Run-creation transitions must not carry an unrelated base,
-  Plan, Event, command, or Artifact change.
-- Eager observational effects keep their frame on the effect site until the
-  durable result Artifact can be bound. Explicit effects return a stable
-  release-required outcome and may claim only after their scope commits;
-  release retry after receipt loss returns the recorded Result.
-- Higher profiles may append typed, self-validating records through
-  `application_journals` so they share the M1 CAS authority. M1 stores only the
-  versioned envelope; the owning profile validates and reduces its payload.
-- A higher-profile state projection coupled to a wait must use the atomic
-  journal-plus-wait checkpoints. Separate CAS commits may not claim one logical
-  suspension or completion.
-- Higher-profile host calls coupled to a semantic Effect must use the atomic
-  journal-plus-effect checkpoints so Machine, Continuation, outbox, and typed
-  lifecycle records cannot acknowledge different sides of one transition.
-- A logical transition spanning multiple higher-profile journals must use
-  `checkpoint_journals`; separate appends cannot claim atomic visibility.
-- When wait activation also wakes a higher-profile parked/index projection, use
-  `checkpoint_wait_activation_journals` so the activation receipt, M1 waits,
-  Continuations, and typed projection checkpoint share one CAS revision.
-  Never attach a new projection record after that activation was committed;
-  redelivery is idempotent only when every requested record already exists.
-- Higher-profile result/evidence Artifacts use `checkpoint_artifact_journals`.
-  The proposed Machine may add only the explicitly listed Artifacts; reject
-  Plans, Events, commands, or unrelated Artifact changes before CAS.
-- Higher-profile Run migration uses `checkpoint_run_migration_journals`; it is
-  the only CAS seam that may couple one exact target Plan, migration Artifacts,
-  Continuation Plan/state/ExecutionBinding replacement, epoch advance, new
-  Attempt, and owning journals. It rejects Plan IDs as bindings and any
-  incompatible active frame.
-- A persisted frame stack proves every adjacent structural edge. A scope child
-  is the exact Region owned by the parent's current scope step; an invoked child
-  pins the exact current invoke site, Region, scope, definition, and derived
-  invocation identity. Prefix reachability alone is not admission.
-- A higher-profile input delivery that also publishes its Artifact and records
-  typed provenance uses `checkpoint_input_wait_journals`; Artifact, journal
-  records, input wait, and Continuation readiness must never split across CAS.
-- Checkpoint rotation occurs at the provider-neutral suffix bound. Cold
-  manifests contain only fixed-size lineage pointers; they never clone a full
-  projection. Cold checkpoints and segments are reclaimable only when explicit
-  GC first materializes a new base outside the CAS critical section and records
-  an authenticated receipt.
-- Reference in-memory synchronization is adapter-local and non-blocking.
-  Contention must surface as a CAS conflict rather than waiting on a mutex.
-- Concrete storage belongs under `plugins/` and must pass this crate's shared
-  conformance suite, including reopen and stale-writer tests.
-- Extend the deterministic CAS boundary sweep when a Run path adds a durable
-  write. Its integrity probe must validate the whole state, replay the Machine,
-  and inspect provider call counts after reopen.
-- M1 changes require updates to the profile document, fault matrix, schemas,
-  SDK control surfaces, and restart-level tests.
-- `cymule.durable-control/1` is the only public M1 mutation/query union. It may
-  start/resume Runs, admit identified waits, release explicit effects, and
-  query Runs/domains; never expose raw Machine, Continuation, outbox, or journal
-  writes through an SDK command.
-- Keep deterministic injected CAS sweeps in this crate and real SQLite
-  child-process death sweeps in `plugins/store-sqlite`. Both discover the Run
-  boundary count from a successful execution and inspect provider calls as well
-  as recovered state.
-- The generated durable model trace is the single command-sequence generator.
-  It composes `cymule-test-world` faults with reopen through public durable
-  interfaces, checks all six public command variants against an independent
-  domain model, and emits a minimized language-neutral fixture on failure.
-  Fault paths retain original command indexes while shrinking, and a minimized
-  fixture must reproduce the exact failure code, phase, and invariant. SDKs
-  must not duplicate this generator.
-- Read-only control owns only a coordinator and must not require a `PluginHost`
-  or create an execution binding.
-- `DurableDelta::new` and `StoreBatch::transition` are crate-private admission
-  seams. Public stores accept only batches produced by `DurableCoordinator`;
-  provider implementations must never expose a second raw mutation path.
+## Ownership and public authority
+
+- This crate owns provider-neutral persistence and recovery. Concrete storage,
+  execution, activation, clocks, and Resource providers remain adapters.
+- `cymule-durable-protocol` owns Clock observations, Continuations and frames,
+  execution claims, wait owners, activation identities, and shared bounds.
+  Import those types directly; do not copy or canonically re-export them.
+- Public mutation enters through the closed `DurableCommand` union or the
+  typed Agent, Evolution, Virtual, and Resource control facades. Callers cannot
+  submit a raw Machine command, target Continuation, delta, journal batch,
+  StateRoot, prepared postcondition, or provider-authored authoritative event.
+- `DurableStoreControl` owns provider-free M1 reads, cancellation, identified
+  wait admission, Resource commands, and provider-registry-bound Evolution.
+  It does not require a PluginHost or create an execution binding.
+  Agent writes and Virtual claims belong to `DurableRuntimeControl`; their
+  read-only facades do not gain writer or provider authority.
+- `DurableRuntimeControl::open` consumes the one-shot
+  `ExecutionBindingAdmission` produced before writable Store I/O. Do not
+  repeat Describe or binding admission during open.
+- `DurableCommand::is_read_only` is the sole wire classifier: Run index,
+  current, wait/effect/occurrence/Attempt pages, and exact Run item queries.
+  Additional Rust-only exact reads require semantic identities plus an exact
+  expected revision and return that observed revision with a typed value.
+  Never expose a generic family, arbitrary key, raw Plan reader, or history scan.
+
+## Fixed-root persistence
+
+- Ordinary open loads only the small Store head and its exact fixed
+  `StateRootManifest`. The coordinator retains no complete Machine,
+  DurableState, active-domain cache, or rebuilt global index.
+- Every command loads one closed, bounded exact-key/read-page neighborhood from
+  that pinned root. Core derives typed touched-key mutations; immutable maps
+  copy changed trie paths and logs copy their authenticated append spines.
+  Never defer a whole-domain traversal until the first command.
+- Typed DurableOperation::Put* values are complete normalized postconditions.
+  An unchanged projection is valid when Core events or sibling fields advance.
+  StateRoot alone compares exact encoded values and lowers only real physical
+  map differences; coordinators must not duplicate reads, clones, or filters
+  for this purpose. Raw map puts still reject same-value mutations. Run query
+  indexes propagate a parent descriptor only when its exact child MapRoot
+  changes. Do not add per-type exceptions or a second global filter.
+- `DurableState` is an explicit offline-audit/materialization DTO, not an
+  ordinary runtime cache or mutation input. Complete projection traversal,
+  cold-history audits, and GC are separately named offline operations.
+  Full audit verifies reachability of every normalized profile root before
+  materializing the audit DTO; an unmaterialized Evolution or Virtual family
+  cannot hide a missing immutable child. Ordinary open remains fixed-size.
+  With a base anchor, full audit also authenticates the complete cold segment
+  chain, every independent Entry and Batch, and the cumulative command-index
+  nodes and membership. Inline archive content cannot substitute for missing
+  independently addressed objects. This traversal is not part of ordinary
+  commands or fresh compaction's pinned Core-source preparation.
+- A StoreBatch contains one exact immutable-object set and one small head CAS.
+  Its transient delta is never a stored segment or a second revision
+  authority. Every constructor remains crate-private.
+- The physical token is an opaque monotonic CAS-lineage fence. Semantic
+  integrity belongs to the pinned StateRoot and typed reachability checks.
+  Do not pretend a reopened snapshot can reconstruct its discarded parent.
+- Old state.json, cymule_state, checkpoint/segment generations, and older
+  official provider generations fail with unsupported_store_generation.
+  There is no current-type importer, mixed reader, or whole-state fallback.
+- Raw immutable-object lookup is optional: a fresh-object existence probe may
+  return None. A required reachable node/value missing from the authenticated
+  graph is Integrity, not a semantic key miss or retryable NotFound.
+- StateRoot leaves, objects, heads, GC receipts, and command-archive objects use
+  their exported canonical-byte limits. Enforce limits before allocation.
+  Large user payloads externalize through immutable Resources; a canonical
+  Machine base uses the existing ordered, indexed bounded-chunk descriptor.
+  A typed leaf carries exact canonical UTF-8 JSON text as a string, not an
+  integer byte array. Base chunks retain raw bytes encoded as strict padded
+  Base64 on wire. These codecs still enforce decoded byte bounds, canonical
+  content, kind and identity; no legacy array-reader fallback is admitted.
+- Verify the exact returned head, semantic revision, and physical token before
+  advancing pinned authority or allowing provider I/O. Once publication may
+  have committed, a missing, stale, foreign, or uncorrelated acknowledgement is
+  CommitOutcomeUnknown. Reopen and resolve exact retained authority; never
+  silently retry that error.
+- Core commands, including singleton commands, use one complete immutable
+  command-batch authority. StartRun uses its closed initial material admission.
+  Paged begin/progress stages publish no terminal profile receipt; only the
+  verified final aggregate batch publishes the derived profile sidecars.
+- Failure and cancellation paging carries one Run-local terminal companion
+  beside Core's sole persisted transition. It binds the exact source
+  Continuation and query roots, then advances only the bounded outbox entries
+  named by each Core Effect page. Finalization selects those completed shadow
+  roots and publishes the small terminal receipt/Continuation/Attempt sidecar;
+  it never rereads every Effect or overwrites another Run's intervening work.
+  While that fence exists, ordinary same-Run M1 sidecars conflict. A retained
+  declared failure resumes from its exact Core command and staged detail
+  Artifact without invoking the provider or Clock again.
+- Standalone Plan/Artifact material admission must retain its ordered Core
+  replay authority and exact owning outer receipt. Do not preload all final
+  materials when replaying historical command batches.
+- Compaction preserves the exact Store-pinned Machine base anchor, cumulative
+  command sparse index, archive head, and complete admitted batch membership.
+  A hot command miss obtains authenticated current-root archive membership or
+  absence; it never scans cold segments or admits identity reuse by default.
+- `DurableStoreControl::compact_machine_history` is an explicit offline
+  maintenance boundary. Its Rust-only request carries a semantic compaction ID,
+  exact source revision, closed kind, and requested suffix, never target state.
+  `EventPrefix` selects a causally closed Event cut; `EventFreeAdmissions`
+  includes conflict admissions and material-only batches and requires suffix
+  zero. The removed conflict-only name has no compatibility alias.
+  Exact receipt replay precedes all current-source reads. Fresh preparation
+  rejects nonempty pending-command or paged-transition roots before loading the
+  complete Core source; only this operation may process the complete base.
+  It never materializes `DurableState` or installs a whole-state runtime cache.
+  Core's opaque prepared result owns the root delta and archive. The shared
+  pinned publisher commits archive objects, base, head, and the one typed
+  receipt together; it accepts no caller-authored archive or raw Machine delta.
+- `history_compaction_head` is a required-nullable exact value-object pointer
+  to the existing typed receipt, not another history map or authority. The
+  primary receipt key, immediate parent archive, current base anchor, and this
+  pointer close in the same CAS. Count material-only batches in cumulative
+  archive validation and GC even when they contain no commands or Events.
+  GC retains and exact-compares every independent batch in each retained archive
+  segment; a command-index-only traversal omits zero-member material batches.
+- A single-CAS receipt return is bound to its verified acknowledgement, not a
+  subsequent current-head lookup. A legitimate later writer does not invalidate
+  an acknowledged historical result. Execution and Effect claims likewise
+  return only transition-derived acknowledged authority; before the next
+  execution step or provider invocation, refresh the bounded current head and
+  exact-verify that same claim instead of re-adjudicating its completed CAS.
+  GC verifies its exact physical successor from the frozen head and receipt;
+  uncorrelated acknowledgements remain Unknown.
+- Explicit cold GC computes reachability outside writer exclusion and fences a
+  physical-only head transition before deletion. Reconciliation completes only
+  its exact current receipt; advancing starts the next bounded page. Preserve
+  retained commands, batches, receipts, and all current roots.
+- Reference-store synchronization is adapter-local and non-blocking. Surface
+  contention as conflict instead of waiting on a lock.
+
+## Run, frame, and component execution
+
+- Empty-domain genesis is parameter-free Machine::new(). A new Run's Plan,
+  creation ExecutionBinding Artifact, input, first Attempt, Running
+  Continuation, and exact issued Clock receipt commit together.
+- Start first derives only its command identity and performs an authenticated
+  hot/cold command plus Run-key lookup. Command/Run double absence is fresh and
+  proceeds to the Clock-owned admission without constructing a throwaway
+  material stage. Replay validates the retained singleton batch and then reads
+  the exact Plan, binding, and input before returning or continuing an already
+  admitted terminal failure; it does not consult the Clock or provider.
+- A Running Continuation has exactly one execution claim and matching active
+  Core Attempt. Ready resume advances epoch and fence with a new Attempt.
+  Ordinary resume of Running work is Busy before provider I/O.
+- Expiry changes nothing by itself. Explicit takeover verifies the old fence
+  and the exact current-scope Clock head, supersedes the old active Attempt,
+  and installs the new claim atomically. There is no automatic takeover or
+  renewal in the M1 baseline.
+- The Clock's non-blocking current-head guard must still enclose the final
+  claim CAS. Historical resolve is not commit authority. If the callback
+  committed and the guard subsequently fails, return CommitOutcomeUnknown.
+  Claims independently verify Run-derived scope and the exact TTL equation.
+- Hot Clock receipts exist only while referenced by an active claim. Releasing
+  or replacing its last claim removes that hot reference in the same CAS; the
+  Clock provider remains historical receipt authority.
+- Semantic invocation, scope, wait, Effect, and component occurrence identities
+  derive from immutable Plan and structural control position, never worker,
+  epoch, provider revision, or fence. Internal command IDs never include a
+  physical StateRoot revision.
+- Persist index-only Region paths, structural invocation paths, canonical
+  Artifact references, lexical scope stack, and explicit next-step positions.
+  Re-resolve the sealed Plan and every adjacent parent/child frame edge.
+  Invoke frames may inherit the caller's Scope; use Core's shared pinned frame
+  validator instead of requiring the Scope creator's invocation to equal the
+  callee. Nested Scope frames still require their exact owned Scope.
+- ExecutorCoreBoundary carries minimal intent only. The coordinator derives
+  scope, input/result, next frame, wait, and terminal disposition from the
+  sealed Plan and exact source. YieldReady requires the exact current Effect
+  boundary or the complete explicit-release set.
+- A component Call persists its semantic Pending occurrence and a new Running
+  provider Attempt before I/O. Only the current invocation's successful new
+  CAS returns Admitted. The same claim's retained Running Attempt returns
+  InFlight and cannot call the provider again.
+- Occurrence state is only Pending or Completed. Attempt state is separately
+  Running, Superseded, or Completed. Takeover leaves the occurrence Pending;
+  a later Attempt increments the ordinal and references its exact predecessor.
+  A takeover acknowledgement lost before a new provider Attempt must remain
+  recoverable when the latest retained Attempt is already Superseded.
+- Successful results validate against the sealed component output schema and
+  required output_artifact_kind. The same CAS retains output, completed
+  occurrence/Attempt, and the unique derived successor Continuation.
+  Expected failure instead commits declared detail, RunFailed, terminal epoch
+  and fence, completed Attempt, and claim-free Failed Continuation together.
+- Late results cannot pass another execution fence. A completed occurrence
+  prevents reinvocation. A legacy Call interrupted before result checkpoint
+  may repeat its cost only through an explicit later takeover; never describe
+  this as provider exactly-once or route world effects through it.
+
+## Waits and terminal work
+
+- Wait identity and complete owner are re-derived from Plan, Run, invocation,
+  Region, site, and step. Kind, source, schema, consume-once policy, and optional
+  local bind are Plan authority, not caller-supplied semantics.
+  Offline audit binds terminal Waits to the unique immutable origin selected by
+  their Wait ID within that Run's authenticated Plan lineage. Migration must
+  not reinterpret a completed or cancelled Wait under the new current Plan;
+  pending Waits still require the current Plan and retained Waiting frame.
+- Identified signal/timer admission is store-only. Its result Artifact, exact
+  selected/applied/Ready receipt, completed waits, frame locals, and readiness
+  commit together without provider execution, Clock access, or auto-resume.
+- Source drivers use authenticated pinned pending-source pages and obey both
+  the framework hard target bound and the caller's max_targets.
+  Check a retained activation receipt before consulting today's pending bucket.
+  Exact redelivery retains the original targets, winners, and Ready Run set.
+  Terminal selected targets are stable non-winners, never broadcast head-of-line
+  blockers or Virtual wake authority.
+- Input waits use the typed Agent input suspension/completion controls.
+  Completion resolves the exact suspension receipt, validates the sole
+  Plan-declared schema, and commits material, Wait, Continuation, Run current,
+  and Agent receipts in one pinned transition. Generic signal/timer admission
+  cannot resolve Input waits.
+- Run execution and world settlement are separate axes. Completed requires
+  settled Effects. Failure/cancellation fence execution, cancel only pending
+  waits and unreleased Effects, and retain dispatch ambiguity as Unknown.
+- Cancellation and external Effect resolution have independent typed exact-key
+  StateRoot receipt families. They are not reserved generic journals.
+  Receipt identity, requested command, actual terminal state, original claim,
+  canonical Artifacts, exact Core command, and complete batch material close
+  one authority, including after cold command compaction.
+- Resource transfer and activation live in coordinator/resource_handoff.rs.
+  Transfer validates exact source/target Runs, producer occurrence/latest
+  Attempt, result Artifact, and target slot. Activation commits its Wait,
+  Continuation, Run current, coupled receipt, and Resource index together.
+  Historical replay authenticates the original receipt, not equality with a
+  Continuation that may have legitimately advanced later.
+
+## Effects and profiles
+
+- Every outbox entry pins its origin Plan, exact ExecutionBinding Artifact,
+  operation binding, and transitive provider closure. Dispatch and
+  reconciliation never substitute current defaults for a lost historical
+  implementation.
+- The current mutable outbox payload lives only in the owning Run's
+  authenticated query root. The global outbox map is an immutable
+  intent-to-Run locator needed by intent-only controls; it never mirrors a
+  dispatch payload or acts as fallback authority. Full audit closes locator
+  membership in both directions and includes in-progress terminal shadow
+  roots in reachability.
+- Enqueue, authorize/claim with its exact lease, observation, reconciliation,
+  and unavailability each pair the exact Core batch with the matching outbox
+  mutation and Run current. Unknown never has a detached event or sidecar CAS.
+- After root-frame dispatch advances the Store, re-read the exact pinned
+  execution step and require the original claim before deriving CompleteRun.
+  Re-evaluate its result from that fresh Plan/frame; never reuse the pre-dispatch
+  revision, relax CAS, or redispatch the provider to finish the Run.
+- Only eager observational Effects dispatch in an open Scope. Deferred effects
+  wait for scope commit; explicit effects additionally require explicit release.
+  A bound eager Effect retains its current frame until a settled result binds.
+- Every Applied response is normalized to one canonical result Artifact.
+  Missing JSON means JSON null, which must first satisfy the original pinned
+  output schema. Invalid dispatch output commits Unknown; invalid reconciliation
+  output leaves the original Unknown settlement unchanged.
+- After dispatch begins, wrong variants, wrong attempt echoes, transport loss,
+  cancellation, defects, and invalid outputs never grant redispatch authority.
+  Preserve the original claim for reconciliation. Only framework-owned binding
+  and manifest comparison may persist implementation unavailability.
+- ResolveEffect uses only the original unknown intent and dispatch fence.
+  The exact historical provider linearizes its terminal decision before the
+  receipt CAS. It acquires no Run claim, reads no Clock, and never resumes a
+  Run, including after failure/cancellation.
+- Agent, Evolution, Virtual, and Resource mutations reduce typed exact source
+  neighborhoods and commit their complete normalized postconditions through the
+  owning facade. No profile accepts a caller-authored target Continuation,
+  generic journal callback, or arbitrary Machine write.
+- Agent publication reconciliation retains its expected original intent and
+  rechecks semantic touched keys. Unknown evidence is append-only; identical
+  Unknown workspace observation is Unchanged with zero CAS.
+- Agent context message pages pin an immutable append-only prefix by exact
+  message count and head, independently of a later Session head. A missing
+  cursor defaults to that source count. Each page obeys separate summed
+  message-current and complete response-wire byte budgets; page size changes
+  grouping only, never the selected prefix. Reads verify the source terminal
+  entry and every reachable log value without a current-head fallback.
+- The non-persisted Agent commit envelope carries required-nullable
+  `committed_revision`: only a newly acknowledged CAS sets it to the observed
+  revision; exact replay sets null. Provider dispatch must not infer fresh
+  ownership from a revision difference or receipt presence. This flag never
+  enters the immutable semantic receipt or its identity.
+- Agent workspace Start requires its exact nullable dispatch lease authority
+  and may dispatch only after a newly acknowledged Start CAS. Replay never
+  dispatches again. Settle observes the retained occurrence; no-Core phases use
+  a real coupled receipt with unchanged Core/neighborhood authority.
+- Workspace coupling lives in coordinator/agent_workspace.rs and uses the
+  existing typed coupled-receipt family. Its 19 required checkpoint fields
+  bind the outer command and phase, source/result Core roots, paired nullable
+  real batch IDs, issued dispatch Clock, existing Continuation content IDs,
+  full target Continuation, and exact before/after Effect, outbox, and lease.
+  It contains no physical result revision or self-referential Agent receipt.
+  Material-only phases retain a real ordered Core batch; no-Core phases require
+  unchanged roots and neighborhood, never a fabricated empty command batch.
+  Its independent 12 MiB canonical bound permits the complete legal Continuation
+  and both single-Effect neighbors without widening the generic receipt bound.
+- Workspace retained evidence is bounded on fresh writes and historical reads
+  by the exact Core read-set budget. Nonterminal occurrences reserve one full
+  allowed final observation product and, for an Effect occurrence only, its
+  canonical result Artifact. Exhausted evidence cannot prevent terminal
+  reconciliation; large provider products externalize through Resources.
+- Virtual claims use the Runtime's admitted complete ExecutionBinding; first
+  binding material, capacity lease, occurrence, and any standard Evolution
+  selection commit together. No separate binding registration is required.
+  The public VirtualClaimOutcome returns a complete verified Plan only for
+  Claimed, retained from its pre-CAS pinned source; NoWork carries only its
+  receipt. Dedicated replay loads the exact receipt and original Plan in one
+  pinned callback; generic receipt-only replay never loads a Plan.
+- Virtual providers are exact binding-pinned sources, migrators, and archives.
+  Migration returns the full typed proposal with verified coverage and exact
+  target-source Artifact bytes. Archive pin/release uses Resource's shared pure
+  lifecycle reducer and the same outer Virtual receipt/CAS.
+- Retry policy remains a pure content-addressed algebra. Restore verifies issued
+  historical Clock evidence once; later reduction verifies only the new suffix.
+  It cannot by itself claim a durable retry. Unknown-world Effects stop with
+  their original intent retained for reconciliation.
+
+## Verification
+
+- Cover positive, illegal-transition, stale-writer, lost-acknowledgement, reopen,
+  and exact replay paths. Fault sweeps inspect provider call counts as well as
+  full offline state audit and Machine replay.
+- Component tests include lost Attempt acknowledgement before I/O, lost result,
+  lost result acknowledgement, successive takeover after lost takeover receipt,
+  stale output rejection, and nested Invoke/Scope/Wait recovery.
+- Keep deterministic in-process CAS sweeps separate from real SQLite
+  child-process-death sweeps. Discover boundary counts from a successful run.
+- Versioned public changes update schemas, fixtures, SDK contracts, the profile
+  documentation, and the version registry. Do not claim complete conformance
+  until the entire applicable suite and strict Clippy pass.

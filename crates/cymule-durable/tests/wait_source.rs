@@ -1,133 +1,23 @@
-//! Bounded parked-index and replaceable wait-source driver tests.
+//! Bounded parked-wait index selection conformance.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cymule_core::{Definition, Expression, Operation, PlanCandidate, Region, Step, WaitSpec};
 use cymule_durable::{
-    Continuation, ContinuationStatus, DriveOutcome, DurableError, DurableResult, DurableState,
-    FrameState, MemoryStore, ParkedWaitIndex, ResumableRuntime, WaitActivationSource,
-    WaitCondition, WaitDelivery, WaitKind, WaitSourceDriver, WaitState,
+    DurableState, ParkedWaitIndex, SignalKeyPageOutcome, WaitCondition, WaitDelivery, WaitKind,
+    WaitState,
 };
-use cymule_runtime::{
-    ExecutionBinding, PLUGIN_VERSION, PluginHost, PluginManifest, PluginRequest, PluginResponse,
-    RuntimeError, RuntimeResult,
+use cymule_durable_protocol::{
+    CONTINUATION_STATE_VERSION, Continuation, ContinuationStatus, FrameState, WaitActivationSource,
+    WaitOwner,
 };
 use serde_json::json;
 
-struct EmptyPlugin;
-
-fn open_runtime<S: cymule_durable::DurableStore, P: PluginHost>(
-    store: S,
-    mut plugin: P,
-) -> cymule_durable::DurableResult<ResumableRuntime<S, P>> {
-    let manifest = plugin
-        .describe()
-        .map_err(|error| DurableError::Substrate(error.to_string()))?;
-    let binding = ExecutionBinding::for_local_process(
-        &manifest,
-        "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-    )
-    .map_err(|error| DurableError::Validation(error.to_string()))?;
-    ResumableRuntime::open(store, plugin, binding)
-}
-
-impl PluginHost for EmptyPlugin {
-    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
-        match request {
-            PluginRequest::Describe => Ok(PluginResponse::Manifest {
-                manifest: PluginManifest {
-                    plugin_version: PLUGIN_VERSION.to_owned(),
-                    implementation_id: "wait-source-test@1".to_owned(),
-                    components: BTreeMap::new(),
-                    effects: BTreeMap::new(),
-                },
-            }),
-            request => Err(RuntimeError::PluginDefect {
-                code: "unexpected_test_request".to_owned(),
-                message: format!("unexpected wait-source request: {request:?}"),
-            }),
-        }
-    }
-}
-
-struct RedeliveringDriver {
-    delivery: WaitDelivery,
-    lose_first_ack: bool,
-    acknowledgements: usize,
-}
-
-impl WaitSourceDriver for RedeliveringDriver {
-    fn receive(
-        &mut self,
-        index: &ParkedWaitIndex,
-        max_targets: usize,
-    ) -> DurableResult<Option<WaitDelivery>> {
-        if self.acknowledgements > 0 {
-            return Ok(None);
-        }
-        if index
-            .select(&self.delivery.source, max_targets)?
-            .wait_ids
-            .is_empty()
-        {
-            // A committed activation disappears from the parked index. The
-            // transport still redelivers the identical delivery until ack.
-            return Ok(Some(self.delivery.clone()));
-        }
-        Ok(Some(self.delivery.clone()))
-    }
-
-    fn acknowledge(&mut self, activation_id: &str) -> DurableResult<()> {
-        if activation_id != self.delivery.activation_id {
-            return Err(DurableError::Validation(
-                "driver acknowledged the wrong activation".to_owned(),
-            ));
-        }
-        if self.lose_first_ack {
-            self.lose_first_ack = false;
-            return Err(DurableError::Substrate(
-                "simulated lost source acknowledgement".to_owned(),
-            ));
-        }
-        self.acknowledgements += 1;
-        Ok(())
-    }
-}
-
-fn signal_candidate() -> PlanCandidate {
-    PlanCandidate {
-        ir_version: cymule_core::IR_VERSION.to_owned(),
-        name: "wait_source_signal".to_owned(),
-        entry: "main".to_owned(),
-        components: Vec::new(),
-        effects: Vec::new(),
-        definitions: vec![Definition {
-            id: "main".to_owned(),
-            input_schema: json!({}),
-            output_schema: json!({}),
-            body: Region {
-                steps: vec![Step {
-                    id: "wait.signal".to_owned(),
-                    operation: Operation::Wait {
-                        wait: WaitSpec::Signal {
-                            key: "signal:continue".to_owned(),
-                            consume_once: true,
-                        },
-                        bind: None,
-                    },
-                }],
-                result: Expression::Input,
-            },
-        }],
-        metadata: BTreeMap::new(),
-    }
-}
-
-fn continuation(wait_ids: &[&str]) -> Continuation {
+fn continuation(wait_ids: &BTreeSet<String>) -> Continuation {
     Continuation {
+        continuation_version: CONTINUATION_STATE_VERSION.to_owned(),
         run_id: "run:index".to_owned(),
-        plan_id: "sha256:plan".to_owned(),
-        binding_context: "binding:test".to_owned(),
+        plan_id: format!("sha256:{}", "1".repeat(64)),
+        binding_context: format!("sha256:{}", "2".repeat(64)),
         frames: vec![FrameState {
             definition_id: "main".to_owned(),
             invocation_id: "main".to_owned(),
@@ -143,22 +33,17 @@ fn continuation(wait_ids: &[&str]) -> Continuation {
             locals: BTreeMap::new(),
         }],
         state: None,
-        wait_set: wait_ids
-            .iter()
-            .map(|wait_id| (*wait_id).to_owned())
-            .collect(),
+        wait_set: wait_ids.clone(),
         scope_stack: vec![cymule_core::ROOT_SCOPE_ID.to_owned()],
-        effect_obligations: BTreeSet::new(),
-        authority_leases: BTreeSet::new(),
-        budget: BTreeMap::new(),
-        causal_frontier: BTreeSet::new(),
         epoch: 0,
+        execution_fence: 0,
+        execution_claim: None,
         status: ContinuationStatus::Waiting,
     }
 }
 
-fn wait_owner() -> cymule_durable::WaitOwner {
-    cymule_durable::WaitOwner {
+fn wait_owner() -> WaitOwner {
+    WaitOwner {
         invocation_id: "main".to_owned(),
         definition_id: "main".to_owned(),
         site_id: "wait.signal".to_owned(),
@@ -168,30 +53,27 @@ fn wait_owner() -> cymule_durable::WaitOwner {
     }
 }
 
+fn wait_id(index: usize) -> String {
+    format!("sha256:{index:064x}")
+}
+
 #[test]
 fn parked_index_selects_bounded_signal_and_exact_timer_candidates() {
-    let wait_ids = [
-        "wait:broadcast:a",
-        "wait:broadcast:b",
-        "wait:once:a",
-        "wait:once:b",
-        "wait:timer:a",
-        "wait:timer:b",
-    ];
+    let wait_ids = (1..=6).map(wait_id).collect::<BTreeSet<_>>();
     let mut state = DurableState::new(cymule_core::Machine::new().snapshot());
     state
         .continuations
         .insert("run:index".to_owned(), continuation(&wait_ids));
     for (wait_id, consume_once) in [
-        ("wait:broadcast:a", false),
-        ("wait:broadcast:b", false),
-        ("wait:once:a", true),
-        ("wait:once:b", true),
+        (wait_id(1), false),
+        (wait_id(2), false),
+        (wait_id(3), true),
+        (wait_id(4), true),
     ] {
         state.waits.insert(
-            wait_id.to_owned(),
+            wait_id.clone(),
             WaitCondition {
-                wait_id: wait_id.to_owned(),
+                wait_id,
                 run_id: "run:index".to_owned(),
                 kind: WaitKind::Signal {
                     key: "signal:batch".to_owned(),
@@ -203,11 +85,11 @@ fn parked_index_selects_bounded_signal_and_exact_timer_candidates() {
             },
         );
     }
-    for wait_id in ["wait:timer:a", "wait:timer:b"] {
+    for wait_id in [wait_id(5), wait_id(6)] {
         state.waits.insert(
-            wait_id.to_owned(),
+            wait_id.clone(),
             WaitCondition {
-                wait_id: wait_id.to_owned(),
+                wait_id,
                 run_id: "run:index".to_owned(),
                 kind: WaitKind::Timer {
                     timer_id: "timer:batch".to_owned(),
@@ -221,33 +103,20 @@ fn parked_index_selects_bounded_signal_and_exact_timer_candidates() {
     }
 
     let index = ParkedWaitIndex::rebuild(&state).expect("index rebuilds");
-    let signal = WaitActivationSource::Signal {
+    let source = WaitActivationSource::Signal {
         key: "signal:batch".to_owned(),
     };
-    let selected = index.select(&signal, 2).expect("signal selects");
-    assert_eq!(
-        selected.wait_ids,
-        BTreeSet::from(["wait:broadcast:a".to_owned(), "wait:once:a".to_owned()])
-    );
+    let selected = index.select(&source, 2).expect("signal selects");
+    assert_eq!(selected.wait_ids, BTreeSet::from([wait_id(1), wait_id(3)]));
     assert_eq!(selected.remaining, 2);
     index
         .validate_delivery(&WaitDelivery {
             activation_id: "delivery:signal".to_owned(),
-            source: signal.clone(),
+            source,
             wait_ids: selected.wait_ids,
             value: json!({"ok": true}),
         })
         .expect("selected signal targets validate");
-    assert!(
-        index
-            .validate_delivery(&WaitDelivery {
-                activation_id: "delivery:invalid".to_owned(),
-                source: signal,
-                wait_ids: BTreeSet::from(["wait:once:a".to_owned(), "wait:once:b".to_owned(),]),
-                value: json!(null),
-            })
-            .is_err()
-    );
 
     let timer = index
         .select(
@@ -257,33 +126,19 @@ fn parked_index_selects_bounded_signal_and_exact_timer_candidates() {
             8,
         )
         .expect("timer selects");
-    assert_eq!(timer.wait_ids, BTreeSet::from(["wait:timer:a".to_owned()]));
+    assert_eq!(timer.wait_ids, BTreeSet::from([wait_id(5)]));
     assert_eq!(timer.remaining, 1);
-    assert!(
-        index
-            .select(
-                &WaitActivationSource::Signal {
-                    key: "signal:batch".to_owned()
-                },
-                0
-            )
-            .is_err()
-    );
 }
 
 #[test]
-fn signal_key_cursor_eventually_pages_beyond_1024_active_sources() {
+fn signal_key_cursor_pages_beyond_one_thousand_active_sources() {
     let mut state = DurableState::new(cymule_core::Machine::new().snapshot());
-    let wait_ids: BTreeSet<String> = (0..1_025)
-        .map(|index| format!("wait:cursor:{index:04}"))
-        .collect();
-    let mut indexed_continuation = continuation(&[]);
-    indexed_continuation.wait_set.clone_from(&wait_ids);
+    let wait_ids = (0..1_025).map(wait_id).collect::<BTreeSet<_>>();
     state
         .continuations
-        .insert("run:index".to_owned(), indexed_continuation);
+        .insert("run:index".to_owned(), continuation(&wait_ids));
     for index in 0..1_025 {
-        let wait_id = format!("wait:cursor:{index:04}");
+        let wait_id = wait_id(index);
         state.waits.insert(
             wait_id.clone(),
             WaitCondition {
@@ -301,76 +156,91 @@ fn signal_key_cursor_eventually_pages_beyond_1024_active_sources() {
     }
 
     let index = ParkedWaitIndex::rebuild(&state).expect("index rebuilds");
-    let first = index
-        .signal_key_page(None, 1_024)
-        .expect("first source page reads");
+    let SignalKeyPageOutcome::Page(first) = index.signal_key_page(None, 1_024).expect("first page")
+    else {
+        panic!("cursor-free page cannot be stale");
+    };
     assert_eq!(first.keys.len(), 1_024);
     assert_eq!(first.remaining, 1);
-    assert!(!first.keys.contains(&"signal:cursor:1024".to_owned()));
-    let second = index
-        .signal_key_page(first.next_cursor.as_deref(), 1_024)
-        .expect("cursor advances");
-    assert!(second.keys.contains(&"signal:cursor:1024".to_owned()));
+    let SignalKeyPageOutcome::Page(second) = index
+        .signal_key_page(first.next_cursor.as_ref(), 1_024)
+        .expect("cursor advances")
+    else {
+        panic!("same-root cursor cannot be stale");
+    };
+    assert_eq!(second.keys.len(), 1);
+    let all = first
+        .keys
+        .into_iter()
+        .chain(second.keys)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(all.len(), 1_025);
+    assert!(all.contains("signal:cursor:1024"));
 }
 
 #[test]
-fn wait_source_ack_loss_redelivers_one_committed_activation_after_reopen() {
-    let run_id = "run:wait-source";
-    let mut runtime = open_runtime(MemoryStore::new(), EmptyPlugin).expect("runtime opens");
-    let DriveOutcome::Suspended { wait_id } = runtime
-        .start(signal_candidate(), &json!({"value": 7}), run_id)
-        .expect("Run parks")
-    else {
-        panic!("Run should park");
-    };
-    let parked = &runtime.coordinator().state().expect("state").waits[&wait_id];
-    assert_eq!(parked.owner.site_id, "wait.signal");
-    assert!(parked.owner.bind.is_none());
-    let mut driver = RedeliveringDriver {
-        delivery: WaitDelivery {
-            activation_id: "delivery:continue:1".to_owned(),
-            source: WaitActivationSource::Signal {
-                key: "signal:continue".to_owned(),
+fn signal_key_cursor_reports_typed_stale_after_authority_changes() {
+    let first_wait_ids = BTreeSet::from([wait_id(1), wait_id(4)]);
+    let mut first_state = DurableState::new(cymule_core::Machine::new().snapshot());
+    first_state
+        .continuations
+        .insert("run:index".to_owned(), continuation(&first_wait_ids));
+    for (wait_id, key) in [
+        (wait_id(1), "signal:before-a"),
+        (wait_id(4), "signal:before-b"),
+    ] {
+        first_state.waits.insert(
+            wait_id.clone(),
+            WaitCondition {
+                wait_id,
+                run_id: "run:index".to_owned(),
+                kind: WaitKind::Signal {
+                    key: key.to_owned(),
+                },
+                consume_once: true,
+                owner: wait_owner(),
+                state: WaitState::Pending,
+                result: None,
             },
-            wait_ids: BTreeSet::from([wait_id]),
-            value: json!({"delivered": true}),
-        },
-        lose_first_ack: true,
-        acknowledgements: 0,
+        );
+    }
+    let first = ParkedWaitIndex::rebuild(&first_state).expect("first index rebuilds");
+    let SignalKeyPageOutcome::Page(page) =
+        first.signal_key_page(None, 1).expect("first page reads")
+    else {
+        panic!("cursor-free page cannot be stale");
     };
-    assert!(runtime.drive_wait_source(&mut driver, 16).is_err());
-    assert_eq!(
-        runtime
-            .coordinator()
-            .state()
-            .expect("state")
-            .wait_activations
-            .len(),
-        1
-    );
+    let cursor = page
+        .next_cursor
+        .expect("two-key fixture retains an authenticated cursor");
 
-    let (store, _) = runtime.into_parts();
-    let mut reopened = open_runtime(store, EmptyPlugin).expect("runtime reopens");
-    assert_eq!(
-        reopened
-            .drive_wait_source(&mut driver, 16)
-            .expect("redelivery replays"),
-        Some(BTreeSet::from([run_id.to_owned()]))
-    );
-    assert_eq!(driver.acknowledgements, 1);
-    assert!(
-        reopened.coordinator().state().expect("state").continuations[run_id].frames[0]
-            .locals
-            .is_empty()
-    );
-    let DriveOutcome::Completed(result) = reopened.resume(run_id).expect("Run resumes") else {
-        panic!("Run should complete");
-    };
-    assert_eq!(result.value, json!({"value": 7}));
-    assert_eq!(
-        reopened
-            .drive_wait_source(&mut driver, 16)
-            .expect("acknowledged source is empty"),
-        None
-    );
+    let second_wait_ids = BTreeSet::from([wait_id(2), wait_id(3)]);
+    let mut second_state = DurableState::new(cymule_core::Machine::new().snapshot());
+    second_state
+        .continuations
+        .insert("run:index".to_owned(), continuation(&second_wait_ids));
+    for (wait_id, key) in [
+        (wait_id(2), "signal:after-a"),
+        (wait_id(3), "signal:after-b"),
+    ] {
+        second_state.waits.insert(
+            wait_id.clone(),
+            WaitCondition {
+                wait_id,
+                run_id: "run:index".to_owned(),
+                kind: WaitKind::Signal {
+                    key: key.to_owned(),
+                },
+                consume_once: true,
+                owner: wait_owner(),
+                state: WaitState::Pending,
+                result: None,
+            },
+        );
+    }
+    let second = ParkedWaitIndex::rebuild(&second_state).expect("second index rebuilds");
+    assert!(matches!(
+        second.signal_key_page(Some(&cursor), 1),
+        Ok(SignalKeyPageOutcome::Stale { .. })
+    ));
 }

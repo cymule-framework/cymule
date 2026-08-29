@@ -1,0 +1,489 @@
+{
+  "head": {
+    "head_version": "cymule.durable-head/2",
+    "revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "state_root_manifest_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "machine_base_anchor": null,
+    "sequence": 0,
+    "gc_sequence": 0,
+    "physical_token": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "gc_receipt": null
+  },
+  "machine_base_anchor": {
+    "anchor_version": "cymule.machine-base-anchor/2",
+    "anchor_id": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+    "base_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "archive_head": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "archive_count": 1,
+    "archive_event_count": 0,
+    "archive_batch_count": 1,
+    "admission_head": "sha256:1313131313131313131313131313131313131313131313131313131313131313",
+    "command_index_root": "sha256:1414141414141414141414141414141414141414141414141414141414141414",
+    "prefix_digest": "sha256:2323232323232323232323232323232323232323232323232323232323232323",
+    "projection_digest": "2424242424242424242424242424242424242424242424242424242424242424",
+    "projection_root": "2525252525252525252525252525252525252525252525252525252525252525"
+  },
+  "state_root_objects": [
+    {
+      "object": "manifest",
+      "manifest_version": "cymule.durable-state-root/3",
+      "manifest_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "parent_manifest": null,
+      "parent_revision": null,
+      "delta_digest": null,
+      "durable_version": "cymule.durable-state/7",
+      "revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "sequence": 0,
+      "machine_snapshot_version": "cymule.machine-snapshot/11",
+      "machine_frontier": {
+        "frontier_version": "cymule.machine-authority-frontier/3",
+        "authority_root": "4444444444444444444444444444444444444444444444444444444444444444",
+        "plan_admission_commitment": "sha256:4545454545454545454545454545454545454545454545454545454545454545",
+        "plan_count": 0,
+        "artifact_admission_commitment": "sha256:4646464646464646464646464646464646464646464646464646464646464646",
+        "artifact_count": 0,
+        "batch_admission_commitment": "sha256:4949494949494949494949494949494949494949494949494949494949494949",
+        "batch_count": 0,
+        "projection_root": "4747474747474747474747474747474747474747474747474747474747474747",
+        "event_count": 0,
+        "admission_sequence": 0,
+        "admission_head": null,
+        "base_anchor_id": null,
+        "command_index_root": "sha256:4848484848484848484848484848484848484848484848484848484848484848",
+        "runs": { "node": null, "entries": 0 },
+        "facts": { "node": null, "entries": 0 },
+        "pending_commands": { "node": null, "entries": 0 },
+        "paged_transitions": { "node": null, "entries": 0 }
+      },
+      "machine_base_anchor": null,
+      "roots": {
+        "machine_plans": { "node": null, "entries": 0 },
+        "machine_plan_admissions": { "node": null, "len": 0, "height": 0, "ordered_root": "sha256:7a11d3576de9d3ceced1159931491f51791f73910d49bbeca4862667158f8bd2" },
+        "machine_artifacts": { "node": null, "entries": 0 },
+        "machine_artifact_admissions": { "node": null, "len": 0, "height": 0, "ordered_root": "sha256:7a11d3576de9d3ceced1159931491f51791f73910d49bbeca4862667158f8bd2" },
+        "machine_base": null,
+        "machine_events": { "node": null, "len": 0, "height": 0, "ordered_root": "sha256:7a11d3576de9d3ceced1159931491f51791f73910d49bbeca4862667158f8bd2" },
+        "machine_admissions": { "node": null, "len": 0, "height": 0, "ordered_root": "sha256:7a11d3576de9d3ceced1159931491f51791f73910d49bbeca4862667158f8bd2" },
+        "machine_commands": { "node": null, "entries": 0 },
+        "machine_command_batches": { "node": null, "entries": 0 },
+        "machine_command_batch_admissions": { "node": null, "len": 0, "height": 0, "ordered_root": "sha256:7a11d3576de9d3ceced1159931491f51791f73910d49bbeca4862667158f8bd2" },
+        "continuations": { "node": null, "entries": 0 },
+        "run_currents": { "node": null, "entries": 0 },
+        "run_query_indexes": { "node": null, "entries": 0 },
+        "waits": { "node": null, "entries": 0 },
+        "pending_signal_sources": { "node": null, "entries": 0 },
+        "pending_timer_sources": { "node": null, "entries": 0 },
+        "wait_activations": { "node": null, "entries": 0 },
+        "leases": { "node": null, "entries": 0 },
+        "outbox": { "node": null, "entries": 0 },
+        "component_occurrences": { "node": null, "entries": 0 },
+        "operation_attempts": { "node": null, "entries": 0 },
+        "clock_observations": { "node": null, "entries": 0 },
+        "snapshots": { "node": null, "entries": 0 },
+        "history_compactions": { "node": null, "entries": 0 },
+        "history_compaction_head": null,
+        "cancellation_receipts": { "node": null, "entries": 0 },
+        "effect_resolution_receipts": { "node": null, "entries": 0 },
+        "application_journals": { "node": null, "entries": 0 },
+        "application_journal_prefix_replacements": { "node": null, "entries": 0 },
+        "application_journal_record_manifests": { "node": null, "entries": 0 },
+        "application_journal_prefix_replacement_history": { "node": null, "entries": 0 },
+        "coupled_checkpoint_receipts": { "node": null, "entries": 0 },
+        "resource_command_receipts": { "node": null, "entries": 0 },
+        "resource_retention_current": { "node": null, "entries": 0 },
+        "resource_pin_current": { "node": null, "entries": 0 },
+        "resource_delete_current": { "node": null, "entries": 0 },
+        "resource_handoff_current": { "node": null, "entries": 0 },
+        "resource_handoff_slots": { "node": null, "entries": 0 },
+        "resource_handoff_activation_current": { "node": null, "entries": 0 },
+        "resource_handoff_activations_by_transfer": { "node": null, "entries": 0 },
+        "resource_handoff_indexes": { "node": null, "entries": 0 },
+        "resource_handoff_activation_indexes": { "node": null, "entries": 0 },
+        "agent_commands": { "node": null, "entries": 0 },
+        "agent_command_receipts": { "node": null, "entries": 0 },
+        "agent_input_suspension_receipts": { "node": null, "entries": 0 },
+        "agent_input_completion_receipts": { "node": null, "entries": 0 },
+        "agent_sessions": { "node": null, "entries": 0 },
+        "agent_updates": { "node": null, "entries": 0 },
+        "agent_messages": { "node": null, "entries": 0 },
+        "agent_message_indexes": { "node": null, "entries": 0 },
+        "agent_tools": { "node": null, "entries": 0 },
+        "agent_elicitations": { "node": null, "entries": 0 },
+        "agent_occurrences": { "node": null, "entries": 0 },
+        "agent_unresolved_occurrence_indexes": { "node": null, "entries": 0 },
+        "agent_streams": { "node": null, "entries": 0 },
+        "agent_stream_chunks": { "node": null, "entries": 0 },
+        "agent_open_stream_indexes": { "node": null, "entries": 0 },
+        "evolution": {
+          "currents": { "node": null, "entries": 0 },
+          "command_aliases": { "node": null, "entries": 0 },
+          "receipts": { "node": null, "entries": 0 },
+          "definition_current": { "node": null, "entries": 0 },
+          "definition_compatibility_current": { "node": null, "entries": 0 },
+          "definition_record": { "node": null, "entries": 0 },
+          "dependency_current": { "node": null, "entries": 0 },
+          "template_current": { "node": null, "entries": 0 },
+          "link_record": { "node": null, "entries": 0 },
+          "plan_record": { "node": null, "entries": 0 },
+          "edge_record": { "node": null, "entries": 0 },
+          "rollout_current": { "node": null, "entries": 0 },
+          "rollout_evidence_current": { "node": null, "entries": 0 },
+          "rollout_decision": { "node": null, "entries": 0 },
+          "occurrence_current": { "node": null, "entries": 0 },
+          "selection_current": { "node": null, "entries": 0 },
+          "migration_record": { "node": null, "entries": 0 },
+          "restart_record": { "node": null, "entries": 0 },
+          "shadow_record": { "node": null, "entries": 0 },
+          "shadow_subject_current": { "node": null, "entries": 0 },
+          "observation_record": { "node": null, "entries": 0 },
+          "observation_occurrence_current": { "node": null, "entries": 0 },
+          "evidence_current": { "node": null, "entries": 0 },
+          "decision_transition_current": { "node": null, "entries": 0 },
+          "transition_record": { "node": null, "entries": 0 }
+        },
+        "virtual_work": {
+          "currents": { "node": null, "entries": 0 },
+          "receipts": { "node": null, "entries": 0 },
+          "regions": { "node": null, "entries": 0 },
+          "active_regions": { "node": null, "entries": 0 },
+          "parked": { "node": null, "entries": 0 },
+          "parked_indexes": { "node": null, "entries": 0 },
+          "work": { "node": null, "entries": 0 },
+          "occurrences": { "node": null, "entries": 0 },
+          "runs": { "node": null, "entries": 0 },
+          "migrations": { "node": null, "entries": 0 },
+          "certificates": { "node": null, "entries": 0 }
+        },
+        "resource_catalog_records": { "node": null, "entries": 0 }
+      }
+    },
+    {
+      "object": "value",
+      "value_version": "cymule.durable-state-value/3",
+      "object_id": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "value": {
+        "value": "leaf",
+        "kind": "journal_record",
+        "canonical_json": "{}"
+      }
+    },
+    {
+      "object": "value",
+      "value_version": "cymule.durable-state-value/3",
+      "object_id": "sha256:2626262626262626262626262626262626262626262626262626262626262626",
+      "value": {
+        "value": "machine_base_chunk",
+        "index": 0,
+        "bytes": "e30="
+      }
+    },
+    {
+      "object": "value",
+      "value_version": "cymule.durable-state-value/3",
+      "object_id": "sha256:2727272727272727272727272727272727272727272727272727272727272727",
+      "value": {
+        "value": "machine_base_descriptor",
+        "canonical_len": 2,
+        "canonical_digest": "2828282828282828282828282828282828282828282828282828282828282828",
+        "chunk_count": 1,
+        "chunks": {
+          "node": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+          "len": 1,
+          "height": 1,
+          "ordered_root": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+        }
+      }
+    },
+    {
+      "object": "value",
+      "value_version": "cymule.durable-state-value/3",
+      "object_id": "sha256:2929292929292929292929292929292929292929292929292929292929292929",
+      "value": {
+        "value": "application_journal",
+        "journal_id": "journal:fixture",
+        "root": {
+          "node": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+          "len": 1,
+          "height": 1,
+          "ordered_root": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+        }
+      }
+    },
+    {
+      "object": "value",
+      "value_version": "cymule.durable-state-value/3",
+      "object_id": "sha256:3030303030303030303030303030303030303030303030303030303030303030",
+      "value": {
+        "value": "application_journal_record_manifests",
+        "journal_id": "journal:fixture",
+        "root": {
+          "node": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "entries": 1
+        }
+      }
+    },
+    {
+      "object": "value",
+      "value_version": "cymule.durable-state-value/3",
+      "object_id": "sha256:3131313131313131313131313131313131313131313131313131313131313131",
+      "value": {
+        "value": "run_query_indexes",
+        "index_version": "cymule.run-query-indexes/2",
+        "run_id": "run:fixture",
+        "waits": { "node": null, "entries": 0 },
+        "effects": { "node": null, "entries": 0 },
+        "occurrences": { "node": null, "entries": 0 },
+        "attempts": { "node": null, "entries": 0 },
+        "pending_waits": { "node": null, "entries": 0 },
+        "active_effects": { "node": null, "entries": 0 },
+        "active_leases": { "node": null, "entries": 0 },
+        "terminal": null
+      }
+    },
+    {
+      "object": "value",
+      "value_version": "cymule.durable-state-value/3",
+      "object_id": "sha256:3232323232323232323232323232323232323232323232323232323232323232",
+      "value": {
+        "value": "pending_wait_source",
+        "source_version": "cymule.pending-wait-source/1",
+        "source": { "kind": "signal", "key": "signal:fixture" },
+        "waits": { "node": "sha256:7777777777777777777777777777777777777777777777777777777777777777", "entries": 1 }
+      }
+    },
+    {
+      "object": "map_node",
+      "node_version": "cymule.authenticated-map-node/1",
+      "object_id": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "body": {
+        "kind": "leaf",
+        "key": "journal:fixture",
+        "key_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+        "value": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+      }
+    },
+    {
+      "object": "log_node",
+      "node_version": "cymule.authenticated-log-node/1",
+      "object_id": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "body": {
+        "kind": "leaf",
+        "values": ["sha256:6666666666666666666666666666666666666666666666666666666666666666"]
+      }
+    }
+  ],
+  "gc_receipt": {
+    "receipt_version": "cymule.durable-gc-receipt/2",
+    "receipt_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "retained_state_root": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "parent_physical_token": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "result_physical_token": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "gc_sequence": 1,
+    "sequence": 0,
+    "reclaimed_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "reclaimed_ids": ["sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],
+    "reclaimed_objects": 1,
+    "remaining_objects": 0
+  },
+  "command_archive_objects": [
+    {
+      "object_kind": "segment",
+      "object": {
+        "header": {
+          "segment_version": "cymule.command-archive-segment/4",
+          "segment_id": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "parent_count": 0,
+          "parent_event_count": 0,
+          "parent_command_index_root": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "entry_count": 1,
+          "event_count": 0,
+          "batch_count": 1,
+          "batches_root": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "entries_root": "sha256:1212121212121212121212121212121212121212121212121212121212121212",
+          "result_count": 1,
+          "result_event_count": 0,
+          "result_admission_head": "sha256:1313131313131313131313131313131313131313131313131313131313131313",
+          "result_command_index_root": "sha256:1414141414141414141414141414141414141414141414141414141414141414"
+        },
+        "entries": [
+          {
+            "admission": {
+              "admission_version": "cymule.command-admission/3",
+              "admission_id": "sha256:1313131313131313131313131313131313131313131313131313131313131313",
+              "sequence": 1,
+              "command_id": "command:fixture",
+              "semantic_hash": "1515151515151515151515151515151515151515151515151515151515151515",
+              "command_record_digest": "1616161616161616161616161616161616161616161616161616161616161616",
+              "batch_id": "sha256:3232323232323232323232323232323232323232323232323232323232323232",
+              "batch_position": 0,
+              "batch_len": 1,
+              "before_projection_digest": "1717171717171717171717171717171717171717171717171717171717171717",
+              "after_projection_digest": "1717171717171717171717171717171717171717171717171717171717171717",
+              "status": "conflict",
+              "event_ids": []
+            },
+            "command": {
+              "envelope": {
+                "command_version": "cymule.command/6",
+                "command_id": "command:fixture",
+                "actor": "actor:fixture",
+                "run_id": "run:fixture",
+                "expected_precondition": "stale:fixture",
+                "command": { "type": "record_fact", "key": "fact:fixture", "value": "value" }
+              },
+              "semantic_hash": "1515151515151515151515151515151515151515151515151515151515151515",
+              "receipt": {
+                "command_id": "command:fixture",
+                "status": "conflict",
+                "event_ids": [],
+              "error_code": "stale_action",
+              "message": "the Run changed after the caller's view",
+                "observed_precondition": "stale:fixture",
+                "current_precondition": "current:fixture"
+              },
+              "batch_id": "sha256:3232323232323232323232323232323232323232323232323232323232323232",
+              "batch_position": 0,
+              "batch_len": 1
+            },
+            "events": []
+          }
+        ],
+        "batches": [
+          {
+            "batch_version": "cymule.command-batch/1",
+            "batch_id": "sha256:3232323232323232323232323232323232323232323232323232323232323232",
+            "parent_authority_root": "3535353535353535353535353535353535353535353535353535353535353535",
+            "admission_parent_authority_root": "3535353535353535353535353535353535353535353535353535353535353535",
+            "members": [
+              {
+                "position": 0,
+                "command_id": "command:fixture",
+                "intent_hash": "3737373737373737373737373737373737373737373737373737373737373737",
+                "semantic_hash": "1515151515151515151515151515151515151515151515151515151515151515"
+              }
+            ],
+            "material_digest": null,
+            "material_source": null,
+            "plan_ids": [],
+            "artifacts": [],
+            "receipts": [
+              {
+                "command_id": "command:fixture",
+                "status": "conflict",
+                "event_ids": [],
+                "error_code": "stale_action",
+                "message": "the Run changed after the caller's view",
+                "observed_precondition": "stale:fixture",
+                "current_precondition": "current:fixture"
+              }
+            ],
+            "event_ids": [],
+            "result_authority_root": "3636363636363636363636363636363636363636363636363636363636363636",
+            "batch_receipt_id": "sha256:3434343434343434343434343434343434343434343434343434343434343434"
+          }
+        ],
+        "command_index_updates": [
+          {
+            "proof_version": "cymule.command-index-proof/2",
+            "command_id": "command:fixture",
+            "empty_depth": 0,
+            "siblings": []
+          }
+        ]
+      }
+    },
+    {
+      "object_kind": "entry",
+      "object": {
+        "admission": {
+          "admission_version": "cymule.command-admission/3",
+          "admission_id": "sha256:1313131313131313131313131313131313131313131313131313131313131313",
+          "sequence": 1,
+          "command_id": "command:fixture",
+          "semantic_hash": "1515151515151515151515151515151515151515151515151515151515151515",
+          "command_record_digest": "1616161616161616161616161616161616161616161616161616161616161616",
+          "batch_id": "sha256:3232323232323232323232323232323232323232323232323232323232323232",
+          "batch_position": 0,
+          "batch_len": 1,
+          "before_projection_digest": "1717171717171717171717171717171717171717171717171717171717171717",
+          "after_projection_digest": "1717171717171717171717171717171717171717171717171717171717171717",
+          "status": "conflict",
+          "event_ids": []
+        },
+        "command": {
+          "envelope": {
+            "command_version": "cymule.command/6",
+            "command_id": "command:fixture",
+            "actor": "actor:fixture",
+            "run_id": "run:fixture",
+            "expected_precondition": "stale:fixture",
+            "command": { "type": "record_fact", "key": "fact:fixture", "value": "value" }
+          },
+          "semantic_hash": "1515151515151515151515151515151515151515151515151515151515151515",
+          "receipt": {
+            "command_id": "command:fixture",
+            "status": "conflict",
+            "event_ids": [],
+          "error_code": "stale_action",
+          "message": "the Run changed after the caller's view",
+            "observed_precondition": "stale:fixture",
+            "current_precondition": "current:fixture"
+          },
+          "batch_id": "sha256:3232323232323232323232323232323232323232323232323232323232323232",
+          "batch_position": 0,
+          "batch_len": 1
+        },
+        "events": []
+      }
+    },
+    {
+      "object_kind": "batch",
+      "object": {
+        "batch_version": "cymule.command-batch/1",
+        "batch_id": "sha256:3232323232323232323232323232323232323232323232323232323232323232",
+        "parent_authority_root": "3535353535353535353535353535353535353535353535353535353535353535",
+        "admission_parent_authority_root": "3535353535353535353535353535353535353535353535353535353535353535",
+        "members": [
+          {
+            "position": 0,
+            "command_id": "command:fixture",
+            "intent_hash": "3737373737373737373737373737373737373737373737373737373737373737",
+            "semantic_hash": "1515151515151515151515151515151515151515151515151515151515151515"
+          }
+        ],
+        "material_digest": null,
+        "material_source": null,
+        "plan_ids": [],
+        "artifacts": [],
+        "receipts": [
+          {
+            "command_id": "command:fixture",
+            "status": "conflict",
+            "event_ids": [],
+            "error_code": "stale_action",
+            "message": "the Run changed after the caller's view",
+            "observed_precondition": "stale:fixture",
+            "current_precondition": "current:fixture"
+          }
+        ],
+        "event_ids": [],
+        "result_authority_root": "3636363636363636363636363636363636363636363636363636363636363636",
+        "batch_receipt_id": "sha256:3434343434343434343434343434343434343434343434343434343434343434"
+      }
+    },
+    {
+      "object_kind": "command_index_node",
+      "object": {
+        "kind": "member",
+        "node_id": "sha256:1818181818181818181818181818181818181818181818181818181818181818",
+        "key_hash": "sha256:1919191919191919191919191919191919191919191919191919191919191919",
+        "command_id": "command:fixture",
+        "value": {
+          "admission_id": "sha256:1313131313131313131313131313131313131313131313131313131313131313",
+          "archive_entry_digest": "sha256:2020202020202020202020202020202020202020202020202020202020202020"
+        }
+      }
+    }
+  ]
+}

@@ -1,20 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/resource.schema.json",
-  "title": "Cymule Resource Protocol cymule.resource/2",
+  "title": "Cymule Resource Protocol cymule.resource/3",
   "oneOf": [
     { "$ref": "#/$defs/resourceCandidate" },
     { "$ref": "#/$defs/resourceHandle" },
     { "$ref": "#/$defs/locatorSet" },
     { "$ref": "#/$defs/publication" },
     { "$ref": "#/$defs/resourceHandoff" },
+    { "$ref": "#/$defs/resourceHandoffActivation" },
     { "$ref": "#/$defs/manifestDescriptor" },
     { "$ref": "#/$defs/listProof" },
-    { "$ref": "#/$defs/deleteIntent" },
-    { "$ref": "#/$defs/lifecycleReceipt" }
+    { "$ref": "#/$defs/listCursor" }
   ],
   "$defs": {
-    "nonEmpty": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "nonEmpty": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$" },
+    "extendedIdentity": { "type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$" },
+    "annotationValue": { "type": "string", "maxLength": 4096, "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$" },
+    "coreIdentity": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$" },
+    "safeNonNegativeInteger": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "artifactRef": {
       "type": "object", "additionalProperties": false,
@@ -22,7 +26,7 @@
       "properties": {
         "identity_version": { "const": "cymule.artifact/2" },
         "artifact_id": { "$ref": "#/$defs/digest" },
-        "kind": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._+-]*/[a-z0-9][a-z0-9._+/-]*$" }
+        "kind": { "type": "string", "maxLength": 255, "pattern": "^[a-z0-9._+-]+(?:/[a-z0-9._+-]+)+$" }
       }
     },
     "shape": { "enum": ["inline", "object", "collection", "directory", "snapshot"] },
@@ -36,7 +40,7 @@
     "integrity": {
       "oneOf": [
         { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "inline" } } },
-        { "type": "object", "additionalProperties": false, "required": ["kind", "digest", "size"], "properties": { "kind": { "const": "content" }, "digest": { "$ref": "#/$defs/digest" }, "size": { "type": "integer", "minimum": 0 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "digest", "size"], "properties": { "kind": { "const": "content" }, "digest": { "$ref": "#/$defs/digest" }, "size": { "$ref": "#/$defs/safeNonNegativeInteger" } } },
         { "type": "object", "additionalProperties": false, "required": ["kind", "authority", "version"], "properties": { "kind": { "const": "version" }, "authority": { "$ref": "#/$defs/nonEmpty" }, "version": { "$ref": "#/$defs/nonEmpty" } } },
         { "type": "object", "additionalProperties": false, "required": ["kind", "identity"], "properties": { "kind": { "const": "live" }, "identity": { "$ref": "#/$defs/nonEmpty" } } }
       ]
@@ -45,24 +49,24 @@
       "type": "object", "additionalProperties": false,
       "required": ["manifest_version", "media_type", "digest", "size", "entry_count", "root_digest"],
       "properties": {
-        "manifest_version": { "const": "cymule.resource-manifest/1" },
+        "manifest_version": { "const": "cymule.resource-manifest/3" },
         "media_type": { "const": "application/vnd.cymule.resource-manifest+jsonl" },
         "digest": { "$ref": "#/$defs/digest" },
-        "size": { "type": "integer", "minimum": 0 },
-        "entry_count": { "type": "integer", "minimum": 0 },
+        "size": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "entry_count": { "$ref": "#/$defs/safeNonNegativeInteger" },
         "root_digest": { "$ref": "#/$defs/digest" }
       }
     },
     "candidateFields": {
       "type": "object", "required": ["resource_version", "shape", "media_type", "integrity"],
       "properties": {
-        "resource_version": { "const": "cymule.resource/2" },
+        "resource_version": { "const": "cymule.resource/3" },
         "shape": { "$ref": "#/$defs/shape" },
         "media_type": { "type": "string", "minLength": 3, "maxLength": 255 },
         "inline": { "$ref": "#/$defs/inlineData" },
         "integrity": { "$ref": "#/$defs/integrity" },
         "manifest": { "$ref": "#/$defs/manifestDescriptor" },
-        "annotations": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 4096 } }
+        "annotations": { "type": "object", "maxProperties": 64, "propertyNames": { "$ref": "#/$defs/extendedIdentity" }, "additionalProperties": { "$ref": "#/$defs/annotationValue" } }
       },
       "allOf": [
         {
@@ -113,7 +117,7 @@
     "resourceHandle": { "allOf": [{ "$ref": "#/$defs/candidateFields" }, { "type": "object", "required": ["resource_id"], "properties": { "resource_id": { "$ref": "#/$defs/digest" } } }], "unevaluatedProperties": false },
     "location": {
       "oneOf": [
-        { "type": "object", "additionalProperties": false, "required": ["kind", "url"], "properties": { "kind": { "const": "public_url" }, "url": { "type": "string", "format": "uri", "minLength": 1 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "url"], "properties": { "kind": { "const": "public_url" }, "url": { "type": "string", "format": "uri", "minLength": 1, "maxLength": 8192 } } },
         { "type": "object", "additionalProperties": false, "required": ["kind", "reference"], "properties": { "kind": { "const": "opaque" }, "reference": { "$ref": "#/$defs/nonEmpty" } } }
       ]
     },
@@ -121,37 +125,57 @@
       "type": "object", "additionalProperties": false,
       "required": ["locator_version", "resource_id", "resolver_binding", "locations"],
       "properties": {
-        "locator_version": { "const": "cymule.resource-locators/1" },
+        "locator_version": { "const": "cymule.resource-locators/2" },
         "resource_id": { "$ref": "#/$defs/digest" },
         "resolver_binding": { "$ref": "#/$defs/nonEmpty" },
-        "locations": { "type": "array", "items": { "$ref": "#/$defs/location" }, "uniqueItems": true }
+        "locations": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/location" }, "uniqueItems": true }
       }
     },
     "publication": { "type": "object", "additionalProperties": false, "required": ["resource", "locators"], "properties": { "resource": { "$ref": "#/$defs/resourceHandle" }, "locators": { "$ref": "#/$defs/locatorSet" } } },
     "manifestEntry": { "type": "object", "additionalProperties": false, "required": ["name", "resource"], "properties": { "name": { "$ref": "#/$defs/nonEmpty" }, "resource": { "$ref": "#/$defs/resourceHandle" } } },
     "merkleStep": { "type": "object", "additionalProperties": false, "required": ["side", "digest"], "properties": { "side": { "enum": ["left", "right"] }, "digest": { "$ref": "#/$defs/digest" } } },
-    "inclusionProof": { "type": "object", "additionalProperties": false, "required": ["index", "path"], "properties": { "index": { "type": "integer", "minimum": 0 }, "path": { "type": "array", "items": { "$ref": "#/$defs/merkleStep" } } } },
-    "listProof": {
+    "inclusionProof": { "type": "object", "additionalProperties": false, "required": ["index", "path"], "properties": { "index": { "$ref": "#/$defs/safeNonNegativeInteger" }, "path": { "type": "array", "maxItems": 53, "items": { "$ref": "#/$defs/merkleStep" } } } },
+    "manifestPredecessorProof": {
       "type": "object", "additionalProperties": false,
-      "required": ["proof_version", "manifest_digest", "entry_count", "start_index", "request_cursor_digest", "next_cursor_digest", "inclusions"],
+      "required": ["entry", "inclusion"],
       "properties": {
-        "proof_version": { "const": "cymule.resource-list-proof/2" },
-        "manifest_digest": { "$ref": "#/$defs/digest" },
-        "entry_count": { "type": "integer", "minimum": 0 },
-        "start_index": { "type": "integer", "minimum": 0 },
-        "request_cursor_digest": { "$ref": "#/$defs/digest" },
-        "next_cursor_digest": { "$ref": "#/$defs/digest" },
-        "inclusions": { "type": "array", "items": { "$ref": "#/$defs/inclusionProof" } }
+        "entry": { "$ref": "#/$defs/manifestEntry" },
+        "inclusion": { "$ref": "#/$defs/inclusionProof" }
       }
     },
-    "producerProvenance": { "type": "object", "additionalProperties": false, "required": ["run_id", "occurrence_id", "result"], "properties": { "run_id": { "$ref": "#/$defs/nonEmpty" }, "occurrence_id": { "$ref": "#/$defs/nonEmpty" }, "result": { "$ref": "#/$defs/artifactRef" } } },
-    "resourceHandoff": { "type": "object", "additionalProperties": false, "required": ["handoff_version", "transfer_id", "producer", "to_run", "slot", "resource"], "properties": { "handoff_version": { "const": "cymule.resource-handoff/3" }, "transfer_id": { "$ref": "#/$defs/nonEmpty" }, "producer": { "$ref": "#/$defs/producerProvenance" }, "to_run": { "$ref": "#/$defs/nonEmpty" }, "slot": { "$ref": "#/$defs/nonEmpty" }, "resource": { "$ref": "#/$defs/artifactRef" } } },
-    "deleteIntent": { "type": "object", "additionalProperties": false, "required": ["intent_version", "delete_id", "gc_id", "resource_id", "store_binding", "publication"], "properties": { "intent_version": { "const": "cymule.resource-delete-intent/1" }, "delete_id": { "$ref": "#/$defs/nonEmpty" }, "gc_id": { "$ref": "#/$defs/nonEmpty" }, "resource_id": { "$ref": "#/$defs/digest" }, "store_binding": { "$ref": "#/$defs/nonEmpty" }, "publication": { "$ref": "#/$defs/publication" } } },
-    "pinReceipt": { "type": "object", "additionalProperties": false, "required": ["receipt_version", "pin_id", "resource_id", "owner"], "properties": { "receipt_version": { "const": "cymule.resource-pin-receipt/1" }, "pin_id": { "$ref": "#/$defs/nonEmpty" }, "resource_id": { "$ref": "#/$defs/digest" }, "owner": { "$ref": "#/$defs/nonEmpty" } } },
-    "releaseReceipt": { "type": "object", "additionalProperties": false, "required": ["receipt_version", "release_id", "pin_id", "resource_id"], "properties": { "receipt_version": { "const": "cymule.resource-release-receipt/1" }, "release_id": { "$ref": "#/$defs/nonEmpty" }, "pin_id": { "$ref": "#/$defs/nonEmpty" }, "resource_id": { "$ref": "#/$defs/digest" } } },
-    "gcReceipt": { "type": "object", "additionalProperties": false, "required": ["receipt_version", "gc_id", "resource_id", "active_pin_count", "disposition"], "properties": { "receipt_version": { "const": "cymule.resource-gc-receipt/1" }, "gc_id": { "$ref": "#/$defs/nonEmpty" }, "resource_id": { "$ref": "#/$defs/digest" }, "active_pin_count": { "type": "integer", "minimum": 0 }, "disposition": { "enum": ["retained", "eligible"] } } },
-    "deleteReceipt": { "type": "object", "additionalProperties": false, "required": ["receipt_version", "delete_id", "gc_id", "resource_id", "store_binding", "removed_bytes", "verified_absent"], "properties": { "receipt_version": { "const": "cymule.resource-delete-receipt/1" }, "delete_id": { "$ref": "#/$defs/nonEmpty" }, "gc_id": { "$ref": "#/$defs/nonEmpty" }, "resource_id": { "$ref": "#/$defs/digest" }, "store_binding": { "$ref": "#/$defs/nonEmpty" }, "removed_bytes": { "type": "integer", "minimum": 0 }, "verified_absent": { "const": true } } },
-    "cleanupReceipt": { "type": "object", "additionalProperties": false, "required": ["receipt_version", "write_id", "upload_id", "store_binding", "removed_staging_objects", "removed_chunks", "verified_absent"], "properties": { "receipt_version": { "const": "cymule.resource-cleanup-receipt/1" }, "write_id": { "$ref": "#/$defs/nonEmpty" }, "upload_id": { "$ref": "#/$defs/nonEmpty" }, "store_binding": { "$ref": "#/$defs/nonEmpty" }, "removed_staging_objects": { "type": "integer", "minimum": 0 }, "removed_chunks": { "type": "integer", "minimum": 0 }, "verified_absent": { "const": true } } },
-    "lifecycleReceipt": { "oneOf": [{ "$ref": "#/$defs/pinReceipt" }, { "$ref": "#/$defs/releaseReceipt" }, { "$ref": "#/$defs/gcReceipt" }, { "$ref": "#/$defs/deleteReceipt" }, { "$ref": "#/$defs/cleanupReceipt" }] }
+    "listProof": {
+      "type": "object", "additionalProperties": false,
+      "required": ["proof_version", "manifest_digest", "entry_count", "start_index", "request_cursor_digest", "next_cursor_digest", "predecessor", "inclusions"],
+      "properties": {
+        "proof_version": { "const": "cymule.resource-list-proof/5" },
+        "manifest_digest": { "$ref": "#/$defs/digest" },
+        "entry_count": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "start_index": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "request_cursor_digest": { "$ref": "#/$defs/digest" },
+        "next_cursor_digest": { "$ref": "#/$defs/digest" },
+        "predecessor": { "oneOf": [{ "$ref": "#/$defs/manifestPredecessorProof" }, { "type": "null" }] },
+        "inclusions": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/inclusionProof" } }
+      }
+    },
+    "listCursor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cursor_version", "cursor_id", "resource_id", "manifest_digest", "resolver_binding", "request_cursor_digest", "request_limit", "start_index", "next_index", "last_name", "progress_digest"],
+      "properties": {
+        "cursor_version": { "const": "cymule.resource-list-cursor/3" },
+        "cursor_id": { "$ref": "#/$defs/digest" },
+        "resource_id": { "$ref": "#/$defs/digest" },
+        "manifest_digest": { "$ref": "#/$defs/digest" },
+        "resolver_binding": { "$ref": "#/$defs/nonEmpty" },
+        "request_cursor_digest": { "$ref": "#/$defs/digest" },
+        "request_limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "start_index": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "next_index": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "last_name": { "$ref": "#/$defs/nonEmpty" },
+        "progress_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "producerProvenance": { "type": "object", "additionalProperties": false, "required": ["run_id", "occurrence_id", "result"], "properties": { "run_id": { "$ref": "#/$defs/coreIdentity" }, "occurrence_id": { "$ref": "#/$defs/coreIdentity" }, "result": { "$ref": "#/$defs/artifactRef" } } },
+    "resourceHandoff": { "type": "object", "additionalProperties": false, "required": ["handoff_version", "transfer_id", "producer", "to_run", "slot", "resource"], "properties": { "handoff_version": { "const": "cymule.resource-handoff/5" }, "transfer_id": { "$ref": "#/$defs/coreIdentity" }, "producer": { "$ref": "#/$defs/producerProvenance" }, "to_run": { "$ref": "#/$defs/coreIdentity" }, "slot": { "$ref": "#/$defs/coreIdentity" }, "resource": { "$ref": "#/$defs/artifactRef" } } },
+    "resourceHandoffActivation": { "type": "object", "additionalProperties": false, "required": ["activation_version", "activation_id", "transfer_id", "to_run", "wait_id", "result"], "properties": { "activation_version": { "const": "cymule.resource-handoff-activation/3" }, "activation_id": { "$ref": "#/$defs/digest" }, "transfer_id": { "$ref": "#/$defs/coreIdentity" }, "to_run": { "$ref": "#/$defs/coreIdentity" }, "wait_id": { "$ref": "#/$defs/coreIdentity" }, "result": { "$ref": "#/$defs/artifactRef" } } }
   }
 }

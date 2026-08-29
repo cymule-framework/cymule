@@ -1,136 +1,143 @@
 # M3 Large Virtual Work Profile
 
-Status: implemented.
+Status: partial terminal candidate. The normalized reducers and bounded provider
+contracts are implemented; complete public Durable integration and the final
+fault, packaging, schema and cross-language gates are not yet closed.
 
-## Implemented profile
+## Authority
 
-- provider-neutral `RegionSource` with opaque versioned cursors and bounded page
-  materialization;
-- transactional page admission that rejects cursor-version changes,
-  non-terminal stalls, empty/repeated work IDs, and partial source failures
-  without advancing any cursor or frontier;
-- logical region cardinality independent from materialized work cardinality;
-- explicit global, active, per-Run, and page-size frontier limits;
-- integer weighted-deficit Run fairness that debits exact item cost, with tests
-  proving 1:3 shares and cost-normalized service;
-- durable dispatch-sequence priority aging with a continuous high-priority
-  adversarial test proving an older low-priority item is selected after a finite
-  bound, including snapshot/restore;
-- independent region round-robin materialization proving visibility fairness
-  with a single frontier slot;
-- capability-aware claims with monotonically increasing fencing epochs;
-- stale-completion rejection;
-- binding-pinned work occurrences created with every claim and retained across
-  running, success, retry, park, terminal failure, and cancellation;
-- idempotent disposition replay, conflicting-disposition rejection, retry under
-  a new epoch/binding, and cancellation fencing of late output;
-- historical command receipts that remain replayable after later checkpoints,
-  without rolling the scheduler back to the command's snapshot;
-- M1-backed claim and resolution checkpoints that atomically retain result,
-  failure, or cancellation Artifacts with occurrence/frontier state;
-- provider-neutral `VirtualWorkControl` interfaces and shared typed occurrence
-  plus control fixtures in Rust, TypeScript, Python, and Go;
-- indexed park/wake reasons for waits, dependencies, budgets, capabilities, and
-  backpressure;
-- portable scheduler snapshots and restore-time bound validation;
-- restore validation for region/run identity, duplicate scheduler placement,
-  known-set coverage, claim fencing, and global/per-Run active limits;
-- a rebuildable exact `ParkReason -> work IDs` index, with M1 wait IDs used as
-  activation keys and no parked-population scan on wake;
-- versioned `cymule.virtual-checkpoint/2` records that persist opaque source
-  cursors and complete bounded frontier mutations as content-addressed deltas
-  through an M1 application journal, without repeating full snapshots;
-- a 4 MiB hard bound on each canonical delta plus authenticated parent and
-  resulting transition heads, with linear-history and exact-reopen regressions;
-- an in-process exact durable-anchor cache that constructs the next delta from
-  the last committed projection without replaying prior journal history, and
-  advances only after the owning M1 CAS succeeds;
-- checkpoint parent lineage, idempotent retry, conflicting-ID rejection,
-  reopen, and in-process rollback after stale CAS;
-- atomic M1 wait activation plus M3 indexed wake checkpoints, including a stale
-  writer fault test proving neither side partially commits;
-- M1 reopen of scheduling policy, Run weights/deficits, dispatch sequence,
-  ready age, and last selections with identical next-claim evidence;
-- provider-neutral `RegionMigrator` planning and verification for opaque cursor
-  split/merge, with exact source preconditions and pinned migration binding;
-- atomic source retirement, target activation, coverage Artifact, receipt, and
-  scheduler checkpoint, while historical/materialized work keeps old region IDs;
-- split-then-merge lineage, stale cursor, unverified evidence, target conflict,
-  stale CAS, reopen, and historical command-replay tests;
-- shared Rust, TypeScript, Python, and Go migration plan/control contracts that
-  never interpret cursor positions;
-- provider-neutral immutable `VirtualArchive` bytes with a framework-computed
-  semantic Resource descriptor and pinned compactor binding;
-- completed-region eligibility that rejects non-exhausted/non-retired regions,
-  any hot work, or a non-terminal greatest occurrence;
-- authenticated completion summaries and compaction certificates retaining the
-  causal cut, manifest/summary/index digests, terminal work fences, occurrence
-  bindings, replay availability, and compactor revision;
-- exact occurrence-selection partial rehydration with full manifest/certificate
-  readback validation and no implicit widening;
-- M1 journal checkpoints retaining only the cold Resource descriptor for
-  compaction and rehydration, including reopen, idempotent receipt replay,
-  stale CAS rollback, injected archive read/write failure, and tamper rejection;
-- shared Rust, TypeScript, Python, and Go compaction/rehydration commands and
-  transport-neutral archive/control interfaces;
-- provider-neutral worker capacity-slot claim commands whose M1 lease and M3
-  occurrence/frontier enter one CAS, including durable empty-poll receipts;
-- atomic active-claim renewal that advances the slot and occurrence lease fence
-  without changing the work epoch or immutable binding;
-- normal result admission fenced by owner, work epoch, lease epoch, and logical
-  pre-expiry observation time;
-- explicit expired-claim retry/fail/cancel recovery against the exact current
-  durable lease, with evidence Artifact checkpointing and later work-epoch
-  takeover that rejects old worker output;
-- deterministic multi-worker tests for distinct-slot progress, same-slot
-  exclusion, stale CAS, pre-expiry rejection, post-expiry takeover, late output,
-  and lost claim/renewal/recovery receipts across reopen;
-- idempotent future Run-weight controls with deficit reset, stale-CAS rollback,
-  reopen, and historical receipt replay;
-- shared Rust, TypeScript, Python, and Go `VirtualSchedulingControl` contracts
-  and claim/renew/recover/Run-weight fixtures;
-- million-item source tests proving an eight-item bounded frontier, fairness,
-  parking, waking, fencing, and restart behavior.
+`cymule-profile-protocol::virtual_work` owns the closed DTOs, identities,
+fairness policy and pure reducer. `cymule-durable` resolves authenticated exact
+reads, invokes the selected provider and commits the normalized postcondition.
+`cymule-virtual` owns archive/provider realization, not a second scheduler.
 
-## Completion boundary
+The public writer is `DurableVirtualControl`, borrowed from a
+`DurableRuntimeControl` with its admitted execution binding, provider registry
+and Clock. Store-only control exposes provider-free exact reads. Neither facade
+accepts a whole scheduler snapshot, raw Machine delta, generic journal append,
+caller-authored postcondition, or arbitrary storage key.
 
-This profile covers provider-neutral large virtual work inside one durable M1
-domain. Cross-domain worker ownership, distributed consensus, infrastructure
-autoscaling, queue delivery, and execution isolation belong to M5 or plugins and
-are not M3 claims.
+## Normalized state and admission
 
-`RegionSource` implementations may enumerate a database, object store, API, or
-generated range, but those technologies never enter M3 semantic state.
+One scalar scheduler current binds bounded scheduling/frontier metadata and
+the profile's authenticated roots. Regions, active-region membership, Runs,
+work, occurrences, parked buckets, migrations, certificates and command
+receipts live in separately keyed families. An ordinary open pins the StateRoot;
+it does not replay all history or reconstruct the complete scheduler.
 
-Version decision: `cymule.virtual-checkpoint/2` replaces the v1 whole-snapshot
-journal payload. V2 carries only a content-addressed delta, its authenticated
-parent/result transition heads, and the exact control receipt. There is no v1
-fallback because journal lineages are version-homogeneous. `VirtualSnapshot`
-keeps a derived parked-reason index that restore always rebuilds from parked
-work. This does not alter `cymule.semantic/4`, the Plan IR, or M1's generic
-application-journal envelope. Work lifecycle adds independent
-`cymule.virtual-work-occurrence/2`
-and `cymule.virtual-work-control/1` domains; SDKs expose their closed wire types
-and transport interfaces but do not reduce scheduler state. Additive scheduling
-policy, integer weight/deficit, dispatch-sequence, and ready-age fields remain
-inside the `cymule.virtual-checkpoint/2` domain. Region topology adds
-independent `cymule.virtual-region-migration/1` and
-`cymule.virtual-region-migration-control/1` domains; receipts and retired lineage
-remain in the same M3 checkpoint.
-Cold history adds independent `cymule.virtual-archive-manifest/1`,
-`cymule.virtual-compaction-certificate/3`,
-`cymule.virtual-compaction-control/1`, and
-`cymule.virtual-rehydration-control/1` domains. Their receipts, bounded summary,
-and terminal fence index remain in the additive
-`cymule.virtual-checkpoint/2` payload; exact occurrence bytes remain a cold
-content-addressed Resource behind `VirtualArchive` and never re-enter hot
-Machine Artifacts.
-Certificate `/2` is the terminal pre-release replacement for `/1`; no dual
-reader or Artifact-reference fallback remains. Existing `/1` checkpoints must
-be rebuilt from their retained cold manifest before upgrading this profile.
-Multi-worker control adds independent `cymule.virtual-claim-control/2`,
-`cymule.virtual-lease-renewal-control/1`,
-`cymule.virtual-recovery-control/1`, and
-`cymule.virtual-run-weight-control/1` domains. Their receipts and active lease
-fences remain additive fields in `cymule.virtual-checkpoint/2`; Clock and worker
-substrates supply proposals but never mutate scheduler state directly.
+Every command first checks its exact all-ever receipt. An identical command
+returns the original semantic receipt without provider I/O or a second CAS.
+Reusing its identity with another body fails. A fresh command resolves only the
+typed read requirements of its reducer from one pinned source. Extra,
+mismatched, stale or missing authority is not silently replaced.
+
+The reducer's complete normalized mutation set, any coupled M1/M4 transitions,
+new Plans/Artifacts, and the command receipt enter one Store CAS. Physical
+observed/committed revisions belong to the non-persisted `VirtualCommit`
+envelope, not the self-authenticating semantic receipt. Failed admission or a
+pre-CAS crash publishes no partial profile state.
+
+## Materialization and claims
+
+`RegionSource` pins an operation, binding and revision. Its cursor is opaque.
+The framework checks bounded page progress, exact source identity, unique work
+IDs, and every payload Artifact's bytes and reference before publishing the
+cursor and work together. A changed provider generation cannot reinterpret a
+retained region.
+
+Weighted-deficit selection and integer priority aging operate on bounded,
+materialized, capability-compatible work. Active-region selection uses an
+authenticated ordered page and at most one wrap; it does not repeatedly scan a
+fixed prefix. Logical source cardinality is independent of frontier cardinality.
+
+A claim resolves the selected Run's fixed Plan or its retained Evolution
+selector. Evolution selection, the Virtual occurrence and capacity-slot lease,
+and their required M1 material share one CAS. The runtime owner's already
+admitted full execution binding supplies first-use material; callers cannot
+register arbitrary binding bytes or provide a different selector at claim time.
+
+The public result is the closed `VirtualClaimOutcome`:
+
+- `NoWork` carries the exact normalized receipt.
+- `Claimed` additionally carries a non-null claim and complete verified
+  `SealedPlan` loaded from the same pinned authority.
+
+The persisted receipt retains Plan identity and binding reference, not another
+Plan copy. No nullable public Plan or raw Plan reader exists.
+
+## Ownership, settlement and wakeup
+
+Each active claim binds worker, work epoch, capacity-slot lease epoch and an
+issued Clock reference. Freshness authorization holds the Clock head guard
+through the final Store CAS. Historical Clock resolution alone never permits
+a mutation. Expiry changes nothing until an explicit recovery command is
+admitted; old output loses after lease replacement or takeover.
+
+Success, retry, park, failure and cancellation are closed dispositions. Retry
+creates a later Virtual occurrence; it does not erase history or redefine the
+Core component's independent provider Attempt. Lease renewal advances the lease
+fence without changing the work epoch or implementation pin.
+
+Park/wake uses exact reason and bucket keys. Identified M1 activation retains
+its complete original target set and winning subset; M3 wakes only admitted
+targets. Receipt replay precedes pending-membership validation, so lost
+acknowledgement remains recoverable after those waits become terminal. An M1
+Wait reason is the exact Wait content ID. The scalar frontier retains a bounded
+directory of only Wait reasons that currently own parked Virtual work, together
+with the exact source and mutation item/byte charge required to wake each
+reason. Parking is rejected before CAS if waking all retained Wait reasons
+together would exceed either aggregate bound. Activation intersects its winning
+M1 subset with this directory, so unrelated M1 targets require no negative
+Virtual lookups, and recomputes each selected charge from the exact keyed leaves
+before removing it atomically.
+
+## Opaque region migration
+
+Migration is provider-neutral planning plus verification, not cursor
+interpretation by the scheduler. The pinned migrator returns one non-Serde
+proposal containing the complete `RegionMigrationPlan`, coverage-evidence
+ArtifactRecord and exact target-source ArtifactRecords. The framework verifies
+all target/reference/byte relationships, rejects duplicate or unrelated
+material, and applies the combined 4 MiB material budget before admission.
+
+Verified coverage, source retirement, target activation, new material and the
+receipt commit together. Existing work and historical occurrences retain their
+original region identities. A Ref-only proposal with missing bytes is not an
+admissible migration and has no separate registration fallback.
+
+## Archive and retention
+
+Cold history is an immutable Resource, selected through its pinned archive
+provider. The framework computes the content descriptor, causal-cut
+certificate, terminal fences, summaries and index proofs. Hot state retains
+the descriptor/certificate and authenticated lookup roots, never a full cold
+archive in Machine Artifacts.
+
+Compaction requires a completed or retired region without active work. Exact
+rehydration verifies the selected occurrence proof against the retained
+certificate and complete bounded archive authority; it cannot widen a request.
+Archived work/command membership prevents rematerialization or identity reuse
+without scanning every historical certificate.
+
+An archive pin and its profile transition share one CAS. Only the typed archive
+retirement transition may release that pin. Physical GC remains downstream of
+the exact M1 roots and Resource retention authority.
+
+## Verification boundary
+
+Before marking the complete profile implemented, the public Durable path must
+pass materialization, fairness, empty claim, lease renewal, recovery, late
+output, park/wake, migration, archive, retirement and exact replay tests.
+Fault sweeps must inject failure before and after the relevant CAS/provider
+boundary, reopen authority and verify exact receipts and call counts. Pure
+DTO/reducer tests do not replace these end-to-end witnesses.
+
+The current source/limit inventory is owned by `versioning/version-domains.json`
+and the named constants in `virtual_work.rs`. Public schema fixtures describe
+the live controls and receipts only. The retired checkpoint/snapshot and
+journal-base models have no current producer or restoration authority; they
+must not be kept alive by a schema-only positive fixture.
+
+Cross-domain ownership, distributed consensus, autoscaling, queue delivery,
+recursive authoring and execution isolation remain proposed separate profiles
+or provider concerns. This profile does not claim those guarantees.

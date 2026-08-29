@@ -20,6 +20,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      controller_sha: ${{ steps.identity.outputs.controller_sha }}
       release_sha: ${{ steps.identity.outputs.release_sha }}
       version: ${{ steps.identity.outputs.version }}
     steps:
@@ -33,6 +34,8 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
+          export LC_ALL=C
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           test "$GITHUB_REF" = "refs/heads/main"
           git fetch --no-tags origin main
           current_main=$(git rev-parse refs/remotes/origin/main)
@@ -40,11 +43,14 @@ jobs:
           git fetch --force origin "refs/tags/v$RELEASE_VERSION:refs/tags/v$RELEASE_VERSION"
           test "$(git cat-file -t "refs/tags/v$RELEASE_VERSION")" = tag
           release_sha=$(git rev-list -n 1 "refs/tags/v$RELEASE_VERSION")
-          test "$release_sha" = "$current_main"
+          git merge-base --is-ancestor "$release_sha" "$current_main"
           git checkout --detach "$release_sha"
           test "$(git describe --exact-match --tags)" = "v$RELEASE_VERSION"
-          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
-          echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "controller_sha=$current_main"
+            echo "release_sha=$release_sha"
+            echo "version=$RELEASE_VERSION"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
         run: |
@@ -72,6 +78,14 @@ jobs:
           version: 0.7.2
           enable-cache: true
           cache-dependency-glob: sdk/python/uv.lock
+
+      - name: Require a closed release changelog and version generation
+        env:
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+        run: >-
+          uv run --project sdk/python --frozen python
+          scripts/version_domains.py verify-release
+          --version "$RELEASE_VERSION"
 
       - name: Verify exact release repository
         run: ./scripts/verify.sh
@@ -175,7 +189,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.verify.outputs.controller_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
           ref: ${{ needs.verify.outputs.release_sha }}
+          path: release-payload
           fetch-depth: 0
           persist-credentials: false
 
@@ -186,11 +207,21 @@ jobs:
 
       - name: Rebind publisher to the verified commit
         env:
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
           RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_TAG: v${{ needs.verify.outputs.version }}
           RELEASE_VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
-          test "$(git describe --exact-match --tags)" = "v$RELEASE_VERSION"
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          git diff --quiet "$CONTROLLER_SHA" -- scripts/crates_release.py scripts/version_domains.py
+          git fetch --no-tags origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
+          remote_release_sha=$(git ls-remote origin "refs/tags/$RELEASE_TAG^{}" | cut -f1)
+          test -n "$remote_release_sha"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+          test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git -C "$CYMULE_RELEASE_WORKSPACE" describe --exact-match --tags)" = "v$RELEASE_VERSION"
           python3 scripts/crates_release.py list >/dev/null
 
       - name: Acquire short-lived crates.io token
@@ -200,15 +231,27 @@ jobs:
       - name: Publish or retain exact staged crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
           CYMULE_CRATES_STAGE: ${{ runner.temp }}/crates-stage
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_TAG: v${{ needs.verify.outputs.version }}
           RELEASE_VERSION: ${{ needs.verify.outputs.version }}
-        run: python3 scripts/crates_release.py publish --version "$RELEASE_VERSION"
+        run: |
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          git diff --quiet "$CONTROLLER_SHA" -- scripts/crates_release.py scripts/version_domains.py
+          git fetch --no-tags origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
+          remote_release_sha=$(git ls-remote origin "refs/tags/$RELEASE_TAG^{}" | cut -f1)
+          test -n "$remote_release_sha"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+          python3 scripts/crates_release.py publish --version "$RELEASE_VERSION"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: crates-release-${{ inputs.version }}
-          path: .cache/crates-release/${{ inputs.version }}/publish.json
+          path: release-payload/.cache/crates-release/${{ inputs.version }}/publish.json
           if-no-files-found: warn
 
   verify-published:

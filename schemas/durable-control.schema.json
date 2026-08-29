@@ -1,94 +1,284 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/durable-control.schema.json",
-  "title": "Cymule Durable Control cymule.durable-control/1",
+  "title": "Cymule Durable Control cymule.durable-control/4",
   "oneOf": [
     {
       "type": "object", "additionalProperties": false,
-      "required": ["type", "control_version", "run_id", "candidate", "input"],
+      "required": ["type", "control_version", "run_id", "candidate", "input", "execution"],
       "properties": {
         "type": { "const": "start_run" },
-        "control_version": { "const": "cymule.durable-control/1" },
+        "control_version": { "const": "cymule.durable-control/4" },
         "run_id": { "$ref": "#/$defs/identity" },
         "candidate": { "$ref": "plan-candidate.schema.json" },
-        "input": true
+        "input": true,
+        "execution": { "$ref": "#/$defs/executionClaimRequest" }
       }
     },
     {
       "type": "object", "additionalProperties": false,
-      "required": ["type", "control_version", "run_id"],
+      "required": ["type", "control_version", "run_id", "execution"],
       "properties": {
         "type": { "const": "resume_run" },
-        "control_version": { "const": "cymule.durable-control/1" },
-        "run_id": { "$ref": "#/$defs/identity" }
+        "control_version": { "const": "cymule.durable-control/4" },
+        "run_id": { "$ref": "#/$defs/identity" },
+        "execution": { "$ref": "#/$defs/executionClaimRequest" }
       }
     },
     {
       "type": "object", "additionalProperties": false,
-      "required": [
-        "type", "control_version", "activation_id", "source", "wait_ids", "value"
-      ],
+      "required": ["type", "control_version", "run_id", "expected_fence", "execution"],
+      "properties": {
+        "type": { "const": "takeover_run" },
+        "control_version": { "const": "cymule.durable-control/4" },
+        "run_id": { "$ref": "#/$defs/identity" },
+        "expected_fence": { "$ref": "#/$defs/positiveExactInteger" },
+        "execution": { "$ref": "#/$defs/executionClaimRequest" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "activation_id", "source", "wait_ids", "value"],
       "properties": {
         "type": { "const": "activate_wait" },
-        "control_version": { "const": "cymule.durable-control/1" },
+        "control_version": { "const": "cymule.durable-control/4" },
         "activation_id": { "$ref": "#/$defs/identity" },
         "source": { "$ref": "#/$defs/waitSource" },
         "wait_ids": {
           "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true,
-          "items": { "$ref": "#/$defs/identity" }
+          "items": { "$ref": "#/$defs/contentId" }
         },
         "value": true
       }
     },
     {
       "type": "object", "additionalProperties": false,
-      "required": ["type", "control_version", "intent_id"],
+      "required": ["type", "control_version", "intent_id", "execution"],
       "properties": {
         "type": { "const": "release_effect" },
-        "control_version": { "const": "cymule.durable-control/1" },
-        "intent_id": { "$ref": "#/$defs/identity" }
+        "control_version": { "const": "cymule.durable-control/4" },
+        "intent_id": { "$ref": "#/$defs/contentId" },
+        "execution": { "$ref": "#/$defs/executionClaimRequest" }
       }
     },
     {
       "type": "object", "additionalProperties": false,
-      "required": ["type", "control_version", "query_id", "run_id"],
+      "required": [
+        "type", "control_version", "resolution_id", "run_id", "intent_id",
+        "execution_binding", "occurrence_binding", "claim_owner", "claim_epoch",
+        "resolution", "value"
+      ],
       "properties": {
-        "type": { "const": "query_run" },
-        "control_version": { "const": "cymule.durable-control/1" },
-        "query_id": { "$ref": "#/$defs/identity" },
-        "run_id": { "$ref": "#/$defs/identity" }
+        "type": { "const": "resolve_effect" },
+        "control_version": { "const": "cymule.durable-control/4" },
+        "resolution_id": { "$ref": "#/$defs/identity" },
+        "run_id": { "$ref": "#/$defs/identity" },
+        "intent_id": { "$ref": "#/$defs/contentId" },
+        "execution_binding": { "$ref": "#/$defs/executionBindingRef" },
+        "occurrence_binding": { "$ref": "#/$defs/contentId" },
+        "claim_owner": { "$ref": "#/$defs/identity" },
+        "claim_epoch": { "$ref": "#/$defs/positiveExactInteger" },
+        "resolution": { "enum": ["resolved_applied", "resolved_not_applied"] },
+        "value": true
+      },
+      "allOf": [{
+        "if": { "properties": { "resolution": { "const": "resolved_not_applied" } }, "required": ["resolution"] },
+        "then": { "properties": { "value": { "type": "null" } } }
+      }]
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "cancellation_id", "run_id", "reason"],
+      "properties": {
+        "type": { "const": "cancel_run" },
+        "control_version": { "const": "cymule.durable-control/4" },
+        "cancellation_id": { "$ref": "#/$defs/identity" },
+        "run_id": { "$ref": "#/$defs/identity" },
+        "reason": true
       }
     },
     {
       "type": "object", "additionalProperties": false,
-      "required": ["type", "control_version", "query_id"],
+      "required": ["type", "control_version", "expected_revision", "cursor", "limit", "max_canonical_bytes"],
       "properties": {
-        "type": { "const": "query_domain" },
-        "control_version": { "const": "cymule.durable-control/1" },
-        "query_id": { "$ref": "#/$defs/identity" }
+        "type": { "const": "run_index_page" },
+        "control_version": { "const": "cymule.durable-control/4" },
+        "expected_revision": { "$ref": "#/$defs/nullableContentId" },
+        "cursor": { "oneOf": [{ "$ref": "#/$defs/pageCursor" }, { "type": "null" }] },
+        "limit": { "$ref": "#/$defs/pageLimit" },
+        "max_canonical_bytes": { "$ref": "#/$defs/pageByteBudget" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "run_id", "expected_revision"],
+      "properties": {
+        "type": { "const": "run_current" },
+        "control_version": { "const": "cymule.durable-control/4" },
+        "run_id": { "$ref": "#/$defs/identity" },
+        "expected_revision": { "$ref": "#/$defs/nullableContentId" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "run_id", "expected_revision", "cursor", "limit", "max_canonical_bytes"],
+      "properties": {
+        "type": { "const": "run_wait_page" },
+        "control_version": { "const": "cymule.durable-control/4" },
+        "run_id": { "$ref": "#/$defs/identity" },
+        "expected_revision": { "$ref": "#/$defs/nullableContentId" },
+        "cursor": { "oneOf": [{ "$ref": "#/$defs/pageCursor" }, { "type": "null" }] },
+        "limit": { "$ref": "#/$defs/pageLimit" },
+        "max_canonical_bytes": { "$ref": "#/$defs/pageByteBudget" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "run_id", "expected_revision", "cursor", "limit", "max_canonical_bytes"],
+      "properties": {
+        "type": { "const": "run_effect_page" },
+        "control_version": { "const": "cymule.durable-control/4" },
+        "run_id": { "$ref": "#/$defs/identity" },
+        "expected_revision": { "$ref": "#/$defs/nullableContentId" },
+        "cursor": { "oneOf": [{ "$ref": "#/$defs/pageCursor" }, { "type": "null" }] },
+        "limit": { "$ref": "#/$defs/pageLimit" },
+        "max_canonical_bytes": { "$ref": "#/$defs/pageByteBudget" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "run_id", "expected_revision", "cursor", "limit", "max_canonical_bytes"],
+      "properties": {
+        "type": { "const": "run_occurrence_page" },
+        "control_version": { "const": "cymule.durable-control/4" },
+        "run_id": { "$ref": "#/$defs/identity" },
+        "expected_revision": { "$ref": "#/$defs/nullableContentId" },
+        "cursor": { "oneOf": [{ "$ref": "#/$defs/pageCursor" }, { "type": "null" }] },
+        "limit": { "$ref": "#/$defs/pageLimit" },
+        "max_canonical_bytes": { "$ref": "#/$defs/pageByteBudget" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "run_id", "expected_revision", "cursor", "limit", "max_canonical_bytes"],
+      "properties": {
+        "type": { "const": "run_attempt_page" },
+        "control_version": { "const": "cymule.durable-control/4" },
+        "run_id": { "$ref": "#/$defs/identity" },
+        "expected_revision": { "$ref": "#/$defs/nullableContentId" },
+        "cursor": { "oneOf": [{ "$ref": "#/$defs/pageCursor" }, { "type": "null" }] },
+        "limit": { "$ref": "#/$defs/pageLimit" },
+        "max_canonical_bytes": { "$ref": "#/$defs/pageByteBudget" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "control_version", "run_id", "expected_revision", "selector", "max_canonical_bytes"],
+      "properties": {
+        "type": { "const": "run_item" },
+        "control_version": { "const": "cymule.durable-control/4" },
+        "run_id": { "$ref": "#/$defs/identity" },
+        "expected_revision": { "$ref": "#/$defs/nullableContentId" },
+        "selector": { "$ref": "#/$defs/runItemSelector" },
+        "max_canonical_bytes": { "$ref": "#/$defs/exactByteBudget" }
       }
     }
   ],
   "$defs": {
+    "contentId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nullableContentId": { "oneOf": [{ "$ref": "#/$defs/contentId" }, { "type": "null" }] },
+    "rawDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "identity": {
       "type": "string", "minLength": 1, "maxLength": 512,
-      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "positiveExactInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "pageLimit": { "type": "integer", "minimum": 1, "maximum": 256 },
+    "pageByteBudget": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+    "exactByteBudget": { "type": "integer", "minimum": 1, "maximum": 13631488 },
+    "clockObservationRef": {
+      "type": "object", "additionalProperties": false,
+      "required": ["clock_version", "observation_id", "source_id", "source_generation", "scope"],
+      "properties": {
+        "clock_version": { "const": "cymule.clock-observation/2" },
+        "observation_id": { "$ref": "#/$defs/contentId" },
+        "source_id": { "$ref": "#/$defs/identity" },
+        "source_generation": { "$ref": "#/$defs/contentId" },
+        "scope": { "$ref": "#/$defs/identity" }
+      }
+    },
+    "executionBindingRef": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity_version", "artifact_id", "kind"],
+      "properties": {
+        "identity_version": { "const": "cymule.artifact/2" },
+        "artifact_id": { "$ref": "#/$defs/contentId" },
+        "kind": { "const": "cymule.execution-binding/2" }
+      }
+    },
+    "executionClaimRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["owner", "clock", "ttl"],
+      "properties": {
+        "owner": { "$ref": "#/$defs/identity" },
+        "clock": { "$ref": "#/$defs/clockObservationRef" },
+        "ttl": { "$ref": "#/$defs/positiveExactInteger" }
+      }
     },
     "waitSource": {
       "oneOf": [
         {
           "type": "object", "additionalProperties": false,
           "required": ["kind", "key"],
-          "properties": {
-            "kind": { "const": "signal" }, "key": { "$ref": "#/$defs/identity" }
-          }
+          "properties": { "kind": { "const": "signal" }, "key": { "$ref": "#/$defs/identity" } }
         },
         {
           "type": "object", "additionalProperties": false,
           "required": ["kind", "timer_id"],
-          "properties": {
-            "kind": { "const": "timer" }, "timer_id": { "$ref": "#/$defs/identity" }
-          }
+          "properties": { "kind": { "const": "timer" }, "timer_id": { "$ref": "#/$defs/identity" } }
+        }
+      ]
+    },
+    "pagePosition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["canonical_key", "key_hash"],
+      "properties": {
+        "canonical_key": { "$ref": "#/$defs/identity" },
+        "key_hash": { "$ref": "#/$defs/rawDigest" }
+      }
+    },
+    "pageCursor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["query_kind", "run_id", "source_revision", "source_root", "position"],
+      "properties": {
+        "query_kind": { "enum": ["run_index", "run_waits", "run_effects", "run_occurrences", "run_attempts"] },
+        "run_id": { "oneOf": [{ "$ref": "#/$defs/identity" }, { "type": "null" }] },
+        "source_revision": { "$ref": "#/$defs/contentId" },
+        "source_root": { "$ref": "#/$defs/rawDigest" },
+        "position": { "$ref": "#/$defs/pagePosition" }
+      }
+    },
+    "runItemSelector": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "wait_id"],
+          "properties": { "kind": { "const": "wait" }, "wait_id": { "$ref": "#/$defs/contentId" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "intent_id"],
+          "properties": { "kind": { "const": "effect" }, "intent_id": { "$ref": "#/$defs/contentId" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "occurrence_id"],
+          "properties": { "kind": { "const": "occurrence" }, "occurrence_id": { "$ref": "#/$defs/contentId" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "attempt_id"],
+          "properties": { "kind": { "const": "attempt" }, "attempt_id": { "$ref": "#/$defs/contentId" } }
         }
       ]
     }

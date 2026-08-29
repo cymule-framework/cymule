@@ -3,13 +3,13 @@
 use serde::{Deserialize, Serialize};
 
 pub const SUITE_MEDIA_TYPE: &str = "application/x-ndjson";
-pub const SUITE_ARTIFACT_KIND: &str = "example.evaluation-suite/1";
+pub const CAMPAIGN_METADATA_ARTIFACT_KIND: &str = "example.evaluation-campaign-metadata/1";
 pub const CASE_ARTIFACT_KIND: &str = "example.evaluation-case/1";
 pub const RESULT_ARTIFACT_KIND: &str = "example.evaluation-result/1";
 pub const ERROR_ARTIFACT_KIND: &str = "example.evaluation-error/1";
 pub const MAX_SUITE_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_CASES: usize = 100_000;
-pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
+pub const MAX_MESSAGE_SCALARS: usize = 16 * 1024;
 
 /// One immutable evaluation case from the JSON Lines suite.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,19 +75,46 @@ pub struct CaseOutput {
     pub score: Score,
 }
 
+impl CaseOutput {
+    /// Verify the policy result against the exact case and returned prediction.
+    pub fn validate_for(&self, case: &EvaluationCase, expected_policy: &str) -> Result<(), String> {
+        if !matches!(
+            self.prediction.category.as_str(),
+            "identity" | "billing" | "reliability" | "general"
+        ) || !matches!(self.prediction.urgency.as_str(), "normal" | "high")
+        {
+            return Err("prediction contains an unsupported label".to_owned());
+        }
+        let category = u8::from(case.expected.category == self.prediction.category);
+        let urgency = u8::from(case.expected.urgency == self.prediction.urgency);
+        if self.score.policy != expected_policy {
+            return Err("score policy does not match the occurrence Plan".to_owned());
+        }
+        let (points, passed) = match expected_policy {
+            "strict" => {
+                let exact = category + urgency == 2;
+                (if exact { 2 } else { 0 }, exact)
+            }
+            "weighted" => (category + urgency, category == 1),
+            _ => return Err("score contains an unsupported policy".to_owned()),
+        };
+        if self.score.points != points || self.score.max_points != 2 || self.score.passed != passed
+        {
+            return Err("score does not match the campaign policy result".to_owned());
+        }
+        Ok(())
+    }
+}
+
 impl EvaluationCase {
     /// Validate the bounded vocabulary and input shape used by this example.
     pub fn validate(&self) -> Result<(), String> {
         if self.id.is_empty()
-            || self.id.len() > 128
+            || self.id.chars().count() > 128
             || self.id.chars().any(char::is_control)
             || self.input.message.is_empty()
-            || self.input.message.len() > MAX_MESSAGE_BYTES
-            || self
-                .input
-                .message
-                .chars()
-                .any(|character| character == '\0')
+            || self.input.message.chars().count() > MAX_MESSAGE_SCALARS
+            || self.input.message.chars().any(char::is_control)
         {
             return Err(format!("case {:?} has an invalid ID or message", self.id));
         }
@@ -102,5 +129,39 @@ impl EvaluationCase {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EvaluationCase, MAX_MESSAGE_SCALARS, TicketInput, TicketLabel};
+
+    #[test]
+    fn string_bounds_match_json_schema_unicode_scalar_semantics() {
+        let case = |id: String, message: String| EvaluationCase {
+            id,
+            input: TicketInput { message },
+            expected: TicketLabel {
+                category: "general".to_owned(),
+                urgency: "normal".to_owned(),
+            },
+        };
+
+        case("🧭".repeat(128), "界".repeat(MAX_MESSAGE_SCALARS))
+            .validate()
+            .expect("multi-byte values at the schema scalar bound are valid");
+        assert!(
+            case("🧭".repeat(129), "valid".to_owned())
+                .validate()
+                .is_err()
+        );
+        assert!(
+            case(
+                "case:valid".to_owned(),
+                "界".repeat(MAX_MESSAGE_SCALARS + 1)
+            )
+            .validate()
+            .is_err()
+        );
     }
 }

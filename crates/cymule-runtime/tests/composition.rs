@@ -1,24 +1,322 @@
 //! Runtime provider graph and binding admission conformance.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use cymule_runtime::{
-    AdmittedPluginRouter, CompositionError, EXECUTION_BINDING_VERSION, ExecutionBinding,
-    ExecutionOperationKind, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest,
+    AdmittedPluginRouter, BoundPluginHost, CompositionError, EXECUTION_BINDING_VERSION,
+    EngineFailure, EngineFailureCategory, EnginePhase, EngineRetryDisposition, ExecutionBinding,
+    ExecutionOperationKind, MAX_COMPOSITION_TOKEN_SCALARS, MAX_EXECUTION_OPERATIONS_PER_KIND,
+    MAX_PROVIDER_PROPERTIES, MAX_PROVIDER_PROPERTY_VALUE_SCALARS, MAX_PROVIDER_SERVICES,
+    MAX_RUNTIME_PROVIDERS, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest,
     PluginOperation, PluginRequest, PluginResponse, RUNTIME_COMPOSITION_VERSION,
     RuntimeCompositionGraph, RuntimeImplementation, RuntimeProviderDescriptor, RuntimeResult,
     ServiceKey,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 const SCHEMA_DIGEST: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 const CONFIGURATION_FINGERPRINT: &str =
     "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+const EFFECT_INTENT_ID: &str =
+    "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+
+fn assert_selected_operation_mismatch(error: cymule_runtime::RuntimeError) {
+    assert!(matches!(
+        error,
+        cymule_runtime::RuntimeError::Composition(error)
+            if matches!(*error, CompositionError::SelectedOperationMismatch { .. })
+                && error.code() == "selected_operation_mismatch"
+    ));
+}
+
+#[test]
+fn every_composition_variant_owns_stable_code_message_and_engine_projection() {
+    let service = ServiceKey::new("cymule.test", "service", "1");
+    let other_service = ServiceKey::new("cymule.test", "service", "2");
+    let cases = vec![
+        (
+            CompositionError::InvalidProvider {
+                provider_id: "provider".to_owned(),
+                reason: "invalid".to_owned(),
+            },
+            "invalid_runtime_provider",
+        ),
+        (
+            CompositionError::DuplicateProviderId {
+                provider_id: "provider".to_owned(),
+            },
+            "duplicate_runtime_provider",
+        ),
+        (
+            CompositionError::DuplicateServiceProvider {
+                service: service.clone(),
+                providers: vec!["one".to_owned(), "two".to_owned()],
+            },
+            "duplicate_service_provider",
+        ),
+        (
+            CompositionError::MissingRequirement {
+                consumer: "consumer".to_owned(),
+                required: service.clone(),
+            },
+            "missing_runtime_requirement",
+        ),
+        (
+            CompositionError::RevisionMismatch {
+                consumer: "consumer".to_owned(),
+                required: service.clone(),
+                available: vec![other_service],
+            },
+            "runtime_revision_mismatch",
+        ),
+        (
+            CompositionError::DependencyCycle {
+                providers: vec!["one".to_owned(), "two".to_owned()],
+            },
+            "runtime_dependency_cycle",
+        ),
+        (
+            CompositionError::NonCanonicalBindingDescriptor,
+            "noncanonical_binding_descriptor",
+        ),
+        (
+            CompositionError::UnboundService {
+                service: service.clone(),
+            },
+            "runtime_service_unbound",
+        ),
+        (
+            CompositionError::InvalidPlanRequirement {
+                key: "requirement".to_owned(),
+                reason: "invalid".to_owned(),
+            },
+            "invalid_plan_requirement",
+        ),
+        (
+            CompositionError::MissingProviderProperty {
+                provider_id: "provider".to_owned(),
+                key: "property".to_owned(),
+            },
+            "missing_provider_property",
+        ),
+        (
+            CompositionError::ProviderPropertyMismatch {
+                provider_id: "provider".to_owned(),
+                key: "property".to_owned(),
+                required: "required".to_owned(),
+                actual: "actual".to_owned(),
+            },
+            "provider_property_mismatch",
+        ),
+        (
+            CompositionError::CompositionLimitExceeded {
+                subject: "runtime providers",
+                maximum: 64,
+            },
+            "composition_limit_exceeded",
+        ),
+        (
+            CompositionError::Encoding("invalid encoding".to_owned()),
+            "composition_encoding_failed",
+        ),
+        (
+            CompositionError::InvalidExecutionBinding {
+                reason: "invalid".to_owned(),
+            },
+            "invalid_execution_binding",
+        ),
+        (
+            CompositionError::MissingOperationBinding {
+                kind: ExecutionOperationKind::Component,
+                operation: "component".to_owned(),
+            },
+            "missing_operation_binding",
+        ),
+        (
+            CompositionError::SelectedOperationMismatch {
+                kind: ExecutionOperationKind::Effect,
+                operation: "effect".to_owned(),
+            },
+            "selected_operation_mismatch",
+        ),
+        (
+            CompositionError::ManifestMismatch,
+            "execution_manifest_mismatch",
+        ),
+    ];
+
+    for (error, expected_code) in cases {
+        assert_eq!(error.code(), expected_code);
+        let expected_message = error.message();
+        assert!(!expected_message.is_empty());
+        assert_eq!(error.to_string(), expected_message);
+        let failure = EngineFailure::from_runtime(error.into(), EnginePhase::ExecutePlan);
+        assert_eq!(failure.category, EngineFailureCategory::PluginDefect);
+        assert_eq!(failure.code.as_ref(), expected_code);
+        assert_eq!(failure.message.as_ref(), expected_message);
+        assert_eq!(
+            failure.retry_disposition,
+            Some(EngineRetryDisposition::Never)
+        );
+        failure
+            .verify()
+            .expect("typed composition projection satisfies the Engine wire");
+    }
+}
 
 fn service(name: &str, revision: &str) -> ServiceKey {
     ServiceKey::new("cymule.test", name, revision)
+}
+
+#[test]
+fn composition_collection_identity_and_artifact_bounds_are_exact() {
+    let providers = (0..MAX_RUNTIME_PROVIDERS)
+        .map(|index| provider(&format!("provider-{index:02}"), Vec::new(), Vec::new()))
+        .collect::<Vec<_>>();
+    RuntimeCompositionGraph::build(providers.clone())
+        .expect("the exact provider-count bound is admitted");
+    let mut too_many_providers = providers;
+    too_many_providers.push(provider("provider-over", Vec::new(), Vec::new()));
+    assert!(matches!(
+        RuntimeCompositionGraph::build(too_many_providers),
+        Err(CompositionError::CompositionLimitExceeded {
+            subject: "runtime provider count",
+            maximum: MAX_RUNTIME_PROVIDERS,
+        })
+    ));
+
+    let services = (0..MAX_PROVIDER_SERVICES)
+        .map(|index| service(&format!("service-{index:03}"), "1"))
+        .collect::<Vec<_>>();
+    RuntimeCompositionGraph::build(vec![provider("services", services.clone(), Vec::new())])
+        .expect("the exact per-provider service bound is admitted");
+    let mut too_many_services = services;
+    too_many_services.push(service("service-over", "1"));
+    assert!(matches!(
+        RuntimeCompositionGraph::build(vec![provider("services", too_many_services, Vec::new(),)]),
+        Err(CompositionError::CompositionLimitExceeded {
+            subject: "provider provided-service count",
+            maximum: MAX_PROVIDER_SERVICES,
+        })
+    ));
+
+    let mut aggregate_services = (0..16)
+        .map(|provider_index| {
+            provider(
+                &format!("aggregate-{provider_index:02}"),
+                (0..MAX_PROVIDER_SERVICES)
+                    .map(|service_index| {
+                        service(
+                            &format!("aggregate-{provider_index:02}-{service_index:03}"),
+                            "1",
+                        )
+                    })
+                    .collect(),
+                Vec::new(),
+            )
+        })
+        .collect::<Vec<_>>();
+    RuntimeCompositionGraph::build(aggregate_services.clone())
+        .expect("the exact aggregate service bound is admitted");
+    aggregate_services.push(provider(
+        "aggregate-over",
+        vec![service("aggregate-over", "1")],
+        Vec::new(),
+    ));
+    assert!(matches!(
+        RuntimeCompositionGraph::build(aggregate_services),
+        Err(CompositionError::CompositionLimitExceeded {
+            subject: "runtime service count",
+            maximum: cymule_runtime::MAX_RUNTIME_SERVICES,
+        })
+    ));
+
+    let mut exact_properties = provider("properties", Vec::new(), Vec::new());
+    exact_properties.properties = (0..MAX_PROVIDER_PROPERTIES)
+        .map(|index| (format!("property.{index:03}"), "value".to_owned()))
+        .collect();
+    RuntimeCompositionGraph::build(vec![exact_properties.clone()])
+        .expect("the exact provider-property bound is admitted");
+    exact_properties
+        .properties
+        .insert("property.over".to_owned(), "value".to_owned());
+    assert!(matches!(
+        RuntimeCompositionGraph::build(vec![exact_properties]),
+        Err(CompositionError::CompositionLimitExceeded {
+            subject: "provider property count",
+            maximum: MAX_PROVIDER_PROPERTIES,
+        })
+    ));
+
+    let mut scalar_provider = provider("scalars", Vec::new(), Vec::new());
+    scalar_provider.implementation.implementation_id = "🧭".repeat(MAX_COMPOSITION_TOKEN_SCALARS);
+    scalar_provider.properties.insert(
+        "property".to_owned(),
+        "🧭".repeat(MAX_PROVIDER_PROPERTY_VALUE_SCALARS),
+    );
+    RuntimeCompositionGraph::build(vec![scalar_provider.clone()])
+        .expect("exact multi-byte scalar bounds are admitted");
+    let mut property_over = scalar_provider.clone();
+    property_over
+        .properties
+        .get_mut("property")
+        .expect("property exists")
+        .push('x');
+    assert!(RuntimeCompositionGraph::build(vec![property_over]).is_err());
+    scalar_provider.implementation.implementation_id.push('x');
+    assert!(RuntimeCompositionGraph::build(vec![scalar_provider]).is_err());
+    let mut control_provider = provider("control", Vec::new(), Vec::new());
+    control_provider.implementation.implementation_id = "implementation\0forged".to_owned();
+    assert!(RuntimeCompositionGraph::build(vec![control_provider]).is_err());
+
+    let binding = ExecutionBinding::for_local_process(
+        &execution_manifest(),
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .expect("binding admits");
+    let bytes = binding.canonical_bytes().expect("binding canonicalizes");
+    assert_eq!(
+        ExecutionBinding::decode(&bytes).expect("canonical binding decodes"),
+        binding
+    );
+    let mut noncanonical = bytes.clone();
+    noncanonical.push(b' ');
+    assert!(matches!(
+        ExecutionBinding::decode(&noncanonical),
+        Err(CompositionError::InvalidExecutionBinding { .. })
+    ));
+    assert!(matches!(
+        ExecutionBinding::decode(&vec![b' '; cymule_core::MAX_ARTIFACT_BYTES + 1]),
+        Err(CompositionError::CompositionLimitExceeded {
+            subject: "execution binding Artifact bytes",
+            maximum: cymule_core::MAX_ARTIFACT_BYTES,
+        })
+    ));
+
+    let operation = serde_json::to_value(
+        binding
+            .components
+            .values()
+            .next()
+            .expect("fixture binding selects a component"),
+    )
+    .expect("operation binding serializes");
+    let mut operation_bomb = serde_json::to_value(&binding).expect("binding serializes");
+    operation_bomb["components"] = Value::Object(
+        (0..=MAX_EXECUTION_OPERATIONS_PER_KIND)
+            .map(|index| (format!("operation-{index:04}"), operation.clone()))
+            .collect(),
+    );
+    let operation_bomb = cymule_core::canonical_bytes(&operation_bomb).expect("bomb canonicalizes");
+    assert!(matches!(
+        ExecutionBinding::decode(&operation_bomb),
+        Err(CompositionError::Encoding(_))
+    ));
 }
 
 fn provider(
@@ -421,7 +719,7 @@ fn admitted_router_dispatches_to_exact_composed_provider_not_capability_superset
     )
     .expect("independent provider manifests admit");
     let mut router = AdmittedPluginRouter::new(
-        binding,
+        binding.clone(),
         BTreeMap::from([
             (
                 "component-provider".to_owned(),
@@ -442,26 +740,530 @@ fn admitted_router_dispatches_to_exact_composed_provider_not_capability_superset
     .expect("router verifies selected provider capabilities");
 
     router
-        .invoke(PluginRequest::Call {
-            component: "evaluate".to_owned(),
-            input: json!({}),
-        })
+        .invoke_bound(
+            &binding,
+            &binding,
+            PluginRequest::Call {
+                component: "evaluate".to_owned(),
+                input: json!({}),
+            },
+        )
         .expect("component routes");
     router
-        .invoke(PluginRequest::PrepareEffect {
-            operation: "publish".to_owned(),
-            intent_id: "intent:one".to_owned(),
-            input: json!({}),
-        })
+        .invoke_bound(
+            &binding,
+            &binding,
+            PluginRequest::PrepareEffect {
+                operation: "publish".to_owned(),
+                intent_id: EFFECT_INTENT_ID.to_owned(),
+                input: json!({}),
+            },
+        )
         .expect("effect routes");
     assert_eq!(*component_calls.lock().unwrap(), ["evaluate"]);
     assert_eq!(*effect_calls.lock().unwrap(), ["publish"]);
     assert!(
         router
-            .invoke(PluginRequest::Call {
-                component: "advertised_but_unbound".to_owned(),
-                input: json!({}),
-            })
+            .invoke_bound(
+                &binding,
+                &binding,
+                PluginRequest::Call {
+                    component: "advertised_but_unbound".to_owned(),
+                    input: json!({}),
+                },
+            )
             .is_err()
     );
+}
+
+#[test]
+fn historical_operation_admission_ignores_unrelated_missing_provider_and_operation() {
+    let mut old_effect_provider = execution_provider(
+        CONFIGURATION_FINGERPRINT,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    old_effect_provider.provider_id = "old-effect".to_owned();
+    old_effect_provider.implementation.implementation_id = "cymule.test.old-effect".to_owned();
+    old_effect_provider.provides = vec![ExecutionOperationKind::Effect.service_key("publish")];
+    let mut unrelated_provider = execution_provider(
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    unrelated_provider.provider_id = "unrelated-component".to_owned();
+    unrelated_provider.implementation.implementation_id =
+        "cymule.test.unrelated-component".to_owned();
+    unrelated_provider.provides = vec![ExecutionOperationKind::Component.service_key("evaluate")];
+    let historical_graph =
+        RuntimeCompositionGraph::build(vec![old_effect_provider.clone(), unrelated_provider])
+            .expect("historical graph admits");
+    let old_manifest = PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: "cymule.test.old-effect".to_owned(),
+        components: BTreeMap::new(),
+        effects: BTreeMap::from([(
+            "publish".to_owned(),
+            PluginEffect {
+                implementation_revision: "effect-v1".to_owned(),
+                can_reconcile: true,
+            },
+        )]),
+    };
+    let unrelated_manifest = PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: "cymule.test.unrelated-component".to_owned(),
+        components: BTreeMap::from([(
+            "evaluate".to_owned(),
+            PluginOperation {
+                implementation_revision: "component-v1".to_owned(),
+            },
+        )]),
+        effects: BTreeMap::new(),
+    };
+    let historical = ExecutionBinding::admit(
+        &historical_graph,
+        &BTreeMap::from([
+            ("old-effect".to_owned(), old_manifest.clone()),
+            ("unrelated-component".to_owned(), unrelated_manifest),
+        ]),
+    )
+    .expect("historical binding admits");
+    let current_graph =
+        RuntimeCompositionGraph::build(vec![old_effect_provider]).expect("current graph admits");
+    let current = ExecutionBinding::admit(
+        &current_graph,
+        &BTreeMap::from([("old-effect".to_owned(), old_manifest.clone())]),
+    )
+    .expect("current binding admits");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut router = AdmittedPluginRouter::new(
+        current.clone(),
+        BTreeMap::from([(
+            "old-effect".to_owned(),
+            Box::new(RecordingProvider {
+                manifest: old_manifest,
+                calls: calls.clone(),
+            }) as Box<dyn PluginHost>,
+        )]),
+    )
+    .expect("current router admits");
+    router
+        .invoke_bound(
+            &current,
+            &historical,
+            PluginRequest::PrepareEffect {
+                operation: "publish".to_owned(),
+                intent_id: EFFECT_INTENT_ID.to_owned(),
+                input: json!({}),
+            },
+        )
+        .expect("selected historical operation remains available");
+    assert_eq!(*calls.lock().unwrap(), ["publish"]);
+
+    assert_exact_operation_manifest_validation(&historical);
+}
+
+fn assert_exact_operation_manifest_validation(historical: &ExecutionBinding) {
+    let mut unrelated_changed = PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: "cymule.test.old-effect".to_owned(),
+        components: BTreeMap::from([(
+            "unrelated".to_owned(),
+            PluginOperation {
+                implementation_revision: "changed".to_owned(),
+            },
+        )]),
+        effects: BTreeMap::from([(
+            "publish".to_owned(),
+            PluginEffect {
+                implementation_revision: "effect-v1".to_owned(),
+                can_reconcile: true,
+            },
+        )]),
+    };
+    assert!(
+        historical
+            .verify_operation_manifest(
+                ExecutionOperationKind::Effect,
+                "publish",
+                &unrelated_changed,
+            )
+            .is_ok()
+    );
+    unrelated_changed
+        .effects
+        .get_mut("publish")
+        .unwrap()
+        .can_reconcile = false;
+    assert_eq!(
+        historical.verify_operation_manifest(
+            ExecutionOperationKind::Effect,
+            "publish",
+            &unrelated_changed,
+        ),
+        Err(CompositionError::ManifestMismatch)
+    );
+    unrelated_changed.effects.remove("publish");
+    assert_eq!(
+        historical.verify_operation_manifest(
+            ExecutionOperationKind::Effect,
+            "publish",
+            &unrelated_changed,
+        ),
+        Err(CompositionError::ManifestMismatch)
+    );
+    assert!(matches!(
+        historical.verify_operation_manifest(
+            ExecutionOperationKind::Component,
+            "publish",
+            &unrelated_changed,
+        ),
+        Err(CompositionError::MissingOperationBinding { .. })
+    ));
+}
+
+#[test]
+fn historical_operation_never_falls_back_to_current_provider() {
+    let mut old_provider = execution_provider(
+        CONFIGURATION_FINGERPRINT,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    old_provider.provider_id = "old".to_owned();
+    old_provider.implementation.implementation_id = "cymule.test.old".to_owned();
+    old_provider.provides = vec![ExecutionOperationKind::Effect.service_key("publish")];
+    let old_graph = RuntimeCompositionGraph::build(vec![old_provider]).unwrap();
+    let old_manifest = PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: "cymule.test.old".to_owned(),
+        components: BTreeMap::new(),
+        effects: BTreeMap::from([(
+            "publish".to_owned(),
+            PluginEffect {
+                implementation_revision: "effect-v1".to_owned(),
+                can_reconcile: true,
+            },
+        )]),
+    };
+    let historical = ExecutionBinding::admit(
+        &old_graph,
+        &BTreeMap::from([("old".to_owned(), old_manifest)]),
+    )
+    .unwrap();
+
+    let mut new_provider = execution_provider(
+        CONFIGURATION_FINGERPRINT,
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    new_provider.provider_id = "new".to_owned();
+    new_provider.implementation.implementation_id = "cymule.test.new".to_owned();
+    new_provider.provides = vec![ExecutionOperationKind::Effect.service_key("publish")];
+    let new_graph = RuntimeCompositionGraph::build(vec![new_provider]).unwrap();
+    let new_manifest = PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: "cymule.test.new".to_owned(),
+        components: BTreeMap::new(),
+        effects: BTreeMap::from([(
+            "publish".to_owned(),
+            PluginEffect {
+                implementation_revision: "effect-v1".to_owned(),
+                can_reconcile: true,
+            },
+        )]),
+    };
+    let current = ExecutionBinding::admit(
+        &new_graph,
+        &BTreeMap::from([("new".to_owned(), new_manifest.clone())]),
+    )
+    .unwrap();
+    let new_calls = Arc::new(Mutex::new(Vec::new()));
+    let mut router = AdmittedPluginRouter::new(
+        current.clone(),
+        BTreeMap::from([(
+            "new".to_owned(),
+            Box::new(RecordingProvider {
+                manifest: new_manifest,
+                calls: new_calls.clone(),
+            }) as Box<dyn PluginHost>,
+        )]),
+    )
+    .unwrap();
+    let error = router
+        .invoke_bound(
+            &current,
+            &historical,
+            PluginRequest::PrepareEffect {
+                operation: "publish".to_owned(),
+                intent_id: EFFECT_INTENT_ID.to_owned(),
+                input: json!({}),
+            },
+        )
+        .expect_err("missing historical provider fails closed");
+    assert_selected_operation_mismatch(error);
+    assert!(new_calls.lock().unwrap().is_empty());
+}
+
+struct AllCallProvider {
+    manifest: PluginManifest,
+    calls: Arc<AtomicUsize>,
+}
+
+impl PluginHost for AllCallProvider {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match request {
+            PluginRequest::Describe => Ok(PluginResponse::Manifest {
+                manifest: self.manifest.clone(),
+            }),
+            PluginRequest::PrepareEffect { .. } => Ok(PluginResponse::Prepared),
+            request => panic!("unexpected test request {request:?}"),
+        }
+    }
+}
+
+#[test]
+fn historical_operation_rejects_same_provider_descriptor_drift_before_any_call() {
+    let manifest = execution_manifest();
+    let historical_provider = execution_provider(
+        CONFIGURATION_FINGERPRINT,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    let historical_graph = RuntimeCompositionGraph::build(vec![historical_provider]).unwrap();
+    let historical = ExecutionBinding::admit(
+        &historical_graph,
+        &BTreeMap::from([("executor".to_owned(), manifest.clone())]),
+    )
+    .unwrap();
+
+    for current_provider in [
+        execution_provider(
+            CONFIGURATION_FINGERPRINT,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        execution_provider(
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+    ] {
+        let current_graph = RuntimeCompositionGraph::build(vec![current_provider]).unwrap();
+        let current = ExecutionBinding::admit(
+            &current_graph,
+            &BTreeMap::from([("executor".to_owned(), manifest.clone())]),
+        )
+        .unwrap();
+        let direct_calls = Arc::new(AtomicUsize::new(0));
+        let mut direct = AllCallProvider {
+            manifest: manifest.clone(),
+            calls: direct_calls.clone(),
+        };
+        let direct_error = direct
+            .invoke_bound(
+                &current,
+                &historical,
+                PluginRequest::PrepareEffect {
+                    operation: "publish".to_owned(),
+                    intent_id: EFFECT_INTENT_ID.to_owned(),
+                    input: json!({}),
+                },
+            )
+            .expect_err("direct host requires runtime-owner descriptor equivalence");
+        assert_selected_operation_mismatch(direct_error);
+        assert_eq!(direct_calls.load(Ordering::SeqCst), 0);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut router = AdmittedPluginRouter::new(
+            current.clone(),
+            BTreeMap::from([(
+                "executor".to_owned(),
+                Box::new(AllCallProvider {
+                    manifest: manifest.clone(),
+                    calls: calls.clone(),
+                }) as Box<dyn PluginHost>,
+            )]),
+        )
+        .unwrap();
+        calls.store(0, Ordering::SeqCst);
+        let error = router
+            .invoke_bound(
+                &current,
+                &historical,
+                PluginRequest::PrepareEffect {
+                    operation: "publish".to_owned(),
+                    intent_id: EFFECT_INTENT_ID.to_owned(),
+                    input: json!({}),
+                },
+            )
+            .expect_err("descriptor drift cannot realize a historical occurrence");
+        assert_selected_operation_mismatch(error);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn historical_operation_rejects_transitive_dependency_rebinding_before_any_call() {
+    let manifest = execution_manifest();
+    let store_service = ServiceKey::new("cymule.test", "store", "1");
+    let mut executor = execution_provider(
+        CONFIGURATION_FINGERPRINT,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    executor.requires = vec![store_service.clone()];
+    let store =
+        |provider_id: &str, implementation_id: &str, revision: &str| RuntimeProviderDescriptor {
+            version: RUNTIME_COMPOSITION_VERSION.to_owned(),
+            provider_id: provider_id.to_owned(),
+            implementation: RuntimeImplementation {
+                implementation_id: implementation_id.to_owned(),
+                revision: revision.to_owned(),
+            },
+            provides: vec![store_service.clone()],
+            requires: Vec::new(),
+            properties: BTreeMap::new(),
+            configuration_schema_digest: SCHEMA_DIGEST.to_owned(),
+            configuration_fingerprint: CONFIGURATION_FINGERPRINT.to_owned(),
+        };
+    let old_store = store(
+        "old-store",
+        "cymule.test.old-store",
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    let new_store = store(
+        "new-store",
+        "cymule.test.new-store",
+        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    );
+    let store_manifest = |implementation_id: &str| PluginManifest {
+        plugin_version: PLUGIN_VERSION.to_owned(),
+        implementation_id: implementation_id.to_owned(),
+        components: BTreeMap::new(),
+        effects: BTreeMap::new(),
+    };
+    let historical = ExecutionBinding::admit(
+        &RuntimeCompositionGraph::build(vec![executor.clone(), old_store]).unwrap(),
+        &BTreeMap::from([
+            ("executor".to_owned(), manifest.clone()),
+            (
+                "old-store".to_owned(),
+                store_manifest("cymule.test.old-store"),
+            ),
+        ]),
+    )
+    .unwrap();
+    let current = ExecutionBinding::admit(
+        &RuntimeCompositionGraph::build(vec![executor, new_store]).unwrap(),
+        &BTreeMap::from([
+            ("executor".to_owned(), manifest.clone()),
+            (
+                "new-store".to_owned(),
+                store_manifest("cymule.test.new-store"),
+            ),
+        ]),
+    )
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut router = AdmittedPluginRouter::new(
+        current.clone(),
+        BTreeMap::from([(
+            "executor".to_owned(),
+            Box::new(AllCallProvider {
+                manifest,
+                calls: calls.clone(),
+            }) as Box<dyn PluginHost>,
+        )]),
+    )
+    .unwrap();
+    calls.store(0, Ordering::SeqCst);
+    let error = router
+        .invoke_bound(
+            &current,
+            &historical,
+            PluginRequest::PrepareEffect {
+                operation: "publish".to_owned(),
+                intent_id: EFFECT_INTENT_ID.to_owned(),
+                input: json!({}),
+            },
+        )
+        .expect_err("transitive provider rebinding fails closed");
+    assert_selected_operation_mismatch(error);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn admitted_operation_token_is_host_bound_and_consumed() {
+    let manifest = execution_manifest();
+    let binding = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .unwrap();
+    let first_calls = Arc::new(AtomicUsize::new(0));
+    let second_calls = Arc::new(AtomicUsize::new(0));
+    let mut first = AllCallProvider {
+        manifest: manifest.clone(),
+        calls: first_calls.clone(),
+    };
+    let _second = AllCallProvider {
+        manifest,
+        calls: second_calls.clone(),
+    };
+    let admission = first
+        .admit_bound_operation(
+            &binding,
+            &binding,
+            ExecutionOperationKind::Effect,
+            "publish",
+        )
+        .unwrap();
+    assert!(admission.is_available());
+    admission
+        .invoke(PluginRequest::PrepareEffect {
+            operation: "publish".to_owned(),
+            intent_id: EFFECT_INTENT_ID.to_owned(),
+            input: json!({}),
+        })
+        .expect("one-shot token invokes only its issuing host");
+    assert_eq!(first_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(second_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn raw_host_cannot_override_selected_operation_equivalence() {
+    let manifest = execution_manifest();
+    let historical = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .expect("historical binding admits");
+    let current = ExecutionBinding::for_local_process(
+        &manifest,
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .expect("current binding admits");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut host = AllCallProvider {
+        manifest,
+        calls: calls.clone(),
+    };
+
+    let admission = host
+        .admit_bound_operation(
+            &current,
+            &historical,
+            ExecutionOperationKind::Effect,
+            "publish",
+        )
+        .expect("framework returns a closed unavailable admission");
+    assert!(!admission.is_available());
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "binding mismatch rejects before raw host Describe or invocation"
+    );
+    let error = admission
+        .invoke(PluginRequest::PrepareEffect {
+            operation: "publish".to_owned(),
+            intent_id: EFFECT_INTENT_ID.to_owned(),
+            input: json!({}),
+        })
+        .expect_err("framework-selected operation mismatch stays typed");
+    assert_selected_operation_mismatch(error);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

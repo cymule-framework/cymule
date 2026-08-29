@@ -5,15 +5,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cymule_core::{
-    ComponentContract, Definition, DispatchPolicy, EffectContract, EffectProfile, Expression,
-    IR_VERSION, MutationKind, Operation, PlanCandidate, ReconciliationMode, Region, ScopeMode,
-    Step, WaitSpec, seal_plan,
+    COMPONENT_OUTPUT_ARTIFACT_KIND, ComponentContract, Definition, DispatchPolicy, EffectContract,
+    EffectProfile, Expression, IR_VERSION, MutationKind, Operation, PlanCandidate,
+    ReconciliationMode, Region, SealedPlan, Step, WaitSpec, content_id, seal_plan,
 };
 use cymule_runtime::{
-    ContractBoundary, ContractPhase, ContractSide, ContractTarget, ContractValidator,
-    EmbeddedRuntime, EngineContractSide, EngineFailure, EngineFailureCategory, EnginePhase,
-    ExecutionBinding, PLUGIN_VERSION, PlanContracts, PluginEffect, PluginHost, PluginManifest,
-    PluginOperation, PluginRequest, PluginResponse, RuntimeError, RuntimeResult,
+    ContractBoundary, ContractIssue, ContractIssueKind, ContractPhase, ContractSide,
+    ContractTarget, ContractValidator, ContractViolation, EmbeddedRuntime, EngineContractSide,
+    EngineFailure, EngineFailureCategory, EnginePhase, ExecutionBinding, MAX_CONTRACT_ISSUES,
+    MAX_CONTRACT_MESSAGE_SCALARS, MAX_CONTRACT_POINTER_SCALARS, PLUGIN_VERSION, PlanContracts,
+    PluginEffect, PluginExpectedFailure, PluginHost, PluginManifest, PluginOperation,
+    PluginRequest, PluginResponse, RuntimeError, RuntimeResult,
 };
 use serde_json::{Value, json};
 
@@ -35,6 +37,7 @@ fn candidate() -> PlanCandidate {
             id: "example.component".to_owned(),
             input_schema: closed_object(&json!({"name": {"type": "string"}}), &["name"]),
             output_schema: json!({"type": "integer"}),
+            output_artifact_kind: COMPONENT_OUTPUT_ARTIFACT_KIND.to_owned(),
             requirements: BTreeMap::new(),
         }],
         effects: vec![EffectContract {
@@ -85,7 +88,6 @@ fn candidate() -> PlanCandidate {
                         Step {
                             id: "scope.wait".to_owned(),
                             operation: Operation::Scope {
-                                mode: ScopeMode::Transactional,
                                 body: Box::new(Region {
                                     steps: vec![Step {
                                         id: "wait.approval".to_owned(),
@@ -118,26 +120,30 @@ fn candidate() -> PlanCandidate {
                     result: Expression::Literal { value: json!(true) },
                 },
             },
-            Definition {
-                id: "worker".to_owned(),
-                input_schema: json!({
-                    "type": "array",
-                    "prefixItems": [{"type": "integer"}],
-                    "items": false
-                }),
-                output_schema: closed_object(&json!({"done": {"const": true}}), &["done"]),
-                body: Region {
-                    steps: Vec::new(),
-                    result: Expression::Object {
-                        fields: BTreeMap::from([(
-                            "done".to_owned(),
-                            Expression::Literal { value: json!(true) },
-                        )]),
-                    },
-                },
-            },
+            worker_definition(),
         ],
         metadata: BTreeMap::new(),
+    }
+}
+
+fn worker_definition() -> Definition {
+    Definition {
+        id: "worker".to_owned(),
+        input_schema: json!({
+            "type": "array",
+            "prefixItems": [{"type": "integer"}],
+            "items": false
+        }),
+        output_schema: closed_object(&json!({"done": {"const": true}}), &["done"]),
+        body: Region {
+            steps: Vec::new(),
+            result: Expression::Object {
+                fields: BTreeMap::from([(
+                    "done".to_owned(),
+                    Expression::Literal { value: json!(true) },
+                )]),
+            },
+        },
     }
 }
 
@@ -159,6 +165,12 @@ struct ContractPlugin {
 struct InvalidReconciliationOutputPlugin {
     counts: Arc<PluginCounts>,
 }
+
+struct UnresolvedReconciliationPlugin {
+    resolution: cymule_core::ReconciliationResolution,
+}
+
+struct EffectPrepareExpectedFailurePlugin;
 
 fn plugin_manifest() -> PluginManifest {
     PluginManifest {
@@ -199,9 +211,10 @@ impl PluginHost for ContractPlugin {
                 self.counts.prepare.fetch_add(1, Ordering::SeqCst);
                 Ok(PluginResponse::Prepared)
             }
-            PluginRequest::DispatchEffect { .. } => {
+            PluginRequest::DispatchEffect { attempt, .. } => {
                 self.counts.dispatch.fetch_add(1, Ordering::SeqCst);
                 Ok(PluginResponse::EffectResult {
+                    attempt,
                     outcome: cymule_core::WorldOutcome::Applied,
                     value: Some(self.effect_output.clone()),
                 })
@@ -223,21 +236,64 @@ impl PluginHost for InvalidReconciliationOutputPlugin {
                 self.counts.prepare.fetch_add(1, Ordering::SeqCst);
                 Ok(PluginResponse::Prepared)
             }
-            PluginRequest::DispatchEffect { .. } => {
+            PluginRequest::DispatchEffect { attempt, .. } => {
                 self.counts.dispatch.fetch_add(1, Ordering::SeqCst);
                 Ok(PluginResponse::EffectResult {
+                    attempt,
                     outcome: cymule_core::WorldOutcome::Unknown,
                     value: None,
                 })
             }
-            PluginRequest::ReconcileEffect { .. } => {
+            PluginRequest::ReconcileEffect { attempt, .. } => {
                 self.counts.reconcile.fetch_add(1, Ordering::SeqCst);
                 Ok(PluginResponse::ReconciliationResult {
+                    attempt,
                     resolution: cymule_core::ReconciliationResolution::ResolvedApplied,
                     value: Some(json!(42)),
                 })
             }
             PluginRequest::Call { .. } => panic!("effect-only fixture does not call components"),
+        }
+    }
+}
+
+impl PluginHost for UnresolvedReconciliationPlugin {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        match request {
+            PluginRequest::Describe => Ok(PluginResponse::Manifest {
+                manifest: plugin_manifest(),
+            }),
+            PluginRequest::PrepareEffect { .. } => Ok(PluginResponse::Prepared),
+            PluginRequest::DispatchEffect { attempt, .. } => Ok(PluginResponse::EffectResult {
+                attempt,
+                outcome: cymule_core::WorldOutcome::Unknown,
+                value: None,
+            }),
+            PluginRequest::ReconcileEffect { attempt, .. } => {
+                Ok(PluginResponse::ReconciliationResult {
+                    attempt,
+                    resolution: self.resolution,
+                    value: None,
+                })
+            }
+            PluginRequest::Call { .. } => panic!("effect-only fixture does not call components"),
+        }
+    }
+}
+
+impl PluginHost for EffectPrepareExpectedFailurePlugin {
+    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
+        match request {
+            PluginRequest::Describe => Ok(PluginResponse::Manifest {
+                manifest: plugin_manifest(),
+            }),
+            PluginRequest::PrepareEffect { .. } => Ok(PluginResponse::ExpectedFailure {
+                error: PluginExpectedFailure {
+                    code: "not_a_component_outcome".to_owned(),
+                    message: "effect prepare cannot declare a business failure".to_owned(),
+                },
+            }),
+            request => panic!("unexpected effect-prepare test request: {request:?}"),
         }
     }
 }
@@ -261,6 +317,26 @@ fn runtime(
         binding,
     )
     .expect("runtime opens with exact binding")
+}
+
+#[test]
+fn embedded_internal_command_ids_do_not_narrow_the_public_run_identity() {
+    let counts = Arc::new(PluginCounts::default());
+    let mut runtime = runtime(counts, json!(42), json!("observed"));
+    let run_id = "🚀".repeat(512);
+
+    let outcome = runtime
+        .execute(
+            seal_plan(candidate()).expect("Plan admits"),
+            &json!({"request": "run"}),
+            run_id.clone(),
+        )
+        .expect("a 512-scalar Run identity reaches its semantic boundary");
+    assert!(matches!(
+        outcome,
+        cymule_runtime::ExecutionOutcome::Suspended { ref suspension }
+            if suspension.run_id == run_id
+    ));
 }
 
 fn effect_only_candidate(input: Value, output: Value) -> PlanCandidate {
@@ -475,6 +551,138 @@ fn violations_are_structured_masked_and_reject_unknown_instance_fields() {
 }
 
 #[test]
+fn contract_authority_bounds_iteration_fields_targets_and_complete_violations() {
+    let validator = ContractValidator::compile(
+        ContractTarget::wait("wait:many-errors"),
+        &json!({"type": "array", "items": {"type": "string"}}),
+    )
+    .expect("many-error schema compiles");
+    let error = validator
+        .validate(&Value::Array((0..150).map(|index| json!(index)).collect()))
+        .expect_err("every array item violates the schema");
+    assert_eq!(error.issues.len(), MAX_CONTRACT_ISSUES);
+    assert_eq!(
+        error.issues.last().expect("omission issue exists").message,
+        "additional contract issues were omitted after the fixed validation budget"
+    );
+    error
+        .verify()
+        .expect("bounded generated violation verifies");
+
+    let target = ContractTarget::wait("🧭".repeat(512));
+    ContractValidator::compile(target, &json!(true))
+        .expect("512 multi-byte target scalars are admitted");
+    let Err(invalid_target) =
+        ContractValidator::compile(ContractTarget::wait("🧭".repeat(513)), &json!(true))
+    else {
+        panic!("513 target scalars are rejected before schema compilation")
+    };
+    assert_eq!(invalid_target.target.id, "invalid-contract-target");
+    invalid_target
+        .verify()
+        .expect("invalid target failure still has a closed projection");
+    let Err(control_target) =
+        ContractValidator::compile(ContractTarget::wait("wait:\u{0000}forged"), &json!(true))
+    else {
+        panic!("control-bearing target is rejected")
+    };
+    control_target
+        .verify()
+        .expect("control-bearing target failure remains closed");
+
+    let escaped = ContractValidator::compile(
+        ContractTarget::wait("wait:escaped-path"),
+        &json!({
+            "type": "object",
+            "properties": {"a/b~c": {"type": "string"}}
+        }),
+    )
+    .expect("escaped-path schema compiles")
+    .validate(&json!({"a/b~c": 1}))
+    .expect_err("escaped-path value fails");
+    assert_eq!(escaped.issues[0].instance_path, "/a~1b~0c");
+    escaped.verify().expect("escaped pointer verifies");
+
+    let control_path = ContractValidator::compile(
+        ContractTarget::wait("wait:control-path"),
+        &json!({
+            "type": "object",
+            "properties": {"\u{0001}": {"type": "string"}}
+        }),
+    )
+    .expect("control-path schema compiles")
+    .validate(&json!({"\u{0001}": 1}))
+    .expect_err("control-path value fails");
+    assert_eq!(control_path.issues[0].instance_path, "");
+    control_path
+        .verify()
+        .expect("control path is safely projected");
+
+    let Err(long_schema_error) = ContractValidator::compile(
+        ContractTarget::wait("wait:long-schema-error"),
+        &json!({"type": "x".repeat(10_000)}),
+    ) else {
+        panic!("invalid long schema declaration fails")
+    };
+    assert!(long_schema_error.issues[0].message.chars().count() <= MAX_CONTRACT_MESSAGE_SCALARS);
+    long_schema_error
+        .verify()
+        .expect("long schema diagnostics are bounded at their source");
+
+    let mut field_bounds = ContractIssue {
+        kind: ContractIssueKind::Validation,
+        instance_path: format!("/{}", "x".repeat(MAX_CONTRACT_POINTER_SCALARS - 1)),
+        schema_path: String::new(),
+        message: "🧭".repeat(MAX_CONTRACT_MESSAGE_SCALARS),
+    };
+    field_bounds
+        .verify()
+        .expect("exact pointer and message scalar bounds verify");
+    field_bounds.instance_path.push('x');
+    assert!(field_bounds.verify().is_err());
+    field_bounds.instance_path.pop();
+    field_bounds.message.push('x');
+    assert!(field_bounds.verify().is_err());
+
+    let concrete = (0..cymule_runtime::MAX_CONCRETE_CONTRACT_ISSUES)
+        .map(|index| ContractIssue {
+            kind: ContractIssueKind::Validation,
+            instance_path: format!("/{index:03}"),
+            schema_path: String::new(),
+            message: "bounded".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let exact_concrete = ContractViolation {
+        phase: ContractPhase::Execution,
+        target: ContractTarget::wait("wait:exact-issue-count"),
+        issues: concrete.clone(),
+    };
+    exact_concrete
+        .verify()
+        .expect("exact concrete issue-count bound verifies");
+    let mut exact_total = exact_concrete;
+    exact_total.issues.push(ContractIssue {
+        kind: ContractIssueKind::Omitted,
+        instance_path: String::new(),
+        schema_path: String::new(),
+        message: "additional contract issues were omitted after the fixed validation budget"
+            .to_owned(),
+    });
+    assert_eq!(exact_total.issues.len(), MAX_CONTRACT_ISSUES);
+    exact_total
+        .verify()
+        .expect("exact total issue-count bound verifies");
+    let mut over = exact_total;
+    over.issues.push(ContractIssue {
+        kind: ContractIssueKind::Validation,
+        instance_path: format!("/{}", "x".repeat(MAX_CONTRACT_POINTER_SCALARS - 1)),
+        schema_path: String::new(),
+        message: "over".to_owned(),
+    });
+    assert!(over.verify().is_err());
+}
+
+#[test]
 fn missing_contract_selection_fails_closed_with_a_typed_target() {
     let contracts = PlanContracts::compile(&candidate()).expect("schemas compile");
     let error = contracts
@@ -545,6 +753,50 @@ fn invalid_run_input_has_zero_plugin_calls_and_zero_machine_mutation() {
 }
 
 #[test]
+fn bound_deferred_effect_fails_seal_and_execute_before_machine_or_plugin_io() {
+    let mut invalid = effect_only_candidate(json!({}), json!({}));
+    invalid.effects[0].profile.mutation = MutationKind::Mutating;
+    invalid.effects[0].profile.dispatch = DispatchPolicy::OnScopeCommit;
+
+    let seal_counts = Arc::new(PluginCounts::default());
+    let mut seal_runtime = runtime(seal_counts.clone(), json!(42), json!(42));
+    let error = seal_runtime
+        .seal(invalid.clone())
+        .expect_err("deferred Effect result binding must fail sealing");
+    assert!(matches!(
+        error,
+        RuntimeError::Core(cymule_core::CoreError::Validation(ref message))
+            if message.contains("may bind only for observational eager dispatch")
+    ));
+    assert_eq!(seal_counts.call.load(Ordering::SeqCst), 0);
+    assert_eq!(seal_counts.prepare.load(Ordering::SeqCst), 0);
+    assert_eq!(seal_counts.dispatch.load(Ordering::SeqCst), 0);
+    assert!(seal_runtime.machine().snapshot().plans.is_empty());
+
+    let plan = SealedPlan {
+        plan_id: content_id("cymule.plan/1", &invalid).expect("candidate identity derives"),
+        candidate: invalid,
+    };
+    let execute_counts = Arc::new(PluginCounts::default());
+    let mut execute_runtime = runtime(execute_counts.clone(), json!(42), json!(42));
+    let error = execute_runtime
+        .execute(plan, &json!({}), "run:invalid-effect-bind")
+        .expect_err("identity-correct but semantically invalid Plan must fail execution admission");
+    assert!(matches!(
+        error,
+        RuntimeError::Core(cymule_core::CoreError::Validation(ref message))
+            if message.contains("may bind only for observational eager dispatch")
+    ));
+    assert_eq!(execute_counts.call.load(Ordering::SeqCst), 0);
+    assert_eq!(execute_counts.prepare.load(Ordering::SeqCst), 0);
+    assert_eq!(execute_counts.dispatch.load(Ordering::SeqCst), 0);
+    let snapshot = execute_runtime.machine().snapshot();
+    assert!(snapshot.plans.is_empty());
+    assert!(snapshot.artifacts.is_empty());
+    assert!(snapshot.events.is_empty());
+}
+
+#[test]
 fn unmet_plan_requirements_are_rejected_before_run_creation_or_dispatch() {
     let mut candidate = candidate();
     candidate.components[0].requirements =
@@ -561,7 +813,11 @@ fn unmet_plan_requirements_are_rejected_before_run_creation_or_dispatch() {
 
     assert!(matches!(
         error,
-        RuntimeError::PluginDefect { ref code, .. } if code == "execution_binding_rejected"
+        RuntimeError::Composition(ref error)
+            if matches!(
+                error.as_ref(),
+                cymule_runtime::CompositionError::MissingProviderProperty { .. }
+            ) && error.code() == "missing_provider_property"
     ));
     assert_eq!(counts.call.load(Ordering::SeqCst), 0);
     let snapshot = runtime.machine().snapshot();
@@ -745,6 +1001,86 @@ fn embedded_invalid_reconciliation_output_preserves_unknown() {
     assert_eq!(
         effect.reconciliation,
         cymule_core::ReconciliationState::Pending
+    );
+}
+
+#[test]
+fn embedded_unresolved_reconciliation_never_binds_or_completes() {
+    for resolution in [
+        cymule_core::ReconciliationResolution::StillUnknown,
+        cymule_core::ReconciliationResolution::GovernanceRequired,
+    ] {
+        let binding = ExecutionBinding::for_local_process(
+            &plugin_manifest(),
+            "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        )
+        .expect("test binding is admitted");
+        let mut runtime =
+            EmbeddedRuntime::new(UnresolvedReconciliationPlugin { resolution }, binding)
+                .expect("runtime opens");
+        let run_id = format!("run:unresolved-{resolution:?}");
+
+        let outcome = runtime.execute(
+            seal_plan(effect_only_candidate(
+                json!({"type": "integer"}),
+                json!({"type": "string"}),
+            ))
+            .expect("Plan admits"),
+            &json!({"request": "run"}),
+            &run_id,
+        );
+        match resolution {
+            cymule_core::ReconciliationResolution::StillUnknown => assert!(matches!(
+                outcome.expect("still-unknown is a typed execution boundary"),
+                cymule_runtime::ExecutionOutcome::ReconciliationRequired { .. }
+            )),
+            cymule_core::ReconciliationResolution::GovernanceRequired => assert!(matches!(
+                outcome.expect_err("queryable provider cannot delegate to governance"),
+                RuntimeError::PluginDefect { ref code, .. }
+                    if code == "invalid_reconciliation_resolution"
+            )),
+            _ => unreachable!("test covers unresolved reconciliation only"),
+        }
+        let run = &runtime.machine().projection().runs[&run_id];
+        assert!(run.result.is_none());
+        let effect = run.effects.values().next().expect("effect exists");
+        assert_eq!(effect.outcome, cymule_core::WorldOutcome::Unknown);
+        assert_eq!(
+            effect.reconciliation,
+            cymule_core::ReconciliationState::Pending
+        );
+    }
+}
+
+#[test]
+fn embedded_effect_prepare_expected_failure_is_a_plugin_defect_not_run_failure() {
+    let binding = ExecutionBinding::for_local_process(
+        &plugin_manifest(),
+        "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    )
+    .expect("test binding is admitted");
+    let mut runtime =
+        EmbeddedRuntime::new(EffectPrepareExpectedFailurePlugin, binding).expect("runtime opens");
+    let error = runtime
+        .execute(
+            seal_plan(effect_only_candidate(
+                json!({"type": "integer"}),
+                json!({"type": "string"}),
+            ))
+            .expect("Plan admits"),
+            &json!({"request": "run"}),
+            "run:effect-prepare-expected-failure",
+        )
+        .expect_err("effect prepare expected failure is a defect");
+    assert!(matches!(
+        error,
+        RuntimeError::PluginDefect { ref code, .. }
+            if code == "plugin_protocol_violation"
+    ));
+    let run = &runtime.machine().projection().runs["run:effect-prepare-expected-failure"];
+    assert_eq!(
+        run.execution_status,
+        cymule_core::RunExecutionStatus::Active
     );
 }
 

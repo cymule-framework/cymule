@@ -4,12 +4,13 @@ use jsonschema::{Retrieve, Uri};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{CoreError, Result, content_id};
+use crate::{CoreError, Result, canonical_bytes, content_id, decode_json, validate_artifact_kind};
 
 const JSON_SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 
 /// Frozen canonical IR version.
-pub const IR_VERSION: &str = "cymule.ir/2";
+pub const IR_VERSION: &str = "cymule.ir/3";
+const PLAN_ID_DOMAIN: &str = "cymule.plan/1";
 
 /// An unsealed, language-neutral semantic plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,15 +23,12 @@ pub struct PlanCandidate {
     /// Entry definition ID.
     pub entry: String,
     /// Abstract component contracts.
-    #[serde(default)]
     pub components: Vec<ComponentContract>,
     /// Abstract effect contracts.
-    #[serde(default)]
     pub effects: Vec<EffectContract>,
     /// Structured definitions.
     pub definitions: Vec<Definition>,
     /// Non-semantic author metadata. Keys and values are still content-addressed.
-    #[serde(default)]
     pub metadata: BTreeMap<String, String>,
 }
 
@@ -54,8 +52,9 @@ pub struct ComponentContract {
     pub input_schema: Value,
     /// Output JSON Schema.
     pub output_schema: Value,
+    /// Exact Artifact kind used to retain every successful output.
+    pub output_artifact_kind: String,
     /// Provider-neutral required properties.
-    #[serde(default)]
     pub requirements: BTreeMap<String, String>,
 }
 
@@ -72,7 +71,6 @@ pub struct EffectContract {
     /// Effect safety and recovery properties.
     pub profile: EffectProfile,
     /// Provider-neutral required properties.
-    #[serde(default)]
     pub requirements: BTreeMap<String, String>,
 }
 
@@ -87,10 +85,8 @@ pub struct EffectProfile {
     /// How an ambiguous result can be reconciled.
     pub reconciliation: ReconciliationMode,
     /// Whether the provider accepts a stable idempotency key.
-    #[serde(default)]
     pub keyed_idempotency: bool,
     /// Whether the operation is irreversible after application.
-    #[serde(default)]
     pub irreversible: bool,
 }
 
@@ -149,7 +145,6 @@ pub struct Definition {
 #[serde(deny_unknown_fields)]
 pub struct Region {
     /// Ordered semantic operations.
-    #[serde(default)]
     pub steps: Vec<Step>,
     /// Region result.
     pub result: Expression,
@@ -206,30 +201,18 @@ pub enum Operation {
         input: Expression,
         /// Intentional occurrence key. Retries reuse it.
         occurrence: String,
-        /// Optional result binding.
+        /// Optional result binding. Only eager observational effects may bind.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bind: Option<String>,
     },
-    /// Execute a nested transactional scope.
+    /// Execute a nested auto-commit scope.
     Scope {
-        /// Scope behavior profile.
-        mode: ScopeMode,
         /// Nested body.
         body: Box<Region>,
         /// Optional result binding.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bind: Option<String>,
     },
-}
-
-/// Scope behavior profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScopeMode {
-    /// Normal nested state/evidence transaction.
-    Transactional,
-    /// Speculative branch; mutating effects remain staged until commit.
-    Speculative,
 }
 
 /// Durable wait descriptions.
@@ -241,7 +224,6 @@ pub enum WaitSpec {
         /// Stable signal key.
         key: String,
         /// Whether at most one waiter may consume it.
-        #[serde(default)]
         consume_once: bool,
     },
     /// Wait for a logical timer identifier.
@@ -288,6 +270,11 @@ pub enum Expression {
 
 impl PlanCandidate {
     /// Validate semantic structure before canonical identity is computed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or schema-compilation error when the candidate is
+    /// not one closed, executable `cymule.ir/3` graph.
     pub fn validate(&self) -> Result<()> {
         if self.ir_version != IR_VERSION {
             return Err(CoreError::Validation(format!(
@@ -295,19 +282,25 @@ impl PlanCandidate {
                 self.ir_version
             )));
         }
-        validate_id("plan name", &self.name)?;
+        validate_semantic_id("plan name", &self.name)?;
 
         let component_ids = unique_contract_ids(
             "component",
             self.components.iter().map(|contract| contract.id.as_str()),
         )?;
-        let effect_ids = unique_contract_ids(
+        unique_contract_ids(
             "effect",
             self.effects.iter().map(|contract| contract.id.as_str()),
         )?;
+        let effect_profiles = self
+            .effects
+            .iter()
+            .map(|contract| (contract.id.as_str(), &contract.profile))
+            .collect::<BTreeMap<_, _>>();
         for contract in &self.components {
             validate_schema("component input", &contract.input_schema)?;
             validate_schema("component output", &contract.output_schema)?;
+            validate_artifact_kind(&contract.output_artifact_kind)?;
         }
         for contract in &self.effects {
             validate_schema("effect input", &contract.input_schema)?;
@@ -342,7 +335,7 @@ impl PlanCandidate {
             validate_region(
                 &definition.body,
                 &component_ids,
-                &effect_ids,
+                &effect_profiles,
                 &definition_ids,
                 &mut sites,
                 &BTreeSet::new(),
@@ -354,17 +347,38 @@ impl PlanCandidate {
 }
 
 /// Validate every semantic and Draft 2020-12 contract, then seal one Plan.
+///
+/// # Errors
+///
+/// Returns an error when the candidate cannot be canonicalized, validated, or
+/// assigned its content identity.
 pub fn seal_plan(candidate: PlanCandidate) -> Result<SealedPlan> {
+    let normalized = canonical_plan_candidate(&candidate)?;
+    let candidate = if normalized == candidate {
+        candidate
+    } else {
+        normalized
+    };
     candidate.validate()?;
-    let plan_id = content_id("cymule.plan/1", &candidate)?;
+    let plan_id = content_id(PLAN_ID_DOMAIN, &candidate)?;
     Ok(SealedPlan { plan_id, candidate })
 }
 
 impl SealedPlan {
     /// Verify that the embedded candidate still matches its Plan ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the candidate is not canonical and valid or its
+    /// declared Plan ID is not its exact content identity.
     pub fn verify(&self) -> Result<()> {
+        if canonical_plan_candidate(&self.candidate)? != self.candidate {
+            return Err(CoreError::Validation(
+                "sealed Plan candidate does not use canonical JSON number forms".to_owned(),
+            ));
+        }
         self.candidate.validate()?;
-        let expected = content_id("cymule.plan/1", &self.candidate)?;
+        let expected = content_id(PLAN_ID_DOMAIN, &self.candidate)?;
         if expected != self.plan_id {
             return Err(CoreError::IdentityMismatch(format!(
                 "plan ID {} does not match {expected}",
@@ -375,13 +389,17 @@ impl SealedPlan {
     }
 }
 
+fn canonical_plan_candidate(candidate: &PlanCandidate) -> Result<PlanCandidate> {
+    decode_json(&canonical_bytes(candidate)?)
+}
+
 fn unique_contract_ids<'a>(
     kind: &str,
     ids: impl Iterator<Item = &'a str>,
 ) -> Result<BTreeSet<String>> {
     let mut unique = BTreeSet::new();
     for id in ids {
-        validate_id(kind, id)?;
+        validate_semantic_id(kind, id)?;
         if !unique.insert(id.to_owned()) {
             return Err(CoreError::Validation(format!("duplicate {kind} ID {id:?}")));
         }
@@ -392,14 +410,14 @@ fn unique_contract_ids<'a>(
 fn validate_region(
     region: &Region,
     components: &BTreeSet<String>,
-    effects: &BTreeSet<String>,
+    effects: &BTreeMap<&str, &EffectProfile>,
     definitions: &BTreeSet<String>,
     sites: &mut BTreeSet<String>,
     inherited: &BTreeSet<String>,
 ) -> Result<()> {
     let mut bindings = inherited.clone();
     for step in &region.steps {
-        validate_id("step", &step.id)?;
+        validate_semantic_id("step", &step.id)?;
         if !sites.insert(step.id.clone()) {
             return Err(CoreError::Validation(format!(
                 "duplicate stable step site {:?}",
@@ -446,13 +464,22 @@ fn validate_region(
                 occurrence,
                 bind,
             } => {
-                if !effects.contains(effect) {
+                let Some(profile) = effects.get(effect.as_str()) else {
                     return Err(CoreError::Validation(format!(
                         "step {} references unknown effect {effect:?}",
                         step.id
                     )));
+                };
+                if bind.is_some()
+                    && (profile.mutation != MutationKind::Observational
+                        || profile.dispatch != DispatchPolicy::Eager)
+                {
+                    return Err(CoreError::Validation(format!(
+                        "step {} binds effect {effect:?}, but effect results may bind only for observational eager dispatch",
+                        step.id
+                    )));
                 }
-                validate_id("occurrence", occurrence)?;
+                validate_semantic_id("occurrence", occurrence)?;
                 validate_expression(input, &bindings)?;
                 bind.as_ref()
             }
@@ -463,7 +490,7 @@ fn validate_region(
         };
 
         if let Some(binding) = result_binding {
-            validate_id("binding", binding)?;
+            validate_semantic_id("binding", binding)?;
             if !bindings.insert(binding.clone()) {
                 return Err(CoreError::Validation(format!(
                     "binding {binding:?} is assigned more than once"
@@ -483,12 +510,7 @@ fn validate_invocation_graph(definitions: &[Definition]) -> Result<()> {
             (definition.id.as_str(), targets)
         })
         .collect::<BTreeMap<_, _>>();
-    let mut visiting = BTreeSet::new();
-    let mut complete = BTreeSet::new();
-    for definition in graph.keys() {
-        visit_definition(definition, &graph, &mut visiting, &mut complete)?;
-    }
-    Ok(())
+    validate_acyclic_graph(&graph)
 }
 
 fn collect_invocations<'a>(region: &'a Region, targets: &mut BTreeSet<&'a str>) {
@@ -503,37 +525,57 @@ fn collect_invocations<'a>(region: &'a Region, targets: &mut BTreeSet<&'a str>) 
     }
 }
 
-fn visit_definition<'a>(
-    definition: &'a str,
-    graph: &BTreeMap<&'a str, BTreeSet<&'a str>>,
-    visiting: &mut BTreeSet<&'a str>,
-    complete: &mut BTreeSet<&'a str>,
-) -> Result<()> {
-    if complete.contains(definition) {
-        return Ok(());
+fn validate_acyclic_graph<'a>(graph: &BTreeMap<&'a str, BTreeSet<&'a str>>) -> Result<()> {
+    enum Visit<'a> {
+        Enter(&'a str),
+        Exit(&'a str),
     }
-    if !visiting.insert(definition) {
-        return Err(CoreError::Validation(format!(
-            "recursive definition invocation reaches {definition:?}"
-        )));
+
+    let mut visiting = BTreeSet::new();
+    let mut complete = BTreeSet::new();
+    let mut stack = Vec::new();
+    for definition in graph.keys().copied() {
+        if complete.contains(definition) {
+            continue;
+        }
+        stack.push(Visit::Enter(definition));
+        while let Some(visit) = stack.pop() {
+            match visit {
+                Visit::Enter(definition) => {
+                    if complete.contains(definition) {
+                        continue;
+                    }
+                    if !visiting.insert(definition) {
+                        return Err(CoreError::Validation(format!(
+                            "recursive definition invocation reaches {definition:?}"
+                        )));
+                    }
+                    stack.push(Visit::Exit(definition));
+                    for target in graph[definition].iter().rev() {
+                        if !complete.contains(target) {
+                            stack.push(Visit::Enter(target));
+                        }
+                    }
+                }
+                Visit::Exit(definition) => {
+                    visiting.remove(definition);
+                    complete.insert(definition);
+                }
+            }
+        }
     }
-    for target in &graph[definition] {
-        visit_definition(target, graph, visiting, complete)?;
-    }
-    visiting.remove(definition);
-    complete.insert(definition);
     Ok(())
 }
 
 fn validate_wait(wait: &WaitSpec) -> Result<()> {
     match wait {
-        WaitSpec::Signal { key, .. } => validate_id("signal key", key),
-        WaitSpec::Timer { timer_id } => validate_id("timer", timer_id),
+        WaitSpec::Signal { key, .. } => validate_semantic_id("signal key", key),
+        WaitSpec::Timer { timer_id } => validate_semantic_id("timer", timer_id),
         WaitSpec::Input {
             correlation,
             schema,
         } => {
-            validate_id("input correlation", correlation)?;
+            validate_semantic_id("input correlation", correlation)?;
             validate_schema("wait input", schema)
         }
     }
@@ -586,6 +628,17 @@ fn validate_schema(kind: &str, schema: &Value) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn validate_schema_instance(kind: &str, schema: &Value, instance: &Value) -> Result<()> {
+    jsonschema::draft202012::options()
+        .with_retriever(DenyExternalReferences)
+        .build(schema)
+        .map_err(|error| CoreError::Validation(format!("{kind} schema is invalid: {error}")))?
+        .validate(instance)
+        .map_err(|error| {
+            CoreError::Validation(format!("{kind} does not match its Plan schema: {error}"))
+        })
+}
+
 #[derive(Debug)]
 struct DenyExternalReferences;
 
@@ -598,7 +651,13 @@ impl Retrieve for DenyExternalReferences {
     }
 }
 
-fn validate_id(kind: &str, id: &str) -> Result<()> {
+/// Validate one stable Plan/runtime semantic identifier.
+///
+/// # Errors
+///
+/// Returns a validation error unless the identifier contains 1..=160 ASCII
+/// alphanumeric or `._-/:` characters.
+pub fn validate_semantic_id(kind: &str, id: &str) -> Result<()> {
     let valid = !id.is_empty()
         && id.len() <= 160
         && id
@@ -610,5 +669,51 @@ fn validate_id(kind: &str, id: &str) -> Result<()> {
         Err(CoreError::Validation(format!(
             "{kind} ID {id:?} must be 1..=160 ASCII identifier characters"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn invocation_definition(index: usize, target: Option<usize>) -> Definition {
+        Definition {
+            id: format!("definition.{index}"),
+            input_schema: Value::Bool(true),
+            output_schema: Value::Bool(true),
+            body: Region {
+                steps: target
+                    .map(|target| Step {
+                        id: format!("invoke.{index}"),
+                        operation: Operation::Invoke {
+                            definition: format!("definition.{target}"),
+                            input: Expression::Input,
+                            bind: None,
+                        },
+                    })
+                    .into_iter()
+                    .collect(),
+                result: Expression::Input,
+            },
+        }
+    }
+
+    #[test]
+    fn invocation_graph_handles_a_very_deep_chain_and_still_detects_its_cycle() {
+        const DEFINITION_COUNT: usize = 20_000;
+
+        let mut definitions = (0..DEFINITION_COUNT)
+            .map(|index| {
+                invocation_definition(index, (index + 1 < DEFINITION_COUNT).then_some(index + 1))
+            })
+            .collect::<Vec<_>>();
+        validate_invocation_graph(&definitions).expect("deep acyclic chain is valid");
+
+        definitions[DEFINITION_COUNT - 1] = invocation_definition(DEFINITION_COUNT - 1, Some(0));
+        assert!(matches!(
+            validate_invocation_graph(&definitions),
+            Err(CoreError::Validation(message))
+                if message.contains("recursive definition invocation")
+        ));
     }
 }

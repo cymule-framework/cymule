@@ -1,0 +1,17 @@
+#!/usr/bin/python3
+import json
+import sys
+
+
+request = json.load(sys.stdin)["request"]
+json.dump(
+    {
+        "engine_protocol": "cymule.engine/3",
+        "outcome": "success",
+        "legacy_extension": True,
+        "request": request,
+        "response": {"type": "verified"},
+    },
+    sys.stdout,
+    separators=(",", ":"),
+)

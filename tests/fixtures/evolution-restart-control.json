@@ -1,23 +1,22 @@
 {
-  "control_version": "cymule.evolution-control/4",
-  "command_id": "command:evolution:fixture:restart",
   "operation": "restart_under_new_plan",
+  "control_version": "cymule.evolution-control/5",
+  "command_id": "command:evolution:fixture:restart",
   "request": {
     "restart_id": "restart:fixture:1",
-    "source_run": "run:fixture:source",
     "replacement_run": "run:fixture:replacement",
+    "run_id": "run:fixture:source",
     "from_plan": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "expected_source_epoch": 7,
     "to_plan": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-    "safe_point_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-    "source_epoch": 7,
     "input": {
       "identity_version": "cymule.artifact/2",
-      "artifact_id": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "artifact_id": "sha256:aaa91a5fd304327f3f991e33926bc9d78c6b5197b09833cdeb295b619b397414",
       "kind": "cymule.input/1"
     },
     "evidence": {
       "identity_version": "cymule.artifact/2",
-      "artifact_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "artifact_id": "sha256:92c5cd0b861b642404367fbf6fc5345cca2c69aba49c926c9428d96fc782f6b4",
       "kind": "cymule.restart-evidence/1"
     }
   }

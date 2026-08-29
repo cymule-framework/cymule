@@ -36,6 +36,7 @@ jobs:
           name: analysis-coverage
           path: |
             .cache/test-analysis/coverage.json
+            .cache/test-analysis/coverage-evolution-m4.json
             .cache/test-harness/rust-coverage.json
           if-no-files-found: warn
 

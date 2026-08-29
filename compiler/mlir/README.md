@@ -18,7 +18,7 @@ Proposed:
 
 - a registered dialect with TableGen operation definitions;
 - structural verification interfaces and canonicalization passes;
-- deterministic lowering to `cymule.ir/2` Plan Candidates;
+- deterministic lowering to `cymule.ir/3` Plan Candidates;
 - source-location and diagnostic round trips for every SDK frontend.
 
 The Rust sealer remains authoritative even after those pieces exist.

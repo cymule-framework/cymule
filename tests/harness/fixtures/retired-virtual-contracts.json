@@ -1,0 +1,331 @@
+{
+  "status": "historical",
+  "cases": [
+    {
+      "name": "virtual_checkpoint_v4",
+      "value": {
+        "checkpoint_version": "cymule.virtual-checkpoint/4",
+        "checkpoint_id": "virtual:fixture:1",
+        "parent_checkpoint": null,
+        "parent_state_digest": "cf487a580bdf6b551e8cc947c67f73e8b3b03b01591154130ec28530291edaaf",
+        "state_digest": "d931818b993a2885eaf75a3d10b9815c91b6490a8c673db5d9a48bb78585df38",
+        "delta_digest": "5fa3ac5657f23554d95297d236a6929c9d59101ac29de2da86faf2adcc301c12",
+        "delta": {
+          "scheduling_policy": {
+            "base_quantum": 1,
+            "aging_interval": 1
+          },
+          "regions": {
+            "upsert": {
+              "region:fixture": {
+                "region_id": "region:fixture",
+                "run_id": "run:fixture",
+                "source": {
+                  "operation": "fixture.range",
+                  "binding": "binding:region-source/fixture",
+                  "revision": "fixture-source-v1"
+                },
+                "source_artifact": {
+                  "identity_version": "cymule.artifact/2",
+                  "artifact_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "kind": "example/region-source"
+                },
+                "cursor": {
+                  "version": "fixture/1",
+                  "position": "0",
+                  "exhausted": false
+                },
+                "estimated_total": 1000000
+              }
+            },
+            "remove": []
+          },
+          "ready": {
+            "upsert": {},
+            "remove": []
+          },
+          "active": {
+            "upsert": {},
+            "remove": []
+          },
+          "parked": {
+            "upsert": {},
+            "remove": []
+          },
+          "known": {
+            "add": [],
+            "remove": []
+          },
+          "last_run": null,
+          "last_region": null,
+          "claim_epochs": {
+            "upsert": {},
+            "remove": []
+          },
+          "archived_work_index_root_digest": "sha256:a19c5b75352a801495b2a4244d7ed8e7639f6b0630195f8ebbab0c2a69242f44",
+          "occurrences": {
+            "upsert": {},
+            "remove": []
+          },
+          "run_weights": {
+            "upsert": {
+              "run:fixture": 1
+            },
+            "remove": []
+          },
+          "run_deficits": {
+            "upsert": {
+              "run:fixture": 0
+            },
+            "remove": []
+          },
+          "dispatch_sequence": 0,
+          "ready_since": {
+            "upsert": {},
+            "remove": []
+          },
+          "retired_regions": {
+            "upsert": {},
+            "remove": []
+          },
+          "migrations": {
+            "upsert": {},
+            "remove": []
+          },
+          "compactions": {
+            "upsert": {},
+            "remove": []
+          },
+          "compaction_receipts": {
+            "upsert": {},
+            "remove": []
+          },
+          "compacted_regions": {
+            "upsert": {},
+            "remove": []
+          },
+          "rehydration_receipts": {
+            "upsert": {},
+            "remove": []
+          },
+          "claim_receipts": {
+            "upsert": {},
+            "remove": []
+          },
+          "lease_renewal_receipts": {
+            "upsert": {},
+            "remove": []
+          },
+          "recovery_receipts": {
+            "upsert": {},
+            "remove": []
+          },
+          "resolution_receipts": {
+            "upsert": {},
+            "remove": []
+          },
+          "run_weight_receipts": {
+            "upsert": {},
+            "remove": []
+          }
+        },
+        "clock_observation": null,
+        "control": null,
+        "receipt_occurrence_id": null,
+        "materialization_source": null,
+        "receipt_materialized": null,
+        "wait_activation_receipt": null,
+        "receipt_woken": null,
+        "migration_control": null,
+        "receipt_migration_id": null,
+        "compaction_control": null,
+        "receipt_compaction_id": null,
+        "rehydration_control": null,
+        "receipt_rehydration_id": null,
+        "claim_control": null,
+        "receipt_claim_id": null,
+        "lease_renewal_control": null,
+        "receipt_lease_renewal_id": null,
+        "recovery_control": null,
+        "receipt_recovery_id": null,
+        "run_weight_control": null,
+        "receipt_run_weight_id": null
+      }
+    },
+    {
+      "name": "virtual_journal_base_v2",
+      "value": {
+        "base_version": "cymule.virtual-journal-base/2",
+        "base_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "state_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "certificate": {
+          "certificate_version": "cymule.virtual-journal-base-certificate/2",
+          "certificate_id": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "journal_id": "journal:fixture",
+          "parent_base_id": null,
+          "parent_replacement_id": null,
+          "covered_record_count": 1,
+          "covered_first": {
+            "record_id": "record:fixture",
+            "content_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "covered_last": {
+            "record_id": "record:fixture",
+            "content_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "covered_records_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "covered_state_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+          "compaction_command_id": "command:compact:fixture",
+          "archive_certificate_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "base_projection_digest": "3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        "snapshot": {
+          "scheduling_policy": {
+            "base_quantum": 1,
+            "aging_interval": 1
+          },
+          "regions": {
+            "region:fixture": {
+              "region_id": "region:fixture",
+              "run_id": "run:fixture",
+              "source": {
+                "operation": "fixture.range",
+                "binding": "binding:region-source/fixture",
+                "revision": "fixture-source-v1"
+              },
+              "source_artifact": {
+                "identity_version": "cymule.artifact/2",
+                "artifact_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "kind": "example/region-source"
+              },
+              "cursor": {
+                "version": "fixture/1",
+                "position": "0",
+                "exhausted": false
+              },
+              "estimated_total": 1000000
+            }
+          },
+          "ready": {},
+          "active": {},
+          "parked": {},
+          "known": [],
+          "last_run": null,
+          "last_region": null,
+          "claim_epochs": {},
+          "archived_work_index_root_digest": "sha256:a19c5b75352a801495b2a4244d7ed8e7639f6b0630195f8ebbab0c2a69242f44",
+          "occurrences": {},
+          "run_weights": {
+            "run:fixture": 1
+          },
+          "run_deficits": {
+            "run:fixture": 0
+          },
+          "dispatch_sequence": 0,
+          "ready_since": {},
+          "retired_regions": {},
+          "migrations": {},
+          "compactions": {},
+          "compaction_receipts": {},
+          "compacted_regions": {},
+          "rehydration_receipts": {},
+          "claim_receipts": {},
+          "lease_renewal_receipts": {},
+          "recovery_receipts": {},
+          "resolution_receipts": {},
+          "run_weight_receipts": {}
+        }
+      }
+    },
+    {
+      "name": "coupled_claim_receipt",
+      "value": {
+        "command": {
+          "control_version": "cymule.virtual-claim-control/4",
+          "command_id": "command:claim:fixture",
+          "owner": "worker:fixture",
+          "slot_id": "slot:worker-fixture:0",
+          "execution_binding": {
+            "identity_version": "cymule.artifact/2",
+            "artifact_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "kind": "cymule.execution-binding/2"
+          },
+          "capabilities": [
+            "cpu",
+            "sandbox"
+          ],
+          "clock": {
+            "clock_version": "cymule.clock-observation/2",
+            "observation_id": "sha256:3f6791eb4b5bebb5dfadf9e46b732585738aa13300fdec718a8264ec14465a62",
+            "source_id": "clock:fixture",
+            "source_generation": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "scope": "slot:worker-fixture:0"
+          },
+          "lease_ttl": 30
+        },
+        "clock_observation": {
+          "clock_version": "cymule.clock-observation/2",
+          "observation_id": "sha256:3f6791eb4b5bebb5dfadf9e46b732585738aa13300fdec718a8264ec14465a62",
+          "source_id": "clock:fixture",
+          "source_generation": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "scope": "slot:worker-fixture:0",
+          "logical_time": 100,
+          "observed_unix_ms": 100
+        },
+        "claim": {
+          "item": {
+            "work_id": "work:fixture",
+            "region_id": "region:fixture",
+            "run_id": "run:fixture",
+            "payload": {
+              "identity_version": "cymule.artifact/2",
+              "artifact_id": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "kind": "example/input"
+            },
+            "capability": "cpu",
+            "priority": 0,
+            "cost": 1
+          },
+          "owner": "worker:fixture",
+          "epoch": 1,
+          "occurrence_id": "sha256:7ef6e10b0dfa444061dbbfd6bef7eaf6b14ceae318e860bd29c03f140905ecdf",
+          "plan_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "execution_binding": {
+            "identity_version": "cymule.artifact/2",
+            "artifact_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "kind": "cymule.execution-binding/2"
+          },
+          "lease": {
+            "resource": "slot:worker-fixture:0",
+            "owner": "worker:fixture",
+            "epoch": 1,
+            "expires_at": 130,
+            "clock": {
+              "clock_version": "cymule.clock-observation/2",
+              "observation_id": "sha256:3f6791eb4b5bebb5dfadf9e46b732585738aa13300fdec718a8264ec14465a62",
+              "source_id": "clock:fixture",
+              "source_generation": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "scope": "slot:worker-fixture:0"
+            }
+          }
+        },
+        "coupled_journals": [
+          {
+            "journal_id": "journal:fixture-pin",
+            "records": [
+              {
+                "record_id": "pin:fixture",
+                "content_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              {
+                "record_id": "attribution:fixture",
+                "content_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              }
+            ],
+            "manifest_digest": "67812fc4134c895bb9124e8338c91f49ef4cf7b1805fec0aa802bfd196401867"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use cymule_core::{
     ComponentContract, Definition, EffectContract, EffectProfile, Expression, Operation,
-    PlanCandidate, Region, ScopeMode, Step, WaitSpec,
+    PlanCandidate, Region, Step, WaitSpec,
 };
 use serde_json::Value;
 
@@ -38,12 +38,14 @@ impl FlowBuilder {
         id: impl Into<String>,
         input_schema: Value,
         output_schema: Value,
+        output_artifact_kind: impl Into<String>,
         requirements: BTreeMap<String, String>,
     ) -> Self {
         self.components.push(ComponentContract {
             id: id.into(),
             input_schema,
             output_schema,
+            output_artifact_kind: output_artifact_kind.into(),
             requirements,
         });
         self
@@ -130,6 +132,7 @@ impl FlowBuilder {
         effect: impl Into<String>,
         input: Expression,
         occurrence: impl Into<String>,
+        bind: Option<String>,
     ) -> Self {
         self.steps.push(Step {
             id: site.into(),
@@ -137,7 +140,7 @@ impl FlowBuilder {
                 effect: effect.into(),
                 input,
                 occurrence: occurrence.into(),
-                bind: None,
+                bind,
             },
         });
         self
@@ -153,17 +156,10 @@ impl FlowBuilder {
     }
 
     /// Append a nested scope built from an already structured Region.
-    pub fn scope(
-        mut self,
-        site: impl Into<String>,
-        mode: ScopeMode,
-        body: Region,
-        bind: impl Into<String>,
-    ) -> Self {
+    pub fn scope(mut self, site: impl Into<String>, body: Region, bind: impl Into<String>) -> Self {
         self.steps.push(Step {
             id: site.into(),
             operation: Operation::Scope {
-                mode,
                 body: Box::new(body),
                 bind: Some(bind.into()),
             },

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import email.utils
+import heapq
 import hashlib
 import json
 import math
@@ -23,6 +24,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 
 
 CONTROL_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -37,14 +39,26 @@ ROOT = (
     if CONFIGURED_RELEASE_WORKSPACE is not None
     else CONTROL_ROOT
 )
+sys.path.insert(0, str(CONTROL_ROOT / "scripts"))
+import version_domains  # noqa: E402
+
 CATALOG_PATH = ROOT / "scripts" / "crates-release.toml"
 USER_AGENT = "cymule-release/1 (https://github.com/cymule-framework/cymule)"
 REGISTRY_API = "https://crates.io/api/v1"
 STATIC_REGISTRY = "https://static.crates.io/crates"
 MAX_CRATE_BYTES = 10 * 1024 * 1024
+MAX_REGISTRY_UPLOAD_BYTES = 2 * MAX_CRATE_BYTES + 8
 MAX_NEW_CRATE_RATE_LIMIT_WAIT_SECONDS = 15 * 60
 MAX_NEW_CRATE_RATE_LIMIT_RETRIES = 2
+MAX_REGISTRY_CHECKSUM_WAIT_SECONDS = 300
+REGISTRY_CHECKSUM_POLL_SECONDS = 5
 GIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+PREFIXED_SHA256_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+STABLE_VERSION_PATTERN = re.compile(
+    r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+)
+CRATE_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_-]*")
 NEW_CRATE_RATE_LIMIT_MARKERS = (
     "status 429 Too Many Requests",
     "You have published too many new crates in a short period of time.",
@@ -53,6 +67,27 @@ NEW_CRATE_RETRY_PATTERN = re.compile(
     r"Please try again after "
     r"([A-Za-z]{3}, \d{1,2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT)"
 )
+CRATES_PACKAGE_REPORT_VERSION = "cymule.crates-package-report/1"
+CRATES_PUBLISH_REPORT_VERSION = "cymule.crates-publish-report/1"
+CRATES_RELEASE_STAGE_VERSION = "cymule.crates-release-stage/3"
+
+
+class RegistryChecksumMissing(TimeoutError):
+    """The registry remained reachable but never exposed the requested version."""
+
+
+class CratePublishOutcomeAmbiguous(ValueError):
+    """A PUT response was lost and exact registry readback was unavailable."""
+
+
+def version_registry_digest() -> str:
+    return version_domains.registry_digest(ROOT)
+
+
+def load_i_json(value: bytes, *, label: str) -> object:
+    """Decode release authority through the shared strict I-JSON contract."""
+
+    return version_domains.load_json_bytes(value, label=label)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -71,6 +106,80 @@ class ClosedCrate:
     archive_sha256: str
     upload: pathlib.Path
     upload_sha256: str
+
+
+def deterministic_publish_order(
+    dependencies: dict[str, set[str]],
+    *,
+    preference: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    """Return one stable dependency-first order and reject incomplete graphs."""
+
+    nodes = set(dependencies)
+    unknown = set().union(*dependencies.values(), set()) - nodes
+    if unknown:
+        raise ValueError(
+            f"public crate graph references unknown dependencies {sorted(unknown)}"
+        )
+    if preference is None:
+        preference = tuple(sorted(nodes))
+    if len(preference) != len(nodes) or set(preference) != nodes:
+        raise ValueError("public crate graph preference does not cover every crate")
+    rank = {name: index for index, name in enumerate(preference)}
+    remaining = {name: len(required) for name, required in dependencies.items()}
+    dependents = {name: set() for name in nodes}
+    for name, required in dependencies.items():
+        for dependency in required:
+            dependents[dependency].add(name)
+    ready = [(rank[name], name) for name, count in remaining.items() if count == 0]
+    heapq.heapify(ready)
+    ordered: list[str] = []
+    while ready:
+        _, name = heapq.heappop(ready)
+        ordered.append(name)
+        for dependent in sorted(
+            dependents[name], key=lambda value: (rank[value], value)
+        ):
+            remaining[dependent] -= 1
+            if remaining[dependent] == 0:
+                heapq.heappush(ready, (rank[dependent], dependent))
+    if len(ordered) != len(nodes):
+        cycle = sorted(name for name, count in remaining.items() if count > 0)
+        raise ValueError(f"public crate publish graph contains a cycle: {cycle}")
+    return tuple(ordered)
+
+
+def cargo_dependency_is_published(dependency: dict[str, object]) -> bool:
+    """Match the dependency kinds retained by Cargo's normalized package."""
+
+    kind = dependency.get("kind")
+    requirement = dependency.get("req")
+    if kind not in (None, "build", "dev") or not isinstance(requirement, str):
+        raise ValueError("Cargo metadata contains an unsupported dependency kind")
+    return kind in (None, "build") or requirement != "*"
+
+
+def cargo_publish_graph(
+    packages: dict[str, object], catalog_names: set[str]
+) -> dict[str, set[str]]:
+    """Project Cargo metadata to the public edges retained for publication."""
+
+    graph = {name: set() for name in catalog_names}
+    for name in sorted(catalog_names):
+        package = packages.get(name)
+        if not isinstance(package, dict) or not isinstance(
+            package.get("dependencies"), list
+        ):
+            raise ValueError(f"Cargo metadata is missing public crate {name}")
+        for dependency in package["dependencies"]:
+            if not isinstance(dependency, dict):
+                raise ValueError(f"Cargo metadata dependency is malformed for {name}")
+            dependency_name = dependency.get("name")
+            if dependency_name not in catalog_names:
+                continue
+            if cargo_dependency_is_published(dependency):
+                graph[name].add(dependency_name)
+    return graph
 
 
 def run(
@@ -98,26 +207,93 @@ def load_catalog() -> list[PublicCrate]:
 
     with CATALOG_PATH.open("rb") as handle:
         raw = tomllib.load(handle)
-    if raw.get("schema") != 1 or not isinstance(raw.get("crate"), list):
+    if (
+        set(raw) != {"schema", "crate"}
+        or raw.get("schema") != 1
+        or not isinstance(raw.get("crate"), list)
+    ):
         raise ValueError("unsupported or malformed crate release catalog")
     crates: list[PublicCrate] = []
+    catalog_projection: list[dict[str, object]] = []
     seen: set[str] = set()
     for entry in raw["crate"]:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"name", "path", "dependencies"}
+            or not isinstance(entry.get("name"), str)
+            or CRATE_NAME_PATTERN.fullmatch(entry["name"]) is None
+            or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("dependencies"), list)
+            or any(not isinstance(value, str) for value in entry["dependencies"])
+            or len(set(entry["dependencies"])) != len(entry["dependencies"])
+            or entry["dependencies"] != sorted(entry["dependencies"])
+        ):
+            raise ValueError("malformed public crate catalog entry")
+        relative = pathlib.PurePosixPath(entry["path"])
+        if (
+            relative.is_absolute()
+            or relative.as_posix() != entry["path"]
+            or not relative.parts
+            or ".." in relative.parts
+            or pathlib.PureWindowsPath(entry["path"]).is_absolute()
+            or "\\" in entry["path"]
+        ):
+            raise ValueError(f"invalid public crate path {entry['path']}")
+        unresolved_path = ROOT.joinpath(*relative.parts)
+        if any(
+            ROOT.joinpath(*relative.parts[:index]).is_symlink()
+            for index in range(1, len(relative.parts) + 1)
+        ):
+            raise ValueError(f"public crate path is a symlink for {entry['name']}")
+        crate_path = unresolved_path.resolve(strict=True)
+        try:
+            crate_path.relative_to(ROOT.resolve(strict=True))
+        except ValueError as error:
+            raise ValueError(f"public crate path escapes payload for {entry['name']}") from error
+        manifest = crate_path / "Cargo.toml"
         crate = PublicCrate(
             name=entry["name"],
-            path=ROOT / entry["path"],
+            path=crate_path,
             dependencies=tuple(entry["dependencies"]),
         )
-        if crate.name in seen or not crate.path.joinpath("Cargo.toml").is_file():
+        if (
+            crate.name in seen
+            or manifest.is_symlink()
+            or not manifest.is_file()
+        ):
             raise ValueError(f"invalid or duplicate public crate {crate.name}")
-        missing = set(crate.dependencies) - seen
-        if missing:
-            raise ValueError(
-                f"crate {crate.name} precedes dependencies {sorted(missing)}"
-            )
         seen.add(crate.name)
         crates.append(crate)
+        catalog_projection.append(
+            {
+                "name": entry["name"],
+                "path": entry["path"],
+                "dependencies": entry["dependencies"],
+            }
+        )
+    catalog_order = tuple(crate.name for crate in crates)
+    declared_graph = {crate.name: set(crate.dependencies) for crate in crates}
+    ordered = deterministic_publish_order(
+        declared_graph,
+        preference=catalog_order,
+    )
+    if ordered != catalog_order:
+        raise ValueError(
+            "crate catalog is not in dependency-first publish order: "
+            f"expected {list(ordered)}"
+        )
+    authoritative = version_domains.release_catalog_entries(ROOT)
+    if catalog_projection != authoritative:
+        raise ValueError(
+            "crate catalog differs from Cargo's normalized publication graph"
+        )
     return crates
+
+
+def validate_stable_version(version: object) -> str:
+    if not isinstance(version, str) or STABLE_VERSION_PATTERN.fullmatch(version) is None:
+        raise ValueError("crate release version must be one exact stable SemVer")
+    return version
 
 
 def cargo_metadata() -> dict[str, object]:
@@ -127,14 +303,25 @@ def cargo_metadata() -> dict[str, object]:
         ["cargo", "metadata", "--format-version", "1", "--no-deps"],
         capture=True,
     )
-    return json.loads(result.stdout)
+    metadata = load_i_json(
+        result.stdout.encode("utf-8"), label="cargo metadata output"
+    )
+    if not isinstance(metadata, dict):
+        raise ValueError("cargo metadata returned a non-object")
+    return metadata
 
 
 def validate_workspace(crates: list[PublicCrate], requested: str | None = None) -> str:
     """Validate catalog coverage, versions, metadata, and dependency edges."""
 
     metadata = cargo_metadata()
-    packages = {package["name"]: package for package in metadata["packages"]}
+    if not isinstance(metadata.get("packages"), list):
+        raise ValueError("Cargo metadata omits its package inventory")
+    packages = {
+        package["name"]: package
+        for package in metadata["packages"]
+        if isinstance(package, dict) and isinstance(package.get("name"), str)
+    }
     catalog_names = {crate.name for crate in crates}
     published = {
         name
@@ -147,15 +334,39 @@ def validate_workspace(crates: list[PublicCrate], requested: str | None = None) 
             f"missing={sorted(published - catalog_names)} "
             f"extra={sorted(catalog_names - published)}"
         )
+    declared_graph = {crate.name: set(crate.dependencies) for crate in crates}
+    actual_graph = cargo_publish_graph(packages, catalog_names)
+    catalog_order = tuple(crate.name for crate in crates)
+    actual_order = deterministic_publish_order(
+        actual_graph,
+        preference=catalog_order,
+    )
+    if actual_order != catalog_order:
+        raise ValueError(
+            "crate catalog is not in Cargo dependency-first publish order: "
+            f"expected {list(actual_order)}"
+        )
+    for crate in crates:
+        actual = actual_graph[crate.name]
+        declared = declared_graph[crate.name]
+        if actual != declared:
+            raise ValueError(
+                f"catalog dependencies for {crate.name} are {sorted(declared)}, "
+                f"Cargo publishes {sorted(actual)}"
+            )
     versions = {packages[crate.name]["version"] for crate in crates}
     if len(versions) != 1:
         raise ValueError(f"public crate versions diverge: {sorted(versions)}")
-    version = versions.pop()
+    version = validate_stable_version(versions.pop())
     if requested is not None and version != requested:
         raise ValueError(f"requested {requested}, manifests contain {version}")
-    typescript_version = json.loads(
-        ROOT.joinpath("sdk/typescript/package.json").read_text(encoding="utf-8")
-    )["version"]
+    typescript_manifest = load_i_json(
+        ROOT.joinpath("sdk/typescript/package.json").read_bytes(),
+        label="sdk/typescript/package.json",
+    )
+    if not isinstance(typescript_manifest, dict):
+        raise ValueError("TypeScript package manifest must be an object")
+    typescript_version = typescript_manifest["version"]
     if typescript_version != version:
         raise ValueError(
             f"TypeScript package {typescript_version} does not match Rust {version}"
@@ -175,18 +386,11 @@ def validate_workspace(crates: list[PublicCrate], requested: str | None = None) 
             raise ValueError(f"public repository metadata is missing for {crate.name}")
         if package.get("readme") is None:
             raise ValueError(f"README metadata is missing for {crate.name}")
-        actual_dependencies = {
-            dependency["name"]
-            for dependency in package["dependencies"]
-            if dependency["name"] in catalog_names and dependency["kind"] is None
-        }
-        if actual_dependencies != set(crate.dependencies):
-            raise ValueError(
-                f"catalog dependencies for {crate.name} are "
-                f"{sorted(crate.dependencies)}, Cargo has {sorted(actual_dependencies)}"
-            )
         for dependency in package["dependencies"]:
-            if dependency["name"] in catalog_names and dependency["kind"] is None:
+            if (
+                dependency["name"] in catalog_names
+                and cargo_dependency_is_published(dependency)
+            ):
                 if dependency["req"] != f"^{version}":
                     raise ValueError(
                         f"{crate.name} dependency {dependency['name']} uses "
@@ -205,12 +409,60 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def stage_file(directory: pathlib.Path, basename: object) -> pathlib.Path:
+    """Resolve one regular, non-symlink stage file owned by ``directory``."""
+
+    if (
+        not isinstance(basename, str)
+        or not basename
+        or pathlib.PurePosixPath(basename).name != basename
+        or pathlib.PureWindowsPath(basename).name != basename
+    ):
+        raise ValueError("crate release stage file must be one basename")
+    path = directory / basename
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"crate release stage file {basename} is not regular non-symlink")
+    resolved = path.resolve(strict=True)
+    if resolved.parent != directory:
+        raise ValueError(f"crate release stage file {basename} escapes its stage")
+    return resolved
+
+
+def inspect_crate_members(
+    archive: tarfile.TarFile, crate: str, version: str
+) -> dict[tuple[str, ...], tarfile.TarInfo]:
+    """Close the complete Cargo archive namespace before reading any member."""
+
+    root = (f"{crate}-{version}",)
+    members: dict[tuple[str, ...], tarfile.TarInfo] = {}
+    for member in archive.getmembers():
+        path = pathlib.PurePosixPath(member.name)
+        if (
+            path.is_absolute()
+            or not path.parts
+            or ".." in path.parts
+            or path.parts[:1] != root
+            or member.issym()
+            or member.islnk()
+            or not (member.isfile() or member.isdir())
+            or path.parts in members
+        ):
+            raise ValueError(f"unsafe archive member in {crate}: {member.name}")
+        members[path.parts] = member
+    manifest_path = (*root, "Cargo.toml")
+    manifest = members.get(manifest_path)
+    if manifest is None or not manifest.isfile():
+        raise ValueError(f"archive for {crate} omits normalized Cargo.toml")
+    return members
+
+
 def publish_metadata(archive_path: pathlib.Path, crate: str, version: str) -> bytes:
     """Derive Cargo's documented registry metadata from normalized archive bytes."""
 
     root = pathlib.PurePosixPath(f"{crate}-{version}")
     with tarfile.open(archive_path, "r:gz") as archive:
-        manifest_member = archive.getmember(str(root / "Cargo.toml"))
+        members = inspect_crate_members(archive, crate, version)
+        manifest_member = members[(*root.parts, "Cargo.toml")]
         manifest_stream = archive.extractfile(manifest_member)
         if manifest_stream is None:
             raise ValueError(f"archive for {crate} omits normalized Cargo.toml")
@@ -221,7 +473,19 @@ def publish_metadata(archive_path: pathlib.Path, crate: str, version: str) -> by
         readme_file = package.get("readme")
         readme = None
         if readme_file is not None:
-            readme_member = archive.getmember(str(root / readme_file))
+            if not isinstance(readme_file, str):
+                raise ValueError(f"normalized readme path is invalid for {crate}")
+            readme_path = pathlib.PurePosixPath(readme_file)
+            if (
+                readme_path.is_absolute()
+                or not readme_path.parts
+                or ".." in readme_path.parts
+                or readme_path.as_posix() != readme_file
+            ):
+                raise ValueError(f"normalized readme path is invalid for {crate}")
+            readme_member = members.get((*root.parts, *readme_path.parts))
+            if readme_member is None or not readme_member.isfile():
+                raise ValueError(f"archive for {crate} omits {readme_file}")
             readme_stream = archive.extractfile(readme_member)
             if readme_stream is None:
                 raise ValueError(f"archive for {crate} omits {readme_file}")
@@ -309,6 +573,8 @@ def inspect_upload_body(
 ) -> None:
     """Authenticate a staged upload body against its archive and closed identity."""
 
+    if body.stat().st_size > MAX_REGISTRY_UPLOAD_BYTES:
+        raise ValueError(f"registry upload body is oversized for {crate}")
     raw = body.read_bytes()
     if len(raw) < 8:
         raise ValueError(f"registry upload body is truncated for {crate}")
@@ -316,7 +582,11 @@ def inspect_upload_body(
     metadata_end = 4 + metadata_length
     if metadata_end + 4 > len(raw):
         raise ValueError(f"registry metadata length is invalid for {crate}")
-    metadata = json.loads(raw[4:metadata_end])
+    metadata = load_i_json(
+        raw[4:metadata_end], label=f"registry upload metadata for {crate}"
+    )
+    if not isinstance(metadata, dict):
+        raise ValueError(f"registry upload metadata is not an object for {crate}")
     crate_length = struct.unpack("<I", raw[metadata_end : metadata_end + 4])[0]
     crate_bytes = raw[metadata_end + 4 :]
     if crate_length != len(crate_bytes) or crate_bytes != archive.read_bytes():
@@ -408,19 +678,7 @@ def write_packaged_workspace(
         extracted = staging / "extracted" / crate.name
         extracted.mkdir(parents=True)
         with tarfile.open(archives[crate.name], "r:gz") as archive:
-            root = pathlib.PurePosixPath(f"{crate.name}-{version}")
-            for member in archive.getmembers():
-                path = pathlib.PurePosixPath(member.name)
-                if (
-                    path.is_absolute()
-                    or ".." in path.parts
-                    or path.parts[:1] != root.parts
-                    or member.issym()
-                    or member.islnk()
-                ):
-                    raise ValueError(
-                        f"unsafe archive member in {crate.name}: {member.name}"
-                    )
+            inspect_crate_members(archive, crate.name, version)
             archive.extractall(extracted, filter="data")
         source = extracted / f"{crate.name}-{version}"
         destination = staging / "packages" / crate.name
@@ -531,7 +789,7 @@ def verify_packages(allow_dirty: bool) -> dict[str, object]:
         upload_hashes[crate.name] = sha256(upload)
     write_packaged_workspace(staging, crates, version, second)
     report = {
-        "schema": "cymule.crates-package-report/1",
+        "schema": CRATES_PACKAGE_REPORT_VERSION,
         "version": version,
         "crates": [
             {
@@ -556,7 +814,10 @@ def request_json(path: str) -> dict[str, object] | None:
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)
+            payload = load_i_json(response.read(), label=request.full_url)
+        if not isinstance(payload, dict):
+            raise ValueError(f"crates.io returned a non-object from {request.full_url}")
+        return payload
     except urllib.error.HTTPError as error:
         if error.code == 404:
             return None
@@ -571,36 +832,122 @@ def registry_checksum(crate: str, version: str) -> str | None:
     payload = request_json(f"/crates/{name}/{release}")
     if payload is None:
         return None
-    return payload["version"]["checksum"]
+    record = payload.get("version")
+    checksum = record.get("checksum") if isinstance(record, dict) else None
+    if not isinstance(checksum, str) or SHA256_PATTERN.fullmatch(checksum) is None:
+        raise ValueError(f"crates.io returned a malformed checksum for {crate}@{version}")
+    return checksum
 
 
 def wait_for_checksum(crate: str, version: str, expected: str) -> None:
     """Wait a bounded interval for the registry index to expose exact bytes."""
 
-    deadline = time.monotonic() + 300
-    while time.monotonic() < deadline:
-        observed = registry_checksum(crate, version)
-        if observed is not None:
-            if observed != expected:
-                raise ValueError(
-                    f"registry checksum mismatch for {crate}@{version}: {observed}"
+    deadline = time.monotonic() + MAX_REGISTRY_CHECKSUM_WAIT_SECONDS
+    last_observation = "unavailable"
+    last_error: BaseException | None = None
+    while True:
+        try:
+            observed = registry_checksum(crate, version)
+        except (OSError, TimeoutError, urllib.error.URLError) as error:
+            last_observation = "unavailable"
+            last_error = error
+        else:
+            last_error = None
+            if observed is not None:
+                if observed != expected:
+                    raise ValueError(
+                        f"registry checksum mismatch for {crate}@{version}: {observed}"
+                    )
+                return
+            last_observation = "missing"
+        if time.monotonic() >= deadline:
+            if last_observation == "missing":
+                raise RegistryChecksumMissing(
+                    f"registry did not index {crate}@{version} within "
+                    f"{MAX_REGISTRY_CHECKSUM_WAIT_SECONDS} seconds"
                 )
-            return
-        time.sleep(5)
-    raise TimeoutError(f"registry did not index {crate}@{version} within 300 seconds")
+            raise CratePublishOutcomeAmbiguous(
+                "crate_publish_outcome_ambiguous: exact registry checksum "
+                f"readback unavailable for {crate}@{version}"
+            ) from last_error
+        time.sleep(REGISTRY_CHECKSUM_POLL_SECONDS)
 
 
-def verify_download(crate: str, version: str, expected: str) -> None:
+def crate_download_url(crate: str, version: str) -> str:
+    return f"{STATIC_REGISTRY}/{crate}/{crate}-{version}.crate"
+
+
+def verify_download(crate: str, version: str, expected: str) -> str:
     """Download published bytes and verify the registry checksum independently."""
 
-    url = f"{STATIC_REGISTRY}/{crate}/{crate}-{version}.crate"
+    url = crate_download_url(crate, version)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     digest = hashlib.sha256()
     with urllib.request.urlopen(request, timeout=60) as response:
         for chunk in iter(lambda: response.read(1024 * 1024), b""):
             digest.update(chunk)
-    if digest.hexdigest() != expected:
+    observed = digest.hexdigest()
+    if observed != expected:
         raise ValueError(f"downloaded archive checksum mismatch for {crate}@{version}")
+    return observed
+
+
+def stage_registry_evidence(
+    directory: pathlib.Path, version: str, release_sha: str
+) -> list[dict[str, object]]:
+    """Bind one authenticated stage to fresh crates.io checksum and byte readback."""
+
+    version = validate_stable_version(version)
+    crates = load_catalog()
+    closed = load_stage(directory, crates, version, release_sha)
+    evidence: list[dict[str, object]] = []
+    for crate in crates:
+        expected = closed[crate.name].archive_sha256
+        observed = registry_checksum(crate.name, version)
+        if observed is None:
+            raise ValueError(f"missing {crate.name}@{version} from crates.io")
+        if observed != expected:
+            raise ValueError(
+                f"immutable registry version {crate.name}@{version} has other bytes"
+            )
+        downloaded = verify_download(crate.name, version, expected)
+        evidence.append(
+            {
+                "package_id": f"cargo:{crate.name}",
+                "name": crate.name,
+                "version": version,
+                "publication": {
+                    "kind": "cargo",
+                    "registry": "https://crates.io/",
+                    "registry_identity": (
+                        f"https://crates.io/crates/{crate.name}/{version}"
+                    ),
+                    "content_digest": f"sha256:{downloaded}",
+                    "provenance": {
+                        "kind": "registry-checksum",
+                        "checksum": f"sha256:{observed}",
+                        "download_url": crate_download_url(crate.name, version),
+                    },
+                },
+            }
+        )
+    return evidence
+
+
+def write_publication_evidence(
+    output: pathlib.Path, evidence: list[dict[str, object]]
+) -> None:
+    """Materialize job-local BOM inputs after exact stage/registry convergence."""
+
+    if (
+        not output.is_absolute()
+        or output.parent.is_symlink()
+        or not output.parent.is_dir()
+        or output.exists()
+    ):
+        raise ValueError("crate publication evidence output must be one new absolute file")
+    with output.open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
 
 
 def require_release_checkout(version: str) -> None:
@@ -620,6 +967,7 @@ def require_release_checkout(version: str) -> None:
 def stage_packages(version: str, release_sha: str, output: pathlib.Path) -> None:
     """Stage exact Cargo archives before any registry identity is granted."""
 
+    version = validate_stable_version(version)
     if GIT_SHA_PATTERN.fullmatch(release_sha) is None:
         raise ValueError("release SHA must be one exact lowercase Git commit identity")
     crates = load_catalog()
@@ -656,9 +1004,10 @@ def stage_packages(version: str, release_sha: str, output: pathlib.Path) -> None
     output.joinpath("manifest.json").write_text(
         json.dumps(
             {
-                "schema": "cymule.crates-release-stage/2",
+                "schema": CRATES_RELEASE_STAGE_VERSION,
                 "version": version,
                 "release_sha": release_sha,
+                "version_domain_registry_digest": version_registry_digest(),
                 "crates": entries,
             },
             indent=2,
@@ -677,23 +1026,46 @@ def load_stage(
 ) -> dict[str, ClosedCrate]:
     """Authenticate the no-OIDC stage consumed by the publisher."""
 
-    manifest = json.loads(
-        directory.joinpath("manifest.json").read_text(encoding="utf-8")
-    )
-    if set(manifest) != {"schema", "version", "release_sha", "crates"}:
+    version = validate_stable_version(version)
+    if GIT_SHA_PATTERN.fullmatch(release_sha) is None:
+        raise ValueError("crate release stage requires one exact release SHA")
+    directory = directory.resolve(strict=True)
+    if not directory.is_dir():
+        raise ValueError("crate release stage is not a directory")
+    manifest_path = stage_file(directory, "manifest.json")
+    manifest = load_i_json(manifest_path.read_bytes(), label=str(manifest_path))
+    if not isinstance(manifest, dict):
         raise ValueError("malformed crate release stage manifest")
-    if manifest["schema"] != "cymule.crates-release-stage/2":
+    if set(manifest) != {
+        "schema",
+        "version",
+        "release_sha",
+        "version_domain_registry_digest",
+        "crates",
+    }:
+        raise ValueError("malformed crate release stage manifest")
+    if manifest["schema"] != CRATES_RELEASE_STAGE_VERSION:
         raise ValueError("unsupported crate release stage manifest")
     if manifest["version"] != version or manifest["release_sha"] != release_sha:
         raise ValueError("crate release stage belongs to another version or commit")
+    if (
+        not isinstance(manifest["version_domain_registry_digest"], str)
+        or PREFIXED_SHA256_PATTERN.fullmatch(
+            manifest["version_domain_registry_digest"]
+        )
+        is None
+        or manifest["version_domain_registry_digest"] != version_registry_digest()
+    ):
+        raise ValueError("crate release stage belongs to another version-domain generation")
     expected_names = [crate.name for crate in crates]
     entries = manifest["crates"]
-    if (
-        not isinstance(entries, list)
-        or [entry.get("name") for entry in entries] != expected_names
-    ):
+    if not isinstance(entries, list) or len(entries) != len(expected_names):
         raise ValueError("crate release stage does not match the ordered catalog")
-    closed: dict[str, ClosedCrate] = {}
+    for entry, expected_name in zip(entries, expected_names, strict=True):
+        if not isinstance(entry, dict) or entry.get("name") != expected_name:
+            raise ValueError("crate release stage does not match the ordered catalog")
+
+    expected_files = {"manifest.json"}
     for entry in entries:
         if set(entry) != {
             "name",
@@ -703,17 +1075,35 @@ def load_stage(
             "upload_sha256",
         }:
             raise ValueError("malformed crate release stage entry")
-        archive = directory / entry["archive"]
+        if (
+            not isinstance(entry["sha256"], str)
+            or SHA256_PATTERN.fullmatch(entry["sha256"]) is None
+            or not isinstance(entry["upload_sha256"], str)
+            or SHA256_PATTERN.fullmatch(entry["upload_sha256"]) is None
+        ):
+            raise ValueError("malformed crate release stage digest")
         expected_archive = f"{entry['name']}-{version}.crate"
-        if archive.name != expected_archive or not archive.is_file():
-            raise ValueError(f"missing staged archive {expected_archive}")
+        expected_upload = f"{entry['name']}-{version}.publish"
+        if entry["archive"] != expected_archive or entry["upload"] != expected_upload:
+            raise ValueError("crate release stage file must be one expected basename")
+        expected_files.update((expected_archive, expected_upload))
+    observed_files = {path.name for path in directory.iterdir()}
+    if observed_files != expected_files:
+        raise ValueError("crate release stage does not contain its exact file set")
+
+    closed: dict[str, ClosedCrate] = {}
+    for entry in entries:
+        expected_archive = f"{entry['name']}-{version}.crate"
+        archive = stage_file(directory, entry["archive"])
+        if archive.stat().st_size > MAX_CRATE_BYTES:
+            raise ValueError(f"staged archive is oversized for {entry['name']}")
         observed = sha256(archive)
         if observed != entry["sha256"]:
             raise ValueError(f"staged archive digest changed for {entry['name']}")
-        upload = directory / entry["upload"]
         expected_upload = f"{entry['name']}-{version}.publish"
-        if upload.name != expected_upload or not upload.is_file():
-            raise ValueError(f"missing staged upload body {expected_upload}")
+        upload = stage_file(directory, entry["upload"])
+        if upload.stat().st_size > MAX_REGISTRY_UPLOAD_BYTES:
+            raise ValueError(f"staged upload body is oversized for {entry['name']}")
         upload_sha256 = sha256(upload)
         if upload_sha256 != entry["upload_sha256"]:
             raise ValueError(f"staged upload body changed for {entry['name']}")
@@ -725,9 +1115,12 @@ def load_stage(
 def compare_stages(candidate: pathlib.Path, reference: pathlib.Path) -> None:
     """Require independently packaged crate stages to be byte-identical."""
 
-    candidate_manifest = json.loads(
-        candidate.joinpath("manifest.json").read_text(encoding="utf-8")
+    candidate_path = candidate / "manifest.json"
+    candidate_manifest = load_i_json(
+        candidate_path.read_bytes(), label=str(candidate_path)
     )
+    if not isinstance(candidate_manifest, dict):
+        raise ValueError("candidate crate stage manifest must be an object")
     version = candidate_manifest.get("version")
     release_sha = candidate_manifest.get("release_sha")
     if not isinstance(version, str) or not isinstance(release_sha, str):
@@ -735,9 +1128,11 @@ def compare_stages(candidate: pathlib.Path, reference: pathlib.Path) -> None:
     crates = load_catalog()
     candidate_closed = load_stage(candidate, crates, version, release_sha)
     reference_closed = load_stage(reference, crates, version, release_sha)
-    if candidate_manifest != json.loads(
-        reference.joinpath("manifest.json").read_text(encoding="utf-8")
-    ):
+    reference_path = reference / "manifest.json"
+    reference_manifest = load_i_json(
+        reference_path.read_bytes(), label=str(reference_path)
+    )
+    if candidate_manifest != reference_manifest:
         raise ValueError("independent crate stage manifests differ")
     for crate in crates:
         left = candidate_closed[crate.name]
@@ -766,13 +1161,50 @@ def new_crate_rate_limit_delay(output: str, *, now: float | None = None) -> int 
     return delay
 
 
-def publish_crate(crate: str, upload: pathlib.Path, token: str) -> None:
+def verify_remote_release_authority(
+    controller_sha: str, release_sha: str, release_tag: str
+) -> None:
+    """Re-read the exact remote main and peeled release tag before one write."""
+
+    main_ref = "refs/heads/main"
+    tag_ref = f"refs/tags/{release_tag}^{{}}"
+    result = run(
+        ["git", "ls-remote", "origin", main_ref, tag_ref],
+        cwd=CONTROL_ROOT,
+        capture=True,
+    )
+    observed: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        fields = line.split("\t")
+        if (
+            len(fields) != 2
+            or GIT_SHA_PATTERN.fullmatch(fields[0]) is None
+            or fields[1] in observed
+        ):
+            raise ValueError("remote release authority returned malformed refs")
+        observed[fields[1]] = fields[0]
+    expected = {main_ref: controller_sha, tag_ref: release_sha}
+    if observed != expected:
+        raise ValueError(
+            "remote release authority moved before crates.io publication"
+        )
+
+
+def publish_crate(
+    crate: str,
+    version: str,
+    expected: str,
+    upload: pathlib.Path,
+    token: str,
+    verify_authority: Callable[[], None],
+) -> None:
     """Upload one already-closed body, retrying only the exact new-name limit."""
 
+    body = upload.read_bytes()
     for attempt in range(MAX_NEW_CRATE_RATE_LIMIT_RETRIES + 1):
         request = urllib.request.Request(
             f"{REGISTRY_API}/crates/new",
-            data=upload.read_bytes(),
+            data=body,
             method="PUT",
             headers={
                 "Accept": "application/json",
@@ -781,21 +1213,39 @@ def publish_crate(crate: str, upload: pathlib.Path, token: str) -> None:
                 "User-Agent": USER_AGENT,
             },
         )
+        verify_authority()
         print(f"+ PUT exact closed bytes for {crate}", flush=True)
+        put_error: BaseException | None = None
+        rate_limit_output: str | None = None
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
-                payload = json.load(response)
+                payload = load_i_json(
+                    response.read(), label=f"crates.io publish response for {crate}"
+                )
             if not isinstance(payload, dict) or payload.get("errors"):
                 raise ValueError(f"crates.io rejected {crate}: {payload}")
-            return
         except urllib.error.HTTPError as error:
-            body = error.read().decode("utf-8", errors="replace")
-            output = f"status {error.code} {error.reason}: {body}"
-            if error.code != 429:
-                raise
-        delay = new_crate_rate_limit_delay(output)
+            try:
+                error_body = error.read().decode("utf-8", errors="replace")
+            finally:
+                error.close()
+            output = f"status {error.code} {error.reason}: {error_body}"
+            put_error = error
+            if error.code == 429:
+                rate_limit_output = output
+        except (OSError, TimeoutError, urllib.error.URLError, ValueError) as error:
+            put_error = error
+        try:
+            wait_for_checksum(crate, version, expected)
+            return
+        except RegistryChecksumMissing as missing:
+            if rate_limit_output is None:
+                raise ValueError(
+                    f"crates.io did not publish {crate}@{version}: {put_error}"
+                ) from put_error or missing
+        delay = new_crate_rate_limit_delay(rate_limit_output)
         if delay is None or attempt == MAX_NEW_CRATE_RATE_LIMIT_RETRIES:
-            raise ValueError(f"crates.io rejected {crate}: {output}")
+            raise ValueError(f"crates.io rejected {crate}: {rate_limit_output}")
         print(
             f"crates.io limited new crate names; retrying {crate} in {delay} seconds",
             flush=True,
@@ -806,12 +1256,28 @@ def publish_crate(crate: str, upload: pathlib.Path, token: str) -> None:
 def publish(version: str) -> None:
     """Publish or exactly replay every crate in dependency order."""
 
+    version = validate_stable_version(version)
     token = os.environ.get("CARGO_REGISTRY_TOKEN")
     if not token:
         raise ValueError("CARGO_REGISTRY_TOKEN is required")
     crates = load_catalog()
     require_release_checkout(version)
     release_sha = run(["git", "rev-parse", "HEAD"], capture=True).stdout.strip()
+    controller_sha = os.environ.get("CONTROLLER_SHA", "")
+    expected_release_sha = os.environ.get("RELEASE_SHA", "")
+    release_tag = os.environ.get("RELEASE_TAG", "")
+    if (
+        GIT_SHA_PATTERN.fullmatch(controller_sha) is None
+        or GIT_SHA_PATTERN.fullmatch(expected_release_sha) is None
+        or expected_release_sha != release_sha
+        or release_tag != f"v{version}"
+    ):
+        raise ValueError("crate publication release authority is missing or mismatched")
+    local_controller_sha = run(
+        ["git", "rev-parse", "HEAD"], cwd=CONTROL_ROOT, capture=True
+    ).stdout.strip()
+    if local_controller_sha != controller_sha:
+        raise ValueError("crate publication controller checkout does not match main authority")
     stage_directory = os.environ.get("CYMULE_CRATES_STAGE")
     if stage_directory is None or not pathlib.Path(stage_directory).is_absolute():
         raise ValueError("CYMULE_CRATES_STAGE must name the absolute no-OIDC stage")
@@ -823,7 +1289,16 @@ def publish(version: str) -> None:
         expected = closed[crate.name].archive_sha256
         observed = registry_checksum(crate.name, version)
         if observed is None:
-            publish_crate(crate.name, closed[crate.name].upload, token)
+            publish_crate(
+                crate.name,
+                version,
+                expected,
+                closed[crate.name].upload,
+                token,
+                lambda: verify_remote_release_authority(
+                    controller_sha, release_sha, release_tag
+                ),
+            )
             outcome = "published"
         elif observed == expected:
             outcome = "retained"
@@ -831,13 +1306,12 @@ def publish(version: str) -> None:
             raise ValueError(
                 f"immutable registry version {crate.name}@{version} has other bytes"
             )
-        wait_for_checksum(crate.name, version, expected)
         verify_download(crate.name, version, expected)
         outcomes.append({"name": crate.name, "sha256": expected, "outcome": outcome})
         report_dir.joinpath("publish.json").write_text(
             json.dumps(
                 {
-                    "schema": "cymule.crates-publish-report/1",
+                    "schema": CRATES_PUBLISH_REPORT_VERSION,
                     "version": version,
                     "crates": outcomes,
                 },
@@ -852,6 +1326,7 @@ def publish(version: str) -> None:
 def verify_registry(version: str) -> None:
     """Verify registry bytes against the exact tag and compile fresh consumers."""
 
+    version = validate_stable_version(version)
     crates = load_catalog()
     validate_workspace(crates, version)
     require_release_checkout(version)
@@ -937,6 +1412,11 @@ def parse_args() -> argparse.Namespace:
     compare_parser = subparsers.add_parser("compare-stages")
     compare_parser.add_argument("--candidate", type=pathlib.Path, required=True)
     compare_parser.add_argument("--reference", type=pathlib.Path, required=True)
+    evidence_parser = subparsers.add_parser("registry-evidence")
+    evidence_parser.add_argument("--version", required=True)
+    evidence_parser.add_argument("--release-sha", required=True)
+    evidence_parser.add_argument("--stage", type=pathlib.Path, required=True)
+    evidence_parser.add_argument("--output", type=pathlib.Path, required=True)
     subparsers.add_parser("list")
     return parser.parse_args()
 
@@ -956,6 +1436,12 @@ def main() -> int:
     elif args.command == "compare-stages":
         compare_stages(args.candidate, args.reference)
         print("verified independent crate stage equality")
+    elif args.command == "registry-evidence":
+        evidence = stage_registry_evidence(
+            args.stage, args.version, args.release_sha
+        )
+        write_publication_evidence(args.output, evidence)
+        print(f"materialized {len(evidence)} crate publication records")
     else:
         for crate in load_catalog():
             print(crate.name)

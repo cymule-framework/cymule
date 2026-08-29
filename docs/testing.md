@@ -6,6 +6,11 @@ change must prove the Rust transition, frozen wire form, and every language
 projection together. The checked-in harness selects the smallest conservative
 set and escalates an unknown path to the complete suite.
 
+Implementation status: the terminal Engine v4/live-evolution commit matrix and
+complete branch-wide catalog must be rerun after final source freeze. No prior
+partial run is current evidence for version authority, SDKs, process death,
+packages, release workflows, or MLIR.
+
 ## Design sources
 
 SQLite demonstrates three practices that matter directly to a durable semantic
@@ -67,13 +72,54 @@ runner:
 | Plugin conformance | only the optional capability's public seam | one leaf suite per plugin |
 
 Cross-language differential also validates the unified
-`cymule.live-evolution-control/3` fixture in Rust, TypeScript, Python, and Go.
+`cymule.live-evolution-control/6` fixture in Rust, TypeScript, Python, and Go.
+Before any operation-specific assertion, each SDK compares the success
+envelope's complete inner request with the exact strict JSON value it serialized
+and sent. The shared matrix covers every Engine request variant, an echo changed
+one field at a time, missing/duplicate/unknown echo fields, and the former v4
+response-only success. It separately changes omitted optional members to
+explicit `null` so typed decoding cannot erase a wire mismatch. Failure fixtures
+intentionally omit request and reject one as unknown because failure can precede
+strict decoding. The matrix does not
+recompute a Rust Plan, Resource, Clock, durable-control, or rollout result to
+manufacture correlation. Invalid echo on mutating requests must produce
+`unknown_world_outcome/reconcile`; read-only validation produces an invalid
+response without replay permission.
+Rust transport tests also inject explicit `null` into omission-only request,
+success-response, and nested failure-issue members, then prove typed
+reserialization detects the erased presence before execution or response
+admission. A required-nullable Run query result remains a positive control.
+Each successful Engine v4 `execute_live_evolution` response must be one
+`EvolutionCommit`. Its observed revision is a valid StateRoot identity, its
+`committed_revision` member is present with either an exact revision or `null`,
+and its semantic receipt matches the exact `evolution_id` and complete command
+serialized in the echoed request. The negative matrix independently changes the
+outer partition, command identity and body, parent current, Durable source
+witness, normalized write descriptor, publication evidence/mode, rollout
+decision, observation, and outcome. Because the request may already have
+committed, every malformed or mismatched success is classified as
+`unknown_world_outcome` with `reconcile`; it is never exposed as an
+uncorrelated success.
 The same leaf runs a shared negative fixture through the real Rust Engine and
 compares failure category, phase, code, and explicitly justified retry
 disposition. It never parses stderr to recover semantic meaning.
 Stateful Rust tests separately prove that transitive registry relinking, Plan
 DAG edges, rollout decisions, occurrence pins, and virtual worker claims share
-the intended single-domain CAS boundaries.
+the intended single-domain CAS boundaries. Profile reducer tests start with one
+bounded exact source view and request missing membership/non-membership proofs
+explicitly. They cover source and postcondition count/byte max and max-plus-one,
+all-ever command replay, historical definition/Plan/link/edge reuse,
+source-decision-derived rollout identities, and evidence isolation through an
+A1 -> A2 -> A1 -> A2 cycle. Edge and rollout-transition tests mutate every
+retained identity input, reject their superseded `/1` generations, and reject
+missing required DTO members. Virtual claim-outcome tests independently reject
+NoWork carrying a Plan, Claimed omitting its claim or Plan, and Plan, claim,
+Clock, or execution-binding substitution against the normalized receipt.
+Durable tests separately prove that each closed
+postcondition publishes its scalar current,
+aliases, receipt, normalized leaves, Plans, Artifacts, and coupled M1/M3
+mutations in one CAS; a shape-valid digest cannot delete or mutate an unrelated
+retained family.
 
 The suite inventory is a dependency graph, not a checklist that every edit must
 run. A leaf change runs its owner. A shared interface runs that owner and direct
@@ -181,16 +227,31 @@ python3 scripts/test_harness.py run rust-portability
 
 Coverage currently gates the measured four-crate semantic baseline at 72% line
 and 78% region coverage. These are non-regression floors, not a claim that a
-percentage proves correctness. Core mutation uses its independent
-public-interface conformance tests. A separate M4 mutation witness targets
-compatibility analysis, safe-point proofs, automatic relink admission, and
-replacement-Run authorization so changes in those higher-profile laws cannot
-hide behind core coverage. The scheduled workflow partitions core across eight
-parallel zero-based `K/N` shards and the smaller M4 surface across four; each
-copies the existing target into its scratch tree for incremental rebuilds.
+percentage proves correctness. The M4 reducer has its own non-averaged
+profile-protocol artifact and 63% line / 64% region floors; the report includes
+only `src/evolution.rs` and `src/evolution/**`, so Evolution host or another
+profile cannot mask it. Core mutation uses its independent public-interface
+conformance tests. A separate M4 mutation witness targets
+the `cymule-profile-protocol::evolution` reducer's compatibility analysis,
+safe-point proofs, migration target-binding/M1-sidecar closure, automatic
+relink/edge admission, rollout-transition identity, and replacement-Run
+authorization. It requires a nonempty inventory containing
+each named law before executing, so moving the reducer cannot silently turn the
+gate into an empty pass. Process-wire conformance stays in the independent
+`cymule-evolution` leaf. The scheduled workflow partitions core across eight
+parallel zero-based `K/N` shards and the bounded M4 reducer surface across four;
+each copies the existing target into its scratch tree for incremental rebuilds.
 Day-one plugin coverage is a separate witness with 72% line and 72% region
 floors. It cannot raise or lower the semantic baseline and is not inferred from
 core tests that happen to compile plugin dependencies.
+M4 quiescence faults prepare an Effect, park and activate a wait, then attempt
+both migration and replacement authorization. Pending, claimed, and unknown
+outbox states, unresolved Machine obligations, pending waits, active Attempts,
+effect claim leases, and a moved store head must fail before adapter/target work
+or at the final CAS. Origin-routing cases delete the target Effect, bind a
+same-named target provider, and remove the historical handler; the current
+provider call count remains zero and unavailable/governance retains the old
+world outcome and obligation.
 Plugin mutation is independently sharded and bounded to the admission and
 ambiguity functions whose failure could acknowledge the wrong state: SQLite
 CAS, HTTP/timer acknowledgement, process execution limits, and MCP result
@@ -216,7 +277,10 @@ any lane starts, then uploads one execution report per selected lane.
 CI lanes are static jobs selected by planner outputs, not one matrix job with
 conditional setup steps. Each job therefore downloads only the toolchain actions
 its suite actually needs; skipped Go, Node, pnpm, or uv setup is not part of an
-unrelated lane's failure surface.
+unrelated lane's failure surface. Independently of the narrow path selection,
+every plan attaches the deterministic `version-domain-source` lane. It validates
+the complete public-candidate snapshot and registry closure without converting
+that path selection into `full`.
 
 Rust uses five independently reported lanes: workspace static/consumer compile,
 semantic profiles, durable and live-process profiles, provider plugins, and
@@ -228,7 +292,8 @@ other evidence instead of hiding it behind one long Rust job.
 
 Routing is a conservative union over every changed path:
 
-- documentation-only changes select the meta lane;
+- documentation-only changes select the meta lane, plus the mandatory
+  version-domain source-closure lane shared by every plan;
 - one language SDK selects only that language and its package check where
   applicable;
 - a shared schema, fixture, Resource, or M3 wire change selects the frozen
@@ -267,6 +332,24 @@ Unknown observation. They count prepare, dispatch, and reconciliation calls and
 verify the exact Machine/outbox pair after reopen; a successful Run alone is not
 proof that the provider was invoked once.
 
+Wide failure and cancellation tests discover the real Core Begin, Progress and
+Finalize page sequence, then inject before-CAS failure and lost acknowledgement
+at every recoverable page. They inspect the hidden Run-local outbox roots, Core
+and provider Attempts, pending transition count, Continuation fence, and exact
+provider call count after reopen. Separate cases commit another Run between
+every source page and return a late same-Run result, proving that the terminal
+transition neither replaces unrelated roots nor accepts a material-only sidecar.
+
+Agent Context tests retain an old `(message_head,message_count)` prefix, append
+new messages, and read the old prefix at a newer StateRoot revision with page
+sizes one and 256. They compare complete `AgentMessageCurrent` sequences and
+canonical-byte sums, independently exercise the complete page-wire budget, and
+corrupt or remove a reachable value in Memory, Directory, and SQLite stores.
+Recovery tests use a valid source descriptor and a real older message reference
+which the original reader did not deliver; unresolved Completed must remain
+Unknown with no second write, while terminal completion replay and NotApplied
+remain valid.
+
 Compound anomaly tests inject a second failure during recovery from the first.
 The current effect case loses the provider response after application, commits
 `Unknown` during reopen, loses that durable acknowledgement, reopens again, and
@@ -282,7 +365,7 @@ integration tests additionally place an external barrier immediately before or
 after a selected real CAS, then the parent sends `SIGKILL`. This selects narrow
 OS-death windows without adding a test branch to the reducer.
 
-The M1 Run sweep treats every segmented head CAS as two distinct anomaly points:
+The M1 Run sweep treats every StateRoot head CAS as two distinct anomaly points:
 failure before the write and lost acknowledgement after a successful write. It
 first discovers the boundary count from a successful execution, injects one
 fault at each position, disables the fault, reopens through the public durable
@@ -290,11 +373,11 @@ interface, and runs the same integrity probe. This permanently regresses the
 split initialization window where a Run could previously become durable without
 its first Continuation.
 
-The segmented-store complexity witness appends 128 fixed-size typed journal
-records across several manifest rotations. It asserts zero projection loads on
-the hot path and a history-independent bound on segment, manifest, and head
-bytes; explicit GC is measured separately because it deliberately materializes
-the cold base outside writer exclusion.
+The StateRoot complexity witness appends 256 fixed-size typed journal records.
+It asserts one initial projection load, one new journal leaf per append, and a
+history-independent bound on copied persistent map/log nodes. Exact historical
+lookups traverse rooted paths without materializing cumulative history; explicit
+GC streams a separately bounded physical inventory.
 
 Reopen follows only IDs reachable from one observed head. Directory tests add
 malformed unrelated immutable files and interrupted `.next` files; SQLite tests
@@ -303,12 +386,13 @@ one deferred read transaction from head observation through reachable lineage
 validation, so a concurrent commit cannot splice two revisions into one reopen.
 
 Directory GC has a separate internal process-death sweep. A child is stopped
-with `SIGKILL` after the new materialized checkpoint is durable, after the GC
-receipt is durable, after the recoverable head is published, and after deletion
-starts. Ordinary `load()` must reopen the old head before publication or the
-new head afterward and must finish only the deletion authorized by its receipt.
-The test hook is compiled only into the crate's unit-test artifact; production
-reducer and adapter builds have no pause or crash switch.
+with `SIGKILL` after the new GC receipt is durable, on both sides of head
+publication, and after deletion starts or becomes directory-durable. Ordinary
+`load()` must reopen the old head before publication or the new head afterward
+and reconcile only that head's pinned deletion page. It never selects the next
+page; only an explicit advance may publish another generation. The test hook is
+compiled only into the crate's unit-test artifact; production reducer and
+adapter builds have no pause or crash switch.
 
 The production SQLite witness repeats that automatically discovered boundary
 set with real child-process death on both CAS sides. A separate SQLite provider
@@ -318,7 +402,7 @@ probe again. The filesystem Resource witness likewise kills after a retained
 chunk and after publication, then verifies the exact content digest. Its upload
 record is the durable chunk frontier: bytes are synced before the frontier
 advances, and reopen discards only a suffix that was never acknowledged.
-SQLite provider tests also inject aborting triggers at immutable-segment insert
+SQLite provider tests also inject aborting triggers at immutable-object insert
 and head update to prove the enclosing SQL transaction rolls back every row.
 This reaches SQLite statement and transaction boundaries, not VFS I/O.
 
@@ -329,8 +413,17 @@ redeliver the identical source delivery before acknowledgement, retain exactly
 one activation, stop redelivery after acknowledgement, replay the Machine, and
 resume the Run. The clock leaf kills before and after `observe`; an observation
 whose caller receipt was lost still forces the next value to advance after
-reopen and backward wall-clock movement. M4 kills both sides of unified
-publication, and the optional Agent suite discovers occurrence, Session, and
+reopen and backward wall-clock movement. M4 kills both sides of its one typed
+StateRoot CAS. The independent deterministic control matrix compares the
+retained semantic receipt, scalar current, exact normalized writes, introduced
+Plans and Artifacts, and coupled M1/M3 state across every outcome. It then
+advances current state and resolves the historical command through the exact
+all-ever alias, proving that the original outcome returns without provider
+invocation or obsolete source revalidation. Migration, restart, and shadow
+counters must not advance. A same-ID different-command probe must conflict
+before those counters advance. Template registration separately proves
+complete-content conflict and preservation of the initially linked Plan after
+later relinking. The optional Agent suite discovers occurrence, Session, and
 stream CAS counts from successful baselines before killing every boundary.
 After each Agent kill it runs full SQLite integrity checks and a WAL checkpoint
 before semantic recovery, repeats both after recovery, and applies the same
@@ -357,6 +450,33 @@ Wait-source tests rebuild the parked index from durable authority, select
 within a deterministic hard bound, and reject targets under another source.
 Inject acknowledgement loss after activation CAS, reopen, redeliver the exact
 delivery, and assert one retained activation plus one later acknowledgement.
+For a persisted broadcast selection, cancel one target before admission and
+prove the remaining pending target is the sole applied winner, the cancelled
+target remains a terminal nonwinner, the source acknowledges, and reopen does
+not redeliver the completed delivery.
+
+Execution-ownership tests open two independent coordinators over the same
+store. They prove that an active claim makes the second ordinary resume Busy
+before provider I/O; merely observing expiry changes no revision; explicit
+takeover pins the exact old fence and a receipt resolved from the selected
+Clock source generation's current scope head; a Ready resume presented with an
+older still-resolvable receipt fails before claim CAS and provider I/O while the
+latest receipt succeeds. A second real SQLite Clock must also be unable to
+advance that scope after validation but before the Store CAS: the first Clock's
+non-blocking guard encloses the CAS, and a deliberately stale callback is never
+invoked. The
+semantic component occurrence stays constant while a later provider Attempt is
+created; and both late old-fence output and stale result CAS lose. Lost
+acknowledgement after result commit reopens the one completed occurrence without
+another provider call.
+
+The SQLite ownership witness repeats the critical handoff with two real child
+processes and one issued-receipt Clock ledger. Only the Ready-claim winner may
+reach the provider marker. After that process is killed, a later observation by
+itself leaves the Running revision unchanged; the surviving process performs
+the exact-fence takeover, and direct rooted-state inspection proves Clock receipt,
+new claim, and old-Attempt supersession share one CAS before stale output is
+rejected. This is process-death evidence, not a disk power-loss claim.
 
 Fault adapters belong in test support or behind existing substrate interfaces.
 Do not add test-only branches to the semantic reducer. Do not use wall-clock
@@ -375,7 +495,7 @@ The durable model trace generates the public `DurableCommand` sequence and the
 underlying CAS fault plan once in Rust, reopens after each injected failure, and
 checks every response against a small Run/domain model. A failure contains the
 seed, retained original command indexes, a copy-paste Cargo replay command, and
-a minimized `cymule.test-trace/1` JSON document. That document can be promoted
+a minimized `cymule.test-trace/2` JSON document. That document can be promoted
 to `tests/fixtures/` for all SDKs; TypeScript, Python, and Go never implement
 their own command generator or shrinker.
 

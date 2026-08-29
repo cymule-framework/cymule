@@ -1,0 +1,22 @@
+{
+  "legacy_versions": [
+    "cymule.application-journal-prefix-replacement-receipt/1",
+    "cymule.command-admission/1",
+    "cymule.command-archive-segment/2",
+    "cymule.coupled-checkpoint-receipt/1",
+    "cymule.directory-store/3",
+    "cymule.durable-checkpoint/1",
+    "cymule.durable-gc-receipt/1",
+    "cymule.durable-head/1",
+    "cymule.durable-segment/3",
+    "cymule.durable-state/6",
+    "cymule.history-compaction/1",
+    "cymule.machine-base-anchor/1",
+    "cymule.machine-base/3",
+    "cymule.machine-delta/3",
+    "cymule.machine-prefix/3",
+    "cymule.machine-snapshot/8",
+    "cymule.snapshot/1",
+    "cymule.sqlite-store/4"
+  ]
+}

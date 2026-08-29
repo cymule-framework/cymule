@@ -1,0 +1,20 @@
+{
+  "command_archive_segment": "cymule.command-archive-segment/3",
+  "component_occurrence": "cymule.component-occurrence/3",
+  "coupled_checkpoint_receipt": "cymule.coupled-checkpoint-receipt/2",
+  "durable_checkpoint": "cymule.durable-checkpoint/2",
+  "durable_control": "cymule.durable-control/3",
+  "durable_gc_receipt": "cymule.durable-gc-receipt/1",
+  "durable_head": "cymule.durable-head/1",
+  "durable_segment": "cymule.durable-segment/4",
+  "durable_state": "cymule.durable-state/6",
+  "ir": "cymule.ir/2",
+  "live_evolution_control": "cymule.live-evolution-control/5",
+  "machine_base_anchor": "cymule.machine-base-anchor/1",
+  "machine_snapshot": "cymule.machine-snapshot/10",
+  "operation_attempt": "cymule.operation-attempt/1",
+  "resource_list_cursor": "cymule.resource-list-cursor/2",
+  "resource_list_proof": "cymule.resource-list-proof/4",
+  "resource_locators": "cymule.resource-locators/1",
+  "run_query_indexes": "cymule.run-query-indexes/1"
+}

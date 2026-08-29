@@ -155,39 +155,62 @@ fn tool_identity_validation_enforces_exact_boundaries() {
             .invoke_tool(valid)
             .expect("the documented maximum identity length is accepted");
     }
+
+    let multibyte_boundary = "界".repeat(512);
+    let multibyte_overflow = "界".repeat(513);
+    for field in ["call", "operation"] {
+        let mut valid = request();
+        let mut invalid = request();
+        if field == "call" {
+            valid.tool_call_id = multibyte_boundary.clone();
+            invalid.tool_call_id = multibyte_overflow.clone();
+        } else {
+            valid.operation = multibyte_boundary.clone();
+            invalid.operation = multibyte_overflow.clone();
+        }
+        adapter
+            .invoke_tool(valid)
+            .expect("512 Unicode scalar values are accepted");
+        assert!(matches!(
+            adapter.invoke_tool(invalid),
+            Err(AgentError::Validation(_))
+        ));
+    }
 }
 
 #[test]
-fn resource_links_and_embedded_text_preserve_reference_evidence() {
+fn occurrence_binding_length_uses_unicode_scalar_values() {
+    let result = || FakeCaller {
+        result: Ok(CallToolResult::success(Vec::new())),
+    };
+    let accepted = "界".repeat(512);
+    let adapter = McpToolAdapter::new(result(), accepted.clone())
+        .expect("512 Unicode scalar values are accepted");
+    assert_eq!(adapter.occurrence_binding(), accepted);
+    assert!(matches!(
+        McpToolAdapter::new(result(), "界".repeat(513)),
+        Err(AgentError::Validation(_))
+    ));
+}
+
+#[test]
+fn resource_links_and_embedded_text_require_a_resource_adapter() {
     let linked = Resource::new("s3://bucket/key", "result").with_mime_type("application/json");
     let embedded =
         ResourceContents::text("inline result", "memory://result").with_mime_type("text/markdown");
-    let result = CallToolResult::success(vec![
+    for content in [
         McpContentBlock::resource_link(linked),
         McpContentBlock::resource(embedded),
-    ]);
-    let adapter =
-        McpToolAdapter::new(FakeCaller { result: Ok(result) }, "mcp:test").expect("adapter builds");
-
-    assert_eq!(
-        adapter
-            .invoke_tool(request())
-            .expect("resources map")
-            .content,
-        vec![
-            ContentBlock::Resource {
-                uri: "s3://bucket/key".to_owned(),
-                mime_type: Some("application/json".to_owned()),
-            },
-            ContentBlock::Resource {
-                uri: "memory://result".to_owned(),
-                mime_type: Some("text/markdown".to_owned()),
-            },
-            ContentBlock::Text {
-                text: "inline result".to_owned(),
-            },
-        ]
-    );
+    ] {
+        let result = CallToolResult::success(vec![content]);
+        let adapter = McpToolAdapter::new(FakeCaller { result: Ok(result) }, "mcp:test")
+            .expect("adapter builds");
+        assert!(matches!(
+            adapter.invoke_tool(request()),
+            Err(AgentError::RecoveryRequired(message))
+                if message.contains("Cymule ResourceHandle")
+        ));
+    }
 }
 
 #[test]

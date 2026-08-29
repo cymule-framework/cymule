@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 cymule-core.workspace = true
+cymule-clock-system.workspace = true
 cymule-durable.workspace = true
 cymule-evolution.workspace = true
 cymule-executor-process = { path = "../../plugins/executor-process" }
@@ -20,6 +21,12 @@ cymule-store-sqlite = { path = "../../plugins/store-sqlite" }
 cymule-virtual.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[dev-dependencies]
+cymule-test-world = { path = "../../tests/test-world" }
 
 [lints]
 workspace = true

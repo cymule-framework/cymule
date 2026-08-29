@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/version-domain-registry.schema.json",
+  "title": "Cymule Version Domain Registry cymule.version-domain-registry/3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["registry_version", "source_generation", "defaults", "domains"],
+  "properties": {
+    "registry_version": { "const": "cymule.version-domain-registry/3" },
+    "source_generation": { "$ref": "#/$defs/sourceGeneration" },
+    "defaults": { "$ref": "#/$defs/defaults" },
+    "domains": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/domain" }
+    }
+  },
+  "$defs": {
+    "nonEmpty": { "type": "string", "minLength": 1 },
+    "path": { "type": "string", "pattern": "^[A-Za-z0-9_.@/-]+$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "version": { "type": "string", "pattern": "^cymule\\.[a-z0-9.-]+/[1-9][0-9]*$" },
+    "stringSet": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonEmpty" },
+      "uniqueItems": true
+    },
+    "sourceGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "workspace_version", "state", "source_snapshot_digest", "baseline_source_snapshot_digest", "predecessor_registry_digest", "predecessor_source_snapshot_digest", "predecessor_registry_version", "predecessor_source_generation", "dispatch_policy"],
+      "properties": {
+        "generation": { "$ref": "#/$defs/nonEmpty" },
+        "workspace_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
+        "state": { "enum": ["source", "archived"] },
+        "source_snapshot_digest": { "$ref": "#/$defs/digest" },
+        "baseline_source_snapshot_digest": { "$ref": "#/$defs/digest" },
+        "predecessor_registry_digest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "predecessor_source_snapshot_digest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "predecessor_registry_version": { "oneOf": [{ "$ref": "#/$defs/version" }, { "type": "null" }] },
+        "predecessor_source_generation": { "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }] },
+        "dispatch_policy": { "const": "exact-generation-before-decode" }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "predecessor_registry_digest": { "type": "null" },
+            "predecessor_source_snapshot_digest": { "type": "null" },
+            "predecessor_registry_version": { "type": "null" },
+            "predecessor_source_generation": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "predecessor_registry_digest": { "$ref": "#/$defs/digest" },
+            "predecessor_source_snapshot_digest": { "$ref": "#/$defs/digest" },
+            "predecessor_registry_version": { "$ref": "#/$defs/version" },
+            "predecessor_source_generation": { "$ref": "#/$defs/nonEmpty" }
+          }
+        }
+      ]
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["defined_at_source_snapshot_digest", "introduced_release_generation", "compatibility_mode", "migration", "removal_gate"],
+      "properties": {
+        "defined_at_source_snapshot_digest": { "$ref": "#/$defs/digest" },
+        "introduced_release_generation": { "$ref": "#/$defs/nonEmpty" },
+        "compatibility_mode": { "$ref": "#/$defs/compatibility" },
+        "migration": { "$ref": "#/$defs/migration" },
+        "removal_gate": { "$ref": "#/$defs/nonEmpty" }
+      }
+    },
+    "compatibility": {
+      "enum": ["exact-reject", "read-old-write-new", "offline-migrate", "side-by-side-runtime", "derived-only"]
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "edge", "runbook"],
+      "properties": {
+        "mode": { "enum": ["none", "unsupported", "offline", "side-by-side"] },
+        "edge": { "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }] },
+        "runbook": { "oneOf": [{ "$ref": "#/$defs/path" }, { "type": "null" }] }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "mode": { "const": "none" },
+            "edge": { "type": "null" },
+            "runbook": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "mode": { "const": "unsupported" },
+            "edge": { "type": "null" },
+            "runbook": { "$ref": "#/$defs/path" }
+          }
+        },
+        {
+          "properties": {
+            "mode": { "enum": ["offline", "side-by-side"] },
+            "edge": { "$ref": "#/$defs/nonEmpty" },
+            "runbook": { "$ref": "#/$defs/path" }
+          }
+        }
+      ]
+    },
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "id", "canonical_digest", "root"],
+      "properties": {
+        "path": { "$ref": "#/$defs/path" },
+        "id": { "type": "string", "format": "uri" },
+        "canonical_digest": { "$ref": "#/$defs/digest" },
+        "root": { "type": "boolean" },
+        "fragment": { "type": "string", "pattern": "^#(?:/.*|[A-Za-z_][A-Za-z0-9._:-]*)?$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "root": { "const": false } }, "required": ["root"] },
+          "then": { "required": ["fragment"], "properties": { "fragment": { "not": { "const": "#" } } } },
+          "else": { "properties": { "fragment": { "const": "#" } } }
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "symbol", "role"],
+      "properties": {
+        "path": { "$ref": "#/$defs/path" },
+        "symbol": { "$ref": "#/$defs/nonEmpty" },
+        "role": { "enum": ["artifact_kind", "artifact_type_key", "binary_hash_domain", "catalog_namespace", "content_id_domain", "persistence_discriminator", "protocol_discriminator", "receipt_discriminator", "release_receipt", "semantic_selector", "standard"] }
+      }
+    },
+    "consumers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemas", "types", "packages"],
+      "properties": {
+        "schemas": { "$ref": "#/$defs/stringSet" },
+        "types": { "$ref": "#/$defs/stringSet" },
+        "packages": { "$ref": "#/$defs/stringSet" }
+      }
+    },
+    "domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domain", "version", "defined_at_source_snapshot_digest", "kind", "owner", "writers", "readers", "schemas", "sources", "literal_locations", "embeds", "depends_on", "consumers", "generator_paths", "compatibility_mode", "migration", "removal_gate", "conformance"],
+      "properties": {
+        "domain": { "type": "string", "pattern": "^cymule\\.[a-z0-9.-]+$" },
+        "version": { "$ref": "#/$defs/version" },
+        "defined_at_source_snapshot_digest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "kind": { "enum": ["semantic", "wire", "persistence", "binding", "receipt", "projection"] },
+        "owner": { "$ref": "#/$defs/nonEmpty" },
+        "writers": { "$ref": "#/$defs/stringSet" },
+        "readers": { "$ref": "#/$defs/stringSet" },
+        "schemas": { "type": "array", "items": { "$ref": "#/$defs/schema" } },
+        "sources": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/source" } },
+        "literal_locations": { "$ref": "#/$defs/stringSet" },
+        "embeds": { "$ref": "#/$defs/stringSet" },
+        "depends_on": { "$ref": "#/$defs/stringSet" },
+        "consumers": { "$ref": "#/$defs/consumers" },
+        "generator_paths": { "$ref": "#/$defs/stringSet" },
+        "compatibility_mode": { "oneOf": [{ "$ref": "#/$defs/compatibility" }, { "type": "null" }] },
+        "migration": { "oneOf": [{ "$ref": "#/$defs/migration" }, { "type": "null" }] },
+        "removal_gate": { "oneOf": [{ "$ref": "#/$defs/nonEmpty" }, { "type": "null" }] },
+        "conformance": { "$ref": "#/$defs/stringSet" }
+      }
+    }
+  }
+}

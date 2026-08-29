@@ -15,12 +15,14 @@ publish.workspace = true
 axum.workspace = true
 cymule-core.workspace = true
 cymule-durable.workspace = true
+cymule-durable-protocol.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+cymule-clock-system.workspace = true
 cymule-runtime.workspace = true
 cymule-store-sqlite = { path = "../store-sqlite" }
 cymule-test-world = { path = "../../tests/test-world" }

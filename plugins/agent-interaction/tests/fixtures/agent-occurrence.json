@@ -16,12 +16,30 @@
     "response": {
       "tool_call_id": "tool:read",
       "content": [
-        { "type": "json", "value": { "exists": true } }
+        {
+          "type": "resource_handle",
+          "resource": {
+            "resource_id": "sha256:3779d4838c3ab0530ff707f9c1779bb72ba021073ee37226fa357f7696690205",
+            "resource_version": "cymule.resource/3",
+            "shape": "inline",
+            "media_type": "text/plain;charset=utf-8",
+            "inline": {
+              "encoding": "utf8",
+              "text": "shared cross-run resource"
+            },
+            "integrity": { "kind": "inline" },
+            "annotations": { "purpose": "cross-language-conformance" }
+          }
+        }
       ],
       "occurrence_binding": "binding:tool/1"
     }
   },
-  "occurrence_binding": "binding:tool/1",
+  "occurrence_binding": {
+    "authority": "standalone",
+    "implementation_id": "test.fixture-host/1",
+    "binding_id": "binding:tool/1"
+  },
   "failure": null,
-  "recovery_evidence": []
+  "recovery_observations": []
 }

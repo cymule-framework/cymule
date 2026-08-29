@@ -1,16 +1,16 @@
 {
-  "activation_version": "cymule.wait-activation/1",
+  "activation_version": "cymule.wait-activation/2",
   "activation_id": "activation:shared:1",
   "source": {
     "kind": "signal",
     "key": "signal:continue"
   },
   "wait_ids": [
-    "wait:shared:1"
+    "sha256:8d55f9d1981f4579ce12d106f25d85307ed27db86a4c106bbe17cb0ea8e9acc5"
   ],
   "result": {
     "identity_version": "cymule.artifact/2",
     "artifact_id": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "kind": "cymule.wait-activation-result/1"
+    "kind": "cymule.wait-result/1"
   }
 }

@@ -4,8 +4,10 @@ use std::collections::BTreeMap;
 
 use cymule_core::{Machine, artifact_ref};
 use cymule_resource::{
-    ArtifactTypeCandidate, ArtifactTypeRegistry, FrameworkArtifactType, ResourceCandidate,
-    ResourceError, ResourceIntegrity, ResourceShape, framework_artifact_contracts,
+    ArtifactTypeCandidate, ArtifactTypeRegistry, FrameworkArtifactType,
+    MAX_ARTIFACT_TYPE_SCHEMA_BYTES, MAX_ARTIFACT_TYPE_SCHEMA_DEPTH, MAX_ARTIFACT_TYPE_SCHEMA_NODES,
+    ResourceCandidate, ResourceError, ResourceIntegrity, ResourceShape,
+    framework_artifact_contracts,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -166,14 +168,14 @@ fn read_boundary_rejects_wrong_kind_tamper_noncanonical_and_wrong_schema() {
     wrong_kind.reference.kind = "example.other/1".to_owned();
     assert!(matches!(
         registry.decode_json(&wrong_kind),
-        Err(ResourceError::Integrity(_))
+        Err(ResourceError::Integrity { .. })
     ));
 
     let mut tampered = valid.clone();
     tampered.bytes[10] ^= 1;
     assert!(matches!(
         registry.decode_json(&tampered),
-        Err(ResourceError::Integrity(_))
+        Err(ResourceError::Integrity { .. })
     ));
 
     let mut machine = Machine::new();
@@ -188,7 +190,7 @@ fn read_boundary_rejects_wrong_kind_tamper_noncanonical_and_wrong_schema() {
         .expect("raw Artifact remains available");
     assert!(matches!(
         registry.decode_json(noncanonical),
-        Err(ResourceError::Integrity(_))
+        Err(ResourceError::Integrity { .. })
     ));
 
     let wrong_schema_ref = machine
@@ -215,7 +217,7 @@ fn descriptor_tamper_and_external_schema_references_fail_closed() {
     descriptor.schema = json!({"type": "string"});
     assert!(matches!(
         descriptor.verify(),
-        Err(ResourceError::Integrity(_))
+        Err(ResourceError::Integrity { .. })
     ));
 
     for schema in [
@@ -238,6 +240,163 @@ fn descriptor_tamper_and_external_schema_references_fail_closed() {
     )
     .seal()
     .expect("$ref text inside const is ordinary instance data");
+}
+
+fn schema_with_depth(depth: usize) -> Value {
+    (1..depth).fold(Value::Bool(true), |child, _| {
+        Value::Object(serde_json::Map::from_iter([("not".to_owned(), child)]))
+    })
+}
+
+#[test]
+fn schema_byte_budget_accepts_exact_canonical_limit_and_rejects_one_more() {
+    let empty_schema = json!({"$comment": ""});
+    let overhead = cymule_core::canonical_bytes(&empty_schema)
+        .expect("schema canonicalizes")
+        .len();
+    let schema = json!({"$comment": "a".repeat(MAX_ARTIFACT_TYPE_SCHEMA_BYTES - overhead)});
+    let contract = ArtifactTypeCandidate::canonical_json("example.byte-budget/1", schema)
+        .seal()
+        .expect("exact canonical schema budget seals");
+    assert_eq!(
+        cymule_core::canonical_bytes(&contract.schema)
+            .expect("bounded schema canonicalizes")
+            .len(),
+        MAX_ARTIFACT_TYPE_SCHEMA_BYTES,
+    );
+    contract.verify().expect("exact schema budget verifies");
+
+    let mut oversized = contract;
+    oversized.schema["$comment"] = json!("a".repeat(MAX_ARTIFACT_TYPE_SCHEMA_BYTES - overhead + 1));
+    assert!(matches!(
+        oversized.verify(),
+        Err(ResourceError::Validation(message)) if message.contains("canonical bytes")
+    ));
+    assert!(matches!(
+        ArtifactTypeCandidate::canonical_json("example.byte-budget/1", oversized.schema).seal(),
+        Err(ResourceError::Validation(message)) if message.contains("canonical bytes")
+    ));
+}
+
+#[test]
+fn schema_byte_budget_counts_canonical_escapes_not_only_source_text() {
+    let schema = json!({"$comment": "\u{0001}".repeat(MAX_ARTIFACT_TYPE_SCHEMA_BYTES / 6)});
+    assert!(matches!(
+        ArtifactTypeCandidate::canonical_json("example.escaped-budget/1", schema).seal(),
+        Err(ResourceError::Validation(message)) if message.contains("canonical bytes")
+    ));
+}
+
+#[test]
+fn schema_size_preflight_matches_core_numbers_unicode_and_json_escapes() {
+    let controls = (0_u8..=31).map(char::from).collect::<String>();
+    let prefix = format!("{controls}\"\\界😀\u{2028}");
+    let mut schema = json!({
+        "$comment": prefix,
+        "x-data": {"key\"\\界😀": [null, true, false, 1.0, -0.0, 0.000_000_1, cymule_core::MAX_EXACT_INTEGER]}
+    });
+    let current = cymule_core::canonical_bytes(&schema)
+        .expect("mixed schema data canonicalizes")
+        .len();
+    schema["$comment"] = json!(format!(
+        "{prefix}{}",
+        "a".repeat(MAX_ARTIFACT_TYPE_SCHEMA_BYTES - current)
+    ));
+    assert_eq!(
+        cymule_core::canonical_bytes(&schema)
+            .expect("exact-limit mixed schema canonicalizes")
+            .len(),
+        MAX_ARTIFACT_TYPE_SCHEMA_BYTES,
+    );
+    let mut contract = ArtifactTypeCandidate::canonical_json("example.preflight-size/1", schema)
+        .seal()
+        .expect("preflight agrees with Core at the exact mixed-data limit");
+    contract
+        .verify()
+        .expect("mixed exact-limit contract verifies");
+    let comment = contract.schema["$comment"]
+        .as_str()
+        .expect("test comment is a string");
+    contract.schema["$comment"] = json!(format!("{comment}a"));
+    assert!(matches!(
+        contract.verify(),
+        Err(ResourceError::Validation(message)) if message.contains("canonical bytes")
+    ));
+}
+
+#[test]
+fn schema_node_budget_counts_data_values_and_rejects_one_more() {
+    let schema = json!({"x-data": vec![Value::Null; MAX_ARTIFACT_TYPE_SCHEMA_NODES - 2]});
+    let mut contract = ArtifactTypeCandidate::canonical_json("example.node-budget/1", schema)
+        .seal()
+        .expect("exact schema node budget seals");
+    contract
+        .verify()
+        .expect("exact schema node budget verifies");
+    contract.schema["x-data"]
+        .as_array_mut()
+        .expect("test schema data is an array")
+        .push(Value::Null);
+    assert!(matches!(
+        contract.verify(),
+        Err(ResourceError::Validation(message)) if message.contains("JSON values")
+    ));
+    assert!(matches!(
+        ArtifactTypeCandidate::canonical_json("example.node-budget/1", contract.schema).seal(),
+        Err(ResourceError::Validation(message)) if message.contains("JSON values")
+    ));
+}
+
+#[test]
+fn schema_depth_budget_accepts_exact_limit_and_rejects_one_more() {
+    let mut contract = ArtifactTypeCandidate::canonical_json(
+        "example.depth-budget/1",
+        schema_with_depth(MAX_ARTIFACT_TYPE_SCHEMA_DEPTH),
+    )
+    .seal()
+    .expect("exact schema depth budget seals");
+    contract
+        .verify()
+        .expect("exact schema depth budget verifies");
+    contract.schema = schema_with_depth(MAX_ARTIFACT_TYPE_SCHEMA_DEPTH + 1);
+    assert!(matches!(
+        contract.verify(),
+        Err(ResourceError::Validation(message)) if message.contains("depth")
+    ));
+    assert!(matches!(
+        ArtifactTypeCandidate::canonical_json("example.depth-budget/1", contract.schema).seal(),
+        Err(ResourceError::Validation(message)) if message.contains("depth")
+    ));
+}
+
+#[test]
+fn directly_supplied_deep_schemas_reject_without_recursive_clone_or_drop() {
+    const HOSTILE_DEPTH: usize = 32_768;
+    assert!(matches!(
+        ArtifactTypeCandidate::canonical_json(
+            "example.deep-budget/1",
+            schema_with_depth(HOSTILE_DEPTH),
+        )
+        .seal(),
+        Err(ResourceError::Validation(message)) if message.contains("depth")
+    ));
+
+    let mut contract =
+        ArtifactTypeCandidate::canonical_json("example.deep-budget/1", Value::Bool(true))
+            .seal()
+            .expect("initial shallow schema seals");
+    contract.schema = schema_with_depth(HOSTILE_DEPTH);
+    assert!(matches!(
+        contract.verify(),
+        Err(ResourceError::Validation(message)) if message.contains("depth")
+    ));
+    let contract_id = contract.contract_id.clone();
+    let mut registry = ArtifactTypeRegistry::new();
+    assert!(matches!(
+        registry.register(contract),
+        Err(ResourceError::Validation(message)) if message.contains("depth")
+    ));
+    assert!(registry.descriptor(&contract_id).is_none());
 }
 
 #[test]
@@ -311,7 +470,7 @@ fn opaque_resource_and_artifact_bytes_do_not_require_a_contract() {
 #[test]
 fn framework_artifacts_use_closed_exact_contracts() {
     let contracts = framework_artifact_contracts().expect("framework contracts seal");
-    assert_eq!(contracts.len(), 5);
+    assert_eq!(contracts.len(), 4);
     let ids: std::collections::BTreeSet<_> = contracts
         .iter()
         .map(|contract| contract.contract_id.as_str())
@@ -326,9 +485,38 @@ fn framework_artifacts_use_closed_exact_contracts() {
     let resource_contract =
         cymule_resource::framework_artifact_contract(FrameworkArtifactType::ResourceHandle)
             .expect("Resource Handle contract seals");
+    let typed_resource_kind = resource_contract
+        .typed_artifact_kind()
+        .expect("Resource Handle persisted kind derives");
+    assert_eq!(
+        resource_contract.contract_id,
+        cymule_resource::resource_handle_artifact_contract_id()
+            .expect("protocol contract ID derives")
+    );
+    assert_eq!(
+        typed_resource_kind,
+        cymule_resource::resource_handle_artifact_kind().expect("protocol typed kind derives")
+    );
+    assert_eq!(
+        typed_resource_kind,
+        format!(
+            "cymule.typed-json/sha256-{}",
+            resource_contract
+                .contract_id
+                .strip_prefix("sha256:")
+                .expect("contract digest")
+        )
+    );
+    assert_ne!(typed_resource_kind, resource_contract.artifact_kind);
     let artifact = registry
         .put_canonical_json(&resource_contract.contract_id, &resource)
         .expect("exact framework value seals");
+    assert_eq!(artifact.reference.kind, typed_resource_kind);
+    assert_eq!(
+        cymule_resource::decode_resource_handle_artifact(&artifact)
+            .expect("closed protocol decoder accepts the exact Artifact"),
+        resource
+    );
     assert_eq!(
         registry
             .decode_typed::<cymule_resource::ResourceHandle>(&artifact)

@@ -1,25 +1,125 @@
 use std::collections::BTreeMap;
 
 use cymule_core::{
-    ComponentContract, Definition, Expression, IR_VERSION, Operation, PlanCandidate, Region, Step,
+    COMPONENT_OUTPUT_ARTIFACT_KIND, ComponentContract, Definition, Expression, IR_VERSION,
+    Operation, PlanCandidate, Region, Step,
 };
-use cymule_evolution::{LiveEvolutionController, PlanTemplate, SubflowReference};
+use cymule_evolution::{PlanTemplate, SubflowReference};
 use serde_json::{Value, json};
 
-use crate::plugin::{SCORER_COMPONENT, SUBJECT_COMPONENT};
+use crate::{
+    model::MAX_MESSAGE_SCALARS,
+    plugin::{SCORER_COMPONENT, SUBJECT_COMPONENT},
+};
 
 pub const SCORER_REF: &str = "example.scorer";
 pub const TEMPLATE_ID: &str = "example.evaluation-campaign";
+
+fn ticket_label_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "category": {"enum": ["identity", "billing", "reliability", "general"]},
+            "urgency": {"enum": ["normal", "high"]}
+        },
+        "required": ["category", "urgency"],
+        "additionalProperties": false
+    })
+}
+
+fn evaluation_case_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": r"^[^\u0000-\u001f\u007f-\u009f]+$"
+            },
+            "input": {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_MESSAGE_SCALARS,
+                        "pattern": r"^[^\u0000-\u001f\u007f-\u009f]+$"
+                    }
+                },
+                "required": ["message"],
+                "additionalProperties": false
+            },
+            "expected": ticket_label_schema()
+        },
+        "required": ["id", "input", "expected"],
+        "additionalProperties": false
+    })
+}
+
+fn prediction_schema() -> Value {
+    ticket_label_schema()
+}
+
+fn scorer_evaluation_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "case": evaluation_case_schema(),
+            "prediction": prediction_schema()
+        },
+        "required": ["case", "prediction"],
+        "additionalProperties": false
+    })
+}
+
+fn scorer_component_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "evaluation": scorer_evaluation_schema(),
+            "policy": {"enum": ["strict", "weighted"]}
+        },
+        "required": ["evaluation", "policy"],
+        "additionalProperties": false
+    })
+}
+
+fn score_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "policy": {"enum": ["strict", "weighted"]},
+            "points": {"type": "integer", "minimum": 0, "maximum": 2},
+            "max_points": {"const": 2},
+            "passed": {"type": "boolean"}
+        },
+        "required": ["policy", "points", "max_points", "passed"],
+        "additionalProperties": false
+    })
+}
+
+fn case_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "prediction": prediction_schema(),
+            "score": score_schema()
+        },
+        "required": ["prediction", "score"],
+        "additionalProperties": false
+    })
+}
 
 pub fn scorer_definition(policy: &str, compatible: bool) -> Definition {
     Definition {
         id: "score".to_owned(),
         input_schema: if compatible {
-            json!({})
+            scorer_evaluation_schema()
         } else {
             json!({"type": "string"})
         },
-        output_schema: json!({}),
+        output_schema: score_schema(),
         body: Region {
             steps: vec![Step {
                 id: "score.case".to_owned(),
@@ -56,8 +156,9 @@ pub fn campaign_template() -> PlanTemplate {
             components: vec![
                 ComponentContract {
                     id: SUBJECT_COMPONENT.to_owned(),
-                    input_schema: json!({}),
-                    output_schema: json!({}),
+                    input_schema: evaluation_case_schema(),
+                    output_schema: prediction_schema(),
+                    output_artifact_kind: COMPONENT_OUTPUT_ARTIFACT_KIND.to_owned(),
                     requirements: BTreeMap::from([(
                         "capability".to_owned(),
                         "evaluation-subject".to_owned(),
@@ -65,8 +166,9 @@ pub fn campaign_template() -> PlanTemplate {
                 },
                 ComponentContract {
                     id: SCORER_COMPONENT.to_owned(),
-                    input_schema: json!({}),
-                    output_schema: json!({}),
+                    input_schema: scorer_component_input_schema(),
+                    output_schema: score_schema(),
+                    output_artifact_kind: COMPONENT_OUTPUT_ARTIFACT_KIND.to_owned(),
                     requirements: BTreeMap::from([(
                         "capability".to_owned(),
                         "evaluation-scorer".to_owned(),
@@ -76,8 +178,8 @@ pub fn campaign_template() -> PlanTemplate {
             effects: Vec::new(),
             definitions: vec![Definition {
                 id: "main".to_owned(),
-                input_schema: json!({}),
-                output_schema: json!({}),
+                input_schema: evaluation_case_schema(),
+                output_schema: case_output_schema(),
                 body: Region {
                     steps: vec![
                         Step {
@@ -139,17 +241,8 @@ pub fn campaign_template() -> PlanTemplate {
         references: vec![SubflowReference::latest_compatible(
             SCORER_REF,
             "campaign_scorer",
-            json!({}),
-            json!({}),
+            scorer_evaluation_schema(),
+            score_schema(),
         )],
     }
-}
-
-pub fn current_plan(
-    controller: &LiveEvolutionController,
-) -> Result<cymule_evolution::LinkedPlan, String> {
-    controller
-        .current_link(TEMPLATE_ID)
-        .cloned()
-        .ok_or_else(|| "campaign template has no current linked Plan".to_owned())
 }

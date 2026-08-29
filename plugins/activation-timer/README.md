@@ -7,6 +7,25 @@ the first exact wait targets are persisted before delivery, so lost
 acknowledgement redelivers the same activation and targets even after those
 waits leave the rebuilt parked index.
 
+Retained target selections always redeliver first. Fresh due-source discovery
+uses a fixed 256-row scan budget and an exclusive `(due_unix_ms,
+activation_id)` continuation between polls. Large prefixes of due timers with
+no matching parked wait therefore cannot make one poll unbounded or starve a
+later matching timer; the cursor resets after reaching the current end so newly
+inserted earlier rows remain visible.
+
+Activation and timer identities share Cymule's cross-language boundary: 1..=512
+Unicode scalar values with no control character. Multi-byte identities are not
+measured by their UTF-8 byte length.
+
+The SQLite store has one physical generation,
+`cymule.activation-timer-store/1`. A completely empty database is initialized
+atomically; every nonempty database must already contain the exact singleton
+generation and fixed table/index DDL before configuration or data access.
+Older, partial, foreign, or modified databases fail with
+`unsupported_store_generation` and are not altered. This crate has no in-place
+upgrade, importer, or process-local alternate authority.
+
 ```sh
 cargo add cymule-activation-timer
 ```

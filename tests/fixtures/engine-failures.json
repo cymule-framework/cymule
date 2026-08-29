@@ -1,5 +1,5 @@
 {
-  "protocol": "cymule.engine/2",
+  "protocol": "cymule.engine/4",
   "cases": {
     "invalid_plan_version": {
       "category": "validation",
@@ -16,7 +16,7 @@
     "plugin_defect": {
       "category": "plugin_defect",
       "phase": "execute_plan",
-      "code": "plugin_process_failed",
+      "code": "plugin_protocol_violation",
       "retry_disposition": "never"
     },
     "substrate_failure": {

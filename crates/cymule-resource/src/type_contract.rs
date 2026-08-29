@@ -1,20 +1,34 @@
 use std::collections::BTreeMap;
 
 use cymule_core::{ArtifactRecord, artifact_ref, canonical_bytes, canonical_digest, content_id};
-use jsonschema::{Draft, Validator};
+use jsonschema::{Draft, Registry, Retrieve, Uri, Validator};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
+pub use cymule_profile_protocol::resource::{
+    ARTIFACT_TYPE_CONTRACT_VERSION, CANONICAL_JSON_MEDIA_TYPE, JSON_SCHEMA_DIALECT,
+};
+use cymule_profile_protocol::resource::{
+    FRAMEWORK_RESOURCE_HANDLE_TYPE_KEY, resource_handle_artifact_schema,
+};
+
 use crate::{ResourceError, ResourceResult, ResourceSchemaIssue};
 
-/// Frozen typed Artifact contract descriptor version.
-pub const ARTIFACT_TYPE_CONTRACT_VERSION: &str = "cymule.artifact-type-contract/1";
 /// Opaque Artifact kind used to persist one recoverable type contract.
 pub const ARTIFACT_TYPE_CONTRACT_KIND: &str = "cymule.artifact-type-contract/1";
-/// Media type emitted by the canonical JSON contract.
-pub const CANONICAL_JSON_MEDIA_TYPE: &str = "application/json";
-/// Closed JSON Schema dialect used by typed Artifact contracts.
-pub const JSON_SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
+/// Maximum canonical JSON bytes in one typed Artifact schema.
+pub const MAX_ARTIFACT_TYPE_SCHEMA_BYTES: usize = 1024 * 1024;
+/// Maximum JSON values in one typed Artifact schema, including its root and data keywords.
+pub const MAX_ARTIFACT_TYPE_SCHEMA_NODES: usize = 16_384;
+/// Maximum syntactic and local-reference-expanded depth, with the schema root at depth one.
+pub const MAX_ARTIFACT_TYPE_SCHEMA_DEPTH: usize = 64;
+/// Maximum schema-node visits when expanding local references, counting repeated targets.
+pub const MAX_ARTIFACT_TYPE_SCHEMA_EXPANSIONS: usize = 65_536;
+/// Maximum cumulative canonical subschema bytes when expanding local references.
+pub const MAX_ARTIFACT_TYPE_SCHEMA_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
+const FRAMEWORK_RESOURCE_HANDOFF_TYPE_KEY: &str = "cymule.framework-resource-handoff/5";
+const FRAMEWORK_RESOURCE_LIST_PROOF_TYPE_KEY: &str = "cymule.framework-resource-list-proof/5";
+const FRAMEWORK_RESOURCE_MANIFEST_TYPE_KEY: &str = "cymule.framework-resource-manifest/3";
 
 /// Closed framework Artifact types with exact immutable contracts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,8 +41,6 @@ pub enum FrameworkArtifactType {
     ResourceListProof,
     /// Exact producer-provenance Run handoff.
     ResourceHandoff,
-    /// Pin/release/GC/delete/cleanup lifecycle receipt union.
-    ResourceLifecycleReceipt,
 }
 
 /// Candidate for one pure canonical JSON Artifact contract.
@@ -41,7 +53,7 @@ pub struct ArtifactTypeCandidate {
     pub artifact_kind: String,
     /// Encoded media type. Version 1 accepts canonical JSON only.
     pub media_type: String,
-    /// Complete local JSON Schema Draft 2020-12 contract.
+    /// Complete acyclic local JSON Schema Draft 2020-12 contract within the shared budgets.
     pub schema: Value,
 }
 
@@ -59,7 +71,7 @@ pub struct ArtifactTypeContract {
     pub media_type: String,
     /// SHA-256 digest of the canonical schema bytes.
     pub schema_digest: String,
-    /// Complete local JSON Schema Draft 2020-12 contract.
+    /// Complete acyclic local JSON Schema Draft 2020-12 contract within the shared budgets.
     pub schema: Value,
 }
 
@@ -105,8 +117,16 @@ impl ArtifactTypeCandidate {
     ///
     /// Returns an error for an unsupported encoding contract, external schema
     /// reference, invalid schema, or invalid Artifact kind.
-    pub fn seal(self) -> ResourceResult<ArtifactTypeContract> {
-        validate_candidate(&self)?;
+    pub fn seal(mut self) -> ResourceResult<ArtifactTypeContract> {
+        if let Err(error) = validate_contract_fields(
+            &self.contract_version,
+            &self.artifact_kind,
+            &self.media_type,
+            &self.schema,
+        ) {
+            discard_schema(&mut self.schema);
+            return Err(error);
+        }
         let schema_digest = schema_digest(&self.schema)?;
         let contract_id = contract_id(
             &self.contract_version,
@@ -134,18 +154,21 @@ impl ArtifactTypeContract {
     /// Returns an error when any retained contract field is malformed or no
     /// longer matches its content identity.
     pub fn verify(&self) -> ResourceResult<()> {
-        validate_candidate(&ArtifactTypeCandidate {
-            contract_version: self.contract_version.clone(),
-            artifact_kind: self.artifact_kind.clone(),
-            media_type: self.media_type.clone(),
-            schema: self.schema.clone(),
-        })?;
+        validate_contract_fields(
+            &self.contract_version,
+            &self.artifact_kind,
+            &self.media_type,
+            &self.schema,
+        )?;
         let expected_schema_digest = schema_digest(&self.schema)?;
         if self.schema_digest != expected_schema_digest {
-            return Err(ResourceError::Integrity(format!(
-                "Artifact contract schema digest {} does not match {expected_schema_digest}",
-                self.schema_digest
-            )));
+            return Err(ResourceError::Integrity {
+                code: "artifact_contract_schema_digest_mismatch".to_owned(),
+                message: format!(
+                    "Artifact contract schema digest {} does not match {expected_schema_digest}",
+                    self.schema_digest
+                ),
+            });
         }
         let expected_contract_id = contract_id(
             &self.contract_version,
@@ -155,12 +178,30 @@ impl ArtifactTypeContract {
             &self.schema,
         )?;
         if self.contract_id != expected_contract_id {
-            return Err(ResourceError::Integrity(format!(
-                "Artifact contract ID {} does not match {expected_contract_id}",
-                self.contract_id
-            )));
+            return Err(ResourceError::Integrity {
+                code: "artifact_contract_identity_mismatch".to_owned(),
+                message: format!(
+                    "Artifact contract ID {} does not match {expected_contract_id}",
+                    self.contract_id
+                ),
+            });
         }
         Ok(())
+    }
+
+    /// Derive the exact Artifact kind that carries values admitted by this contract.
+    ///
+    /// Component declarations use this value as their required output Artifact
+    /// kind, so a normal durable completion produces the same typed authority
+    /// consumed by Resource handoff admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this contract is invalid or its exact typed kind
+    /// cannot be derived from the retained contract identity.
+    pub fn typed_artifact_kind(&self) -> ResourceResult<String> {
+        self.verify()?;
+        typed_json_kind(&self.contract_id)
     }
 }
 
@@ -173,6 +214,10 @@ impl ArtifactTypeRegistry {
     }
 
     /// Construct a registry containing every frozen framework Resource contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a framework contract cannot be sealed or registered.
     pub fn with_framework_contracts() -> ResourceResult<Self> {
         let mut registry = Self::new();
         for descriptor in framework_artifact_contracts()? {
@@ -190,8 +235,11 @@ impl ArtifactTypeRegistry {
     /// # Errors
     ///
     /// Returns an error for an invalid descriptor or schema.
-    pub fn register(&mut self, descriptor: ArtifactTypeContract) -> ResourceResult<()> {
-        descriptor.verify()?;
+    pub fn register(&mut self, mut descriptor: ArtifactTypeContract) -> ResourceResult<()> {
+        if let Err(error) = descriptor.verify() {
+            discard_schema(&mut descriptor.schema);
+            return Err(error);
+        }
         if self.contracts.contains_key(&descriptor.contract_id) {
             return Ok(());
         }
@@ -298,38 +346,41 @@ impl ArtifactTypeRegistry {
 }
 
 /// Seal one exact framework-owned Artifact type contract.
+///
+/// # Errors
+///
+/// Returns an error when the schema cannot be constructed, compiled, or sealed.
 pub fn framework_artifact_contract(
     artifact_type: FrameworkArtifactType,
 ) -> ResourceResult<ArtifactTypeContract> {
     let (artifact_kind, definition) = match artifact_type {
         FrameworkArtifactType::ResourceHandle => {
-            ("cymule.framework-resource-handle/2", "resourceHandle")
+            (FRAMEWORK_RESOURCE_HANDLE_TYPE_KEY, "resourceHandle")
         }
         FrameworkArtifactType::ResourceManifest => {
-            ("cymule.framework-resource-manifest/1", "manifestDescriptor")
+            (FRAMEWORK_RESOURCE_MANIFEST_TYPE_KEY, "manifestDescriptor")
         }
         FrameworkArtifactType::ResourceListProof => {
-            ("cymule.framework-resource-list-proof/2", "listProof")
+            (FRAMEWORK_RESOURCE_LIST_PROOF_TYPE_KEY, "listProof")
         }
         FrameworkArtifactType::ResourceHandoff => {
-            ("cymule.framework-resource-handoff/3", "resourceHandoff")
+            (FRAMEWORK_RESOURCE_HANDOFF_TYPE_KEY, "resourceHandoff")
         }
-        FrameworkArtifactType::ResourceLifecycleReceipt => (
-            "cymule.framework-resource-lifecycle-receipt/1",
-            "lifecycleReceipt",
-        ),
     };
     ArtifactTypeCandidate::canonical_json(artifact_kind, framework_schema(definition)?).seal()
 }
 
 /// Seal every framework-owned Resource Artifact contract in stable order.
+///
+/// # Errors
+///
+/// Returns an error when any framework contract cannot be sealed.
 pub fn framework_artifact_contracts() -> ResourceResult<Vec<ArtifactTypeContract>> {
     [
         FrameworkArtifactType::ResourceHandle,
         FrameworkArtifactType::ResourceManifest,
         FrameworkArtifactType::ResourceListProof,
         FrameworkArtifactType::ResourceHandoff,
-        FrameworkArtifactType::ResourceLifecycleReceipt,
     ]
     .into_iter()
     .map(framework_artifact_contract)
@@ -338,11 +389,10 @@ pub fn framework_artifact_contracts() -> ResourceResult<Vec<ArtifactTypeContract
 
 fn framework_schema(definition: &str) -> ResourceResult<Value> {
     let schema = match definition {
-        "resourceHandle" => resource_handle_schema(),
+        "resourceHandle" => resource_handle_artifact_schema(),
         "manifestDescriptor" => manifest_descriptor_schema(),
         "listProof" => list_proof_schema(),
         "resourceHandoff" => resource_handoff_schema(),
-        "lifecycleReceipt" => lifecycle_receipt_schema(),
         _ => {
             return Err(ResourceError::Validation(format!(
                 "unknown framework Artifact definition {definition}"
@@ -350,40 +400,6 @@ fn framework_schema(definition: &str) -> ResourceResult<Value> {
         }
     };
     Ok(schema)
-}
-
-fn resource_handle_schema() -> Value {
-    serde_json::json!({
-        "$schema": JSON_SCHEMA_DIALECT,
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["resource_id", "resource_version", "shape", "media_type", "integrity"],
-        "properties": {
-            "resource_id": digest_schema(),
-            "resource_version": {"const": crate::RESOURCE_VERSION},
-            "shape": {"enum": ["inline", "object", "collection", "directory", "snapshot"]},
-            "media_type": {"type": "string", "minLength": 3, "maxLength": 255},
-            "inline": inline_schema(),
-            "integrity": integrity_schema(),
-            "manifest": manifest_descriptor_schema_without_dialect(),
-            "annotations": {
-                "type": "object",
-                "additionalProperties": {"type": "string", "maxLength": 4096}
-            }
-        },
-        "allOf": [{
-            "if": {"properties": {"shape": {"const": "inline"}}, "required": ["shape"]},
-            "then": {
-                "required": ["inline"],
-                "not": {"required": ["manifest"]},
-                "properties": {"integrity": {"type": "object", "properties": {"kind": {"const": "inline"}}, "required": ["kind"]}}
-            },
-            "else": {
-                "not": {"required": ["inline"]},
-                "properties": {"integrity": {"not": {"type": "object", "properties": {"kind": {"const": "inline"}}, "required": ["kind"]}}}
-            }
-        }]
-    })
 }
 
 fn manifest_descriptor_schema() -> Value {
@@ -407,8 +423,8 @@ fn manifest_descriptor_schema_without_dialect() -> Value {
             "manifest_version": {"const": crate::RESOURCE_MANIFEST_VERSION},
             "media_type": {"const": crate::RESOURCE_MANIFEST_MEDIA_TYPE},
             "digest": digest_schema(),
-            "size": {"type": "integer", "minimum": 0},
-            "entry_count": {"type": "integer", "minimum": 0},
+            "size": safe_non_negative_integer_schema(),
+            "entry_count": safe_non_negative_integer_schema(),
             "root_digest": digest_schema()
         }
     })
@@ -419,31 +435,76 @@ fn list_proof_schema() -> Value {
         "$schema": JSON_SCHEMA_DIALECT,
         "type": "object",
         "additionalProperties": false,
-        "required": ["proof_version", "manifest_digest", "entry_count", "start_index", "request_cursor_digest", "next_cursor_digest", "inclusions"],
+        "required": ["proof_version", "manifest_digest", "entry_count", "start_index", "request_cursor_digest", "next_cursor_digest", "predecessor", "inclusions"],
         "properties": {
             "proof_version": {"const": crate::RESOURCE_LIST_PROOF_VERSION},
             "manifest_digest": digest_schema(),
-            "entry_count": {"type": "integer", "minimum": 0},
-            "start_index": {"type": "integer", "minimum": 0},
+            "entry_count": safe_non_negative_integer_schema(),
+            "start_index": safe_non_negative_integer_schema(),
             "request_cursor_digest": digest_schema(),
             "next_cursor_digest": digest_schema(),
+            "predecessor": {
+                "oneOf": [
+                    {"type": "null"},
+                    {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["entry", "inclusion"],
+                        "properties": {
+                            "entry": manifest_entry_schema(),
+                            "inclusion": manifest_inclusion_schema()
+                        }
+                    }
+                ]
+            },
             "inclusions": {
                 "type": "array",
+                "maxItems": crate::MAX_LIST_PAGE,
+                "items": manifest_inclusion_schema()
+            }
+        }
+    })
+}
+
+fn manifest_entry_schema() -> Value {
+    let mut resource = resource_handle_artifact_schema();
+    resource
+        .as_object_mut()
+        .expect("Resource Handle schema is an object")
+        .remove("$schema");
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "resource"],
+        "properties": {
+            "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "pattern": r"^[^\u0000-\u001f\u007f-\u009f\\]+$"
+            },
+            "resource": resource
+        }
+    })
+}
+
+fn manifest_inclusion_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "path"],
+        "properties": {
+            "index": safe_non_negative_integer_schema(),
+            "path": {
+                "type": "array",
+                "maxItems": crate::MAX_MANIFEST_PROOF_DEPTH,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["index", "path"],
+                    "required": ["side", "digest"],
                     "properties": {
-                        "index": {"type": "integer", "minimum": 0},
-                        "path": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "required": ["side", "digest"],
-                                "properties": {"side": {"enum": ["left", "right"]}, "digest": digest_schema()}
-                            }
-                        }
+                        "side": {"enum": ["left", "right"]},
+                        "digest": digest_schema()
                     }
                 }
             }
@@ -459,94 +520,22 @@ fn resource_handoff_schema() -> Value {
         "required": ["handoff_version", "transfer_id", "producer", "to_run", "slot", "resource"],
         "properties": {
             "handoff_version": {"const": crate::RESOURCE_HANDOFF_VERSION},
-            "transfer_id": non_empty_schema(),
+            "transfer_id": core_identity_schema(),
             "producer": {
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["run_id", "occurrence_id", "result"],
                 "properties": {
-                    "run_id": non_empty_schema(),
-                    "occurrence_id": non_empty_schema(),
+                    "run_id": core_identity_schema(),
+                    "occurrence_id": core_identity_schema(),
                     "result": artifact_ref_schema()
                 }
             },
-            "to_run": non_empty_schema(),
-            "slot": non_empty_schema(),
+            "to_run": core_identity_schema(),
+            "slot": core_identity_schema(),
             "resource": artifact_ref_schema()
         }
     })
-}
-
-fn lifecycle_receipt_schema() -> Value {
-    serde_json::json!({
-        "$schema": JSON_SCHEMA_DIALECT,
-        "oneOf": [
-            receipt_schema(
-                crate::RESOURCE_PIN_RECEIPT_VERSION,
-                &["pin_id", "resource_id", "owner"],
-                &serde_json::json!({"pin_id": non_empty_schema(), "resource_id": digest_schema(), "owner": non_empty_schema()}),
-            ),
-            receipt_schema(
-                crate::RESOURCE_RELEASE_RECEIPT_VERSION,
-                &["release_id", "pin_id", "resource_id"],
-                &serde_json::json!({"release_id": non_empty_schema(), "pin_id": non_empty_schema(), "resource_id": digest_schema()}),
-            ),
-            receipt_schema(
-                crate::RESOURCE_GC_RECEIPT_VERSION,
-                &["gc_id", "resource_id", "active_pin_count", "disposition"],
-                &serde_json::json!({"gc_id": non_empty_schema(), "resource_id": digest_schema(), "active_pin_count": {"type": "integer", "minimum": 0}, "disposition": {"enum": ["retained", "eligible"]}}),
-            ),
-            receipt_schema(
-                crate::RESOURCE_DELETE_RECEIPT_VERSION,
-                &["delete_id", "gc_id", "resource_id", "store_binding", "removed_bytes", "verified_absent"],
-                &serde_json::json!({"delete_id": non_empty_schema(), "gc_id": non_empty_schema(), "resource_id": digest_schema(), "store_binding": non_empty_schema(), "removed_bytes": {"type": "integer", "minimum": 0}, "verified_absent": {"const": true}}),
-            ),
-            receipt_schema(
-                crate::RESOURCE_CLEANUP_RECEIPT_VERSION,
-                &["write_id", "upload_id", "store_binding", "removed_staging_objects", "removed_chunks", "verified_absent"],
-                &serde_json::json!({"write_id": non_empty_schema(), "upload_id": non_empty_schema(), "store_binding": non_empty_schema(), "removed_staging_objects": {"type": "integer", "minimum": 0}, "removed_chunks": {"type": "integer", "minimum": 0}, "verified_absent": {"const": true}}),
-            )
-        ]
-    })
-}
-
-fn receipt_schema(version: &str, required: &[&str], properties: &Value) -> Value {
-    let mut required = required
-        .iter()
-        .map(|value| Value::String((*value).to_owned()))
-        .collect::<Vec<_>>();
-    required.insert(0, Value::String("receipt_version".to_owned()));
-    let mut properties = properties
-        .as_object()
-        .cloned()
-        .expect("receipt properties are an object");
-    properties.insert(
-        "receipt_version".to_owned(),
-        serde_json::json!({"const": version}),
-    );
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": required,
-        "properties": properties
-    })
-}
-
-fn inline_schema() -> Value {
-    serde_json::json!({"oneOf": [
-        {"type": "object", "additionalProperties": false, "required": ["encoding", "text"], "properties": {"encoding": {"const": "utf8"}, "text": {"type": "string"}}},
-        {"type": "object", "additionalProperties": false, "required": ["encoding", "value"], "properties": {"encoding": {"const": "json"}, "value": true}},
-        {"type": "object", "additionalProperties": false, "required": ["encoding", "data"], "properties": {"encoding": {"const": "base64"}, "data": {"type": "string"}}}
-    ]})
-}
-
-fn integrity_schema() -> Value {
-    serde_json::json!({"oneOf": [
-        {"type": "object", "additionalProperties": false, "required": ["kind"], "properties": {"kind": {"const": "inline"}}},
-        {"type": "object", "additionalProperties": false, "required": ["kind", "digest", "size"], "properties": {"kind": {"const": "content"}, "digest": digest_schema(), "size": {"type": "integer", "minimum": 0}}},
-        {"type": "object", "additionalProperties": false, "required": ["kind", "authority", "version"], "properties": {"kind": {"const": "version"}, "authority": non_empty_schema(), "version": non_empty_schema()}},
-        {"type": "object", "additionalProperties": false, "required": ["kind", "identity"], "properties": {"kind": {"const": "live"}, "identity": non_empty_schema()}}
-    ]})
 }
 
 fn artifact_ref_schema() -> Value {
@@ -566,8 +555,21 @@ fn digest_schema() -> Value {
     serde_json::json!({"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"})
 }
 
-fn non_empty_schema() -> Value {
-    serde_json::json!({"type": "string", "minLength": 1, "maxLength": 512})
+fn safe_non_negative_integer_schema() -> Value {
+    serde_json::json!({
+        "type": "integer",
+        "minimum": 0,
+        "maximum": cymule_core::MAX_EXACT_INTEGER
+    })
+}
+
+fn core_identity_schema() -> Value {
+    serde_json::json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "pattern": r"^[^\u0000-\u001f\u007f-\u009f]+$"
+    })
 }
 
 impl ArtifactTypeContract {
@@ -586,21 +588,26 @@ impl ArtifactTypeContract {
     }
 }
 
-fn validate_candidate(candidate: &ArtifactTypeCandidate) -> ResourceResult<()> {
-    if candidate.contract_version != ARTIFACT_TYPE_CONTRACT_VERSION {
+fn validate_contract_fields(
+    contract_version: &str,
+    artifact_kind: &str,
+    media_type: &str,
+    schema: &Value,
+) -> ResourceResult<()> {
+    if contract_version != ARTIFACT_TYPE_CONTRACT_VERSION {
         return Err(ResourceError::Validation(format!(
-            "unsupported Artifact contract version {:?}",
-            candidate.contract_version
+            "unsupported Artifact contract version {contract_version:?}"
         )));
     }
-    validate_artifact_kind(&candidate.artifact_kind)?;
-    if candidate.media_type != CANONICAL_JSON_MEDIA_TYPE {
+    validate_artifact_kind(artifact_kind)?;
+    if media_type != CANONICAL_JSON_MEDIA_TYPE {
         return Err(ResourceError::Validation(format!(
             "Artifact contract version 1 requires media type {CANONICAL_JSON_MEDIA_TYPE}"
         )));
     }
-    validate_schema_references(&candidate.schema)?;
-    compile_schema(&candidate.schema)?;
+    validate_schema_budget(schema)?;
+    validate_schema_references(schema)?;
+    compile_schema(schema)?;
     Ok(())
 }
 
@@ -610,10 +617,128 @@ fn validate_artifact_kind(kind: &str) -> ResourceResult<()> {
         .map_err(|error| ResourceError::Validation(error.to_string()))
 }
 
+fn validate_schema_budget(schema: &Value) -> ResourceResult<()> {
+    let mut pending = vec![(schema, 1_usize)];
+    let mut visited = 0_usize;
+    let mut encoded_bytes = 0_usize;
+    while let Some((value, depth)) = pending.pop() {
+        visited += 1;
+        if depth > MAX_ARTIFACT_TYPE_SCHEMA_DEPTH {
+            return Err(ResourceError::Validation(format!(
+                "typed Artifact schema exceeds depth {MAX_ARTIFACT_TYPE_SCHEMA_DEPTH}"
+            )));
+        }
+        match value {
+            Value::Null | Value::Bool(true) => {
+                account_schema_bytes(&mut encoded_bytes, 4)?;
+            }
+            Value::Bool(false) => {
+                account_schema_bytes(&mut encoded_bytes, 5)?;
+            }
+            Value::Number(number) => {
+                let number_bytes = canonical_bytes(number)
+                    .map_err(|error| ResourceError::Validation(error.to_string()))?;
+                account_schema_bytes(&mut encoded_bytes, number_bytes.len())?;
+            }
+            Value::String(text) => {
+                account_schema_string_bytes(&mut encoded_bytes, text)?;
+            }
+            Value::Array(children) => {
+                check_schema_nodes(visited, pending.len(), children.len())?;
+                account_schema_bytes(&mut encoded_bytes, 2)?;
+                account_schema_bytes(&mut encoded_bytes, children.len().saturating_sub(1))?;
+                pending.extend(children.iter().map(|child| (child, depth + 1)));
+            }
+            Value::Object(children) => {
+                check_schema_nodes(visited, pending.len(), children.len())?;
+                account_schema_bytes(&mut encoded_bytes, 2)?;
+                account_schema_bytes(&mut encoded_bytes, children.len().saturating_sub(1))?;
+                for key in children.keys() {
+                    account_schema_string_bytes(&mut encoded_bytes, key)?;
+                    account_schema_bytes(&mut encoded_bytes, 1)?;
+                }
+                pending.extend(children.values().map(|child| (child, depth + 1)));
+            }
+        }
+    }
+    // Count exact JSON punctuation/string bytes and Core-canonical number
+    // bytes before recursive encoding can clone the complete supplied Value.
+    let bytes =
+        canonical_bytes(schema).map_err(|error| ResourceError::Validation(error.to_string()))?;
+    if bytes.len() > MAX_ARTIFACT_TYPE_SCHEMA_BYTES {
+        return Err(schema_byte_budget_error());
+    }
+    Ok(())
+}
+
+fn check_schema_nodes(visited: usize, pending: usize, children: usize) -> ResourceResult<()> {
+    if visited
+        .checked_add(pending)
+        .and_then(|count| count.checked_add(children))
+        .is_none_or(|count| count > MAX_ARTIFACT_TYPE_SCHEMA_NODES)
+    {
+        return Err(ResourceError::Validation(format!(
+            "typed Artifact schema exceeds {MAX_ARTIFACT_TYPE_SCHEMA_NODES} JSON values"
+        )));
+    }
+    Ok(())
+}
+
+fn account_schema_bytes(encoded_bytes: &mut usize, additional: usize) -> ResourceResult<()> {
+    *encoded_bytes = encoded_bytes
+        .checked_add(additional)
+        .filter(|count| *count <= MAX_ARTIFACT_TYPE_SCHEMA_BYTES)
+        .ok_or_else(schema_byte_budget_error)?;
+    Ok(())
+}
+
+fn account_schema_string_bytes(encoded_bytes: &mut usize, text: &str) -> ResourceResult<()> {
+    account_schema_bytes(encoded_bytes, 2)?;
+    for character in text.chars() {
+        let bytes = match character {
+            '"' | '\\' | '\u{0008}' | '\t' | '\n' | '\u{000c}' | '\r' => 2,
+            '\u{0000}'..='\u{001f}' => 6,
+            character => character.len_utf8(),
+        };
+        account_schema_bytes(encoded_bytes, bytes)?;
+    }
+    Ok(())
+}
+
+fn schema_byte_budget_error() -> ResourceError {
+    ResourceError::Validation(format!(
+        "typed Artifact schema exceeds {MAX_ARTIFACT_TYPE_SCHEMA_BYTES} canonical bytes"
+    ))
+}
+
+fn discard_schema(schema: &mut Value) {
+    // Owned direct-Value ingress also owns rejection cleanup. Ordinary Value
+    // drop is recursive and must not overflow after rejecting a deep schema.
+    let mut pending = vec![schema.take()];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Array(children) => pending.extend(children),
+            Value::Object(children) => pending.extend(children.into_iter().map(|(_, child)| child)),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+}
+
 fn validate_schema_references(schema: &Value) -> ResourceResult<()> {
-    let Value::Object(object) = schema else {
-        return Ok(());
-    };
+    let mut pending = vec![schema];
+    while let Some(schema) = pending.pop() {
+        let Value::Object(object) = schema else {
+            continue;
+        };
+        validate_schema_reference_keywords(object)?;
+        pending.extend(schema_children(object).into_iter().map(|(child, _)| child));
+    }
+    Ok(())
+}
+
+fn validate_schema_reference_keywords(
+    object: &serde_json::Map<String, Value>,
+) -> ResourceResult<()> {
     if let Some(dialect) = object.get("$schema")
         && dialect.as_str() != Some(JSON_SCHEMA_DIALECT)
     {
@@ -635,6 +760,11 @@ fn validate_schema_references(schema: &Value) -> ResourceResult<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn schema_children(object: &serde_json::Map<String, Value>) -> Vec<(&Value, usize)> {
+    let mut children = Vec::new();
     for keyword in [
         "not",
         "if",
@@ -649,14 +779,12 @@ fn validate_schema_references(schema: &Value) -> ResourceResult<()> {
         "contentSchema",
     ] {
         if let Some(child) = object.get(keyword) {
-            validate_schema_references(child)?;
+            children.push((child, 1));
         }
     }
     for keyword in ["allOf", "anyOf", "oneOf", "prefixItems"] {
-        if let Some(Value::Array(children)) = object.get(keyword) {
-            for child in children {
-                validate_schema_references(child)?;
-            }
+        if let Some(Value::Array(values)) = object.get(keyword) {
+            children.extend(values.iter().map(|child| (child, 2)));
         }
     }
     for keyword in [
@@ -666,18 +794,148 @@ fn validate_schema_references(schema: &Value) -> ResourceResult<()> {
         "patternProperties",
         "dependentSchemas",
     ] {
-        if let Some(Value::Object(children)) = object.get(keyword) {
-            for child in children.values() {
-                validate_schema_references(child)?;
+        if let Some(Value::Object(values)) = object.get(keyword) {
+            children.extend(values.values().map(|child| (child, 2)));
+        }
+    }
+    children
+}
+
+#[derive(Default)]
+struct SchemaExpansionBudget {
+    visits: usize,
+    canonical_bytes: usize,
+}
+
+impl SchemaExpansionBudget {
+    fn admit(&mut self, schema: &Value, depth: usize, ancestors: &[&Value]) -> ResourceResult<()> {
+        if depth > MAX_ARTIFACT_TYPE_SCHEMA_DEPTH {
+            return Err(ResourceError::Validation(format!(
+                "typed Artifact schema reference-expanded depth exceeds {MAX_ARTIFACT_TYPE_SCHEMA_DEPTH}"
+            )));
+        }
+        if ancestors
+            .iter()
+            .any(|ancestor| std::ptr::eq(*ancestor, schema))
+        {
+            return Err(ResourceError::Validation(
+                "typed Artifact schemas do not admit recursive reference cycles".to_owned(),
+            ));
+        }
+        self.reserve(0, 1)?;
+        self.visits += 1;
+        let bytes = canonical_bytes(schema)
+            .map_err(|error| ResourceError::Validation(error.to_string()))?
+            .len();
+        self.canonical_bytes = self
+            .canonical_bytes
+            .checked_add(bytes)
+            .filter(|count| *count <= MAX_ARTIFACT_TYPE_SCHEMA_EXPANDED_BYTES)
+            .ok_or_else(|| {
+                ResourceError::Validation(format!(
+                    "typed Artifact schema reference expansion exceeds {MAX_ARTIFACT_TYPE_SCHEMA_EXPANDED_BYTES} cumulative canonical bytes"
+                ))
+            })?;
+        Ok(())
+    }
+
+    fn reserve(&self, pending: usize, additional: usize) -> ResourceResult<()> {
+        if self
+            .visits
+            .checked_add(pending)
+            .and_then(|count| count.checked_add(additional))
+            .is_none_or(|count| count > MAX_ARTIFACT_TYPE_SCHEMA_EXPANSIONS)
+        {
+            return Err(ResourceError::Validation(format!(
+                "typed Artifact schema reference expansion exceeds {MAX_ARTIFACT_TYPE_SCHEMA_EXPANSIONS} schema visits"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn validate_schema_reference_graph(
+    schema: &Value,
+    registry: &Registry<'_>,
+    base_uri: Uri<String>,
+) -> ResourceResult<()> {
+    let resolver = registry.resolver(base_uri);
+    let mut pending = vec![(schema, resolver, 1_usize, Vec::new(), true)];
+    let mut budget = SchemaExpansionBudget::default();
+    while let Some((schema, resolver, depth, mut ancestors, enter_subresource)) = pending.pop() {
+        budget.admit(schema, depth, &ancestors)?;
+        ancestors.push(schema);
+        let resolver = if enter_subresource {
+            resolver
+                .in_subresource(Draft::Draft202012.create_resource_ref(schema))
+                .map_err(|error| schema_reference_error(&error))?
+        } else {
+            resolver
+        };
+        let Value::Object(object) = schema else {
+            continue;
+        };
+        validate_schema_reference_keywords(object)?;
+        let children = schema_children(object);
+        budget.reserve(pending.len(), children.len())?;
+        for (child, depth_cost) in children {
+            pending.push((
+                child,
+                resolver.clone(),
+                depth + depth_cost,
+                ancestors.clone(),
+                true,
+            ));
+        }
+        for keyword in ["$ref", "$dynamicRef"] {
+            if let Some(reference) = object.get(keyword).and_then(Value::as_str) {
+                budget.reserve(pending.len(), 1)?;
+                let lookup = resolver
+                    .lookup(reference)
+                    .map_err(|error| schema_reference_error(&error))?;
+                let (target, target_resolver, _) = lookup.into_inner();
+                pending.push((target, target_resolver, depth + 1, ancestors.clone(), false));
             }
         }
     }
     Ok(())
 }
 
+fn schema_reference_error(error: &jsonschema::ReferencingError) -> ResourceError {
+    ResourceError::Validation(format!(
+        "typed Artifact schema reference cannot resolve: {error}"
+    ))
+}
+
+#[derive(Debug)]
+struct DenyExternalSchemaReferences;
+
+impl Retrieve for DenyExternalSchemaReferences {
+    fn retrieve(
+        &self,
+        _uri: &Uri<String>,
+    ) -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err("typed Artifact schema retrieval is forbidden".into())
+    }
+}
+
 fn compile_schema(schema: &Value) -> ResourceResult<Validator> {
+    let resource = Draft::Draft202012.create_resource_ref(schema);
+    let base_uri = resource.id().unwrap_or("json-schema:///");
+    let registry = Registry::new()
+        .draft(Draft::Draft202012)
+        .retriever(DenyExternalSchemaReferences)
+        .add(base_uri, resource)
+        .map_err(|error| schema_reference_error(&error))?
+        .prepare()
+        .map_err(|error| schema_reference_error(&error))?;
+    let base_uri =
+        jsonschema::uri::from_str(base_uri).map_err(|error| schema_reference_error(&error))?;
+    validate_schema_reference_graph(schema, &registry, base_uri)?;
     Validator::options()
         .with_draft(Draft::Draft202012)
+        .with_retriever(DenyExternalSchemaReferences)
+        .with_registry(&registry)
         .build(schema)
         .map_err(|error| ResourceError::Validation(format!("invalid Artifact schema: {error}")))
 }
@@ -728,14 +986,24 @@ fn verify_artifact(artifact: &ArtifactRecord) -> ResourceResult<()> {
     artifact
         .reference
         .validate()
-        .map_err(|error| ResourceError::Integrity(error.to_string()))?;
-    let expected = artifact_ref(&artifact.reference.kind, &artifact.bytes)
-        .map_err(|error| ResourceError::Integrity(error.to_string()))?;
+        .map_err(|error| ResourceError::Integrity {
+            code: "artifact_reference_invalid".to_owned(),
+            message: error.to_string(),
+        })?;
+    let expected = artifact_ref(&artifact.reference.kind, &artifact.bytes).map_err(|error| {
+        ResourceError::Integrity {
+            code: "artifact_identity_invalid".to_owned(),
+            message: error.to_string(),
+        }
+    })?;
     if artifact.reference != expected {
-        return Err(ResourceError::Integrity(format!(
-            "Artifact ID {} does not match its identity version, kind, and bytes",
-            artifact.reference.artifact_id
-        )));
+        return Err(ResourceError::Integrity {
+            code: "artifact_bytes_identity_mismatch".to_owned(),
+            message: format!(
+                "Artifact ID {} does not match its identity version, kind, and bytes",
+                artifact.reference.artifact_id
+            ),
+        });
     }
     Ok(())
 }
@@ -746,9 +1014,10 @@ fn decode_canonical_json(bytes: &[u8]) -> ResourceResult<Value> {
     let canonical =
         canonical_bytes(&value).map_err(|error| ResourceError::Validation(error.to_string()))?;
     if canonical != bytes {
-        return Err(ResourceError::Integrity(
-            "typed JSON Artifact bytes are not canonical".to_owned(),
-        ));
+        return Err(ResourceError::Integrity {
+            code: "typed_json_artifact_noncanonical".to_owned(),
+            message: "typed JSON Artifact bytes are not canonical".to_owned(),
+        });
     }
     Ok(value)
 }

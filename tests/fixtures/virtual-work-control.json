@@ -1,11 +1,17 @@
 {
-  "control_version": "cymule.virtual-work-control/1",
+  "control_version": "cymule.virtual-work-control/2",
   "command_id": "command:virtual:fixture:success",
   "work_id": "work:fixture",
   "owner": "worker:fixture",
   "epoch": 1,
   "expected_lease_epoch": 1,
-  "observed_at": 101,
+  "clock": {
+    "clock_version": "cymule.clock-observation/2",
+    "observation_id": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+    "source_id": "clock:fixture",
+    "source_generation": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "scope": "slot:worker-fixture:0"
+  },
   "resolution": {
     "resolution": "succeeded",
     "result": {

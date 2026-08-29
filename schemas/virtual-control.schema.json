@@ -1,0 +1,1505 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/virtual-control.schema.json",
+  "title": "Cymule Virtual Control Contracts",
+  "description": "Finite current Virtual authoring commands and bounded DTOs shared with Rust. This schema defines no Engine transport, generic checkpoint, full scheduler snapshot, provider interface, or normalized persistence receipt.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/controlCommand"
+    },
+    {
+      "$ref": "#/$defs/migrationControlCommand"
+    },
+    {
+      "$ref": "#/$defs/compactionControlCommand"
+    },
+    {
+      "$ref": "#/$defs/rehydrationControlCommand"
+    },
+    {
+      "$ref": "#/$defs/claimControlCommand"
+    },
+    {
+      "$ref": "#/$defs/leaseRenewalControlCommand"
+    },
+    {
+      "$ref": "#/$defs/recoveryControlCommand"
+    },
+    {
+      "$ref": "#/$defs/runWeightControlCommand"
+    },
+    {
+      "$ref": "#/$defs/occurrence"
+    },
+    {
+      "$ref": "#/$defs/compactionCertificate"
+    }
+  ],
+  "$defs": {
+    "archiveBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding",
+        "revision"
+      ],
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/sourceIdentity"
+        },
+        "revision": {
+          "$ref": "#/$defs/sourceIdentity"
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_version",
+        "artifact_id",
+        "kind"
+      ],
+      "properties": {
+        "identity_version": {
+          "const": "cymule.artifact/2"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "kind": {
+          "type": "string",
+          "pattern": "^[a-z0-9._+-]+(?:/[a-z0-9._+-]+)+$",
+          "maxLength": 255
+        }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item",
+        "owner",
+        "epoch",
+        "occurrence_id",
+        "plan_id",
+        "execution_binding",
+        "lease"
+      ],
+      "properties": {
+        "item": {
+          "$ref": "#/$defs/work"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "occurrence_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "plan_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "execution_binding": {
+          "$ref": "#/$defs/executionBindingArtifact"
+        },
+        "lease": {
+          "$ref": "#/$defs/claimLease"
+        }
+      }
+    },
+    "claimControlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_version",
+        "command_id",
+        "owner",
+        "slot_id",
+        "execution_binding",
+        "capabilities",
+        "clock",
+        "lease_ttl"
+      ],
+      "properties": {
+        "control_version": {
+          "const": "cymule.virtual-claim-control/4"
+        },
+        "command_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "slot_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "execution_binding": {
+          "$ref": "#/$defs/executionBindingArtifact"
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "clock": {
+          "$ref": "#/$defs/clockObservationRef"
+        },
+        "lease_ttl": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "claimLease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resource",
+        "owner",
+        "epoch",
+        "expires_at",
+        "clock"
+      ],
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "clock": {
+          "$ref": "#/$defs/clockObservationRef"
+        }
+      }
+    },
+    "clockObservationRef": {
+      "$ref": "durable-control.schema.json#/$defs/clockObservationRef"
+    },
+    "compactionCertificate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "certificate_version",
+        "certificate_id",
+        "source_causal_cut",
+        "summary",
+        "summary_state_digest",
+        "occurrence_root_digest",
+        "parent_work_index_root_digest",
+        "work_index_updates_digest",
+        "work_index_root_digest",
+        "command_root_digest",
+        "command_count",
+        "unresolved_obligations",
+        "retained_execution_bindings",
+        "replay_availability",
+        "rehydration_manifest",
+        "archive"
+      ],
+      "properties": {
+        "certificate_version": {
+          "const": "cymule.virtual-compaction-certificate/4"
+        },
+        "certificate_id": {
+          "$ref": "#/$defs/contentId"
+        },
+        "source_causal_cut": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "summary": {
+          "$ref": "#/$defs/completionSummary"
+        },
+        "summary_state_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "occurrence_root_digest": {
+          "$ref": "#/$defs/contentId"
+        },
+        "parent_work_index_root_digest": {
+          "$ref": "#/$defs/contentId"
+        },
+        "work_index_updates_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "work_index_root_digest": {
+          "$ref": "#/$defs/contentId"
+        },
+        "command_root_digest": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/contentId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "command_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unresolved_obligations": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "retained_execution_bindings": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/executionBindingArtifact"
+          }
+        },
+        "replay_availability": {
+          "$ref": "#/$defs/replayAvailability"
+        },
+        "rehydration_manifest": {
+          "$ref": "https://cymule.dev/schemas/resource.schema.json#/$defs/resourceHandle"
+        },
+        "archive": {
+          "$ref": "#/$defs/archiveBinding"
+        }
+      }
+    },
+    "compactionControlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_version",
+        "command_id",
+        "region_id",
+        "source_causal_cut",
+        "work_ids",
+        "occurrence_ids",
+        "archived_command_ids",
+        "archive"
+      ],
+      "properties": {
+        "control_version": {
+          "const": "cymule.virtual-compaction-control/1"
+        },
+        "command_id": {
+          "$ref": "#/$defs/contentId"
+        },
+        "region_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "source_causal_cut": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "work_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "occurrence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/contentId"
+          }
+        },
+        "archived_command_ids": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "archive": {
+          "$ref": "#/$defs/archiveBinding"
+        }
+      }
+    },
+    "completionSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "region_id",
+        "run_id",
+        "occurrence_count",
+        "work_count",
+        "succeeded_count",
+        "failed_count",
+        "cancelled_count",
+        "output_digest",
+        "evidence_digest",
+        "retained_debug_index_digest"
+      ],
+      "properties": {
+        "region_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "run_id": {
+          "$ref": "#/$defs/runIdentity"
+        },
+        "occurrence_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "work_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "succeeded_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "failed_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "cancelled_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "output_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "evidence_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "retained_debug_index_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "contentId": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "controlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_version",
+        "command_id",
+        "work_id",
+        "owner",
+        "epoch",
+        "expected_lease_epoch",
+        "clock",
+        "resolution"
+      ],
+      "properties": {
+        "control_version": {
+          "const": "cymule.virtual-work-control/2"
+        },
+        "command_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "work_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expected_lease_epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "clock": {
+          "$ref": "#/$defs/clockObservationRef"
+        },
+        "resolution": {
+          "$ref": "#/$defs/resolution"
+        }
+      }
+    },
+    "cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "position",
+        "exhausted"
+      ],
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "position": {
+          "type": "string"
+        },
+        "exhausted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "executionBindingArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_version",
+        "artifact_id",
+        "kind"
+      ],
+      "properties": {
+        "identity_version": {
+          "const": "cymule.artifact/2"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "kind": {
+          "const": "cymule.execution-binding/2"
+        }
+      }
+    },
+    "leaseRenewalControlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_version",
+        "command_id",
+        "work_id",
+        "owner",
+        "epoch",
+        "expected_lease_epoch",
+        "clock",
+        "lease_ttl"
+      ],
+      "properties": {
+        "control_version": {
+          "const": "cymule.virtual-lease-renewal-control/2"
+        },
+        "command_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "work_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expected_lease_epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "clock": {
+          "$ref": "#/$defs/clockObservationRef"
+        },
+        "lease_ttl": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "leaseRenewalReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "clock_observation",
+        "lease"
+      ],
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/leaseRenewalControlCommand"
+        },
+        "clock_observation": {
+          "$ref": "durable-storage.schema.json#/$defs/clock_observation"
+        },
+        "lease": {
+          "$ref": "#/$defs/claimLease"
+        }
+      }
+    },
+    "migrationControlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_version",
+        "command_id",
+        "plan"
+      ],
+      "properties": {
+        "control_version": {
+          "const": "cymule.virtual-region-migration-control/3"
+        },
+        "command_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "plan": {
+          "$ref": "#/$defs/migrationPlan"
+        }
+      }
+    },
+    "migrationPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "migration_version",
+        "migration_id",
+        "kind",
+        "expected_sources",
+        "targets",
+        "migration_binding",
+        "migration_revision",
+        "coverage_evidence"
+      ],
+      "properties": {
+        "migration_version": {
+          "const": "cymule.virtual-region-migration/3"
+        },
+        "migration_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "kind": {
+          "enum": [
+            "split",
+            "merge"
+          ]
+        },
+        "expected_sources": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/$defs/virtualIdentity"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/sourceCheckpoint"
+          },
+          "maxProperties": 1024
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/region"
+          },
+          "maxItems": 1024
+        },
+        "migration_binding": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "coverage_evidence": {
+          "$ref": "#/$defs/artifact"
+        },
+        "migration_revision": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "migrationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan",
+        "retired_regions",
+        "active_targets"
+      ],
+      "properties": {
+        "plan": {
+          "$ref": "#/$defs/migrationPlan"
+        },
+        "retired_regions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "active_targets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        }
+      }
+    },
+    "migrationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "migration_id",
+        "kind",
+        "source_region_ids",
+        "target_count",
+        "migration_binding",
+        "migration_revision"
+      ],
+      "properties": {
+        "migration_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "kind": {
+          "enum": [
+            "split",
+            "merge"
+          ]
+        },
+        "source_region_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "target_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "migration_binding": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "migration_revision": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "nonEmpty": {
+      "$ref": "#/$defs/virtualIdentity"
+    },
+    "occurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "occurrence_version",
+        "occurrence_id",
+        "work_id",
+        "region_id",
+        "run_id",
+        "owner",
+        "epoch",
+        "lease_epoch",
+        "lease_clock",
+        "plan_id",
+        "execution_binding",
+        "state",
+        "result",
+        "error",
+        "next_reason"
+      ],
+      "properties": {
+        "occurrence_version": {
+          "const": "cymule.virtual-work-occurrence/3"
+        },
+        "occurrence_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "work_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "region_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "run_id": {
+          "$ref": "#/$defs/runIdentity"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "lease_epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "lease_clock": {
+          "$ref": "#/$defs/clockObservationRef"
+        },
+        "plan_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "execution_binding": {
+          "$ref": "#/$defs/executionBindingArtifact"
+        },
+        "state": {
+          "enum": [
+            "running",
+            "succeeded",
+            "retry_scheduled",
+            "parked",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "result": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/artifact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/artifact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/parkReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "running"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "type": "null"
+              },
+              "error": {
+                "type": "null"
+              },
+              "next_reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "succeeded"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/artifact"
+              },
+              "error": {
+                "type": "null"
+              },
+              "next_reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "retry_scheduled"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "type": "null"
+              },
+              "error": {
+                "$ref": "#/$defs/artifact"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "parked"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "type": "null"
+              },
+              "error": {
+                "type": "null"
+              },
+              "next_reason": {
+                "$ref": "#/$defs/parkReason"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "failed",
+                  "cancelled"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "type": "null"
+              },
+              "error": {
+                "$ref": "#/$defs/artifact"
+              },
+              "next_reason": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "parkReason": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "key"
+          ],
+          "properties": {
+            "kind": {
+              "const": "wait"
+            },
+            "key": {
+              "$ref": "#/$defs/contentId"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "work_id"
+          ],
+          "properties": {
+            "kind": {
+              "const": "dependency"
+            },
+            "work_id": {
+              "$ref": "#/$defs/nonEmpty"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "account"
+          ],
+          "properties": {
+            "kind": {
+              "const": "budget"
+            },
+            "account": {
+              "$ref": "#/$defs/nonEmpty"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "capability"
+          ],
+          "properties": {
+            "kind": {
+              "const": "capability"
+            },
+            "capability": {
+              "$ref": "#/$defs/nonEmpty"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "domain"
+          ],
+          "properties": {
+            "kind": {
+              "const": "backpressure"
+            },
+            "domain": {
+              "$ref": "#/$defs/nonEmpty"
+            }
+          }
+        }
+      ]
+    },
+    "parked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item",
+        "reason"
+      ],
+      "properties": {
+        "item": {
+          "$ref": "#/$defs/work"
+        },
+        "reason": {
+          "$ref": "#/$defs/parkReason"
+        }
+      }
+    },
+    "recoveryControlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_version",
+        "command_id",
+        "work_id",
+        "expected_owner",
+        "expected_epoch",
+        "expected_lease_epoch",
+        "clock",
+        "resolution"
+      ],
+      "properties": {
+        "control_version": {
+          "const": "cymule.virtual-recovery-control/2"
+        },
+        "command_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "work_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "expected_owner": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "expected_epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expected_lease_epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "clock": {
+          "$ref": "#/$defs/clockObservationRef"
+        },
+        "resolution": {
+          "$ref": "#/$defs/resolution"
+        }
+      }
+    },
+    "recoveryReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "clock_observation",
+        "occurrence"
+      ],
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/recoveryControlCommand"
+        },
+        "clock_observation": {
+          "$ref": "durable-storage.schema.json#/$defs/clock_observation"
+        },
+        "occurrence": {
+          "$ref": "#/$defs/occurrence"
+        }
+      }
+    },
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "region_id",
+        "run_id",
+        "source",
+        "source_artifact",
+        "cursor",
+        "estimated_total"
+      ],
+      "properties": {
+        "region_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "run_id": {
+          "$ref": "#/$defs/runIdentity"
+        },
+        "source": {
+          "$ref": "#/$defs/sourceBinding"
+        },
+        "source_artifact": {
+          "$ref": "durable-storage.schema.json#/$defs/artifact_ref"
+        },
+        "cursor": {
+          "$ref": "#/$defs/cursor"
+        },
+        "estimated_total": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "rehydrationControlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_version",
+        "command_id",
+        "certificate_id",
+        "occurrence_ids"
+      ],
+      "properties": {
+        "control_version": {
+          "const": "cymule.virtual-rehydration-control/1"
+        },
+        "command_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "certificate_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "occurrence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/contentId"
+          },
+          "maxItems": 1024
+        }
+      }
+    },
+    "rehydrationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "restored_occurrence_ids"
+      ],
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/rehydrationControlCommand"
+        },
+        "restored_occurrence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        }
+      }
+    },
+    "replayAvailability": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "exact"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "missing"
+          ],
+          "properties": {
+            "status": {
+              "const": "projection_only"
+            },
+            "missing": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/nonEmpty"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "status": {
+              "const": "unavailable"
+            },
+            "reason": {
+              "$ref": "#/$defs/nonEmpty"
+            }
+          }
+        }
+      ]
+    },
+    "resolution": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "resolution",
+            "result"
+          ],
+          "properties": {
+            "resolution": {
+              "const": "succeeded"
+            },
+            "result": {
+              "$ref": "#/$defs/artifact"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "resolution",
+            "error",
+            "next_reason"
+          ],
+          "properties": {
+            "resolution": {
+              "const": "retry"
+            },
+            "error": {
+              "$ref": "#/$defs/artifact"
+            },
+            "next_reason": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/parkReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "resolution",
+            "reason"
+          ],
+          "properties": {
+            "resolution": {
+              "const": "parked"
+            },
+            "reason": {
+              "$ref": "#/$defs/parkReason"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "resolution",
+            "error"
+          ],
+          "properties": {
+            "resolution": {
+              "const": "failed"
+            },
+            "error": {
+              "$ref": "#/$defs/artifact"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "resolution",
+            "reason"
+          ],
+          "properties": {
+            "resolution": {
+              "const": "cancelled"
+            },
+            "reason": {
+              "$ref": "#/$defs/artifact"
+            }
+          }
+        }
+      ]
+    },
+    "runIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "runWeightControlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_version",
+        "command_id",
+        "run_id",
+        "weight"
+      ],
+      "properties": {
+        "control_version": {
+          "const": "cymule.virtual-run-weight-control/1"
+        },
+        "command_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "run_id": {
+          "$ref": "#/$defs/runIdentity"
+        },
+        "weight": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "runWeightReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "previous_weight",
+        "current_weight"
+      ],
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/runWeightControlCommand"
+        },
+        "previous_weight": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "current_weight": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "sourceBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "binding",
+        "revision"
+      ],
+      "properties": {
+        "operation": {
+          "$ref": "#/$defs/sourceIdentity"
+        },
+        "binding": {
+          "$ref": "#/$defs/sourceIdentity"
+        },
+        "revision": {
+          "$ref": "#/$defs/sourceIdentity"
+        }
+      }
+    },
+    "sourceCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "cursor"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/sourceBinding"
+        },
+        "cursor": {
+          "$ref": "#/$defs/cursor"
+        }
+      }
+    },
+    "sourceIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]{1,256}$"
+    },
+    "virtualIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "work": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "work_id",
+        "region_id",
+        "run_id",
+        "payload",
+        "capability",
+        "priority",
+        "cost"
+      ],
+      "properties": {
+        "work_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "region_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "run_id": {
+          "$ref": "#/$defs/runIdentity"
+        },
+        "payload": {
+          "$ref": "#/$defs/artifact"
+        },
+        "capability": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/nonEmpty"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "cost": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "workResolutionReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "occurrence"
+      ],
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/controlCommand"
+        },
+        "occurrence": {
+          "$ref": "#/$defs/occurrence"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "intent_id": "sha256:5bd80e160ba0f8b5cfaccc93a52194b7438da9dd420cab532e743fa2e95a4df1",
+  "run_id": "run:applied-null",
+  "state": "applied",
+  "execution_availability": "available",
+  "reconciliation": "resolved",
+  "result": {
+    "identity_version": "cymule.artifact/2",
+    "artifact_id": "sha256:2317f0304d5440f3952b506637c7d8ec788e5851ac2ead62bc658730035d1a73",
+    "kind": "cymule.effect-result/1"
+  }
+}

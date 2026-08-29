@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ResourceCleanupReceipt, ResourceError, ResourceIntegrity, ResourcePublication, ResourceResult,
-    ResourceShape,
+    MAX_RESOURCE_ANNOTATIONS, ResourceCleanupReceipt, ResourceError, ResourceIntegrity,
+    ResourcePublication, ResourceResult, ResourceShape,
 };
 
 /// Maximum bytes submitted to a store in one call.
@@ -45,8 +45,9 @@ impl ResourceWriteIntent {
     /// Returns an error for empty identities, inline shape, invalid media type,
     /// or oversized annotation fields.
     pub fn validate(&self) -> ResourceResult<()> {
-        if self.write_id.is_empty()
-            || self.write_id.len() > 512
+        let write_id_scalars = self.write_id.chars().count();
+        if write_id_scalars == 0
+            || write_id_scalars > 512
             || self.write_id.chars().any(char::is_control)
         {
             return Err(ResourceError::Validation(
@@ -61,17 +62,25 @@ impl ResourceWriteIntent {
         if self.media_type.is_empty()
             || self.media_type.len() > 255
             || !self.media_type.contains('/')
+            || !self.media_type.is_ascii()
+            || self.media_type != self.media_type.to_ascii_lowercase()
             || self.media_type.chars().any(char::is_whitespace)
         {
             return Err(ResourceError::Validation(
                 "resource write media type is invalid".to_owned(),
             ));
         }
+        if self.annotations.len() > MAX_RESOURCE_ANNOTATIONS {
+            return Err(ResourceError::Validation(format!(
+                "resource write intent exceeds {MAX_RESOURCE_ANNOTATIONS} annotations"
+            )));
+        }
         for (key, value) in &self.annotations {
             if key.is_empty()
-                || key.len() > 2048
+                || key.chars().count() > 2048
                 || key.chars().any(char::is_control)
-                || value.len() > 4096
+                || value.chars().count() > 4096
+                || value.chars().any(char::is_control)
             {
                 return Err(ResourceError::Validation(
                     "resource write annotation is invalid".to_owned(),
@@ -83,16 +92,25 @@ impl ResourceWriteIntent {
 }
 
 impl ResourceWriteSession {
-    fn validate_for(&self, intent: &ResourceWriteIntent) -> ResourceResult<()> {
+    /// Verify this session against the exact caller intent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store changed the write identity, upload
+    /// identity, or immutable implementation binding.
+    pub fn validate_for(&self, intent: &ResourceWriteIntent) -> ResourceResult<()> {
         if self.write_id != intent.write_id
             || self.upload_id.is_empty()
+            || self.upload_id.chars().count() > 512
             || self.store_binding.is_empty()
+            || self.store_binding.chars().count() > 512
             || self.upload_id.chars().any(char::is_control)
             || self.store_binding.chars().any(char::is_control)
         {
-            return Err(ResourceError::Substrate(
-                "store returned an invalid write session".to_owned(),
-            ));
+            return Err(ResourceError::Substrate {
+                code: "resource_store_write_session_invalid".to_owned(),
+                message: "store returned an invalid write session".to_owned(),
+            });
         }
         Ok(())
     }
@@ -101,10 +119,18 @@ impl ResourceWriteSession {
 /// Replaceable chunked write boundary for large resources.
 pub trait ArtifactStore {
     /// Begin or resume one idempotent write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid intent, conflicts, or provider failure.
     fn begin_write(&mut self, intent: &ResourceWriteIntent)
     -> ResourceResult<ResourceWriteSession>;
 
     /// Persist one contiguous chunk at the exact expected offset.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid sessions/ranges, conflicts, or provider failure.
     fn write_chunk(
         &mut self,
         session: &ResourceWriteSession,
@@ -113,16 +139,40 @@ pub trait ArtifactStore {
     ) -> ResourceResult<()>;
 
     /// Finalize the upload and return its verified immutable handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid state, integrity failure, or provider failure.
     fn commit_write(
         &mut self,
         session: &ResourceWriteSession,
     ) -> ResourceResult<ResourcePublication>;
 
     /// Abort one upload and return verified staging/chunk cleanup evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid state, integrity failure, or provider failure.
     fn abort_write(
         &mut self,
         session: &ResourceWriteSession,
     ) -> ResourceResult<ResourceCleanupReceipt>;
+
+    /// Retrieve the original terminal cleanup receipt after a lost commit or
+    /// abort response.
+    ///
+    /// A store returns `None` only before it has durably completed the
+    /// immutable cleanup plan. Once present, the exact same receipt remains
+    /// queryable after restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid session, corrupt authority, or provider
+    /// failure.
+    fn cleanup_receipt(
+        &mut self,
+        session: &ResourceWriteSession,
+    ) -> ResourceResult<Option<ResourceCleanupReceipt>>;
 }
 
 /// Validating facade over one chunked store adapter.
@@ -164,6 +214,18 @@ impl<S: ArtifactStore> ResourceWriter<S> {
                 "resource write chunk must be 1..={MAX_WRITE_CHUNK} bytes"
             )));
         }
+        let byte_count = u64::try_from(bytes.len()).map_err(|_| {
+            ResourceError::Validation("resource write chunk exceeds platform bounds".to_owned())
+        })?;
+        if offset > cymule_core::MAX_EXACT_INTEGER
+            || offset
+                .checked_add(byte_count)
+                .is_none_or(|end| end > cymule_core::MAX_EXACT_INTEGER)
+        {
+            return Err(ResourceError::Validation(
+                "resource write range exceeds the shared exact-integer range".to_owned(),
+            ));
+        }
         self.store.write_chunk(session, offset, bytes)
     }
 
@@ -190,9 +252,11 @@ impl<S: ArtifactStore> ResourceWriter<S> {
                 ResourceIntegrity::Content { .. } | ResourceIntegrity::Version { .. }
             )
         {
-            return Err(ResourceError::Substrate(
-                "store committed a Resource that does not match its write intent".to_owned(),
-            ));
+            return Err(ResourceError::Substrate {
+                code: "resource_store_commit_intent_mismatch".to_owned(),
+                message: "store committed a Resource that does not match its write intent"
+                    .to_owned(),
+            });
         }
         Ok(publication)
     }
@@ -211,14 +275,27 @@ impl<S: ArtifactStore> ResourceWriter<S> {
         intent.validate()?;
         session.validate_for(intent)?;
         let receipt = self.store.abort_write(session)?;
-        receipt.verify()?;
-        if receipt.write_id != intent.write_id
-            || receipt.upload_id != session.upload_id
-            || receipt.store_binding != session.store_binding
-        {
-            return Err(ResourceError::Substrate(
-                "store returned cleanup evidence for another upload".to_owned(),
-            ));
+        verify_cleanup_receipt(intent, session, &receipt)?;
+        Ok(receipt)
+    }
+
+    /// Retrieve and verify the original terminal cleanup receipt after a lost
+    /// commit or abort response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is invalid or the store returns
+    /// malformed or mismatched durable evidence.
+    pub fn cleanup_receipt(
+        &mut self,
+        intent: &ResourceWriteIntent,
+        session: &ResourceWriteSession,
+    ) -> ResourceResult<Option<ResourceCleanupReceipt>> {
+        intent.validate()?;
+        session.validate_for(intent)?;
+        let receipt = self.store.cleanup_receipt(session)?;
+        if let Some(receipt) = &receipt {
+            verify_cleanup_receipt(intent, session, receipt)?;
         }
         Ok(receipt)
     }
@@ -227,4 +304,22 @@ impl<S: ArtifactStore> ResourceWriter<S> {
     pub fn into_inner(self) -> S {
         self.store
     }
+}
+
+fn verify_cleanup_receipt(
+    intent: &ResourceWriteIntent,
+    session: &ResourceWriteSession,
+    receipt: &ResourceCleanupReceipt,
+) -> ResourceResult<()> {
+    receipt.verify()?;
+    if receipt.plan.write_id != intent.write_id
+        || receipt.plan.upload_id != session.upload_id
+        || receipt.plan.store_binding != session.store_binding
+    {
+        return Err(ResourceError::Substrate {
+            code: "resource_store_cleanup_upload_mismatch".to_owned(),
+            message: "store returned cleanup evidence for another upload".to_owned(),
+        });
+    }
+    Ok(())
 }

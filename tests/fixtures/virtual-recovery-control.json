@@ -1,11 +1,17 @@
 {
-  "control_version": "cymule.virtual-recovery-control/1",
+  "control_version": "cymule.virtual-recovery-control/2",
   "command_id": "command:recovery:fixture",
   "work_id": "work:fixture",
   "expected_owner": "worker:fixture",
   "expected_epoch": 1,
   "expected_lease_epoch": 2,
-  "observed_at": 150,
+  "clock": {
+    "clock_version": "cymule.clock-observation/2",
+    "observation_id": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+    "source_id": "clock:fixture",
+    "source_generation": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "scope": "slot:worker-fixture:0"
+  },
   "resolution": {
     "resolution": "retry",
     "error": {

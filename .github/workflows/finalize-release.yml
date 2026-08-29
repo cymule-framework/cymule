@@ -11,15 +11,19 @@ on:
 permissions: {}
 
 concurrency:
-  group: finalize-release-${{ inputs.version }}
+  group: finalize-release-stable
   cancel-in-progress: false
 
 jobs:
-  release:
+  verify:
     runs-on: ubuntu-24.04
-    environment: release-finalize
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      controller_sha: ${{ steps.identity.outputs.controller_sha }}
+      release_sha: ${{ steps.identity.outputs.release_sha }}
+      release_tag_sha: ${{ steps.identity.outputs.release_tag_sha }}
+      version: ${{ steps.identity.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -27,21 +31,67 @@ jobs:
           persist-credentials: false
 
       - name: Admit exact current public main and immutable tag
+        id: identity
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
+          export LC_ALL=C
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           test "$GITHUB_REF" = "refs/heads/main"
           git fetch --no-tags origin main
           current_main=$(git rev-parse refs/remotes/origin/main)
           test "$GITHUB_SHA" = "$current_main"
           git fetch --force origin "refs/tags/v$RELEASE_VERSION:refs/tags/v$RELEASE_VERSION"
           test "$(git cat-file -t "refs/tags/v$RELEASE_VERSION")" = tag
+          release_tag_sha=$(git rev-parse "refs/tags/v$RELEASE_VERSION")
           release_sha=$(git rev-list -n 1 "refs/tags/v$RELEASE_VERSION")
-          test "$release_sha" = "$current_main"
-          git checkout --detach "$release_sha"
-          test "$(git describe --exact-match --tags)" = "v$RELEASE_VERSION"
-          test "$(node -p "require('./sdk/typescript/package.json').version")" = "$RELEASE_VERSION"
-          echo "RELEASE_SHA=$release_sha" >> "$GITHUB_ENV"
+          [[ "$release_tag_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]
+          test "$release_tag_sha" != "$release_sha"
+          git merge-base --is-ancestor "$release_sha" "$current_main"
+          {
+            echo "CONTROLLER_SHA=$current_main"
+            echo "RELEASE_SHA=$release_sha"
+            echo "RELEASE_TAG_SHA=$release_tag_sha"
+          } >> "$GITHUB_ENV"
+          {
+            echo "controller_sha=$current_main"
+            echo "release_sha=$release_sha"
+            echo "release_tag_sha=$release_tag_sha"
+            echo "version=$RELEASE_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.identity.outputs.release_sha }}
+          path: release-payload
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind current controller and exact release payload
+        env:
+          CONTROLLER_SHA: ${{ steps.identity.outputs.controller_sha }}
+          RELEASE_SHA: ${{ steps.identity.outputs.release_sha }}
+          RELEASE_TAG_SHA: ${{ steps.identity.outputs.release_tag_sha }}
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          git diff --quiet "$CONTROLLER_SHA" -- \
+            scripts/finalize_release.py \
+            scripts/npm_release.py \
+            scripts/crates_release.py \
+            scripts/version_domains.py
+          git fetch --no-tags origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
+          test "$(git -C release-payload rev-parse HEAD)" = "$RELEASE_SHA"
+          git -C release-payload fetch --force origin \
+            "refs/tags/v$RELEASE_VERSION:refs/tags/v$RELEASE_VERSION"
+          test "$(git -C release-payload cat-file -t "refs/tags/v$RELEASE_VERSION")" = tag
+          test "$(git -C release-payload rev-parse "refs/tags/v$RELEASE_VERSION")" = "$RELEASE_TAG_SHA"
+          test "$(git -C release-payload rev-list -n 1 "refs/tags/v$RELEASE_VERSION")" = "$RELEASE_SHA"
+          package_version=$(python3 -c \
+            'import json, pathlib; print(json.loads(pathlib.Path("release-payload/sdk/typescript/package.json").read_text())["version"])')
+          test "$package_version" = "$RELEASE_VERSION"
 
       - name: Install Rust
         run: |
@@ -58,29 +108,46 @@ jobs:
           node-version: 26.7.0
           registry-url: https://registry.npmjs.org/
           cache: pnpm
-          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+          cache-dependency-path: release-payload/sdk/typescript/pnpm-lock.yaml
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: 0.7.2
+
+      - name: Require a closed release changelog and version generation
+        env:
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          uv run --project sdk/python --frozen python scripts/version_domains.py verify
+          uv run --project sdk/python --frozen python \
+            scripts/version_domains.py verify-release \
+            --version "$RELEASE_VERSION"
 
       - name: Require a current exact-SHA soak witness
         run: >-
           python3 scripts/test_harness.py run
           rust-soak
           --report .cache/test-harness/finalize-rust-soak.json
+        working-directory: release-payload
 
       - name: Rebuild exact npm archives
         env:
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          pnpm --dir sdk/typescript install --frozen-lockfile
-          pnpm --dir sdk/typescript run build
-          pnpm --dir sdk/typescript test
+          pnpm --dir release-payload/sdk/typescript install --frozen-lockfile
+          pnpm --dir release-payload/sdk/typescript run build
+          pnpm --dir release-payload/sdk/typescript test
           for package_name in cymule '@cymule/sdk'; do
             case "$package_name" in
               cymule) stage_name=cymule ;;
               '@cymule/sdk') stage_name=cymule-sdk ;;
             esac
             package_dir="$RUNNER_TEMP/package-$stage_name"
-            stage_dir="$RUNNER_TEMP/npm-stage-$stage_name"
-            node sdk/typescript/scripts/prepare-package.mjs "$package_name" "$package_dir"
+            stage_dir="$RUNNER_TEMP/release-evidence/npm-$stage_name"
+            node release-payload/sdk/typescript/scripts/prepare-package.mjs \
+              "$package_name" "$package_dir"
             python3 scripts/npm_release.py stage \
               --package-dir "$package_dir" \
               --package-name "$package_name" \
@@ -90,71 +157,392 @@ jobs:
           done
 
       - name: Close npm bytes and provenance
+        env:
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
         run: |
+          test "$(node --version)" = v26.7.0
+          test "$(npm --version)" = 11.19.0
           for stage_name in cymule cymule-sdk; do
             python3 scripts/npm_release.py verify-registry \
-              --manifest "$RUNNER_TEMP/npm-stage-$stage_name/manifest.json" \
+              --manifest "$RUNNER_TEMP/release-evidence/npm-$stage_name/manifest.json" \
               --release-sha "$RELEASE_SHA"
           done
 
+      - name: Stage exact crate archives for aggregate publication evidence
+        env:
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          RELEASE_SHA: ${{ steps.identity.outputs.release_sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          git diff --quiet "$CONTROLLER_SHA" -- \
+            scripts/crates_release.py scripts/version_domains.py
+          python3 scripts/crates_release.py stage \
+            --version "$RELEASE_VERSION" \
+            --release-sha "$RELEASE_SHA" \
+            --output "$RUNNER_TEMP/release-evidence/crates"
+
       - name: Close the complete crates.io catalog
         env:
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
           RELEASE_VERSION: ${{ inputs.version }}
         run: python3 scripts/crates_release.py verify-registry --version "$RELEASE_VERSION"
 
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-evidence-${{ inputs.version }}
+          path: ${{ runner.temp }}/release-evidence
+          if-no-files-found: error
+          retention-days: 1
+
+  freeze:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.controller_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.release_sha }}
+          path: release-payload
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust metadata toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: 0.7.2
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26.7.0
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-evidence-${{ needs.verify.outputs.version }}
+          path: ${{ runner.temp }}/release-evidence
+
+      - name: Bind data-only freeze to current controller and exact payload
+        env:
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_TAG: v${{ needs.verify.outputs.version }}
+          RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          git diff --quiet "$CONTROLLER_SHA" -- \
+            scripts/finalize_release.py \
+            scripts/npm_release.py \
+            scripts/crates_release.py \
+            scripts/version_domains.py
+          git fetch --no-tags origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
+          remote_refs=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
+          test "$(printf '%s\n' "$remote_refs" | grep -c .)" -eq 2
+          remote_tag_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
+          remote_release_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG^{}" '$2 == ref {print $1}')
+          test "$remote_tag_sha" = "$RELEASE_TAG_SHA"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+          test "$(git -C release-payload rev-parse HEAD)" = "$RELEASE_SHA"
+
+      - name: Verify exact payload version authority without executing payload code
+        env:
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          uv run --project sdk/python --frozen python scripts/version_domains.py verify
+          uv run --project sdk/python --frozen python \
+            scripts/version_domains.py verify-release \
+            --version "$RELEASE_VERSION"
+
       - name: Prepare release notes
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          awk -v heading="## [$RELEASE_VERSION]" '
-            index($0, heading) == 1 { capture=1; next }
-            capture && /^## \[/ { exit }
-            capture { print }
-          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
-          test -s "$RUNNER_TEMP/release-notes.md"
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: >-
+          uv run --project sdk/python --frozen python
+          scripts/version_domains.py release-notes
+          --version "$RELEASE_VERSION"
+          --output "$RUNNER_TEMP/release-notes.md"
 
-      - name: Create GitHub Release once
+      - name: Freeze fresh registry evidence into the exact release BOM
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: v${{ inputs.version }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "GitHub Release $RELEASE_TAG already exists; exact metadata readback follows"
-          else
-            gh release create "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
-              --title "Cymule $RELEASE_VERSION" \
-              --notes-file "$RUNNER_TEMP/release-notes.md"
-          fi
-          gh release view "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json tagName,name,isDraft,isPrerelease,body \
-            > "$RUNNER_TEMP/release.json"
-          python3 - <<'PY'
-          import json
-          import os
-          import pathlib
+          test "$(node --version)" = v26.7.0
+          test "$(npm --version)" = 11.19.0
+          evidence_dir="$RUNNER_TEMP/final-publications"
+          mkdir "$evidence_dir"
+          for stage_name in cymule cymule-sdk; do
+            python3 scripts/npm_release.py verify-registry \
+              --manifest "$RUNNER_TEMP/release-evidence/npm-$stage_name/manifest.json" \
+              --release-sha "$RELEASE_SHA" \
+              --publication-output "$evidence_dir/npm-$stage_name.json"
+          done
+          python3 scripts/crates_release.py registry-evidence \
+            --version "$RELEASE_VERSION" \
+            --release-sha "$RELEASE_SHA" \
+            --stage "$RUNNER_TEMP/release-evidence/crates" \
+            --output "$evidence_dir/crates.json"
+          uv run --project sdk/python --frozen python scripts/version_domains.py bom \
+            --source-sha "$RELEASE_SHA" \
+            --public-source-sha "$RELEASE_SHA" \
+            --publications "$evidence_dir/npm-cymule.json" \
+            --publications "$evidence_dir/npm-cymule-sdk.json" \
+            --publications "$evidence_dir/crates.json" \
+            --output "$RUNNER_TEMP/cymule-$RELEASE_VERSION-version-domain-bom.json"
 
-          observed = json.loads(
-              pathlib.Path(os.environ["RUNNER_TEMP"], "release.json").read_text()
-          )
-          expected = {
-              "tagName": os.environ["RELEASE_TAG"],
-              "name": f"Cymule {os.environ['RELEASE_VERSION']}",
-              "isDraft": False,
-              "isPrerelease": False,
-          }
-          for key, value in expected.items():
-              if observed.get(key) != value:
-                  raise SystemExit(
-                      f"GitHub Release metadata {key}={observed.get(key)!r}, "
-                      f"expected {value!r}"
-                  )
-          notes = pathlib.Path(
-              os.environ["RUNNER_TEMP"], "release-notes.md"
-          ).read_text().rstrip("\n")
-          if observed.get("body", "").rstrip("\n") != notes:
-              raise SystemExit("GitHub Release notes differ from the exact changelog entry")
-          PY
+      - name: Freeze exact release metadata without mutation authority
+        env:
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          bom_name="cymule-$RELEASE_VERSION-version-domain-bom.json"
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          uv run --project sdk/python --frozen python3 scripts/finalize_release.py stage \
+            --repository "$GITHUB_REPOSITORY" \
+            --version "$RELEASE_VERSION" \
+            --release-sha "$RELEASE_SHA" \
+            --release-tag-sha "$RELEASE_TAG_SHA" \
+            --controller-sha "$CONTROLLER_SHA" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --asset "$RUNNER_TEMP/$bom_name" \
+            --output "$RUNNER_TEMP/release-finalization"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-finalization-${{ needs.verify.outputs.version }}
+          path: ${{ runner.temp }}/release-finalization
+          if-no-files-found: error
+          retention-days: 1
+
+  attest:
+    needs: [verify, freeze]
+    runs-on: ubuntu-24.04
+    environment: release-finalize
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.controller_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.release_sha }}
+          path: release-authority
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-finalization-${{ needs.verify.outputs.version }}
+          path: ${{ runner.temp }}/release-finalization
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: 0.7.2
+
+      - name: Verify the complete data-only BOM authority
+        id: authority
+        env:
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-authority
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_TAG: v${{ needs.verify.outputs.version }}
+          RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          git fetch --no-tags origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
+          remote_refs=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
+          test "$(printf '%s\n' "$remote_refs" | grep -c .)" -eq 2
+          remote_tag_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
+          remote_release_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG^{}" '$2 == ref {print $1}')
+          test "$remote_tag_sha" = "$RELEASE_TAG_SHA"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+          test "$(git -C release-authority rev-parse HEAD)" = "$RELEASE_SHA"
+          bom_path=$(uv run --project sdk/python --frozen python3 scripts/finalize_release.py verify-stage \
+            --repository "$GITHUB_REPOSITORY" \
+            --version "$RELEASE_VERSION" \
+            --release-sha "$RELEASE_SHA" \
+            --release-tag-sha "$RELEASE_TAG_SHA" \
+            --controller-sha "$CONTROLLER_SHA" \
+            --stage "$RUNNER_TEMP/release-finalization")
+          test -f "$bom_path"
+          echo "bom_path=$bom_path" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the content-addressed BOM authority
+        id: bom-attestation
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: ${{ steps.authority.outputs.bom_path }}
+
+      - name: Close the attestation bundle for the projection writer
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.bom-attestation.outputs.bundle-path }}
+        run: |
+          test -f "$ATTESTATION_BUNDLE"
+          mkdir "$RUNNER_TEMP/release-attestation"
+          cp -- "$ATTESTATION_BUNDLE" "$RUNNER_TEMP/release-attestation/bundle.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-attestation-${{ needs.verify.outputs.version }}
+          path: ${{ runner.temp }}/release-attestation
+          if-no-files-found: error
+          retention-days: 1
+
+  control-plane:
+    needs: [verify, freeze, attest]
+    runs-on: ubuntu-24.04
+    environment: release-finalize
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.controller_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mint one repository-scoped read-only settings token
+        id: control-plane-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.CYMULE_RELEASE_CONTROL_APP_ID }}
+          private-key: ${{ secrets.CYMULE_RELEASE_CONTROL_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          permission-actions: read
+
+      - name: Close a short-lived live control-plane receipt
+        env:
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          CONTROL_PLANE_TOKEN: ${{ steps.control-plane-token.outputs.token }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_TAG: v${{ needs.verify.outputs.version }}
+          RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          git diff --quiet "$CONTROLLER_SHA" -- scripts/verify_github_release_settings.py
+          git fetch --no-tags origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
+          remote_refs=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
+          test "$(printf '%s\n' "$remote_refs" | grep -c .)" -eq 2
+          remote_tag_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
+          remote_release_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG^{}" '$2 == ref {print $1}')
+          test "$remote_tag_sha" = "$RELEASE_TAG_SHA"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+          mkdir "$RUNNER_TEMP/release-control-plane"
+          GITHUB_TOKEN="$CONTROL_PLANE_TOKEN" \
+            python3 scripts/verify_github_release_settings.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --mirror-integration-id "${{ vars.CYMULE_GITHUB_MIRROR_INTEGRATION_ID }}" \
+              --release-tag-integration-id "${{ vars.CYMULE_GITHUB_RELEASE_TAG_INTEGRATION_ID }}" \
+              --npm-reviewer-team-id "${{ vars.CYMULE_GITHUB_NPM_REVIEWER_TEAM_ID }}" \
+              --crates-reviewer-team-id "${{ vars.CYMULE_GITHUB_CRATES_REVIEWER_TEAM_ID }}" \
+              --release-reviewer-team-id "${{ vars.CYMULE_GITHUB_RELEASE_REVIEWER_TEAM_ID }}" \
+              --receipt-output "$RUNNER_TEMP/release-control-plane/receipt.json" \
+              --run-id "$GITHUB_RUN_ID" \
+              --run-attempt "$GITHUB_RUN_ATTEMPT" \
+              --controller-sha "$CONTROLLER_SHA" \
+              --release-sha "$RELEASE_SHA" \
+              --release-tag-sha "$RELEASE_TAG_SHA"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-control-plane-${{ needs.verify.outputs.version }}
+          path: ${{ runner.temp }}/release-control-plane
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [verify, freeze, attest, control-plane]
+    runs-on: ubuntu-24.04
+    environment: release-finalize
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Converge the exact draft, BOM, and published Release
+        env:
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_TAG: v${{ needs.verify.outputs.version }}
+          RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          controller_dir="$RUNNER_TEMP/release-controller"
+          authority_dir="$RUNNER_TEMP/release-authority"
+          stage_dir="$RUNNER_TEMP/release-finalization"
+          attestation_dir="$RUNNER_TEMP/release-attestation"
+          control_plane_dir="$RUNNER_TEMP/release-control-plane"
+          repository_url="https://github.com/$GITHUB_REPOSITORY.git"
+
+          git init "$controller_dir"
+          git -C "$controller_dir" remote add origin "$repository_url"
+          git -C "$controller_dir" fetch --no-tags --depth=1 origin "$CONTROLLER_SHA"
+          test "$(git -C "$controller_dir" rev-parse FETCH_HEAD)" = "$CONTROLLER_SHA"
+          git -C "$controller_dir" checkout --detach "$CONTROLLER_SHA"
+          git init "$authority_dir"
+          git -C "$authority_dir" remote add origin "$repository_url"
+          git -C "$authority_dir" fetch --no-tags --depth=1 origin "$RELEASE_SHA"
+          test "$(git -C "$authority_dir" rev-parse FETCH_HEAD)" = "$RELEASE_SHA"
+          git -C "$authority_dir" checkout --detach "$RELEASE_SHA"
+
+          mkdir "$stage_dir" "$attestation_dir" "$control_plane_dir"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "release-finalization-$RELEASE_VERSION" --dir "$stage_dir"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "release-attestation-$RELEASE_VERSION" --dir "$attestation_dir"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "release-control-plane-$RELEASE_VERSION" --dir "$control_plane_dir"
+          test -f "$attestation_dir/bundle.json"
+          test -f "$control_plane_dir/receipt.json"
+
+          export CYMULE_RELEASE_WORKSPACE="$authority_dir"
+          cd "$controller_dir"
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          remote_main=$(git ls-remote origin refs/heads/main | cut -f1)
+          test "$remote_main" = "$CONTROLLER_SHA"
+          remote_refs=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
+          test "$(printf '%s\n' "$remote_refs" | grep -c .)" -eq 2
+          remote_tag_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
+          remote_release_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG^{}" '$2 == ref {print $1}')
+          test "$remote_tag_sha" = "$RELEASE_TAG_SHA"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+          python3 "$controller_dir/scripts/finalize_release.py" publish \
+            --repository "$GITHUB_REPOSITORY" \
+            --version "$RELEASE_VERSION" \
+            --release-sha "$RELEASE_SHA" \
+            --release-tag-sha "$RELEASE_TAG_SHA" \
+            --controller-sha "$CONTROLLER_SHA" \
+            --stage "$stage_dir" \
+            --attestation-bundle "$attestation_dir/bundle.json" \
+            --control-plane-receipt "$control_plane_dir/receipt.json" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"

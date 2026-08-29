@@ -1,12 +1,18 @@
 {
-  "control_version": "cymule.live-evolution-control/3",
+  "control_version": "cymule.live-evolution-control/6",
   "command_id": "command:live-evolution:fixture:select",
   "operation": "apply",
   "template_id": "template:review-parent",
   "command": {
-    "control_version": "cymule.evolution-control/4",
+    "control_version": "cymule.evolution-control/5",
     "command_id": "command:evolution:fixture:select",
     "operation": "select_occurrence",
-    "occurrence_id": "occurrence:fixture:1"
+    "occurrence_id": "occurrence:fixture:1",
+    "selection_id": "selection:fixture:1",
+    "execution_binding": {
+      "identity_version": "cymule.artifact/2",
+      "artifact_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "kind": "cymule.execution-binding/2"
+    }
   }
 }

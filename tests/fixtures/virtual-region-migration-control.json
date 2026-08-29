@@ -1,22 +1,38 @@
 {
-  "control_version": "cymule.virtual-region-migration-control/1",
+  "control_version": "cymule.virtual-region-migration-control/3",
   "command_id": "command:migration:fixture-split",
   "plan": {
-    "migration_version": "cymule.virtual-region-migration/1",
+    "migration_version": "cymule.virtual-region-migration/3",
     "migration_id": "migration:fixture-split",
     "kind": "split",
     "expected_sources": {
       "region:fixture": {
-        "version": "fixture/1",
-        "position": "0",
-        "exhausted": false
+        "source": {
+          "operation": "fixture.range",
+          "binding": "binding:region-source/fixture",
+          "revision": "fixture-source-v1"
+        },
+        "cursor": {
+          "version": "fixture/1",
+          "position": "0",
+          "exhausted": false
+        }
       }
     },
     "targets": [
       {
         "region_id": "region:fixture:left",
         "run_id": "run:fixture",
-        "source": "fixture.range",
+        "source": {
+          "operation": "fixture.range",
+          "binding": "binding:region-source/fixture-v2",
+          "revision": "fixture-source-v2"
+        },
+        "source_artifact": {
+          "identity_version": "cymule.artifact/2",
+          "artifact_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "kind": "example/region-source"
+        },
         "cursor": {
           "version": "fixture-partition/1",
           "position": "left:0",
@@ -27,7 +43,16 @@
       {
         "region_id": "region:fixture:right",
         "run_id": "run:fixture",
-        "source": "fixture.range",
+        "source": {
+          "operation": "fixture.range",
+          "binding": "binding:region-source/fixture-v2",
+          "revision": "fixture-source-v2"
+        },
+        "source_artifact": {
+          "identity_version": "cymule.artifact/2",
+          "artifact_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "kind": "example/region-source"
+        },
         "cursor": {
           "version": "fixture-partition/1",
           "position": "right:0",
@@ -41,6 +66,7 @@
       "identity_version": "cymule.artifact/2",
       "artifact_id": "sha256:123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
       "kind": "example/migration-evidence"
-    }
+    },
+    "migration_revision": "region-migrator:fixture/1"
   }
 }

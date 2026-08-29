@@ -12,14 +12,12 @@ keywords.workspace = true
 publish.workspace = true
 
 [features]
-default = ["fs"]
-fs = ["object_store/fs"]
-aws = ["object_store/aws"]
-azure = ["object_store/azure"]
-gcp = ["object_store/gcp"]
-http = ["object_store/http"]
+default = []
+azure = ["dep:async-trait", "object_store/azure"]
+gcp = ["dep:async-trait", "object_store/gcp"]
 
 [dependencies]
+async-trait = { version = "0.1.92", optional = true }
 cymule-core.workspace = true
 cymule-resource.workspace = true
 futures-util.workspace = true
@@ -30,8 +28,12 @@ sha2.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+async-trait = "0.1.92"
+cymule-durable-protocol.workspace = true
+cymule-test-world = { path = "../../tests/test-world" }
+cymule-virtual.workspace = true
+fs4 = "1.1.0"
 object_store = { workspace = true, features = ["fs"] }
-tempfile = "3.27.0"
 
 [lints]
 workspace = true

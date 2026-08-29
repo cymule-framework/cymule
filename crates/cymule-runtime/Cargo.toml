@@ -12,6 +12,7 @@ keywords.workspace = true
 publish.workspace = true
 
 [dependencies]
+cymule-authenticated-collections.workspace = true
 cymule-core.workspace = true
 jsonschema.workspace = true
 serde.workspace = true

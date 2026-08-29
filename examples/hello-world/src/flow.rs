@@ -4,6 +4,7 @@ use cymule::{
     DispatchPolicy, EffectProfile, Expression, FlowBuilder, MutationKind, PlanCandidate,
     ReconciliationMode,
 };
+use cymule_core::COMPONENT_OUTPUT_ARTIFACT_KIND;
 use serde_json::json;
 
 pub fn build() -> PlanCandidate {
@@ -32,6 +33,7 @@ pub fn build() -> PlanCandidate {
             "required": ["message"],
             "properties": {"message": {"type": "string"}}
         }),
+        COMPONENT_OUTPUT_ARTIFACT_KIND,
         BTreeMap::new(),
     )
     .effect_contract(
@@ -59,6 +61,7 @@ pub fn build() -> PlanCandidate {
             name: "greeting".to_owned(),
         },
         "primary",
+        None,
     )
     .finish(Expression::Binding {
         name: "greeting".to_owned(),
@@ -71,8 +74,8 @@ mod tests {
 
     #[test]
     fn code_first_flow_matches_the_published_ir() {
-        let published: PlanCandidate =
-            serde_json::from_str(include_str!("../flow.json")).expect("published IR parses");
+        let published: PlanCandidate = cymule_core::decode_json(include_bytes!("../flow.json"))
+            .expect("published IR parses through the strict JSON decoder");
         assert_eq!(build(), published);
     }
 }

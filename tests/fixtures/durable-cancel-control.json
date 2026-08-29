@@ -1,0 +1,9 @@
+{
+  "type": "cancel_run",
+  "control_version": "cymule.durable-control/4",
+  "cancellation_id": "cancel:cross-language",
+  "run_id": "run:cross-language",
+  "reason": {
+    "code": "operator_request"
+  }
+}

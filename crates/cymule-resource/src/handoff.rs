@@ -1,344 +1,322 @@
-use cymule_durable::{
-    DurableCoordinator, DurableStore, JournalBatch, JournalRecord, WaitKind, WaitState,
+use cymule_durable::{DurableResourceControl, DurableStore};
+
+pub use cymule_profile_protocol::resource::{
+    MAX_HANDOFF_INDEX_PAGE, RESOURCE_HANDOFF_ACTIVATION_INDEX_VERSION,
+    RESOURCE_HANDOFF_ACTIVATION_VERSION, RESOURCE_HANDOFF_INDEX_VERSION, RESOURCE_HANDOFF_VERSION,
+    ResourceHandoff, ResourceHandoffActivation, ResourceHandoffActivationCurrent,
+    ResourceHandoffActivationIndexEntry, ResourceHandoffActivationReceipt, ResourceHandoffCurrent,
+    ResourceHandoffIndexEntry, ResourceHandoffPage, ResourceHandoffReceipt,
+    ResourceProducerProvenance,
 };
-use serde::{Deserialize, Serialize};
 
-use crate::{ArtifactTypeRegistry, ResourceError, ResourceHandle, ResourceResult};
+use crate::{
+    ResourceCommand, ResourceCommandOutcome, ResourceError, ResourceOperation, ResourceResult,
+    error::durable_resource_error,
+};
 
-/// Frozen Run-to-Run handoff record version.
-pub const RESOURCE_HANDOFF_VERSION: &str = "cymule.resource-handoff/3";
-/// Frozen handoff-to-input activation record version.
-pub const RESOURCE_HANDOFF_ACTIVATION_VERSION: &str = "cymule.resource-handoff-activation/1";
-
-/// Exact producer occurrence and result provenance for one transferred Resource.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceProducerProvenance {
-    /// Producing Run.
-    pub run_id: String,
-    /// Exact immutable component occurrence in that Run.
-    pub occurrence_id: String,
-    /// Exact occurrence output Artifact represented by the Resource.
-    pub result: cymule_core::ArtifactRef,
-}
-
-/// One durable resource transfer between two Runs.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceHandoff {
-    /// Handoff wire version.
-    pub handoff_version: String,
-    /// Caller-supplied idempotency identity.
-    pub transfer_id: String,
-    /// Exact producing occurrence/result provenance.
-    pub producer: ResourceProducerProvenance,
-    /// Consuming Run.
-    pub to_run: String,
-    /// Stable target state/output slot.
-    pub slot: String,
-    /// Exact typed Resource Handle Artifact produced by the occurrence.
-    pub resource: cymule_core::ArtifactRef,
-}
-
-/// Durable evidence that one handoff completed one target input wait.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceHandoffActivation {
-    /// Activation wire version.
-    pub activation_version: String,
-    /// Stable activation/idempotency identity.
-    pub activation_id: String,
-    /// Source transfer identity.
-    pub transfer_id: String,
-    /// Consuming Run.
-    pub to_run: String,
-    /// Exact completed input wait.
-    pub wait_id: String,
-    /// Artifact containing the canonical Resource Handle.
-    pub result: cymule_core::ArtifactRef,
-}
-
-impl ResourceHandoff {
-    /// Validate stable identities and the embedded Resource.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for empty identities, a self-transfer, or invalid
-    /// resource descriptor.
-    pub fn validate(&self) -> ResourceResult<()> {
-        if self.handoff_version != RESOURCE_HANDOFF_VERSION {
-            return Err(ResourceError::Validation(format!(
-                "unsupported resource handoff version {:?}",
-                self.handoff_version
-            )));
-        }
-        for (kind, value) in [
-            ("transfer", self.transfer_id.as_str()),
-            ("source Run", self.producer.run_id.as_str()),
-            ("producer occurrence", self.producer.occurrence_id.as_str()),
-            ("target Run", self.to_run.as_str()),
-            ("slot", self.slot.as_str()),
-        ] {
-            if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
-                return Err(ResourceError::Validation(format!(
-                    "resource {kind} identity must contain 1..=512 non-control characters"
-                )));
-            }
-        }
-        self.producer
-            .result
-            .validate()
-            .map_err(|error| ResourceError::Validation(error.to_string()))?;
-        if self.producer.run_id == self.to_run {
-            return Err(ResourceError::Validation(
-                "resource handoff requires distinct source and target Runs".to_owned(),
-            ));
-        }
-        self.resource
-            .validate()
-            .map_err(|error| ResourceError::Validation(error.to_string()))?;
-        if self.resource != self.producer.result {
-            return Err(ResourceError::Validation(
-                "resource handoff must transfer the producer's exact typed Resource Handle Artifact"
-                    .to_owned(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// M1-backed Run-to-Run resource handoff operations.
+/// M1-backed Run-to-Run Resource handoff authority.
+///
+/// Durable stores each transfer and activation under an exact key plus one
+/// payload-free, per-target ordered index. No operation enumerates another
+/// target or scans an all-domain journal.
 pub struct ResourceHandoffController;
 
 impl ResourceHandoffController {
-    /// Commit one idempotent handoff to the target Run's typed journal.
+    /// Atomically publish one transfer authority and target index entry.
     ///
     /// # Errors
     ///
-    /// Returns an error when either Run is absent, the handoff is invalid, its
-    /// transfer ID conflicts, or the M1 CAS fails.
+    /// Returns an error when the handoff is invalid, conflicts with retained
+    /// authority, or Durable cannot verify or commit the exact command.
     pub fn transfer<S: DurableStore>(
-        coordinator: &mut DurableCoordinator<S>,
+        control: &mut DurableResourceControl<'_, S>,
         handoff: &ResourceHandoff,
-    ) -> ResourceResult<String> {
-        let _ = ensure_admissible(coordinator, handoff)?;
-        let payload = serde_json::to_value(handoff)
-            .map_err(|error| ResourceError::Persistence(error.to_string()))?;
-        let record = JournalRecord::new(&handoff.transfer_id, RESOURCE_HANDOFF_VERSION, payload)
-            .map_err(|error| ResourceError::Persistence(error.to_string()))?;
-        coordinator
-            .append_journal_record(&handoff_journal_id(&handoff.to_run), record)
-            .map_err(|error| match error {
-                cymule_durable::DurableError::IllegalTransition(message) => {
-                    ResourceError::Conflict(message)
-                }
-                other => ResourceError::Persistence(other.to_string()),
-            })
+    ) -> ResourceResult<ResourceHandoffReceipt> {
+        handoff.verify()?;
+        let command = ResourceCommand::new(ResourceOperation::Transfer {
+            handoff: handoff.clone(),
+        })?;
+        match control
+            .commit(&command)
+            .map_err(durable_resource_error)?
+            .outcome
+        {
+            ResourceCommandOutcome::Transfer { receipt } => Ok(receipt),
+            _ => Err(outcome_mismatch(&command.command_id)),
+        }
     }
 
-    /// Atomically record a handoff and complete one matching target input wait.
+    /// Atomically activate one exact prior transfer into its target input Wait.
+    ///
+    /// The same M1 CAS binds the exact source receipt, activation authority,
+    /// per-target activation index, Wait result, and resulting Continuation.
     ///
     /// # Errors
     ///
-    /// Returns an error for an invalid transfer, a non-input or mismatched wait,
-    /// conflicting activation identity, unrelated Machine mutation, or M1 CAS
-    /// failure.
-    pub fn activate_input<S: DurableStore>(
-        coordinator: &mut DurableCoordinator<S>,
+    /// Returns an error when the handoff or Wait is invalid, the source
+    /// transfer is absent or different, or Durable cannot commit activation.
+    pub fn activate<S: DurableStore>(
+        control: &mut DurableResourceControl<'_, S>,
         handoff: &ResourceHandoff,
         wait_id: &str,
-    ) -> ResourceResult<ResourceHandoffActivation> {
-        let machine = ensure_admissible(coordinator, handoff)?;
-        let wait = coordinator
-            .state()
-            .map_err(|error| persistence(&error))?
-            .waits
-            .get(wait_id)
-            .ok_or_else(|| ResourceError::NotFound(format!("input wait {wait_id} is missing")))?;
-        if wait.run_id != handoff.to_run {
-            return Err(ResourceError::Validation(
-                "resource handoff wait belongs to another Run".to_owned(),
-            ));
+    ) -> ResourceResult<ResourceHandoffActivationReceipt> {
+        handoff.verify()?;
+        let source = control
+            .handoff_current(&handoff.transfer_id)
+            .map_err(durable_resource_error)?
+            .ok_or_else(|| {
+                ResourceError::NotFound(format!("Resource handoff {}", handoff.transfer_id))
+            })?;
+        source.verify()?;
+        if source.receipt.handoff != *handoff {
+            return Err(ResourceError::Conflict {
+                code: "resource_handoff_reused".to_owned(),
+                message: format!(
+                    "Resource transfer {} retained different semantics",
+                    handoff.transfer_id
+                ),
+            });
         }
-        match &wait.kind {
-            WaitKind::Input { correlation, .. } if correlation == &handoff.slot => {}
-            WaitKind::Input { .. } => {
-                return Err(ResourceError::Validation(
-                    "resource handoff slot does not match input correlation".to_owned(),
-                ));
-            }
-            _ => {
-                return Err(ResourceError::Validation(
-                    "resource handoff can activate only an input wait".to_owned(),
-                ));
-            }
+        let activation = ResourceHandoffActivation::new(handoff, wait_id)?;
+        let command = ResourceCommand::new(ResourceOperation::ActivateTransfer {
+            activation,
+            source_receipt_id: source.receipt.receipt_id,
+        })?;
+        match control
+            .commit(&command)
+            .map_err(durable_resource_error)?
+            .outcome
+        {
+            ResourceCommandOutcome::ActivateTransfer { receipt } => Ok(receipt),
+            _ => Err(outcome_mismatch(&command.command_id)),
         }
-        if wait.state == WaitState::Cancelled {
-            return Err(ResourceError::Conflict(
-                "resource handoff input wait is cancelled".to_owned(),
-            ));
-        }
-        let result = handoff.resource.clone();
-        let activation = ResourceHandoffActivation {
-            activation_version: RESOURCE_HANDOFF_ACTIVATION_VERSION.to_owned(),
-            activation_id: format!("activation:{}:{wait_id}", handoff.transfer_id),
-            transfer_id: handoff.transfer_id.clone(),
-            to_run: handoff.to_run.clone(),
-            wait_id: wait_id.to_owned(),
-            result: result.clone(),
-        };
-        let handoff_record = JournalRecord::new(
-            &handoff.transfer_id,
-            RESOURCE_HANDOFF_VERSION,
-            serde_json::to_value(handoff)
-                .map_err(|error| ResourceError::Persistence(error.to_string()))?,
-        )
-        .map_err(|error| persistence(&error))?;
-        let activation_record = JournalRecord::new(
-            &activation.activation_id,
-            RESOURCE_HANDOFF_ACTIVATION_VERSION,
-            serde_json::to_value(&activation)
-                .map_err(|error| ResourceError::Persistence(error.to_string()))?,
-        )
-        .map_err(|error| persistence(&error))?;
-        coordinator
-            .checkpoint_input_wait_journals(
-                &machine,
-                &result,
-                wait_id,
-                &[
-                    JournalBatch {
-                        journal_id: handoff_journal_id(&handoff.to_run),
-                        records: vec![handoff_record],
-                    },
-                    JournalBatch {
-                        journal_id: activation_journal_id(&handoff.to_run),
-                        records: vec![activation_record],
-                    },
-                ],
-            )
-            .map_err(map_durable_error)?;
-        Ok(activation)
     }
 
-    /// Replay every incoming handoff for one target Run.
+    /// Read one exact transfer authority by transfer identity.
     ///
     /// # Errors
     ///
-    /// Returns an error for unsupported/tampered records or persistence failure.
-    pub fn incoming<S: DurableStore>(
-        coordinator: &DurableCoordinator<S>,
-        to_run: &str,
-    ) -> ResourceResult<Vec<ResourceHandoff>> {
-        coordinator
-            .journal_records(&handoff_journal_id(to_run))
-            .map_err(|error| ResourceError::Persistence(error.to_string()))?
-            .iter()
-            .map(|record| {
-                if record.schema != RESOURCE_HANDOFF_VERSION {
-                    return Err(ResourceError::Persistence(format!(
-                        "resource handoff {} has unsupported schema {}",
-                        record.record_id, record.schema
-                    )));
-                }
-                record
-                    .verify()
-                    .map_err(|error| ResourceError::Persistence(error.to_string()))?;
-                let handoff: ResourceHandoff = serde_json::from_value(record.payload.clone())
-                    .map_err(|error| ResourceError::Persistence(error.to_string()))?;
-                handoff.validate()?;
-                if handoff.transfer_id != record.record_id || handoff.to_run != to_run {
-                    return Err(ResourceError::Persistence(format!(
-                        "resource handoff record {} has mismatched identity or target",
-                        record.record_id
-                    )));
-                }
-                Ok(handoff)
+    /// Returns an error when the identity is invalid or retained Durable state
+    /// cannot be loaded and verified.
+    pub fn handoff<S: DurableStore>(
+        control: &mut DurableResourceControl<'_, S>,
+        transfer_id: &str,
+    ) -> ResourceResult<Option<ResourceHandoff>> {
+        cymule_core::validate_identity("Resource transfer", transfer_id)
+            .map_err(|error| ResourceError::Validation(error.to_string()))?;
+        control
+            .handoff_current(transfer_id)
+            .map_err(durable_resource_error)?
+            .map(|current| {
+                current.verify()?;
+                Ok(current.receipt.handoff)
             })
-            .collect()
+            .transpose()
+    }
+
+    /// Read one exact activation authority by activation identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the identity is invalid or retained Durable state
+    /// cannot be loaded and verified.
+    pub fn activation<S: DurableStore>(
+        control: &mut DurableResourceControl<'_, S>,
+        activation_id: &str,
+    ) -> ResourceResult<Option<ResourceHandoffActivation>> {
+        cymule_core::validate_content_id("Resource handoff activation", activation_id)
+            .map_err(|error| ResourceError::Validation(error.to_string()))?;
+        control
+            .handoff_activation_current(activation_id)
+            .map_err(durable_resource_error)?
+            .map(|current| {
+                current.verify()?;
+                Ok(current.receipt.activation)
+            })
+            .transpose()
+    }
+
+    /// Resolve one bounded contiguous page from one target Run's exact index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid bounds or identity, an unreadable Durable
+    /// index, or a page that violates its requested target or range.
+    pub fn incoming_page<S: DurableStore>(
+        control: &mut DurableResourceControl<'_, S>,
+        to_run: &str,
+        start_index: u64,
+        limit: usize,
+    ) -> ResourceResult<ResourceHandoffPage> {
+        cymule_core::validate_identity("Resource target Run", to_run)
+            .map_err(|error| ResourceError::Validation(error.to_string()))?;
+        if start_index > cymule_core::MAX_EXACT_INTEGER {
+            return Err(ResourceError::Validation(
+                "Resource handoff page start exceeds the shared exact-integer range".to_owned(),
+            ));
+        }
+        if !(1..=MAX_HANDOFF_INDEX_PAGE).contains(&limit) {
+            return Err(ResourceError::Validation(format!(
+                "Resource handoff page limit must be within 1..={MAX_HANDOFF_INDEX_PAGE}"
+            )));
+        }
+        let page = control
+            .handoff_page(to_run, start_index, limit)
+            .map_err(durable_resource_error)?;
+        validate_handoff_page(&page, to_run, start_index, limit)?;
+        Ok(page)
     }
 }
 
-fn ensure_admissible<S: DurableStore>(
-    coordinator: &DurableCoordinator<S>,
-    handoff: &ResourceHandoff,
-) -> ResourceResult<cymule_core::Machine> {
-    handoff.validate()?;
-    let machine = coordinator
-        .restore_machine()
-        .map_err(|error| persistence(&error))?;
-    for run_id in [&handoff.producer.run_id, &handoff.to_run] {
-        if !machine.projection().runs.contains_key(run_id) {
-            return Err(ResourceError::NotFound(format!(
-                "resource handoff Run {run_id} does not exist"
-            )));
-        }
-    }
-    let state = coordinator.state().map_err(|error| persistence(&error))?;
-    let occurrence = state
-        .component_occurrences
-        .get(&handoff.producer.occurrence_id)
-        .ok_or_else(|| {
-            ResourceError::NotFound(format!(
-                "resource producer occurrence {}",
-                handoff.producer.occurrence_id
-            ))
-        })?;
-    if occurrence.run_id != handoff.producer.run_id || occurrence.output != handoff.producer.result
-    {
-        return Err(ResourceError::Validation(
-            "resource handoff producer Run, occurrence, and result do not match durable authority"
+fn validate_handoff_page(
+    page: &ResourceHandoffPage,
+    to_run: &str,
+    start_index: u64,
+    limit: usize,
+) -> ResourceResult<()> {
+    if page.handoffs.len() > limit {
+        return Err(ResourceError::Integrity {
+            code: "resource_handoff_page_limit_exceeded".to_owned(),
+            message: "Durable returned a Resource handoff page beyond the requested bound"
                 .to_owned(),
-        ));
+        });
     }
-    let result = machine.artifact(&handoff.producer.result).ok_or_else(|| {
-        ResourceError::Persistence(
-            "resource handoff producer result Artifact is missing from the Machine".to_owned(),
-        )
+    let page_count = u64::try_from(page.handoffs.len()).map_err(|_| ResourceError::Integrity {
+        code: "resource_handoff_page_range_overflow".to_owned(),
+        message: "Resource handoff page length exceeds platform bounds".to_owned(),
     })?;
-    let registry = ArtifactTypeRegistry::with_framework_contracts()?;
-    let resource: ResourceHandle = registry.decode_typed(result)?;
-    resource.verify()?;
-    let target = &machine.projection().runs[&handoff.to_run];
-    if !matches!(
-        target.status,
-        cymule_core::RunStatus::Active | cymule_core::RunStatus::Waiting
-    ) {
-        return Err(ResourceError::Validation(format!(
-            "target Run {} cannot accept resource handoffs in state {:?}",
-            handoff.to_run, target.status
-        )));
-    }
-    for existing in ResourceHandoffController::incoming(coordinator, &handoff.to_run)? {
-        if existing.slot == handoff.slot && existing != *handoff {
-            return Err(ResourceError::Conflict(format!(
-                "target Run {} slot {} already has transfer {}",
-                handoff.to_run, handoff.slot, existing.transfer_id
-            )));
+    let end_index = start_index
+        .checked_add(page_count)
+        .filter(|end| *end <= cymule_core::MAX_EXACT_INTEGER)
+        .ok_or_else(|| ResourceError::Integrity {
+            code: "resource_handoff_page_range_overflow".to_owned(),
+            message: "Resource handoff page range exceeds the shared exact-integer bound"
+                .to_owned(),
+        })?;
+    for handoff in &page.handoffs {
+        handoff.verify()?;
+        if handoff.to_run != to_run {
+            return Err(ResourceError::Integrity {
+                code: "resource_handoff_page_target_mismatch".to_owned(),
+                message: "Resource handoff page contains another target Run".to_owned(),
+            });
         }
     }
-    Ok(machine)
+    if let Some(next_index) = page.next_index
+        && (next_index != end_index || page.handoffs.len() < limit)
+    {
+        return Err(ResourceError::Integrity {
+            code: "resource_handoff_page_next_index_invalid".to_owned(),
+            message: "Resource handoff page successor does not equal its full contiguous range"
+                .to_owned(),
+        });
+    }
+    Ok(())
 }
 
-fn persistence(error: &cymule_durable::DurableError) -> ResourceError {
-    ResourceError::Persistence(error.to_string())
-}
-
-fn map_durable_error(error: cymule_durable::DurableError) -> ResourceError {
-    match error {
-        cymule_durable::DurableError::IllegalTransition(message)
-        | cymule_durable::DurableError::Conflict {
-            expected: _,
-            current: Some(message),
-        } => ResourceError::Conflict(message),
-        other => ResourceError::Persistence(other.to_string()),
+fn outcome_mismatch(command_id: &str) -> ResourceError {
+    ResourceError::Integrity {
+        code: "resource_command_outcome_kind_mismatch".to_owned(),
+        message: format!("Resource command {command_id} returned a different outcome kind"),
     }
 }
 
-fn handoff_journal_id(to_run: &str) -> String {
-    format!("cymule.resources/{to_run}")
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn activation_journal_id(to_run: &str) -> String {
-    format!("cymule.resource-activations/{to_run}")
+    fn handoff(transfer_id: &str, to_run: &str) -> ResourceHandoff {
+        let resource = cymule_core::artifact_ref("test/resource", transfer_id.as_bytes())
+            .expect("test Resource reference derives");
+        ResourceHandoff {
+            handoff_version: RESOURCE_HANDOFF_VERSION.to_owned(),
+            transfer_id: transfer_id.to_owned(),
+            producer: ResourceProducerProvenance {
+                run_id: "run:producer".to_owned(),
+                occurrence_id: format!("occurrence:{transfer_id}"),
+                result: resource.clone(),
+            },
+            to_run: to_run.to_owned(),
+            slot: format!("slot:{transfer_id}"),
+            resource,
+        }
+    }
+
+    #[test]
+    fn handoff_page_requires_an_exact_contiguous_successor() {
+        let start_index = 17;
+        let exact = ResourceHandoffPage {
+            handoffs: vec![
+                handoff("transfer:one", "run:consumer"),
+                handoff("transfer:two", "run:consumer"),
+            ],
+            next_index: Some(19),
+        };
+        validate_handoff_page(&exact, "run:consumer", start_index, 2)
+            .expect("full contiguous page verifies");
+
+        for next_index in [17, 18, 20, cymule_core::MAX_EXACT_INTEGER + 1, u64::MAX] {
+            let page = ResourceHandoffPage {
+                handoffs: exact.handoffs.clone(),
+                next_index: Some(next_index),
+            };
+            assert!(matches!(
+                validate_handoff_page(&page, "run:consumer", start_index, 2),
+                Err(ResourceError::Integrity { code, .. })
+                    if code == "resource_handoff_page_next_index_invalid"
+            ));
+        }
+    }
+
+    #[test]
+    fn handoff_page_rejects_successors_on_short_or_empty_pages() {
+        let start_index = 17;
+        for handoffs in [vec![handoff("transfer:one", "run:consumer")], Vec::new()] {
+            let page_count = u64::try_from(handoffs.len()).expect("test page count fits u64");
+            let page = ResourceHandoffPage {
+                handoffs,
+                next_index: Some(start_index + page_count),
+            };
+            assert!(matches!(
+                validate_handoff_page(&page, "run:consumer", start_index, 2),
+                Err(ResourceError::Integrity { code, .. })
+                    if code == "resource_handoff_page_next_index_invalid"
+            ));
+        }
+    }
+
+    #[test]
+    fn handoff_page_accepts_short_and_empty_terminal_pages() {
+        for handoffs in [vec![handoff("transfer:one", "run:consumer")], Vec::new()] {
+            let page = ResourceHandoffPage {
+                handoffs,
+                next_index: None,
+            };
+            validate_handoff_page(&page, "run:consumer", 17, 2)
+                .expect("a short or empty terminal page verifies");
+        }
+        let empty = ResourceHandoffPage {
+            handoffs: Vec::new(),
+            next_index: None,
+        };
+        validate_handoff_page(&empty, "run:consumer", cymule_core::MAX_EXACT_INTEGER, 2)
+            .expect("empty terminal page may end at the exact-integer limit");
+    }
+
+    #[test]
+    fn handoff_page_rejects_exact_integer_range_overflow() {
+        let page = ResourceHandoffPage {
+            handoffs: vec![handoff("transfer:overflow", "run:consumer")],
+            next_index: None,
+        };
+        validate_handoff_page(&page, "run:consumer", cymule_core::MAX_EXACT_INTEGER - 1, 1)
+            .expect("nonempty terminal page may end at the exact-integer limit");
+        for start_index in [cymule_core::MAX_EXACT_INTEGER, u64::MAX] {
+            assert!(matches!(
+                validate_handoff_page(&page, "run:consumer", start_index, 1),
+                Err(ResourceError::Integrity { code, .. })
+                    if code == "resource_handoff_page_range_overflow"
+            ));
+        }
+    }
 }

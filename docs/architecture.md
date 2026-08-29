@@ -1,346 +1,308 @@
 # Architecture
 
-Status: implemented unless marked otherwise.
+Status: partial. The terminal source integration is present in the worktree;
+complete repository verification and version-authority closure remain pending
+the final source freeze. This document describes realization and ownership.
+The [semantic specification](specification.md) owns normative behavior, and
+[conformance](conformance.md) owns profile claims. Exact wire generations are
+listed only in [Version domains](version-domains.md).
 
-## Trust boundary
+## Trust and ownership
 
-The trusted computing base is `cymule-core`. It contains only semantic data,
-canonical identity, validation, admission, deterministic reduction, and replay.
-It performs no network, filesystem, clock, random, model, tool, or provider I/O.
+The semantic kernel is a Rust library, not a service. It performs no filesystem,
+network, wall-clock, randomness, model, tool, or provider I/O. Concrete
+integrations sit outside that boundary.
 
-```text
-Language SDKs / MLIR workbench
-              |
-              v
-        Plan candidates
-              |
-              v
-  Rust sealer + semantic kernel <---- commands
-     |          |          |
-   plans      events    artifacts
-              |
-              v
-      rebuildable projection
-              |
-              v
-     runtime plugin interfaces
-```
+| Owner | Responsibility |
+| --- | --- |
+| [cymule-core](../crates/cymule-core/src/lib.rs) | Plan sealing and schema admission, canonical identity, typed commands, deterministic reduction, complete batch replay and compaction proofs |
+| [cymule-authenticated-collections](../crates/cymule-authenticated-collections/src/lib.rs) | Pure authenticated maps and ordered logs used by Core and Durable |
+| [cymule-durable-protocol](../crates/cymule-durable-protocol/src/lib.rs) | Clock receipt/reference, Continuation/frame, execution-claim, wait-owner and activation DTOs and pure validation |
+| [cymule-runtime](../crates/cymule-runtime/src/lib.rs) | Embedded interpretation, executable boundary validators, exact provider-binding admission and Engine/plugin transport contracts |
+| [cymule-profile-protocol](../crates/cymule-profile-protocol/src/lib.rs) | Resource, Virtual, Evolution and Agent DTOs, bounded source views, identities and pure reducers |
+| [cymule-durable](../crates/cymule-durable/src/lib.rs) | Store-pinned source resolution, resumable execution and typed profile coordination, atomic material/receipt/sidecar publication |
+| Provider crates and language SDKs | Concrete I/O or authoring/transport; neither is a second semantic reducer |
 
-`cymule-runtime` interprets the frozen IR and connects abstract operations to a
-`PluginHost`. The provided process host is one realization. A durable runtime
-may replace it without changing core semantics.
+Rust's closed enums and ownership make the kernel's transition authority
+explicit. The language boundary remains versioned JSON: TypeScript, Python and
+Go do not use FFI or reconstruct the reducer. The Rust SDK uses the same public
+Engine contract rather than a separate language-specific runtime.
 
-## Why the core is Rust
+## Plans and executable contracts
 
-Rust gives the kernel explicit ownership, closed enums, exhaustive transitions,
-and a small dependency surface without requiring a managed runtime. The kernel
-is a normal library rather than a service, so it can be embedded in test tools,
-single-process runtimes, or future durable control planes.
+[Core IR admission](../crates/cymule-core/src/ir.rs) owns the only Plan sealer.
+It compiles every definition, component, Effect and typed input-wait schema as
+Draft 2020-12 with external retrieval disabled, rejects recursive definition
+invocation, and verifies the canonical Plan identity. Machine insertion and
+restore repeat that admission.
 
-The language SDKs do not use FFI and do not duplicate the reducer. They exchange
-versioned canonical JSON through an `Engine` interface. The supplied CLI engine
-uses stdin/stdout, making the boundary usable in local tools and conformance
-tests without choosing an RPC stack.
+[Runtime contracts](../crates/cymule-runtime/src/contract.rs) compile the
+unchanged admitted schemas into boundary validators and produce bounded,
+masked contract diagnostics. This is execution validation, not a second Plan
+sealer. Core itself depends on the schema compiler; it does not delegate
+structural or executable-schema admission to a provider.
 
-`cymule.engine/2` wraps every operation and every response. Success and failure
-share stdout and a single closed envelope; a nonzero process status means the
-transport could not carry that envelope. Failures retain category, processing
-phase, stable code, optional contract issues, and only a recovery disposition
-proved by the owning boundary. In particular, losing a process response does
-not authorize replay of a Run that may already have dispatched an effect.
+A sealed invocation resolves a definition inside that same immutable Plan.
+Frames record structural invocation and lexical Scope ownership, not a
+host-language call stack. Live Evolution links reusable modules before sealing;
+a transitive pinned dependency cannot change merely because a registry head
+moves. See [Frozen IR](specification.md#6-frozen-ir) and
+[Semantic Plan evolution](specification.md#121-semantic-plan-evolution).
 
-## IR and compiler workbench
+A component Call is unclassified computation. Its declared output schema and
+required Artifact kind govern the successful result. Durable records the
+occurrence and provider Attempt before invocation, but a lost result before
+checkpoint can still cause a later admitted Attempt to repeat provider cost.
+Provider observations with ambiguity handling use observational eager Effects;
+world changes use mutating Effects.
 
-The frozen IR is intentionally much smaller than the source language. Source
-frontends may be TypeScript, Python, Rust, Go, a visual editor, or generated
-code. They all emit a Plan Candidate.
+MLIR remains an optional, partial authoring workbench. The current smoke path
+checks experimental generic-operation syntax. A registered dialect,
+structural verifiers and deterministic lowering remain proposed; LLVM/MLIR is
+not a runtime dependency.
 
-`cymule.ir/2` distinguishes component `call` from reusable definition
-`invoke`. An invocation resolves another definition already sealed into the
-same Plan, creates a structural invocation identity, receives explicit input,
-and returns a result binding without inheriting caller locals. The live
-evolution registry operates before sealing: it resolves a logical reference,
-resolves the complete acyclic reusable-module closure, injects every exact
-revision, and creates a new parent Plan. Compatible transitive updates advance
-only the future link. Runtime interpretation never follows a mutable registry
-head.
+## Engine and provider admission
 
-Live evolution remains a control plane around the runtime rather than a second
-executor. Checked migration and shadow traits are plugin seams; the controller
-validates pinned descriptors, records immutable Artifact evidence, and applies
-deterministic rollout gates. It returns one exact selected Plan for dispatch but
-does not own a worker, Agent loop, metric backend, traffic router, or sandbox.
-Automatic module relinking scans only the entry-reachable definition closure;
-new component/effect/wait surfaces or changed provider-neutral requirements
-retain the old future head. Durable migration revalidates a proof derived from
-the current Continuation. Restart authorization returns an exact Plan for a new
-Run but still leaves process or Agent-loop execution to the owning runtime.
+The supplied CLI Engine uses stdin/stdout and the closed Engine envelope.
+Success includes the complete strictly decoded request next to its response;
+each SDK compares it with the exact request value serialized on its wire
+before interpreting the response. Failure has no request echo. Stderr and
+process status are transport diagnostics, not a second semantic failure
+channel. Request/response pairing, member-presence preservation and ambiguous
+mutating-response handling are specified in
+[Engine failures](specification.md#31-engine-failures).
 
-`LiveEvolutionController` is the complete single-domain control authority. Its
-one portable snapshot contains reusable definitions, reverse dependencies,
-template-plus-Plan link history, each template's Plan DAG and rollout state,
-and immutable occurrence pins. Compatible publication, transitive parent
-relinking, DAG edges, and future decisions checkpoint through one application
-journal CAS; applications do not sequence a registry write and a separate
-rollout write.
+Execution uses an immutable `ExecutionBinding`. The selected operation record
+and its transitive provider dependency closure must match the runtime owner's
+admitted pin. A live manifest demonstrates capability but cannot select a
+provider, widen authority or authorize an unbound operation. The framework
+hands the exact provider invocation to a private one-shot admission token.
+Historical dispatch and reconciliation use the retained origin Plan and
+binding, never current defaults.
 
-MLIR is optional and remains outside the kernel. The partial workbench currently
-syntax-checks an experimental generic-operation form and documents its mapping
-to the Plan Candidate schema. A registered dialect, structural verifiers, and
-deterministic lowering remain proposed. LLVM/MLIR libraries are never a runtime
-dependency.
+The process executor captures its executable closure and explicit
+configuration. Fresh durable execution preflight performs Describe before
+writable Store construction and retains that exact host/binding admission.
+Opening the runtime consumes the admission without another Describe. Concrete
+process deadlines, closure copying and termination remain adapter-owned; their
+contract is documented in [Plugins](plugins.md), not in Plan semantics.
 
-## Plugin model
+The narrowest public Durable controls are distinct:
 
-Plugins advertise abstract component and effect implementations. A manifest
-includes stable implementation revisions, reconciliation capability, and a
-stable implementation ID. Plan contracts own schemas and effect properties.
-Registration never grants authority. Admission independently checks the plan,
-binding, policy, and authority before dispatch.
+| Control | Required authority and work |
+| --- | --- |
+| `DurableStoreControl` | Store-only Run queries, wait admission, cancellation, Resource control, Evolution with its fixed provider registry, and explicit history maintenance |
+| `DurableProviderControl` | Store plus admitted historical executor for terminal resolution of an already Unknown Effect; no Run claim or Clock |
+| `DurableRuntimeControl` | Store, admitted executor and issued current-head Clock authority for Run execution; also supplies the owning Virtual and Agent controls |
 
-The reference runtime accepts one explicit `ExecutionBinding`. It checks each
-selected provider's live manifest against that immutable selection, then admits
-every Plan requirement against the normalized provider graph. The admitted
-router dispatches each operation to the provider ID selected by the binding;
-extra advertised capability never becomes routing authority. Canonical
-descriptor bytes are stored as `cymule.execution-binding/2`; all execution
-records point to its Artifact identity or to a deterministic operation binding
-derived from it.
-Process-local construction and finalization remain ordinary adapter ownership,
-not durable semantics.
+The CLI checks exact capability presence for each command before writable
+Store I/O. Queries use provider-native read-only openers. Exact terminal
+Effect-resolution and Evolution retries read the retained receipt before
+constructing historical providers. Ordinary Evolution requires neither a
+runtime PluginHost nor an ambient Clock.
 
-`cymule-runtime` compiles those schemas with the maintained `jsonschema`
-implementation under fixed Draft 2020-12 semantics and a resolver that cannot
-load ambient files or network resources. `cymule-core` continues to own the
-unchanged canonical schema bytes and Plan identity; it does not depend on the
-schema compiler. Embedded execution, durable execution, CLI sealing, durable
-control, and live-evolution linking all use the same runtime Plan-admission
-entry point.
+## Durable storage and execution
 
-The reference process protocol is request/response JSON over stdin/stdout. It is
-designed for testability, not as the only production transport. Future WIT and
-network transports can implement the same `PluginHost` trait.
+[DurableStore](../crates/cymule-durable/src/store.rs) exposes a small head and
+immutable authenticated objects.
+[StateRoot](../crates/cymule-durable/src/state_root.rs) owns their typed layout;
+the provider neither invents a transition nor performs semantic reduction.
+The fixed manifest roots Core authority and closed profile families. Persistent
+map updates copy changed trie paths; ordered-log operations copy bounded AVL
+spines. Their physical roots authenticate representation history, not merely
+the materialized sequence.
 
-## Optional integration plugins
+Ordinary coordinator open reads only the head and its exact manifest. Commands
+resolve bounded typed neighborhoods on demand. They do not rebuild the complete
+Machine, active projection, scheduler, Agent Session, application journal or
+parked-wait index. Exact historical lookup and `load_full_audit` are different
+operations; the latter explicitly traverses reachable authority.
 
-Cymule does not define a Session, Agent Loop, message or tool lifecycle,
-transport stream, or Agent-host occurrence. Those are integration-domain
-objects, not semantic-kernel concepts.
+The coordinator lowers a Core command or complete command batch and any typed
+sidecars before publication. The Store writes immutable objects and compares
+the exact physical token before moving the small head. An unsuccessful CAS may
+leave unreachable immutable objects but publishes no new semantic authority.
+A possible publication with no authoritative acknowledgement becomes
+`CommitOutcomeUnknown`, not permission to retry new work.
 
-The separately owned [`plugins/agent-interaction`](../plugins/agent-interaction)
-package is one optional integration. It lowers Agent-domain projections,
-controllers, and occurrences onto generic M1 journals, waits, effects, scopes,
-resources, bindings, and CAS checkpoints. Its types are not re-exported by the
-framework CLI or language SDKs, and its schema and conformance suite evolve in
-the plugin's own version domain.
+Parameter-free initialization creates an empty domain. Each Start then admits
+its Plan, input, binding, Run/first-Attempt Events, Continuation and execution
+claim together. Existing Runs are preserved. A Start replay observes retained
+progress; it does not reset a Run or bypass the normal Busy/Ready boundaries.
 
-ACP, MCP, A2A, editor, model-provider, and concrete Agent Loop support belongs
-in additional adapters or plugins above that package. The same core interfaces
-can support unrelated integration domains without acquiring Agent-specific
-semantics.
+A Running Continuation has one driver claim. Ready resume and expiry-proven
+takeover use issued Clock evidence, with a non-blocking current-head guard held
+through the final Store CAS. Expiry alone changes nothing. A component result
+commits its validated Artifact, occurrence outcome, Attempt completion and
+post-call Continuation together under that claim. See
+[Continuation ownership](specification.md#71-continuation-ownership).
 
-## Storage contracts
+Small Scope closures use complete bounded inline membership and order proofs.
+Standalone larger closures use persisted typed page progress and one terminal
+semantic decision. A multi-command composite closure that exceeds its inline
+contract returns `PagedScopeRequired`; it does not silently widen the
+operation's read budget. Intermediate page progress is not a completed command
+or permission for provider I/O.
 
-M1 defines a provider-neutral `DurableStore` as compare-and-swap over a small
-head that authenticates one content-addressed checkpoint and a bounded suffix
-of immutable content-addressed state deltas. A successful head transition
-atomically covers the semantic Machine snapshot, Continuations, waits, leases, effect outbox,
-identified signal/timer activation receipts, component occurrences, snapshot
-metadata, and typed higher-profile journals. This keeps M2-M4 records under the
-same revision authority without placing their domain types in `cymule-core`.
+Wait activation has one stable delivery identity. The source driver durably
+retains its selected targets before delivery and acknowledges only after the
+activation CAS. The parked-wait view is lazy and revision-pinned; terminal
+nonwinners do not block a valid broadcast peer. A resumed Ready Continuation
+acquires a new Attempt rather than reusing the yielded one.
 
-One durable domain hosts multiple Runs under that same revision authority. The
-first Run creates the state; later Run creation is an append-only Machine delta
-and initial Continuation committed by the same CAS. A Run ID is never reused to
-reset state, and a lost creation acknowledgement is resolved by reopening the
-domain rather than publishing another Run.
+Cancellation, declared component failure and Effect settlement retain separate
+typed decisions. Missing implementation before dispatch cancels that Effect
+before release as NotApplied; missing implementation after dispatch preserves
+Unknown and requires governance/reconciliation. A lost provider response is
+never a new semantic Effect. Detailed lifecycle laws remain in
+[Run execution](specification.md#32-run-execution-and-world-settlement) and
+[Effects](specification.md#11-effects).
 
-Clock and signal plugins do not wake processes directly. They submit a stable
-`cymule.wait-activation/1` proposal naming the declared source and exact parked
-waits. M1 admits the receipt, result Artifact, wait completions, and Continuation
-readiness in one CAS. Stable redelivery is safe, a consume-once signal token has
-at most one consuming winner, and a resumed Continuation receives a new fenced
-Attempt epoch.
+## Replay, compaction and reclamation
 
-Every parked wait pins an owner containing definition, invocation, Region path,
-site, step, and an optional result local. The owner itself is never optional.
-The activation CAS writes the result Artifact into that local when present
-before the Continuation becomes ready, so later expressions consume durable
-frame state after reopen. Embedded execution exposes the typed boundary but
-creates no Continuation.
+A complete Core batch retains ordered member commands and receipts, its
+material proposal, frozen source and admission parent. A material-only batch
+has no command members but nonempty admitted material; a conflict can have a
+receipt without an Event. Neither can be discarded because an Event count is
+zero.
 
-Production HTTP and timer sources persist the exact selected targets before
-delivery, so an acknowledgement lost after M1 admission cannot cause target
-reselection on restart. `cymule-clock-system` separately converts OS wall-clock
-observations into strictly increasing per-scope logical values for lease and
-scheduling commands. The command CAS, not the clock database, remains semantic
-authority.
+Machine compaction is explicit offline maintenance through
+`DurableStoreControl::compact_machine_history(HistoryCompactionRequest)`.
+The request selects an exact source revision and Event-prefix or Event-free
+admission cut; it contains no replacement Machine or archive bytes. Durable
+derives the source and consumes Core-prepared authority. The maintenance
+operation may process the complete source/base once, while ordinary execution
+retains bounded reads. It is Rust-only: no Engine or SDK transport command is
+implied.
 
-`cymule.durable-control/1` is the common mutation/query transport for all four
-SDKs. It exposes start, resume, wait admission, explicit effect release, and
-read-only Run/domain queries. The Rust `DurableRuntimeControl` is the only
-reducer; clients do not reconstruct Continuations or outbox transitions.
+The base, archive entries, complete batches, sparse command index and new head
+share publication authority. Hot restoration uses the exact Store-pinned base
+anchor and retained suffix. Offline replay additionally verifies the archive.
+A cut preserves each retained batch's frozen-source dependency and the semantic
+authority root. See [Replay](specification.md#13-replay).
 
-The suffix rotates into a fixed-size authenticated manifest at 32 segments;
-each manifest points to its parent and covered segment pack, so hot writes never
-clone or hash the accumulated projection. After 32 packs the coordinator builds
-a new materialized base outside provider writer exclusion, bounding reopen to
-1,024 packed deltas plus the current suffix. Revisions are an incremental hash
-chain over the exact typed delta. Explicit reclamation uses the same outside-lock
-materialization before atomically installing a fresh base and GC receipt.
-The repository
-provides a non-blocking shared-memory reference store, an atomic local directory
-adapter, and a SQLite adapter with immediate
-transactions, WAL, synchronous-full persistence, and zero-timeout contention.
-Adapter exclusion is never semantic authority. No database, queue, or object
-store name is part of the contract.
+Physical reclamation is separate from semantic compaction.
+`reconcile_cold_reclamation` finishes only the deletion page pinned by the
+current head. `advance_cold_reclamation` explicitly selects and publishes the
+next page. Neither an implicit reopen cleanup nor an unsuccessful delete can
+stand in for the pinned receipt.
 
-Machine snapshot v5 can compact a causally closed canonical Event prefix into
-an authenticated base projection while retaining ordered Event identities,
-command identities and semantic hashes, complete command-record digests, and
-every full suffix Event. Restore recomputes the prefix digest from that evidence
-and the projection digest before replaying the suffix. The M1 coordinator
-records cumulative compaction lineage in the same small-head CAS, so a stale
-writer loses and a lost response can be recovered by reopen without recomputing
-history.
+The repository supplies shared-memory reference, directory and SQLite stores.
+Directory publication uses non-blocking exclusion and atomic local publication;
+SQLite uses immediate transactions, WAL, synchronous-full persistence and
+zero-timeout contention. These are realizations, not semantic identities.
+Unsupported or mixed physical generations fail closed without a legacy
+importer. See [Migration runbooks](migrations/README.md).
 
-## Cross-Run resources
+## Resource realization
 
-Status: implemented.
+Resource semantic DTOs and lifecycle reduction are shared through
+`cymule-profile-protocol::resource`. `cymule-resource` supplies typed Artifact
+contracts, verified resolver/store helpers and handoff convenience controls.
+The Resource descriptor identifies content and replay evidence; separate
+locator records identify how an admitted resolver can find it. Credentials
+remain call state.
 
-Run state and outputs use a semantic-only `cymule.resource/2` descriptor rather than
-assuming every Artifact is a small inline blob. The descriptor separates
-logical shape and replay evidence from realization: inline text/JSON/bytes,
-immutable objects, directory or collection manifests, and sandbox/workspace
-snapshots share one contract. Separate `cymule.resource-locators/1` records route
-external URLs and opaque storage references through bounded `ArtifactResolver`
-reads/lists; chunked writes use `ArtifactStore`.
-Concrete local, object-storage, remote-drive, WebDAV, sandbox, and HTTP
-implementations remain plugins.
+Bounded reads and canonical manifest-list proofs verify resolver output.
+Chunked writes use stable write identities and receipt-backed commit/abort
+cleanup. Filesystem and Apache object-store adapters are current concrete
+realizations; a drive, sandbox or other remote transport is not implied by the
+provider-neutral descriptor.
 
-The design follows content-descriptor practice: media type, digest, and size
-prove bytes independently of where they are found. A locator or expiring access
-grant is never canonical identity, and credentials never enter durable state.
-Mutable references remain usable but cannot support exact replay until pinned by
-content digest or immutable version evidence.
-
-`cymule-resource` owns this higher-profile contract; `cymule-core` remains
-unchanged. Resource ID covers shape, media type, inline/content/version/live
-evidence, optional content-manifest descriptor, and semantic annotations. It
-deliberately excludes locator sets, signed URLs, grants, and credential
-revisions. The
-trusted Rust resource sealer validates and hashes candidates. TypeScript,
-Python, Rust, and Go builders call that sealer through the Engine protocol.
-
-`ResourceHandoffController` appends a typed, self-validating transfer to the
-target Run's M1 application journal. The caller supplies an exact producer Run,
-component occurrence and output Artifact, target Run, stable transfer ID, and
-target slot. Handoffs survive reopen, retry
-idempotently, and reject conflicting ID reuse without adding Resource semantics
-to M1 storage.
-
-When the consumer is already parked on a matching input wait, the controller
-can activate it atomically: the producer's typed Resource Handle Artifact
-the transfer and activation records enter separate typed journals, the wait
-completes, and its Continuation becomes ready in one M1 revision. This is a
-generic input-delivery seam, not a queue or Agent message model.
-
-Listable content uses canonical sorted JSON-lines manifests. The semantic
-descriptor retains byte digest/size, entry count, and Merkle root; each bounded
-page binds mathematical index paths plus its request/next cursor chain. This borrows only the
-content-descriptor principle used by OCI: media type, digest, size, immutable
-content, and independent retrieval. Cymule does not import an OCI registry,
-repository, tag, platform, distribution, or credential model.
-
-The M1 Resource lifecycle journal is the pin/release/GC/delete authority. It
-commits a delete fence before physical I/O; store plugins reconcile that intent
-idempotently and must verify exact absence.
-Filesystem and object-store uploads likewise return verified cleanup receipts
-after removing every owned staging/chunk object; a best-effort delete is not a
-terminal state.
+Handoff authority is keyed by transfer, with target-owned slot uniqueness and
+payload-free paged indexes. Activation retains the exact producer occurrence,
+Resource Handle output and source-transfer receipt and couples wait completion
+to Continuation readiness. Retention and deletion use the immutable physical
+binding/content key so annotation-distinct descriptors sharing bytes cannot
+collect each other. Generic Resource commands do not own Virtual archive or
+Agent finalized-stream pins. The exact laws and bounds are in
+[Cross-Run resource values](specification.md#52-cross-run-resource-values).
 
 ## Large virtual work
 
-Status: implemented.
+`cymule-profile-protocol::virtual_work` owns normalized scheduler state and
+pure reduction. `cymule-virtual` re-exports those contracts and provides
+`ResourceBackedVirtualArchive`. Durable invokes the exact
+`VirtualRegionSourceProvider`, `VirtualRegionMigratorProvider` or
+`VirtualArchiveProvider` only when the command requires it.
 
-`cymule-virtual` materializes bounded pages from a provider-neutral
-`RegionSource`; an opaque cursor, not an offset interpreted by Cymule, names the
-next source position. `cymule.virtual-checkpoint/2` records commit that cursor
-with a content-addressed incremental mutation of the complete bounded scheduler
-frontier and an explicit authenticated checkpoint parent through an M1
-application journal. Each canonical delta is bounded to 4 MiB; records never
-repeat a full scheduler snapshot. Stale CAS rolls the in-process scheduler back
-to its previous state, and reopen reduces the authenticated delta chain.
+A bounded materialized frontier is separate from keyed region, work,
+occurrence, parked-reason and receipt authority. A Virtual Run is a scheduling
+namespace, not a synthetic Machine Run. The actual selected Run determines
+its direct Plan or Evolution selector. The claim returns either a retained
+NoWork receipt or a claim with its complete verified SealedPlan; binding
+material, Evolution selection when needed, claim and capacity lease commit
+together. Later results retain exact owner/work/lease fences.
 
-Parked work maintains a rebuildable exact-reason index rather than scanning the
-parked population. A work item blocked on an M1 wait uses the exact wait ID as
-its index key. `DurableVirtualController` can therefore lower one identified
-activation and the resulting M3 wake snapshot into the same M1 CAS revision.
-Concrete databases, object listings, queues, clocks, and signal transports stay
-behind `RegionSource` or activation plugins.
+Fairness uses durable integer weight, cost, deficit and dispatch-count aging.
+Source visibility rotates independently because unmaterialized cost is unknown.
+Retry and lease recovery are explicit typed transitions. A region migration
+returns a complete non-serializable proposal with exact evidence and target
+Artifact records; provider verification and the normalized CAS precede source
+retirement.
 
-Claims are also checkpoints. Before dispatch, the scheduler pins a concrete
-semantic Plan plus exact ExecutionBinding Artifact and records a running
-`cymule.virtual-work-occurrence/2`
-under the new claim epoch. Worker output enters through a closed disposition:
-success, retry, park, terminal failure, or cancellation. `DurableVirtualController`
-atomically checkpoints result/evidence Artifacts and the updated frontier; a
-stale owner, epoch, or CAS changes neither side. Retry policy remains a caller or
-policy-plugin decision and produces a new occurrence rather than rewriting the
-failed attempt.
-Control checkpoints retain the full resolution command and its occurrence ID,
-so historical command replay reads the original receipt even after unrelated
-later claims; it never restores the older scheduler snapshot.
+Archive publication is verified immutable Resource content. Compaction retains
+a certificate, bounded summary, exact execution-binding pins and cumulative
+work/command proof roots. The archive pin is admitted with the certificate;
+only the owning retirement command releases it.
 
-Multi-worker capacity is represented by abstract slot leases. A claim command
-supplies the worker, slot, semantic Plan, ExecutionBinding Artifact,
-capabilities, and Clock-derived logical
-lease window; `DurableVirtualController` previews the next M1 lease and commits
-it with the selected work in one CAS. Different slots can claim independently,
-while one slot cannot hold two active claims. An empty poll records an
-idempotent receipt without acquiring a lease.
+Rehydration is selected and explicit: it restores only requested occurrences
+after proof and identity verification. The current Resource-backed adapter
+loads and verifies the complete manifest, bounded to 8 MiB, and then checks the
+selected range against its retained proof catalog. It does not yet provide
+range-only archive I/O. A provider implementation that avoids the complete read
+is proposed, not an achieved latency or allocation guarantee. The semantic
+contract is [Large virtual work](specification.md#74-large-virtual-work).
 
-Renewal advances the slot lease epoch and the running occurrence fence in one
-checkpoint. Normal result commands carry both the work epoch and current lease
-epoch and must be observed before expiry. After expiry, a recovery controller
-must explicitly retry, fail, or cancel under the exact durable lease; expiry
-does not silently requeue work. Receipt-loss reopen tests cover claim, renewal,
-and recovery, and a later worker receives a greater work epoch before execution.
-The framework never models worker processes, heartbeats, queue endpoints, or an
-Agent Loop.
+## Live Evolution and optional Agent integration
 
-Run selection uses integer weighted deficit accounting over exact item cost.
-Within the chosen Run, priority aging derives only from persisted successful
-dispatch count and ready-entry sequence. This makes fairness portable across
-processes and avoids a clock or floating-point dependency. The guarantee applies
-to materialized, capability-compatible backlogs. `RegionSource` visibility is a
-separate deterministic round-robin layer because Cymule cannot know an item's
-cost before the source returns it.
-Run weight changes use the same idempotent control and M1 checkpoint path and
-reset old deficit before future selection.
+Evolution's pure authority lives in
+`cymule-profile-protocol::evolution`; `cymule-evolution` re-exports it and owns
+the closed process-provider wire. `DurableStoreControl::evolution` binds a fixed
+provider registry and exposes exact reads plus one typed persistence command.
+All-ever command alias lookup precedes source derivation and provider work.
+A fresh command derives its exact keyed source and commits normalized current,
+receipt, material and coupled M1/M3 state together. Historical publication
+reuses immutable records rather than rewriting evidence.
 
-Region topology changes also stay behind the source boundary. A pinned
-`RegionMigrator` receives exact active source snapshots and produces opaque
-replacement cursors plus a coverage-evidence Artifact. The adapter verifies the
-plan again at admission. One M1 checkpoint then retires sources, activates
-targets, retains evidence and receipt, and leaves all already materialized work
-on its historical region identity. No database partition, Kafka offset, object
-prefix, or range syntax enters framework state.
+Migration derives quiescence from one pinned Run authority, resolves its target
+binding before provider work, and replaces the Continuation as a claim-free
+Ready safe point. Ordinary resume separately acquires the next claim. Restart
+records authorization for a distinct replacement Run; it does not automatically
+create or execute it. Adapter preservation declarations are required contracts,
+not a kernel proof that arbitrary transformation code is total.
+See [Semantic Plan evolution](specification.md#121-semantic-plan-evolution).
 
-Completed regions use a separate `VirtualArchive` byte seam. Cymule serializes
-the exact occurrence manifest, derives its semantic Resource descriptor, and
-asks the adapter to idempotently store those bytes. The adapter may realize any
-immutable storage substrate, but it cannot author the
-`VirtualCompactionCertificate`.
-After range readback, one M1 journal CAS replaces hot occurrence payloads with
-a bounded summary, certificate, semantic cold descriptor, proof root, and small
-per-work terminal fence index. A failed CAS leaves at most an unreferenced
-immutable manifest in the adapter. Cold bytes never enter the hot Machine
-Artifact map.
+Core and the public Engine do not define an Agent Loop, Session or streaming
+transport. The optional Agent profile keeps its portable state/reducer in
+`cymule-profile-protocol::agent` so Durable can atomically couple its keyed
+state, receipts and Resource pins. The
+[Agent interaction plugin](../plugins/agent-interaction/README.md) supplies
+controllers and concrete host-facing interfaces. It is not a generic journal
+writer, and its domain types are not exported as an Engine/SDK operation.
+Concrete ACP, MCP, model or editor behavior remains integration-owned.
 
-Partial rehydration is explicit rather than an implicit cache miss. A typed
-command fixes the certificate and exact occurrence IDs. The controller obtains
-an index-bound Merkle proof, reads only each selected occurrence byte range,
-verifies it against the certificate root, then checkpoints only those records. This keeps archive
-latency and provider behavior outside scheduling authority while preserving old
-control receipt and debugging paths on demand.
+The Agent profile uses one occurrence lifecycle for the standalone controller
+and reference driver. Only a freshly acknowledged Started CAS grants host
+dispatch. Context requests and snapshots pin an immutable `(message_head,
+message_count)` prefix; pages read that retained prefix from a newer StateRoot
+without substituting the current Session head. The cumulative selection budget
+counts complete `AgentMessageCurrent` bytes independently from the page-wire
+limit. A recovery call no longer owns the original reader-delivery capability,
+so an unresolved Context cannot accept a provider-authored Completed snapshot;
+it remains Unknown unless an earlier exact completion already committed.
+
+Stream Open computes the canonical size of its prospective final Agent update.
+Staged chunks consume that exact capacity before admission. External delivery
+prederives one semantic Object Resource Handle from media type, digest, and
+size; the provider may add resolver locations but cannot change that Handle.
+This makes wrapper overflow a pre-I/O admission failure instead of a
+post-publication terminalization failure.
+
+## Verification boundary
+
+[Test ownership and commands](testing.md) define focused and full verification.
+Source code and named tests demonstrate intended paths, not a completed
+conformance run for a moving worktree. A profile claim requires the complete
+fault-oriented suite against the same frozen source and exact adapters.
+Publication, deployment and production enablement are separate evidence.

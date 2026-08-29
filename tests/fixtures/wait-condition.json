@@ -1,15 +1,16 @@
 {
-  "wait_id": "wait:fixture",
-  "run_id": "run:fixture",
+  "wait_id": "sha256:8d55f9d1981f4579ce12d106f25d85307ed27db86a4c106bbe17cb0ea8e9acc5",
+  "run_id": "run:durable",
   "kind": {
-    "kind": "signal",
-    "key": "signal:fixture"
+    "kind": "input",
+    "correlation": "approval",
+    "schema": { "type": "string" }
   },
   "consume_once": false,
   "owner": {
-    "invocation_id": "main",
+    "invocation_id": "sha256:1d8b33234ddf4f1c559d6052153a15350ca4e8d8c4e5154a3268fd34da367365",
     "definition_id": "main",
-    "site_id": "wait.fixture",
+    "site_id": "wait.test",
     "region_path": [],
     "step_index": 0,
     "bind": null

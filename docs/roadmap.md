@@ -19,9 +19,10 @@ Status: implemented in 0.1.0.
 
 Status: implemented for one production single-domain authority.
 
-- provider-neutral segmented durable head CAS, bounded checkpoint-plus-suffix
-  reopen, receipt-backed cold reclamation, full Continuation data, waits, leases,
-  outbox, component occurrences, and snapshot records are implemented;
+- provider-neutral small-head CAS over one typed StateRoot, bounded active-state
+  reopen plus exact historical lookup, receipt-backed cold reclamation, full
+  Continuation data, waits, leases, outbox, component occurrences, and snapshot
+  records are implemented;
 - memory and atomic directory-store adapters pass reopen and stale-writer tests;
 - sequential component/wait execution resumes after process reopen and replays
   recorded component outputs without reinvocation;
@@ -51,7 +52,8 @@ Status: implemented for one production single-domain authority.
   CAS before commit and after durable commit, reopens authority, and verifies
   replay plus terminal outbox integrity;
 - provider-neutral cross-Run Resource descriptors, replay classification,
-  bounded resolver/store interfaces, M1 handoff journals, and four SDK builders
+  bounded resolver/store interfaces, keyed M1 handoff authority and indexes,
+  and four SDK builders
   are implemented; handoff input activation is atomic and lost-receipt tested;
 - canonical Event-prefix compaction retains an authenticated base plus exact
   suffix, cumulative receipt lineage, old command deduplication, and
@@ -115,9 +117,10 @@ Status: implemented.
 - archive write/read failure, tamper, stale CAS, reopen, and old receipt replay
   are fault-tested; four SDKs expose the same compact/rehydrate controls without
   provider semantics;
-- capacity-slot leases make claim and M1 authority atomic, renew the active
-  lease fence, reject normal output at expiry, and require explicit fenced
-  retry/fail/cancel recovery before a later worker claims a greater work epoch;
+- capacity-slot coordination leases enter the same M1 CAS as their claims,
+  renew the active lease fence, reject normal output at expiry, and require
+  explicit fenced retry/fail/cancel recovery before a later worker claims a
+  greater work epoch;
 - claim, renewal, recovery, and Run-weight commands retain receipts across lost
   acknowledgements, process reopen, and stale CAS; Rust, TypeScript, Python, and
   Go expose the same transport-neutral scheduling controls;
@@ -133,30 +136,33 @@ Status: implemented for one provider-neutral durable domain.
   conservative impact cones, deterministic future-only canaries, rollback,
   safe-point migration receipts, shadow evidence, and portable snapshots are
   implemented;
-- deterministic structural Plan diff, M1 durable checkpoint lineage,
+- deterministic structural Plan diff, M1 StateRoot revision lineage,
   mixed-version occurrence pinning, stale-CAS rollback, and lost-receipt reopen
   are implemented;
-- reusable local definition invocation, four-language `cymule.ir/2` authoring,
+- reusable local definition invocation, four-language `cymule.ir/3` authoring,
   latest-compatible exact-schema registry resolution, transitive reusable
   module relinking, pinned references, historical linked Plans, and durable
   tamper-checked registry recovery are implemented;
-- one unified durable authority now checkpoints the registry, exact
-  template-plus-Plan history, every template-scoped DAG/rollout, automatic
-  compatible relinks, and occurrence pins together; lost publication receipts
-  replay the original advanced/blocked parent set;
-- future Plan selection and virtual worker claim can commit in one capacity-slot
-  lease CAS, preventing a claim without its immutable version pin or a pin
-  appended after dispatch;
+- one provider-bound `DurableEvolutionControl` now commits a scalar current,
+  exact command alias and receipt, and 22 normalized StateRoot families for
+  definitions, templates, Plans, structural edges, rollout, evidence, and
+  occurrence pins; exact receipt lookup resolves lost acknowledgement without
+  replaying history;
+- future Plan selection and virtual worker claim commit one typed occurrence pin
+  with the capacity-slot lease in one CAS, preventing a claim without decision,
+  Plan, binding, template, and selection lineage or a pin appended after dispatch;
 - exact reviewed patch admission, generic higher-profile impact sites, checked
   migration and isolated shadow plugin contracts, observation gates,
   promotion/rollback, mixed-version Plan selection, four-language controls,
   and lost-receipt recovery are implemented.
-- `LatestCompatible` is the wire/API default, reachable no-widening admission
-  protects future heads, durable safe-point proofs replace caller booleans, and
-  explicit replacement-Run restart authorization is implemented.
-- `cymule.live-evolution-control/3` exposes the complete template-scoped
+- `LatestCompatible` is an explicit required closed strategy, reachable
+  no-widening admission protects future heads, durable safe-point proofs replace
+  caller booleans, and explicit replacement-Run restart authorization is
+  implemented.
+- `cymule.live-evolution-control/6` exposes the complete template-scoped
   authority through Rust, TypeScript, Python, and Go without client-side
-  sequencing.
+  sequencing; Engine v4 returns one `EvolutionCommit` whose physical revisions
+  remain outside the stable semantic receipt.
 
 ## M5 - Isolation and federation
 

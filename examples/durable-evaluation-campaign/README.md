@@ -114,9 +114,11 @@ Read the same durable projection without executing work:
   --run-id run:support-evaluation
 ```
 
-`status` re-verifies the retained suite bytes against their Resource Handle.
-Supplying `--suite FILE` additionally proves that a local file is byte-for-byte
-the suite originally pinned by this campaign.
+`status` opens both retained stores read-only and re-verifies the suite bytes
+against their Resource Handle. Missing storage fails as an integrity error; the
+command never creates or repairs it. Supplying `--suite FILE` additionally
+proves that a local file is byte-for-byte the suite originally pinned by this
+campaign.
 
 ## See crash recovery and live evolution
 
@@ -142,12 +144,17 @@ Publish a compatible scorer revision:
   --policy weighted
 ```
 
-Resume with the same suite and Run identity:
+Evolution is admitted only after the existing campaign's sole region, retained
+metadata Artifact, and pinned suite Resource all verify. A bare durable genesis
+or a damaged campaign cannot publish a future Plan.
+
+Resume from the retained suite Resource and the same Run identity. The original
+local file is no longer required; adding `--suite FILE` is an optional
+byte-for-byte verification input:
 
 ```sh
 ./target/debug/cymule-example-durable-evaluation-campaign run \
   --state "$EVOLUTION_STATE" \
-  --suite examples/durable-evaluation-campaign/fixtures/support-tickets.jsonl \
   --run-id run:evolving-evaluation
 ```
 
@@ -185,18 +192,26 @@ changing the application-level behavior demonstrated here.
 
 The binary launches itself in process-plugin mode only to make the default
 experience self-contained. To integrate a real evaluator, keep the published
-component contracts and pass an executable implementing `cymule.plugin/2`:
+component contracts and pass an executable implementing `cymule.plugin/3`:
 
 ```sh
 ./target/debug/cymule-example-durable-evaluation-campaign run \
   --state "$CAMPAIGN_STATE" \
   --suite examples/durable-evaluation-campaign/fixtures/support-tickets.jsonl \
   --run-id run:external-subject \
-  --plugin /absolute/path/to/evaluation-plugin
+  --plugin /absolute/path/to/evaluation-plugin \
+  --plugin-runtime-revision sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ```
 
 The example invokes that executable with `__plugin`, an empty ambient
-environment, a five-second timeout, and a one-MiB protocol-message limit:
+environment, the `ProcessExecutorConfig` framework-owned default deadline, and
+the plugin protocol's exact 8 MiB message limit. Executable capture remains
+bounded at 128 MiB so repository debug builds can run without turning process
+closure into an unbounded file read. The example does not declare a competing
+local timeout default. The required runtime revision is an immutable aggregate generation
+owned by that plugin provider; it must advance whenever an interpreter, loader,
+shared library, sidecar, or other runtime facility that can change execution
+meaning changes. An OS/architecture label is not such a revision:
 
 - `example.ticket-subject` receives one typed case and returns a prediction;
 - `example.ticket-scorer` receives the case, prediction, and Plan-pinned policy;
@@ -206,10 +221,16 @@ For a different domain, replace the fixture types and component names in this
 example application. The durable store, Resource, scheduler, lease, occurrence,
 and evolution interfaces do not depend on tickets or on any Agent protocol.
 
-The bundled subject is pure and safe to invoke again if a worker dies before a
-result checkpoint. Do not put a mutating operation behind this component and
-assume retries are safe. Model real world mutations as Cymule Effects with a
-provider idempotency key and authoritative reconciliation.
+The bundled subject is pure and may be invoked again only when explicit lease
+recovery proves that its worker died before a retained result checkpoint. A
+returning worker with the same identity resumes its claim only while that lease
+is still live; after expiry it checkpoints recovery before issuing a new claim.
+A returned process, timeout, contract, protocol, shape, or policy-semantic error
+is durably resolved as one terminal case result; the example does not hide an
+unbounded retry policy. Do not put a mutating operation behind this component
+and assume recovery is safe.
+Model real world mutations as Cymule Effects with a provider idempotency key and
+authoritative reconciliation.
 
 ## Failure drills and limits
 
@@ -220,14 +241,17 @@ cargo test -p cymule-example-durable-evaluation-campaign
 ```
 
 It covers process exit after a committed result, expiry and explicit recovery
-after exit with an active claim, refusal to steal an unexpired claim, changed
-suite bytes, retained Resource tampering, duplicate case IDs, unknown fields,
-symlink input, compatible future-only evolution, and incompatible-update
-blocking. A separate Unix black-box test runs a 24-case campaign through a
-protocol-compatible barrier plugin, observes exactly three retained results and
-one active claim through a read-only SQLite connection, sends an external
-process kill, reopens authority, recovers that expired claim, and proves one
-terminal result per case.
+after exit with an active claim (including the same worker identity), same-worker
+reuse before expiry, refusal to steal an unexpired claim, changed suite bytes,
+retained Resource tampering, duplicate case IDs and JSON members, unknown
+fields, control characters, symlink input, non-mutating status observation,
+reopen without the original suite file, exact baseline-to-Resource-to-region
+recovery, protocol-valid invalid plugin output becoming one terminal failure,
+compatible future-only evolution, and incompatible-update blocking. A separate
+Unix black-box test runs a 24-case campaign through a protocol-compatible
+barrier plugin, observes exactly two retained results and one active claim
+through a read-only SQLite connection, sends an external process kill, reopens
+authority, recovers that expired claim, and proves one terminal result per case.
 See [ADVERSARIAL_REVIEW.md](ADVERSARIAL_REVIEW.md) for the reviewed failure
 model and remaining boundaries.
 

@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/evolution-control.schema.json",
-  "title": "Cymule Evolution Control cymule.evolution-control/4",
+  "title": "Cymule Evolution Control cymule.evolution-control/5",
   "oneOf": [
     {
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "patch"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/4" },
+        "control_version": { "const": "cymule.evolution-control/5" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "apply_patch" },
         "patch": { "$ref": "#/$defs/patch" }
@@ -17,7 +17,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "decision"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/4" },
+        "control_version": { "const": "cymule.evolution-control/5" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "set_rollout" },
         "decision": { "$ref": "#/$defs/decision" }
@@ -25,19 +25,21 @@
     },
     {
       "type": "object", "additionalProperties": false,
-      "required": ["control_version", "command_id", "operation", "occurrence_id"],
+      "required": ["control_version", "command_id", "operation", "occurrence_id", "selection_id", "execution_binding"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/4" },
+        "control_version": { "const": "cymule.evolution-control/5" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "select_occurrence" },
-        "occurrence_id": { "$ref": "#/$defs/id" }
+        "occurrence_id": { "$ref": "#/$defs/id" },
+        "selection_id": { "$ref": "#/$defs/id" },
+        "execution_binding": { "$ref": "#/$defs/executionBindingArtifact" }
       }
     },
     {
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "request"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/4" },
+        "control_version": { "const": "cymule.evolution-control/5" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "migrate" },
         "request": { "$ref": "#/$defs/migration" }
@@ -47,7 +49,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "request"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/4" },
+        "control_version": { "const": "cymule.evolution-control/5" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "restart_under_new_plan" },
         "request": { "$ref": "#/$defs/restart" }
@@ -57,7 +59,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "request"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/4" },
+        "control_version": { "const": "cymule.evolution-control/5" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "shadow" },
         "request": { "$ref": "#/$defs/shadow" }
@@ -67,7 +69,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "observation"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/4" },
+        "control_version": { "const": "cymule.evolution-control/5" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "observe" },
         "observation": { "$ref": "#/$defs/observation" }
@@ -77,7 +79,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["control_version", "command_id", "operation", "gate", "next_decision_id"],
       "properties": {
-        "control_version": { "const": "cymule.evolution-control/4" },
+        "control_version": { "const": "cymule.evolution-control/5" },
         "command_id": { "$ref": "#/$defs/id" },
         "operation": { "const": "apply_gate" },
         "gate": { "$ref": "#/$defs/gate" },
@@ -86,7 +88,15 @@
     }
   ],
   "$defs": {
-    "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "id": {
+      "type": "string", "minLength": 1, "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "contentId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "runIdentity": {
+      "type": "string", "minLength": 1, "maxLength": 512,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
     "artifact": {
       "type": "object", "additionalProperties": false,
       "required": ["identity_version", "artifact_id", "kind"],
@@ -101,17 +111,23 @@
       "required": ["reference", "bytes"],
       "properties": {
         "reference": { "$ref": "#/$defs/artifact" },
-        "bytes": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } }
+        "bytes": {
+          "type": "string", "maxLength": 11184812,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?(?![\\s\\S])",
+          "allOf": [{ "if": { "minLength": 11184812 }, "then": { "pattern": "=$" } }]
+        }
       }
     },
     "migrationDescriptor": {
       "type": "object", "additionalProperties": false,
-      "required": ["adapter_id", "adapter_revision", "from_plan", "to_plan", "from_schema", "to_schema", "state_coverage", "failure_and_cancellation", "budget_and_ownership", "authority_and_effects"],
+      "required": ["adapter_id", "adapter_revision", "from_plan", "to_plan", "plan_edge_id", "compatibility_id", "from_schema", "to_schema", "state_coverage", "failure_and_cancellation", "budget_and_ownership", "authority_and_effects"],
       "properties": {
         "adapter_id": { "$ref": "#/$defs/id" },
         "adapter_revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "from_plan": { "$ref": "#/$defs/id" },
-        "to_plan": { "$ref": "#/$defs/id" },
+        "to_plan": { "$ref": "#/$defs/contentId" },
+        "plan_edge_id": { "$ref": "#/$defs/id" },
+        "compatibility_id": { "$ref": "#/$defs/id" },
         "from_schema": { "$ref": "#/$defs/id" },
         "to_schema": { "$ref": "#/$defs/id" },
         "state_coverage": { "const": "total_reachable_state" },
@@ -122,9 +138,10 @@
     },
     "migrationOutput": {
       "type": "object", "additionalProperties": false,
-      "required": ["output_state", "evidence"],
+      "required": ["continuation", "artifacts", "evidence"],
       "properties": {
-        "output_state": { "$ref": "#/$defs/artifactRecord" },
+        "continuation": { "$ref": "#/$defs/continuation" },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifactRecord" } },
         "evidence": { "$ref": "#/$defs/artifactRecord" }
       }
     },
@@ -155,6 +172,18 @@
         "identity_version": { "const": "cymule.artifact/2" },
         "artifact_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "kind": { "const": "cymule.execution-binding/2" }
+      }
+    },
+    "occurrencePin": {
+      "type": "object", "additionalProperties": false,
+      "required": ["occurrence_id", "template_id", "decision_id", "plan_id", "execution_binding", "selection_id"],
+      "properties": {
+        "occurrence_id": { "$ref": "#/$defs/id" },
+        "template_id": { "$ref": "#/$defs/id" },
+        "decision_id": { "$ref": "#/$defs/id" },
+        "plan_id": { "$ref": "#/$defs/id" },
+        "execution_binding": { "$ref": "#/$defs/executionBindingArtifact" },
+        "selection_id": { "$ref": "#/$defs/id" }
       }
     },
     "patchOperation": {
@@ -197,30 +226,26 @@
     },
     "migration": {
       "type": "object", "additionalProperties": false,
-      "required": ["migration_id", "run_id", "from_plan", "to_plan", "plan_edge_id", "compatibility_id", "safe_point_id", "source_epoch", "source_continuation", "input_state", "source_binding", "target_binding"],
+      "required": ["migration_id", "run_id", "from_plan", "to_plan", "plan_edge_id", "compatibility_id", "expected_source_epoch", "adapter_id", "adapter_revision"],
       "properties": {
         "migration_id": { "$ref": "#/$defs/id" },
-        "run_id": { "$ref": "#/$defs/id" },
-        "from_plan": { "$ref": "#/$defs/id" },
-        "to_plan": { "$ref": "#/$defs/id" },
-        "plan_edge_id": { "$ref": "#/$defs/id" },
-        "compatibility_id": { "$ref": "#/$defs/id" },
-        "safe_point_id": { "$ref": "#/$defs/id" },
-        "source_epoch": { "type": "integer", "minimum": 0 },
-        "source_continuation": { "$ref": "#/$defs/continuation" },
-        "input_state": { "$ref": "#/$defs/artifact" },
-        "source_binding": { "$ref": "#/$defs/executionBindingArtifact" },
-        "target_binding": { "$ref": "#/$defs/executionBindingArtifact" }
+        "run_id": { "$ref": "#/$defs/runIdentity" },
+        "from_plan": { "$ref": "#/$defs/contentId" },
+        "to_plan": { "$ref": "#/$defs/contentId" },
+        "plan_edge_id": { "$ref": "#/$defs/contentId" },
+        "compatibility_id": { "$ref": "#/$defs/contentId" },
+        "expected_source_epoch": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "adapter_id": { "$ref": "#/$defs/id" },
+        "adapter_revision": { "$ref": "#/$defs/contentId" }
       }
     },
     "invocationPathSegment": {
       "type": "object", "additionalProperties": false,
-      "required": ["site_id", "region_path", "scope_id", "epoch"],
+      "required": ["site_id", "region_path", "scope_id"],
       "properties": {
         "site_id": { "$ref": "#/$defs/id" },
-        "region_path": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
-        "scope_id": { "$ref": "#/$defs/id" },
-        "epoch": { "type": "integer", "minimum": 0 }
+        "region_path": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } },
+        "scope_id": { "$ref": "#/$defs/id" }
       }
     },
     "frame": {
@@ -232,54 +257,54 @@
         "invocation_path": { "type": "array", "items": { "$ref": "#/$defs/invocationPathSegment" } },
         "scope_id": { "$ref": "#/$defs/id" },
         "input": { "$ref": "#/$defs/artifact" },
-        "region_path": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
-        "next_step": { "type": "integer", "minimum": 0 },
+        "region_path": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } },
+        "next_step": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
         "locals": { "type": "object", "additionalProperties": { "$ref": "#/$defs/artifact" } }
       }
     },
     "continuation": {
       "type": "object", "additionalProperties": false,
-      "required": ["run_id", "plan_id", "binding_context", "frames", "state", "wait_set", "scope_stack", "effect_obligations", "authority_leases", "budget", "causal_frontier", "epoch", "status"],
+      "required": ["continuation_version", "run_id", "plan_id", "binding_context", "frames", "state", "wait_set", "scope_stack", "epoch", "execution_fence", "execution_claim", "status"],
       "properties": {
-        "run_id": { "$ref": "#/$defs/id" },
+        "continuation_version": { "const": "cymule.continuation-state/1" },
+        "run_id": { "$ref": "#/$defs/runIdentity" },
         "plan_id": { "$ref": "#/$defs/id" },
         "binding_context": { "$ref": "#/$defs/id" },
         "frames": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/frame" } },
         "state": { "oneOf": [{ "$ref": "#/$defs/artifact" }, { "type": "null" }] },
         "wait_set": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
         "scope_stack": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/id" } },
-        "effect_obligations": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
-        "authority_leases": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
-        "budget": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
-        "causal_frontier": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
-        "epoch": { "type": "integer", "minimum": 0 },
-        "status": { "enum": ["ready", "waiting", "running", "completed"] }
+        "epoch": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "execution_fence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "execution_claim": { "type": "null" },
+        "status": { "const": "ready" }
       }
     },
     "restart": {
       "type": "object", "additionalProperties": false,
-      "required": ["restart_id", "source_run", "replacement_run", "from_plan", "to_plan", "safe_point_id", "source_epoch", "input", "evidence"],
+      "required": ["restart_id", "replacement_run", "run_id", "from_plan", "expected_source_epoch", "to_plan", "input", "evidence"],
       "properties": {
         "restart_id": { "$ref": "#/$defs/id" },
-        "source_run": { "$ref": "#/$defs/id" },
-        "replacement_run": { "$ref": "#/$defs/id" },
-        "from_plan": { "$ref": "#/$defs/id" },
-        "to_plan": { "$ref": "#/$defs/id" },
-        "safe_point_id": { "$ref": "#/$defs/id" },
-        "source_epoch": { "type": "integer", "minimum": 0 },
+        "replacement_run": { "$ref": "#/$defs/runIdentity" },
+        "run_id": { "$ref": "#/$defs/runIdentity" },
+        "from_plan": { "$ref": "#/$defs/contentId" },
+        "expected_source_epoch": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "to_plan": { "$ref": "#/$defs/contentId" },
         "input": { "$ref": "#/$defs/artifact" },
         "evidence": { "$ref": "#/$defs/artifact" }
       }
     },
     "shadow": {
       "type": "object", "additionalProperties": false,
-      "required": ["comparison_id", "decision_id", "subject", "primary_plan", "shadow_plan", "input", "comparison_policy"],
+      "required": ["comparison_id", "decision_id", "subject", "primary_plan", "shadow_plan", "driver_id", "driver_revision", "input", "comparison_policy"],
       "properties": {
         "comparison_id": { "$ref": "#/$defs/id" },
         "decision_id": { "$ref": "#/$defs/id" },
         "subject": { "$ref": "#/$defs/id" },
-        "primary_plan": { "$ref": "#/$defs/id" },
-        "shadow_plan": { "$ref": "#/$defs/id" },
+        "primary_plan": { "$ref": "#/$defs/contentId" },
+        "shadow_plan": { "$ref": "#/$defs/contentId" },
+        "driver_id": { "$ref": "#/$defs/id" },
+        "driver_revision": { "$ref": "#/$defs/contentId" },
         "input": { "$ref": "#/$defs/artifact" },
         "comparison_policy": { "$ref": "#/$defs/id" }
       }
@@ -302,10 +327,10 @@
       "properties": {
         "gate_id": { "$ref": "#/$defs/id" },
         "decision_id": { "$ref": "#/$defs/id" },
-        "min_target_observations": { "type": "integer", "minimum": 0 },
-        "max_target_failures": { "type": "integer", "minimum": 0 },
-        "min_equivalent_shadows": { "type": "integer", "minimum": 0 },
-        "max_inequivalent_shadows": { "type": "integer", "minimum": 0 }
+        "min_target_observations": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "max_target_failures": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "min_equivalent_shadows": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "max_inequivalent_shadows": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
       }
     }
   }

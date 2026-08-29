@@ -8,18 +8,22 @@
   "properties": {
     "version": {"const": "cymule.execution-binding/2"},
     "context": {"$ref": "#/$defs/context"},
-    "components": {"type": "object", "additionalProperties": {"$ref": "#/$defs/componentBinding"}},
-    "effects": {"type": "object", "additionalProperties": {"$ref": "#/$defs/effectBinding"}}
+    "components": {"type": "object", "maxProperties": 128, "propertyNames": {"$ref": "#/$defs/token"}, "additionalProperties": {"$ref": "#/$defs/componentBinding"}},
+    "effects": {"type": "object", "maxProperties": 128, "propertyNames": {"$ref": "#/$defs/token"}, "additionalProperties": {"$ref": "#/$defs/effectBinding"}}
   },
   "$defs": {
+    "token": {
+      "type": "string", "minLength": 1, "maxLength": 256,
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
     "service": {
       "type": "object",
       "additionalProperties": false,
       "required": ["namespace", "name", "api_revision"],
       "properties": {
-        "namespace": {"type": "string", "minLength": 1, "maxLength": 256},
-        "name": {"type": "string", "minLength": 1, "maxLength": 256},
-        "api_revision": {"type": "string", "minLength": 1, "maxLength": 256}
+        "namespace": {"$ref": "#/$defs/token"},
+        "name": {"$ref": "#/$defs/token"},
+        "api_revision": {"$ref": "#/$defs/token"}
       }
     },
     "implementation": {
@@ -27,8 +31,8 @@
       "additionalProperties": false,
       "required": ["implementation_id", "revision"],
       "properties": {
-        "implementation_id": {"type": "string", "minLength": 1, "maxLength": 256},
-        "revision": {"type": "string", "minLength": 1, "maxLength": 256}
+        "implementation_id": {"$ref": "#/$defs/token"},
+        "revision": {"$ref": "#/$defs/token"}
       }
     },
     "provider": {
@@ -37,11 +41,11 @@
       "required": ["version", "provider_id", "implementation", "provides", "requires", "properties", "configuration_schema_digest", "configuration_fingerprint"],
       "properties": {
         "version": {"const": "cymule.runtime-composition/1"},
-        "provider_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "provider_id": {"$ref": "#/$defs/token"},
         "implementation": {"$ref": "#/$defs/implementation"},
-        "provides": {"type": "array", "items": {"$ref": "#/$defs/service"}},
-        "requires": {"type": "array", "items": {"$ref": "#/$defs/service"}},
-        "properties": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+        "provides": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/service"}},
+        "requires": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/service"}},
+        "properties": {"type": "object", "maxProperties": 256, "propertyNames": {"$ref": "#/$defs/token"}, "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"}},
         "configuration_schema_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "configuration_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
       }
@@ -52,7 +56,7 @@
       "required": ["version", "providers"],
       "properties": {
         "version": {"const": "cymule.runtime-composition/1"},
-        "providers": {"type": "array", "items": {"$ref": "#/$defs/provider"}}
+        "providers": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/provider"}}
       }
     },
     "componentBinding": {
@@ -61,9 +65,9 @@
       "required": ["service", "provider_id", "implementation", "operation_revision"],
       "properties": {
         "service": {"$ref": "#/$defs/service"},
-        "provider_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "provider_id": {"$ref": "#/$defs/token"},
         "implementation": {"$ref": "#/$defs/implementation"},
-        "operation_revision": {"type": "string", "minLength": 1, "maxLength": 256}
+        "operation_revision": {"$ref": "#/$defs/token"}
       }
     },
     "effectBinding": {
@@ -72,9 +76,9 @@
       "required": ["service", "provider_id", "implementation", "operation_revision", "can_reconcile"],
       "properties": {
         "service": {"$ref": "#/$defs/service"},
-        "provider_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "provider_id": {"$ref": "#/$defs/token"},
         "implementation": {"$ref": "#/$defs/implementation"},
-        "operation_revision": {"type": "string", "minLength": 1, "maxLength": 256},
+        "operation_revision": {"$ref": "#/$defs/token"},
         "can_reconcile": {"type": "boolean"}
       }
     }

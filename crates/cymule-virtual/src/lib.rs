@@ -1,36 +1,7 @@
-//! Provider-neutral virtual regions and bounded deterministic scheduling.
+//! Typed provider adapters for Cymule's normalized Virtual-work profile.
 
 mod archive;
-mod durable;
-mod error;
-mod model;
-mod scheduler;
 
-pub use archive::{
-    MAX_VIRTUAL_ARCHIVE_CHUNK, ResourceBackedVirtualArchive, VIRTUAL_ARCHIVE_MANIFEST_KIND,
-    VirtualArchive, VirtualArchiveObject, VirtualArchiveOccurrenceProof, verify_occurrence_proof,
-    virtual_archive_record,
-};
-pub use durable::{
-    DurableVirtualController, MAX_VIRTUAL_CHECKPOINT_DELTA_BYTES, MapDelta, SetDelta,
-    VIRTUAL_CHECKPOINT_SCHEMA, VirtualCheckpoint, VirtualClaimCheckpoint, VirtualDelta,
-};
-pub use error::{VirtualError, VirtualResult};
-pub use model::{
-    ArchivedWorkIndex, ClaimedWork, CompactedWorkIndex, FrontierLimits, MaterializedPage,
-    ParkReason, ParkedWork, RegionMigrationCommand, RegionMigrationKind, RegionMigrationPlan,
-    RegionMigrationReceipt, RegionMigrationRequest, SchedulingPolicy,
-    VIRTUAL_ARCHIVE_MANIFEST_VERSION, VIRTUAL_CLAIM_CONTROL_VERSION,
-    VIRTUAL_COMPACTION_CERTIFICATE_VERSION, VIRTUAL_COMPACTION_CONTROL_VERSION,
-    VIRTUAL_LEASE_RENEWAL_CONTROL_VERSION, VIRTUAL_RECOVERY_CONTROL_VERSION,
-    VIRTUAL_REGION_MIGRATION_CONTROL_VERSION, VIRTUAL_REGION_MIGRATION_VERSION,
-    VIRTUAL_REHYDRATION_CONTROL_VERSION, VIRTUAL_RUN_WEIGHT_CONTROL_VERSION,
-    VIRTUAL_WORK_CONTROL_VERSION, VIRTUAL_WORK_OCCURRENCE_VERSION, VirtualArchiveManifest,
-    VirtualClaimCommand, VirtualClaimLease, VirtualClaimReceipt, VirtualCompactionCertificate,
-    VirtualCompactionCommand, VirtualCompactionReceipt, VirtualCompletionSummary, VirtualCursor,
-    VirtualLeaseRenewalCommand, VirtualLeaseRenewalReceipt, VirtualRecoveryCommand,
-    VirtualRecoveryReceipt, VirtualRegion, VirtualRehydrationCommand, VirtualRehydrationReceipt,
-    VirtualRunWeightCommand, VirtualRunWeightReceipt, VirtualSnapshot, WorkItem, WorkOccurrence,
-    WorkOccurrenceState, WorkResolution, WorkResolutionCommand,
-};
-pub use scheduler::{RegionMigrator, RegionSource, VirtualScheduler};
+pub use archive::ResourceBackedVirtualArchive;
+pub use cymule_profile_protocol::virtual_work::*;
+pub use cymule_profile_protocol::{ProtocolError, ProtocolResult};

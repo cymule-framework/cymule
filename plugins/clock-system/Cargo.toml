@@ -14,13 +14,13 @@ publish.workspace = true
 [dependencies]
 cymule-core.workspace = true
 cymule-durable.workspace = true
+cymule-durable-protocol.workspace = true
 rusqlite.workspace = true
-serde.workspace = true
 
 [dev-dependencies]
 cymule-test-world = { path = "../../tests/test-world" }
 serde_json.workspace = true
-tempfile = "3.27.0"
+tempfile.workspace = true
 
 [lints]
 workspace = true

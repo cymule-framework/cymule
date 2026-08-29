@@ -9,13 +9,16 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use cymule_clock_system::{ClockObservation, SqliteClock, WallClock};
-use cymule_durable::DurableResult;
+use cymule_clock_system::{SqliteClock, WallClock};
+use cymule_durable::{ClockObservationAuthority, DurableResult};
+use cymule_durable_protocol::ClockObservation;
 use cymule_test_world::{ManagedChild, TestWorld};
 use rusqlite::Connection;
 
 #[derive(Clone, Copy)]
 struct FixedWall(u64);
+
+const GENERATION: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
 impl WallClock for FixedWall {
     fn now_unix_ms(&self) -> DurableResult<u64> {
@@ -32,9 +35,13 @@ fn clock_process_kill_worker_entry() {
     let receipt =
         PathBuf::from(std::env::var("CYMULE_CLOCK_KILL_RECEIPT").expect("receipt path exists"));
     let mode = std::env::var("CYMULE_CLOCK_KILL_MODE").expect("kill mode exists");
-    let mut clock =
-        SqliteClock::open_with_wall_clock(database, "clock:process-kill", FixedWall(100))
-            .expect("clock opens");
+    let mut clock = SqliteClock::open_with_wall_clock(
+        database,
+        "clock:process-kill",
+        GENERATION,
+        FixedWall(100),
+    )
+    .expect("clock opens");
     match mode.as_str() {
         "before_observe" => {
             fs::write(marker, "before_observe").expect("pre-observation barrier writes");
@@ -48,6 +55,10 @@ fn clock_process_kill_worker_entry() {
             .expect("observation receipt writes");
             fs::write(marker, "after_observe").expect("post-observation barrier writes");
         }
+        "after_observe_receipt_lost" => {
+            clock.observe("leases").expect("observation commits");
+            fs::write(marker, "after_observe_receipt_lost").expect("lost-receipt barrier writes");
+        }
         mode => panic!("unknown clock kill mode {mode}"),
     }
     loop {
@@ -57,7 +68,11 @@ fn clock_process_kill_worker_entry() {
 
 #[test]
 fn logical_clock_survives_real_process_death_on_both_observation_sides() {
-    for (seed, mode) in [(21, "before_observe"), (22, "after_observe")] {
+    for (seed, mode) in [
+        (21, "before_observe"),
+        (22, "after_observe"),
+        (23, "after_observe_receipt_lost"),
+    ] {
         let world = TestWorld::new(seed).expect("clock test world creates");
         let database = world
             .domain()
@@ -97,26 +112,60 @@ fn logical_clock_survives_real_process_death_on_both_observation_sides() {
         assert_sqlite_integrity(&database);
         if mode == "before_observe" {
             assert!(!receipt.exists());
-            let first =
-                SqliteClock::open_with_wall_clock(&database, "clock:process-kill", FixedWall(100))
-                    .expect("clock reopens")
-                    .observe("leases")
-                    .expect("first observation commits after reopen");
+            let first = SqliteClock::open_with_wall_clock(
+                &database,
+                "clock:process-kill",
+                GENERATION,
+                FixedWall(100),
+            )
+            .expect("clock reopens")
+            .observe("leases")
+            .expect("first observation commits after reopen");
             assert_eq!(first.logical_time, 100);
-        } else {
+        } else if mode == "after_observe" {
             let retained: ClockObservation =
                 serde_json::from_slice(&fs::read(&receipt).expect("observation receipt reads"))
                     .expect("observation receipt decodes");
             retained.verify().expect("retained observation verifies");
             assert_eq!(retained.logical_time, 100);
-            let next =
-                SqliteClock::open_with_wall_clock(&database, "clock:process-kill", FixedWall(90))
-                    .expect("clock reopens with regressed wall time")
-                    .observe("leases")
-                    .expect("next observation commits");
+            let mut resolver = SqliteClock::open_with_wall_clock(
+                &database,
+                "clock:process-kill",
+                GENERATION,
+                FixedWall(90),
+            )
+            .expect("clock resolver reopens");
+            assert_eq!(
+                resolver
+                    .resolve(&retained.reference())
+                    .expect("committed receipt remains resolvable"),
+                retained
+            );
+            let next = SqliteClock::open_with_wall_clock(
+                &database,
+                "clock:process-kill",
+                GENERATION,
+                FixedWall(90),
+            )
+            .expect("clock reopens with regressed wall time")
+            .observe("leases")
+            .expect("next observation commits");
             assert_eq!(next.logical_time, retained.logical_time + 1);
             assert_eq!(next.observed_unix_ms, 90);
             next.verify().expect("next observation verifies");
+        } else {
+            assert!(!receipt.exists());
+            let next = SqliteClock::open_with_wall_clock(
+                &database,
+                "clock:process-kill",
+                GENERATION,
+                FixedWall(90),
+            )
+            .expect("clock reopens after losing the caller receipt")
+            .observe("leases")
+            .expect("next observation commits after receipt loss");
+            assert_eq!(next.logical_time, 101);
+            assert_eq!(next.observed_unix_ms, 90);
         }
         assert_sqlite_integrity(&database);
     }

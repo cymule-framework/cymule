@@ -1,0 +1,608 @@
+name: npm release controller
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Package version without the v prefix
+        required: true
+        type: string
+      caller_generation:
+        description: Closed npm release caller generation
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: publish-npm-stable
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      controller_sha: ${{ steps.identity.outputs.controller_sha }}
+      release_sha: ${{ steps.identity.outputs.release_sha }}
+      version: ${{ steps.identity.outputs.version }}
+      tag: ${{ steps.identity.outputs.tag }}
+      tag_exists: ${{ steps.identity.outputs.tag_exists }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Admit exact new-release or immutable-tag recovery ref
+        id: identity
+        env:
+          CALLER_GENERATION: ${{ inputs.caller_generation }}
+          CONTROLLER_FILE: ${{ job.workflow_file_path }}
+          CONTROLLER_REF: ${{ job.workflow_ref }}
+          CONTROLLER_REPOSITORY: ${{ job.workflow_repository }}
+          CONTROLLER_SHA: ${{ job.workflow_sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          export LC_ALL=C
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$CALLER_GENERATION" = cymule.npm-release-caller/1
+          test "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/publish-npm-release.yml@$GITHUB_REF"
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$CONTROLLER_REPOSITORY" = "$GITHUB_REPOSITORY"
+          test "$CONTROLLER_FILE" = .github/workflows/publish-npm-controller.yml
+          test "$CONTROLLER_REF" = "$GITHUB_REPOSITORY/.github/workflows/publish-npm-controller.yml@refs/heads/main"
+          git fetch --no-tags origin main
+          current_main=$(git rev-parse refs/remotes/origin/main)
+          test "$CONTROLLER_SHA" = "$current_main"
+          git diff --quiet "$CONTROLLER_SHA" -- .github/workflows/publish-npm-release.yml
+          tag="v$RELEASE_VERSION"
+          git fetch --force --tags origin
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            test "$(git cat-file -t "refs/tags/$tag")" = tag
+            release_sha=$(git rev-list -n 1 "$tag")
+            git merge-base --is-ancestor "$release_sha" "$current_main"
+            tag_exists=true
+          else
+            release_sha=$current_main
+            tag_exists=false
+          fi
+          case "$GITHUB_REF" in
+            refs/heads/main)
+              test "$GITHUB_SHA" = "$current_main"
+              if test "$tag_exists" = true && test "$release_sha" != "$current_main"; then
+                echo "historical $tag recovery must be dispatched from refs/tags/$tag" >&2
+                exit 2
+              fi
+              ;;
+            refs/tags/"$tag")
+              test "$tag_exists" = true
+              test "$GITHUB_SHA" = "$release_sha"
+              ;;
+            *)
+              echo "release dispatch must use current main or exact refs/tags/$tag" >&2
+              exit 2
+              ;;
+          esac
+          git merge-base --is-ancestor "$release_sha" "$current_main"
+          git checkout --detach "$release_sha"
+          package_version=$(node -p "require('./sdk/typescript/package.json').version")
+          test "$RELEASE_VERSION" = "$package_version"
+          if test "$tag_exists" = true; then
+            test "$(git describe --exact-match --tags)" = "$tag"
+          fi
+          {
+            echo "controller_sha=$CONTROLLER_SHA"
+            echo "release_sha=$release_sha"
+            echo "version=$RELEASE_VERSION"
+            echo "tag=$tag"
+            echo "tag_exists=$tag_exists"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.1
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.17.0
+          run_install: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26.7.0
+          cache: pnpm
+          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: sdk/go/go.mod
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: 0.7.2
+          enable-cache: true
+          cache-dependency-glob: sdk/python/uv.lock
+
+      - name: Require a closed release changelog and version generation
+        env:
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+        run: >-
+          uv run --project sdk/python --frozen python
+          scripts/version_domains.py verify-release
+          --version "$RELEASE_VERSION"
+
+      - name: Verify exact release repository
+        run: ./scripts/verify.sh
+
+      - name: Run exact release soak
+        run: >-
+          python3 scripts/test_harness.py run
+          rust-soak
+          --report .cache/test-harness/release-rust-soak.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: npm-release-verification-${{ inputs.version }}
+          path: .cache/test-harness/release-rust-soak.json
+          if-no-files-found: error
+
+  stage:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package_name: cymule
+            artifact_name: cymule
+          - package_name: "@cymule/sdk"
+            artifact_name: cymule-sdk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.release_sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.17.0
+          run_install: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26.7.0
+          cache: pnpm
+          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+
+      - name: Build and test exact package source
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          pnpm --dir sdk/typescript run build
+          pnpm --dir sdk/typescript test
+
+      - name: Stage immutable npm archive without publication identity
+        env:
+          ARTIFACT_NAME: ${{ matrix.artifact_name }}
+          PACKAGE_NAME: ${{ matrix.package_name }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          package_dir="$RUNNER_TEMP/package"
+          stage_dir="$RUNNER_TEMP/npm-stage-$ARTIFACT_NAME"
+          node sdk/typescript/scripts/prepare-package.mjs "$PACKAGE_NAME" "$package_dir"
+          python3 scripts/npm_release.py stage \
+            --package-dir "$package_dir" \
+            --package-name "$PACKAGE_NAME" \
+            --version "$RELEASE_VERSION" \
+            --release-sha "$RELEASE_SHA" \
+            --output "$stage_dir"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-release-stage-${{ matrix.artifact_name }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/npm-stage-${{ matrix.artifact_name }}
+          if-no-files-found: error
+          retention-days: 1
+
+  close:
+    needs: [verify, stage]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package_name: cymule
+            artifact_name: cymule
+          - package_name: "@cymule/sdk"
+            artifact_name: cymule-sdk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.release_sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-release-stage-${{ matrix.artifact_name }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/npm-candidate
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.17.0
+          run_install: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26.7.0
+          cache: pnpm
+          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+
+      - name: Independently close exact npm bytes
+        env:
+          PACKAGE_NAME: ${{ matrix.package_name }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          pnpm --dir sdk/typescript run build
+          node sdk/typescript/scripts/prepare-package.mjs \
+            "$PACKAGE_NAME" "$RUNNER_TEMP/npm-reference-package"
+          python3 scripts/npm_release.py stage \
+            --package-dir "$RUNNER_TEMP/npm-reference-package" \
+            --package-name "$PACKAGE_NAME" \
+            --version "$RELEASE_VERSION" \
+            --release-sha "$RELEASE_SHA" \
+            --output "$RUNNER_TEMP/npm-reference"
+          python3 scripts/npm_release.py compare-stages \
+            --candidate "$RUNNER_TEMP/npm-candidate/manifest.json" \
+            --reference "$RUNNER_TEMP/npm-reference/manifest.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-release-closed-${{ matrix.artifact_name }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/npm-candidate
+          if-no-files-found: error
+          retention-days: 1
+
+  preflight-registry:
+    needs: [verify, close]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_name: cymule
+          - artifact_name: cymule-sdk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.release_sha }}
+          path: release-payload
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-release-closed-${{ matrix.artifact_name }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/npm-stage
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26.7.0
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - name: Preflight immutable npm version before tag creation
+        env:
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          RESOLVED_CONTROLLER_SHA: ${{ job.workflow_sha }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          TAG_EXISTS: ${{ needs.verify.outputs.tag_exists }}
+        run: |
+          test "$(node --version)" = v26.7.0
+          test "$(npm --version)" = 11.19.0
+          test "$RESOLVED_CONTROLLER_SHA" = "$CONTROLLER_SHA"
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          git diff --quiet "$CONTROLLER_SHA" -- scripts/npm_release.py scripts/version_domains.py
+          git fetch --no-tags origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
+          test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"
+          if test "$TAG_EXISTS" = true; then
+            python3 scripts/npm_release.py publication-admission \
+              --manifest "$RUNNER_TEMP/npm-stage/manifest.json" \
+              --release-sha "$RELEASE_SHA"
+          else
+            test "$TAG_EXISTS" = false
+            python3 scripts/npm_release.py tag-creation-admission \
+              --manifest "$RUNNER_TEMP/npm-stage/manifest.json" \
+              --release-sha "$RELEASE_SHA"
+          fi
+
+  tag:
+    needs: [verify, preflight-registry]
+    runs-on: ubuntu-24.04
+    environment: npm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.release_sha }}
+          path: release-payload
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-release-closed-cymule-${{ inputs.version }}
+          path: ${{ runner.temp }}/npm-stage-cymule
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-release-closed-cymule-sdk-${{ inputs.version }}
+          path: ${{ runner.temp }}/npm-stage-cymule-sdk
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26.7.0
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - name: Mint the single-purpose release tag writer
+        id: tag-token
+        if: needs.verify.outputs.tag_exists == 'false'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.CYMULE_RELEASE_TAG_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CYMULE_RELEASE_TAG_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Create or verify immutable release tag after registry preflight
+        env:
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          RESOLVED_CONTROLLER_SHA: ${{ job.workflow_sha }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+          TAG_APP_ID: ${{ vars.CYMULE_RELEASE_TAG_APP_ID }}
+          TAG_APP_SLUG: ${{ steps.tag-token.outputs.app-slug }}
+          TAG_PUSH_TOKEN: ${{ steps.tag-token.outputs.token }}
+        run: |
+          test "$RESOLVED_CONTROLLER_SHA" = "$CONTROLLER_SHA"
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          git diff --quiet "$CONTROLLER_SHA" -- scripts/npm_release.py scripts/version_domains.py
+          git fetch --no-tags origin main
+          current_main=$(git rev-parse refs/remotes/origin/main)
+          test "$current_main" = "$CONTROLLER_SHA"
+          test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(node --version)" = v26.7.0
+          test "$(npm --version)" = 11.19.0
+          remote_refs=$(git ls-remote origin \
+            "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
+          remote_tag_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
+          remote_release_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG^{}" '$2 == ref {print $1}')
+          if test -n "$remote_tag_sha" || test -n "$remote_release_sha"; then
+            [[ "$remote_tag_sha" =~ ^[0-9a-f]{40}$ ]]
+            test "$remote_release_sha" = "$RELEASE_SHA"
+            expected_tag_sha=$remote_tag_sha
+            python3 scripts/npm_release.py publication-admission \
+              --manifest "$RUNNER_TEMP/npm-stage-cymule/manifest.json" \
+              --release-sha "$RELEASE_SHA"
+            python3 scripts/npm_release.py publication-admission \
+              --manifest "$RUNNER_TEMP/npm-stage-cymule-sdk/manifest.json" \
+              --release-sha "$RELEASE_SHA"
+          else
+            test "$current_main" = "$RELEASE_SHA"
+            python3 scripts/npm_release.py tag-creation-admission \
+              --manifest "$RUNNER_TEMP/npm-stage-cymule/manifest.json" \
+              --release-sha "$RELEASE_SHA"
+            python3 scripts/npm_release.py tag-creation-admission \
+              --manifest "$RUNNER_TEMP/npm-stage-cymule-sdk/manifest.json" \
+              --release-sha "$RELEASE_SHA"
+            [[ "$TAG_APP_ID" =~ ^[1-9][0-9]*$ ]]
+            test -n "$TAG_APP_SLUG"
+            test -n "$TAG_PUSH_TOKEN"
+            bot_user_id=$(GITHUB_APP_TOKEN="$TAG_PUSH_TOKEN" \
+              python3 scripts/npm_release.py github-app-bot-user-id \
+                --app-slug "$TAG_APP_SLUG" \
+                --app-id "$TAG_APP_ID")
+            [[ "$bot_user_id" =~ ^[1-9][0-9]*$ ]]
+            git -C "$CYMULE_RELEASE_WORKSPACE" config user.name "${TAG_APP_SLUG}[bot]"
+            git -C "$CYMULE_RELEASE_WORKSPACE" config user.email "$bot_user_id+${TAG_APP_SLUG}[bot]@users.noreply.github.com"
+            git -C "$CYMULE_RELEASE_WORKSPACE" tag -a "$RELEASE_TAG" -m "Cymule $RELEASE_VERSION"
+            expected_tag_sha=$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse "refs/tags/$RELEASE_TAG")
+            [[ "$expected_tag_sha" =~ ^[0-9a-f]{40}$ ]]
+            test "$expected_tag_sha" != "$RELEASE_SHA"
+            remote_before_refs=$(git ls-remote origin \
+              "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
+            remote_before_tag_sha=$(printf '%s\n' "$remote_before_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
+            remote_before_release_sha=$(printf '%s\n' "$remote_before_refs" | awk -v ref="refs/tags/$RELEASE_TAG^{}" '$2 == ref {print $1}')
+            if test -n "$remote_before_tag_sha" || test -n "$remote_before_release_sha"; then
+              test "$remote_before_tag_sha" = "$expected_tag_sha"
+              test "$remote_before_release_sha" = "$RELEASE_SHA"
+            else
+              git fetch --no-tags origin main
+              current_main=$(git rev-parse refs/remotes/origin/main)
+              test "$current_main" = "$CONTROLLER_SHA"
+              test "$current_main" = "$RELEASE_SHA"
+              authorization=$(printf 'x-access-token:%s' "$TAG_PUSH_TOKEN" | base64 | tr -d '\n')
+              if ! git -C "$CYMULE_RELEASE_WORKSPACE" \
+                -c "http.extraHeader=Authorization: Basic $authorization" \
+                push "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$RELEASE_TAG"; then
+                echo "tag push response unavailable; resolving by exact readback" >&2
+              fi
+            fi
+          fi
+          final_remote_refs=$(git ls-remote origin \
+            "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
+          final_remote_tag_sha=$(printf '%s\n' "$final_remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
+          final_remote_release_sha=$(printf '%s\n' "$final_remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG^{}" '$2 == ref {print $1}')
+          test "$final_remote_tag_sha" = "$expected_tag_sha"
+          test "$final_remote_release_sha" = "$RELEASE_SHA"
+
+  publish:
+    needs: [verify, close, tag]
+    runs-on: ubuntu-24.04
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package_name: cymule
+            artifact_name: cymule
+          - package_name: "@cymule/sdk"
+            artifact_name: cymule-sdk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.release_sha }}
+          path: release-payload
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-release-closed-${{ matrix.artifact_name }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/npm-stage
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26.7.0
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - name: Authenticate exact staged bytes
+        env:
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          RESOLVED_CONTROLLER_SHA: ${{ job.workflow_sha }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          test "$(node --version)" = v26.7.0
+          test "$(npm --version)" = 11.19.0
+          test "$RESOLVED_CONTROLLER_SHA" = "$CONTROLLER_SHA"
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          git diff --quiet "$CONTROLLER_SHA" -- scripts/npm_release.py scripts/version_domains.py
+          git fetch --no-tags origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
+          remote_release_sha=$(git ls-remote origin "refs/tags/$RELEASE_TAG^{}" | cut -f1)
+          test -n "$remote_release_sha"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+          test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git -C "$CYMULE_RELEASE_WORKSPACE" describe --exact-match --tags)" = "$RELEASE_TAG"
+          python3 scripts/npm_release.py verify-staged \
+            --manifest "$RUNNER_TEMP/npm-stage/manifest.json" \
+            --release-sha "$RELEASE_SHA"
+
+      - name: Publish missing version with trusted provenance
+        env:
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          RESOLVED_CONTROLLER_SHA: ${{ job.workflow_sha }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          test "$RESOLVED_CONTROLLER_SHA" = "$CONTROLLER_SHA"
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          git diff --quiet "$CONTROLLER_SHA" -- scripts/npm_release.py scripts/version_domains.py
+          git fetch --no-tags origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
+          remote_release_sha=$(git ls-remote origin "refs/tags/$RELEASE_TAG^{}" | cut -f1)
+          test -n "$remote_release_sha"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+          test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"
+          python3 scripts/npm_release.py publish \
+            --manifest "$RUNNER_TEMP/npm-stage/manifest.json" \
+            --release-sha "$RELEASE_SHA"
+
+  verify-published:
+    needs: [verify, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_name: cymule
+          - artifact_name: cymule-sdk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.release_sha }}
+          path: release-payload
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-release-closed-${{ matrix.artifact_name }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/npm-stage
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26.7.0
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - name: Read back exact tarball digest and provenance
+        env:
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload
+          RESOLVED_CONTROLLER_SHA: ${{ job.workflow_sha }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+        run: |
+          test "$(node --version)" = v26.7.0
+          test "$(npm --version)" = 11.19.0
+          test "$RESOLVED_CONTROLLER_SHA" = "$CONTROLLER_SHA"
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          git diff --quiet "$CONTROLLER_SHA" -- scripts/npm_release.py scripts/version_domains.py
+          test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"
+          python3 scripts/npm_release.py verify-registry \
+            --manifest "$RUNNER_TEMP/npm-stage/manifest.json" \
+            --release-sha "$RELEASE_SHA"

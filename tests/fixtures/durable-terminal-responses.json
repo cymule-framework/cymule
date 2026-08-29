@@ -1,0 +1,44 @@
+[
+  {
+    "type": "run_boundary",
+    "boundary": {
+      "status": "failed",
+      "failure": {
+        "class": "declared_failure",
+        "code": "fixture_failure",
+        "detail": {
+          "identity_version": "cymule.artifact/2",
+          "artifact_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "kind": "cymule.declared-failure/1"
+        }
+      }
+    }
+  },
+  {
+    "type": "run_cancelled",
+    "receipt": {
+      "receipt_version": "cymule.run-cancellation-receipt/1",
+      "command": {
+        "cancellation_id": "cancel:fixture",
+        "run_id": "run:fixture:cancelled",
+        "reason": { "code": "fixture_cancelled" }
+      },
+      "boundary": {
+        "status": "cancelled",
+        "reason": {
+          "identity_version": "cymule.artifact/2",
+          "artifact_id": "sha256:94f2dae2673ee461ad3a102341c819748b7f12abde7d577cfd2550d2490fc960",
+          "kind": "cymule.cancellation-reason/1"
+        }
+      },
+      "receipt_id": "ac6cbd77048e40559cf76724ae9c7024511b3f16b6c1be9d6bb5e0fd334f39fe"
+    }
+  },
+  {
+    "type": "run_boundary",
+    "boundary": {
+      "status": "effect_not_applied",
+      "intent_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  }
+]

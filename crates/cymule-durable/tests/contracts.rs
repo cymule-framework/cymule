@@ -1,601 +1,94 @@
-//! Durable executor contract-boundary conformance.
+//! Public Durable control/query wire conformance.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-use cymule_core::{
-    ComponentContract, Definition, DispatchPolicy, EffectContract, EffectProfile, Expression,
-    IR_VERSION, MutationKind, Operation, PlanCandidate, ReconciliationMode, Region, Step, WaitSpec,
-    WorldOutcome,
-};
 use cymule_durable::{
-    DriveOutcome, DurableError, DurableStore, MemoryStore, OutboxState, ResumableRuntime, WaitState,
+    DURABLE_CONTROL_VERSION, DurableCommand, DurableResponse, DurableStoreControl,
+    MAX_DURABLE_QUERY_PAGE_BYTES, MAX_DURABLE_QUERY_PAGE_ITEMS, MemoryStore,
 };
-use cymule_runtime::{
-    ExecutionBinding, PLUGIN_VERSION, PluginEffect, PluginHost, PluginManifest, PluginOperation,
-    PluginRequest, PluginResponse, RuntimeResult,
-};
-use serde_json::{Value, json};
+use serde_json::json;
 
-#[derive(Default)]
-struct Counts {
-    calls: AtomicUsize,
-    prepares: AtomicUsize,
-    dispatches: AtomicUsize,
-    reconciliations: AtomicUsize,
-}
-
-struct Plugin {
-    counts: Arc<Counts>,
-    component_output: Value,
-    effect_output: Value,
-}
-
-struct RetryReconciliationPlugin {
-    counts: Arc<Counts>,
-}
-
-impl PluginHost for Plugin {
-    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
-        match request {
-            PluginRequest::Describe => Ok(PluginResponse::Manifest {
-                manifest: PluginManifest {
-                    plugin_version: PLUGIN_VERSION.to_owned(),
-                    implementation_id: "durable-contract-plugin@1".to_owned(),
-                    components: BTreeMap::from([(
-                        "example.component".to_owned(),
-                        PluginOperation {
-                            implementation_revision: "1".to_owned(),
-                        },
-                    )]),
-                    effects: BTreeMap::from([(
-                        "example.effect".to_owned(),
-                        PluginEffect {
-                            implementation_revision: "1".to_owned(),
-                            can_reconcile: true,
-                        },
-                    )]),
-                },
-            }),
-            PluginRequest::Call { .. } => {
-                self.counts.calls.fetch_add(1, Ordering::SeqCst);
-                Ok(PluginResponse::CallResult {
-                    value: self.component_output.clone(),
-                })
-            }
-            PluginRequest::PrepareEffect { .. } => {
-                self.counts.prepares.fetch_add(1, Ordering::SeqCst);
-                Ok(PluginResponse::Prepared)
-            }
-            PluginRequest::DispatchEffect { .. } => {
-                self.counts.dispatches.fetch_add(1, Ordering::SeqCst);
-                Ok(PluginResponse::EffectResult {
-                    outcome: WorldOutcome::Applied,
-                    value: Some(self.effect_output.clone()),
-                })
-            }
-            PluginRequest::ReconcileEffect { .. } => {
-                panic!("test effect never becomes ambiguous")
-            }
-        }
+#[test]
+fn control_four_rejects_removed_query_and_ambient_provider_shapes() {
+    for removed in [
+        json!({
+            "type": "query_run",
+            "control_version": "cymule.durable-control/3",
+            "query_id": "query:removed",
+            "run_id": "run:removed"
+        }),
+        json!({
+            "type": "query_domain",
+            "control_version": "cymule.durable-control/3",
+            "query_id": "query:removed"
+        }),
+        json!({
+            "type": "resume_run",
+            "control_version": DURABLE_CONTROL_VERSION,
+            "run_id": "run:ambient-provider",
+            "provider": "must-not-cross-control"
+        }),
+    ] {
+        assert!(serde_json::from_value::<DurableCommand>(removed).is_err());
     }
 }
 
-impl PluginHost for RetryReconciliationPlugin {
-    fn invoke(&mut self, request: PluginRequest) -> RuntimeResult<PluginResponse> {
-        match request {
-            PluginRequest::Describe => Ok(PluginResponse::Manifest {
-                manifest: PluginManifest {
-                    plugin_version: PLUGIN_VERSION.to_owned(),
-                    implementation_id: "durable-reconciliation-plugin@1".to_owned(),
-                    components: BTreeMap::new(),
-                    effects: BTreeMap::from([(
-                        "example.effect".to_owned(),
-                        PluginEffect {
-                            implementation_revision: "1".to_owned(),
-                            can_reconcile: true,
-                        },
-                    )]),
-                },
-            }),
-            PluginRequest::PrepareEffect { .. } => {
-                self.counts.prepares.fetch_add(1, Ordering::SeqCst);
-                Ok(PluginResponse::Prepared)
-            }
-            PluginRequest::DispatchEffect { .. } => {
-                self.counts.dispatches.fetch_add(1, Ordering::SeqCst);
-                Ok(PluginResponse::EffectResult {
-                    outcome: WorldOutcome::Unknown,
-                    value: None,
-                })
-            }
-            PluginRequest::ReconcileEffect { .. } => {
-                let attempt = self.counts.reconciliations.fetch_add(1, Ordering::SeqCst);
-                Ok(PluginResponse::ReconciliationResult {
-                    resolution: cymule_core::ReconciliationResolution::ResolvedApplied,
-                    value: Some(if attempt == 0 {
-                        json!(7)
-                    } else {
-                        json!("settled")
-                    }),
-                })
-            }
-            PluginRequest::Call { .. } => panic!("effect-only fixture does not call components"),
-        }
-    }
-}
-
-fn runtime(
-    store: MemoryStore,
-    counts: Arc<Counts>,
-    component_output: Value,
-    effect_output: Value,
-) -> ResumableRuntime<MemoryStore, Plugin> {
-    let mut plugin = Plugin {
-        counts,
-        component_output,
-        effect_output,
+#[test]
+fn query_page_requires_explicit_nulls_and_closed_budgets() {
+    let command = DurableCommand::RunIndexPage {
+        control_version: DURABLE_CONTROL_VERSION.to_owned(),
+        expected_revision: None,
+        cursor: None,
+        limit: MAX_DURABLE_QUERY_PAGE_ITEMS,
+        max_canonical_bytes: MAX_DURABLE_QUERY_PAGE_BYTES,
     };
-    let manifest = plugin.describe().expect("test plugin describes");
-    let binding = ExecutionBinding::for_local_process(
-        &manifest,
-        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-    )
-    .expect("test binding is admitted");
-    ResumableRuntime::open(store, plugin, binding).expect("runtime opens")
-}
+    command.verify().expect("maximum bounded query verifies");
+    let mut encoded = serde_json::to_value(&command).expect("query serializes");
+    assert_eq!(encoded["expected_revision"], serde_json::Value::Null);
+    assert_eq!(encoded["cursor"], serde_json::Value::Null);
+    encoded
+        .as_object_mut()
+        .expect("query is an object")
+        .remove("cursor");
+    assert!(serde_json::from_value::<DurableCommand>(encoded).is_err());
 
-fn base_candidate() -> PlanCandidate {
-    PlanCandidate {
-        ir_version: IR_VERSION.to_owned(),
-        name: "durable_contract".to_owned(),
-        entry: "main".to_owned(),
-        components: Vec::new(),
-        effects: Vec::new(),
-        definitions: vec![Definition {
-            id: "main".to_owned(),
-            input_schema: json!({
-                "type": "object",
-                "required": ["request"],
-                "properties": {"request": {"type": "string"}},
-                "additionalProperties": false
-            }),
-            output_schema: json!({}),
-            body: Region {
-                steps: Vec::new(),
-                result: Expression::Literal { value: Value::Null },
-            },
-        }],
-        metadata: BTreeMap::new(),
-    }
-}
-
-fn component_candidate(input: Value, output: Value, argument: Value) -> PlanCandidate {
-    let mut candidate = base_candidate();
-    candidate.components.push(ComponentContract {
-        id: "example.component".to_owned(),
-        input_schema: input,
-        output_schema: output,
-        requirements: BTreeMap::new(),
-    });
-    candidate.definitions[0].body.steps.push(Step {
-        id: "call.component".to_owned(),
-        operation: Operation::Call {
-            component: "example.component".to_owned(),
-            input: Expression::Literal { value: argument },
-            bind: Some("component_result".to_owned()),
-        },
-    });
-    candidate.definitions[0].body.result = Expression::Binding {
-        name: "component_result".to_owned(),
+    let oversized = DurableCommand::RunIndexPage {
+        control_version: DURABLE_CONTROL_VERSION.to_owned(),
+        expected_revision: None,
+        cursor: None,
+        limit: MAX_DURABLE_QUERY_PAGE_ITEMS + 1,
+        max_canonical_bytes: MAX_DURABLE_QUERY_PAGE_BYTES,
     };
-    candidate
-}
-
-fn wait_candidate() -> PlanCandidate {
-    let mut candidate = base_candidate();
-    candidate.definitions[0].output_schema = json!({"type": "null"});
-    candidate.definitions[0].body.steps.push(Step {
-        id: "wait.approval".to_owned(),
-        operation: Operation::Wait {
-            wait: WaitSpec::Input {
-                correlation: "approval".to_owned(),
-                schema: json!({
-                    "type": "object",
-                    "required": ["approved"],
-                    "properties": {"approved": {"type": "boolean"}},
-                    "additionalProperties": false
-                }),
-            },
-            bind: Some("approval".to_owned()),
-        },
-    });
-    candidate
-}
-
-fn effect_candidate() -> PlanCandidate {
-    let mut candidate = base_candidate();
-    candidate.definitions[0].output_schema = json!({"type": "boolean"});
-    candidate.effects.push(EffectContract {
-        id: "example.effect".to_owned(),
-        input_schema: json!({"type": "integer"}),
-        output_schema: json!({"type": "string"}),
-        profile: EffectProfile {
-            mutation: MutationKind::Observational,
-            dispatch: DispatchPolicy::Eager,
-            reconciliation: ReconciliationMode::Queryable,
-            keyed_idempotency: true,
-            irreversible: false,
-        },
-        requirements: BTreeMap::new(),
-    });
-    candidate.definitions[0].body.steps.push(Step {
-        id: "effect.observe".to_owned(),
-        operation: Operation::Effect {
-            effect: "example.effect".to_owned(),
-            input: Expression::Literal { value: json!(7) },
-            occurrence: "primary".to_owned(),
-            bind: Some("effect_result".to_owned()),
-        },
-    });
-    candidate.definitions[0].body.result = Expression::Literal { value: json!(true) };
-    candidate
-}
-
-fn governance_effect_candidate() -> PlanCandidate {
-    let mut candidate = effect_candidate();
-    candidate.effects[0].profile.mutation = MutationKind::Mutating;
-    candidate.effects[0].profile.dispatch = DispatchPolicy::OnScopeCommit;
-    candidate.effects[0].profile.reconciliation = ReconciliationMode::Impossible;
-    let Operation::Effect { bind, .. } = &mut candidate.definitions[0].body.steps[0].operation
-    else {
-        panic!("fixture contains one effect")
-    };
-    *bind = None;
-    candidate
-}
-
-fn invocation_candidate() -> PlanCandidate {
-    let mut candidate = base_candidate();
-    candidate.definitions.push(Definition {
-        id: "worker".to_owned(),
-        input_schema: json!({"type": "integer"}),
-        output_schema: json!({"type": "null"}),
-        body: Region {
-            steps: Vec::new(),
-            result: Expression::Literal { value: Value::Null },
-        },
-    });
-    candidate.definitions[0].body.steps.push(Step {
-        id: "invoke.worker".to_owned(),
-        operation: Operation::Invoke {
-            definition: "worker".to_owned(),
-            input: Expression::Literal {
-                value: json!("bad"),
-            },
-            bind: Some("worker_result".to_owned()),
-        },
-    });
-    candidate
+    assert!(oversized.verify().is_err());
 }
 
 #[test]
-fn invalid_run_input_does_not_create_durable_state() {
-    let store = MemoryStore::new();
-    let mut readback = store.clone();
-    let counts = Arc::new(Counts::default());
-    let mut runtime = runtime(store, counts.clone(), json!("ok"), json!("ok"));
-
-    let error = runtime
-        .start(base_candidate(), &json!({"request": 7}), "run:bad-input")
-        .expect_err("entry input must fail");
-    assert!(matches!(error, DurableError::Contract(_)));
-    assert!(readback.load().expect("store loads").is_none());
-    assert_eq!(counts.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(counts.prepares.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn component_contract_failures_do_not_create_occurrences() {
-    let input_counts = Arc::new(Counts::default());
-    let mut input_runtime = runtime(
-        MemoryStore::new(),
-        input_counts.clone(),
-        json!("ok"),
-        json!("ok"),
-    );
-    let error = input_runtime
-        .start(
-            component_candidate(json!({"type": "integer"}), json!({}), json!("bad")),
-            &json!({"request": "run"}),
-            "run:bad-component-input",
-        )
-        .expect_err("component input must fail");
-    assert!(matches!(error, DurableError::Contract(_)));
-    assert_eq!(input_counts.calls.load(Ordering::SeqCst), 0);
-    assert!(
-        input_runtime
-            .coordinator()
-            .state()
-            .expect("state loads")
-            .component_occurrences
-            .is_empty()
-    );
-
-    let output_counts = Arc::new(Counts::default());
-    let mut output_runtime = runtime(
-        MemoryStore::new(),
-        output_counts.clone(),
-        json!(7),
-        json!("ok"),
-    );
-    let error = output_runtime
-        .start(
-            component_candidate(
-                json!({"type": "integer"}),
-                json!({"type": "string"}),
-                json!(7),
-            ),
-            &json!({"request": "run"}),
-            "run:bad-component-output",
-        )
-        .expect_err("component output must fail");
-    assert!(matches!(error, DurableError::Contract(_)));
-    assert_eq!(output_counts.calls.load(Ordering::SeqCst), 1);
-    assert!(
-        output_runtime
-            .coordinator()
-            .state()
-            .expect("state loads")
-            .component_occurrences
-            .is_empty()
-    );
-}
-
-#[test]
-fn invalid_wait_completion_does_not_advance_revision_or_write_result() {
-    let counts = Arc::new(Counts::default());
-    let mut runtime = runtime(MemoryStore::new(), counts, json!("ok"), json!("ok"));
-    let DriveOutcome::Suspended { wait_id } = runtime
-        .start(wait_candidate(), &json!({"request": "run"}), "run:wait")
-        .expect("Run parks")
-    else {
-        panic!("Run must suspend")
+fn initialized_domain_has_one_revision_pinned_empty_run_page() {
+    let mut control = DurableStoreControl::initialize(MemoryStore::new())
+        .expect("parameter-free durable genesis initializes");
+    let command = DurableCommand::RunIndexPage {
+        control_version: DURABLE_CONTROL_VERSION.to_owned(),
+        expected_revision: None,
+        cursor: None,
+        limit: 1,
+        max_canonical_bytes: MAX_DURABLE_QUERY_PAGE_BYTES,
     };
-    let revision = runtime.coordinator().revision().map(str::to_owned);
-    let artifact_count = runtime
-        .coordinator()
-        .restore_machine()
-        .expect("Machine restores")
-        .snapshot()
-        .artifacts
-        .len();
-
-    let error = runtime
-        .complete_wait(&wait_id, &json!({"approved": "yes"}))
-        .expect_err("wait result must fail");
-    assert!(matches!(error, DurableError::Contract(_)));
-    assert_eq!(runtime.coordinator().revision(), revision.as_deref());
-    assert_eq!(
-        runtime
-            .coordinator()
-            .restore_machine()
-            .expect("Machine restores")
-            .snapshot()
-            .artifacts
-            .len(),
-        artifact_count
-    );
-    let wait = &runtime.coordinator().state().expect("state loads").waits[&wait_id];
-    assert_eq!(wait.state, WaitState::Pending);
-    assert!(wait.result.is_none());
-}
-
-#[test]
-fn invalid_effect_output_is_never_settled_or_recorded() {
-    let counts = Arc::new(Counts::default());
-    let mut runtime = runtime(MemoryStore::new(), counts.clone(), json!("ok"), json!(7));
-    let outcome = runtime
-        .start(
-            effect_candidate(),
-            &json!({"request": "run"}),
-            "run:effect-output",
-        )
-        .expect("invalid post-dispatch output is classified durably");
-    assert!(matches!(
-        outcome,
-        DriveOutcome::ReconciliationRequired { .. }
-    ));
-    assert_eq!(counts.prepares.load(Ordering::SeqCst), 1);
-    assert_eq!(counts.dispatches.load(Ordering::SeqCst), 1);
-    let state = runtime.coordinator().state().expect("state loads");
-    let dispatch = state.outbox.values().next().expect("outbox claim exists");
-    assert_eq!(dispatch.state, OutboxState::Unknown);
-    assert!(dispatch.result.is_none());
-    let machine = runtime
-        .coordinator()
-        .restore_machine()
-        .expect("Machine restores");
-    let effect = machine.projection().runs["run:effect-output"]
-        .effects
-        .values()
-        .next()
-        .expect("effect exists");
-    assert_eq!(effect.outcome, WorldOutcome::Unknown);
-    assert_eq!(
-        effect.reconciliation,
-        cymule_core::ReconciliationState::Pending
-    );
-}
-
-#[test]
-fn invalid_reconciliation_output_keeps_unknown_and_retries_reconciliation() {
-    let counts = Arc::new(Counts::default());
-    let mut plugin = RetryReconciliationPlugin {
-        counts: counts.clone(),
+    let response = control.submit(command.clone()).expect("empty index reads");
+    response
+        .verify_query_for(&command)
+        .expect("response binds exact query authority");
+    let DurableResponse::RunIndexPage { page } = response else {
+        panic!("Run-index query returned another response")
     };
-    let manifest = plugin.describe().expect("test plugin describes");
-    let binding = ExecutionBinding::for_local_process(
-        &manifest,
-        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-    )
-    .expect("test binding is admitted");
-    let mut runtime =
-        ResumableRuntime::open(MemoryStore::new(), plugin, binding).expect("runtime opens");
+    assert!(page.items.is_empty());
+    assert!(page.next_cursor.is_none());
 
-    assert!(matches!(
-        runtime
-            .start(
-                effect_candidate(),
-                &json!({"request": "run"}),
-                "run:reconciliation-output",
-            )
-            .expect("invalid reconciliation output is classified durably"),
-        DriveOutcome::ReconciliationRequired { .. }
-    ));
-    let state = runtime.coordinator().state().expect("state loads");
-    let dispatch = state.outbox.values().next().expect("outbox exists");
-    assert_eq!(dispatch.state, OutboxState::Unknown);
-    assert!(dispatch.result.is_none());
-    assert_eq!(counts.dispatches.load(Ordering::SeqCst), 1);
-    assert_eq!(counts.reconciliations.load(Ordering::SeqCst), 1);
-
-    let DriveOutcome::Completed(_) = runtime
-        .resume("run:reconciliation-output")
-        .expect("later reconciliation retries the original intent")
-    else {
-        panic!("second reconciliation should complete the Run")
+    let stale = DurableCommand::RunIndexPage {
+        control_version: DURABLE_CONTROL_VERSION.to_owned(),
+        expected_revision: Some(
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned(),
+        ),
+        cursor: None,
+        limit: 1,
+        max_canonical_bytes: MAX_DURABLE_QUERY_PAGE_BYTES,
     };
-    assert_eq!(counts.dispatches.load(Ordering::SeqCst), 1);
-    assert_eq!(counts.reconciliations.load(Ordering::SeqCst), 2);
-    let state = runtime.coordinator().state().expect("state loads");
-    let dispatch = state.outbox.values().next().expect("outbox exists");
-    assert_eq!(dispatch.state, OutboxState::Applied);
-    assert!(dispatch.result.is_some());
-}
-
-#[test]
-fn governance_resolution_closes_the_original_effect_obligation() {
-    let counts = Arc::new(Counts::default());
-    let mut plugin = RetryReconciliationPlugin {
-        counts: counts.clone(),
-    };
-    let manifest = plugin.describe().expect("test plugin describes");
-    let binding = ExecutionBinding::for_local_process(
-        &manifest,
-        "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-    )
-    .expect("test binding is admitted");
-    let mut runtime =
-        ResumableRuntime::open(MemoryStore::new(), plugin, binding).expect("runtime opens");
-    let DriveOutcome::ReconciliationRequired { intent_id } = runtime
-        .start(
-            governance_effect_candidate(),
-            &json!({"request": "run"}),
-            "run:governance-resolution",
-        )
-        .expect("ambiguous impossible effect requires governance")
-    else {
-        panic!("Run must require governance resolution")
-    };
-    assert_eq!(counts.dispatches.load(Ordering::SeqCst), 1);
-    assert_eq!(counts.reconciliations.load(Ordering::SeqCst), 0);
-
-    let DriveOutcome::Completed(_) = runtime
-        .resolve_effect(
-            &intent_id,
-            cymule_core::ReconciliationResolution::ResolvedApplied,
-            Some(&json!("governed")),
-        )
-        .expect("provider-neutral governance settles the original intent")
-    else {
-        panic!("resolved obligation should complete the Run")
-    };
-    let machine = runtime
-        .coordinator()
-        .restore_machine()
-        .expect("Machine restores");
-    assert!(
-        machine.projection().runs["run:governance-resolution"]
-            .obligations
-            .values()
-            .all(|obligation| obligation.resolved)
-    );
-    assert_eq!(counts.dispatches.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn definition_and_effect_inputs_fail_before_child_or_effect_state() {
-    let invocation_counts = Arc::new(Counts::default());
-    let mut invocation_runtime = runtime(
-        MemoryStore::new(),
-        invocation_counts,
-        json!("ok"),
-        json!("ok"),
-    );
-    let error = invocation_runtime
-        .start(
-            invocation_candidate(),
-            &json!({"request": "run"}),
-            "run:invoke-input",
-        )
-        .expect_err("invocation input must fail");
-    assert!(matches!(error, DurableError::Contract(_)));
-    assert_eq!(
-        invocation_runtime
-            .coordinator()
-            .state()
-            .expect("state loads")
-            .continuations["run:invoke-input"]
-            .frames
-            .len(),
-        1
-    );
-
-    let effect_counts = Arc::new(Counts::default());
-    let mut effect_runtime = runtime(
-        MemoryStore::new(),
-        effect_counts.clone(),
-        json!("ok"),
-        json!("ok"),
-    );
-    let mut candidate = effect_candidate();
-    candidate.effects[0].input_schema = json!({"type": "string"});
-    let error = effect_runtime
-        .start(candidate, &json!({"request": "run"}), "run:effect-input")
-        .expect_err("effect input must fail");
-    assert!(matches!(error, DurableError::Contract(_)));
-    assert_eq!(effect_counts.prepares.load(Ordering::SeqCst), 0);
-    assert_eq!(effect_counts.dispatches.load(Ordering::SeqCst), 0);
-    assert!(
-        effect_runtime
-            .coordinator()
-            .state()
-            .expect("state loads")
-            .outbox
-            .is_empty()
-    );
-}
-
-#[test]
-fn invalid_definition_result_never_completes_the_run() {
-    let counts = Arc::new(Counts::default());
-    let mut runtime = runtime(MemoryStore::new(), counts, json!("ok"), json!("ok"));
-    let mut candidate = base_candidate();
-    candidate.definitions[0].output_schema = json!({"type": "string"});
-    let error = runtime
-        .start(candidate, &json!({"request": "run"}), "run:bad-result")
-        .expect_err("definition result must fail");
-    assert!(matches!(error, DurableError::Contract(_)));
-    assert!(
-        runtime
-            .coordinator()
-            .restore_machine()
-            .expect("Machine restores")
-            .projection()
-            .runs["run:bad-result"]
-            .result
-            .is_none()
-    );
+    assert!(control.submit(stale).is_err());
 }

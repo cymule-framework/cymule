@@ -1,0 +1,8 @@
+{
+  "fixture_version": "cymule.legacy-fixture/1",
+  "source_commit": "66a432c45c81a74dfa3b030783a75ad7df5b772e",
+  "source_package": "cymule-directory-store@0.1.0",
+  "source_path": "state.json",
+  "payload_sha256": "75a3b928571edeec373813f69b846ced2579dda9a2fa868575057a3996f853a0",
+  "repository_file_trailing_newline_excluded": true
+}

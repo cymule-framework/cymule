@@ -1,5 +1,5 @@
 {
-  "ir_version": "cymule.ir/2",
+  "ir_version": "cymule.ir/3",
   "name": "cross_language_echo",
   "entry": "main",
   "components": [
@@ -7,6 +7,7 @@
       "id": "test.echo",
       "input_schema": {},
       "output_schema": {},
+      "output_artifact_kind": "cymule.component-output/1",
       "requirements": {}
     }
   ],
@@ -16,8 +17,8 @@
       "input_schema": {},
       "output_schema": {},
       "profile": {
-        "mutation": "mutating",
-        "dispatch": "on_scope_commit",
+        "mutation": "observational",
+        "dispatch": "eager",
         "reconciliation": "queryable",
         "keyed_idempotency": true,
         "irreversible": false
@@ -44,7 +45,17 @@
             "op": "effect",
             "effect": "test.capture",
             "input": { "kind": "binding", "name": "echoed" },
-            "occurrence": "primary"
+            "occurrence": "primary",
+            "bind": "observed"
+          },
+          {
+            "id": "scope.finalize",
+            "op": "scope",
+            "body": {
+              "steps": [],
+              "result": { "kind": "literal", "value": null }
+            },
+            "bind": "scope_result"
           }
         ],
         "result": { "kind": "binding", "name": "echoed" }

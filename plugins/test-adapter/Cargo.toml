@@ -10,8 +10,15 @@ publish = false
 
 [dependencies]
 cymule-core.workspace = true
+cymule-durable-protocol.workspace = true
+cymule-evolution.workspace = true
 cymule-runtime.workspace = true
+rusqlite.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+cymule-executor-process.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

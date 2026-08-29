@@ -12,6 +12,8 @@ pub enum RuntimeError {
     Core(cymule_core::CoreError),
     /// An executable Plan contract failed admission or value validation.
     Contract(crate::ContractViolation),
+    /// Runtime composition or immutable execution-binding admission failed.
+    Composition(Box<crate::CompositionError>),
     /// A component returned an explicit application failure value.
     ExpectedPluginFailure(PluginExpectedFailure),
     /// Plugin protocol or behavior was invalid.
@@ -33,6 +35,14 @@ pub enum RuntimeError {
         /// Stable substrate failure code.
         code: String,
         /// Human-readable failure summary.
+        message: String,
+    },
+    /// The invocation owner explicitly cancelled work before an authoritative
+    /// external-world mutation became ambiguous.
+    Cancelled {
+        /// Stable cancellation code.
+        code: String,
+        /// Human-readable cancellation summary.
         message: String,
     },
     /// A bounded plugin invocation exceeded its admitted deadline.
@@ -70,6 +80,14 @@ impl RuntimeError {
         }
     }
 
+    /// Construct an owner-authoritative invocation cancellation.
+    pub fn cancelled(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Cancelled {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
     /// Construct a bounded invocation timeout.
     pub fn timed_out(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::TimedOut {
@@ -92,6 +110,14 @@ impl Display for RuntimeError {
         match self {
             Self::Core(error) => Display::fmt(error, formatter),
             Self::Contract(error) => write!(formatter, "contract_violation: {error}"),
+            Self::Composition(error) => {
+                write!(
+                    formatter,
+                    "composition_failed: {}: {}",
+                    error.code(),
+                    error.message()
+                )
+            }
             Self::ExpectedPluginFailure(error) => {
                 write!(
                     formatter,
@@ -114,6 +140,9 @@ impl Display for RuntimeError {
             ),
             Self::Substrate { code, message } => {
                 write!(formatter, "substrate_failed: {code}: {message}")
+            }
+            Self::Cancelled { code, message } => {
+                write!(formatter, "cancelled: {code}: {message}")
             }
             Self::TimedOut { code, message } => write!(formatter, "timed_out: {code}: {message}"),
             Self::UnknownWorld { code, message } => {
@@ -149,10 +178,7 @@ impl From<crate::PlanAdmissionError> for RuntimeError {
 
 impl From<crate::CompositionError> for RuntimeError {
     fn from(error: crate::CompositionError) -> Self {
-        Self::PluginDefect {
-            code: "execution_binding_rejected".to_owned(),
-            message: error.to_string(),
-        }
+        Self::Composition(Box::new(error))
     }
 }
 

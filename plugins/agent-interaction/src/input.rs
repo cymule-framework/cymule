@@ -1,255 +1,151 @@
-use cymule_core::{ArtifactRef, canonical_digest};
-use cymule_durable::{
-    DurableCoordinator, DurableStore, WaitCondition, WaitKind, WaitOwner, WaitState,
+//! Typed Agent input commands over the closed persistence capability.
+
+pub use cymule_profile_protocol::agent::{AgentInputCheckpoint, AgentInputResult};
+
+use cymule_durable_protocol::WaitOwner;
+use cymule_profile_protocol::agent::{
+    AgentCommand, AgentCommandAction, AgentCommit, AgentElicitationQuery, AgentInputCommand,
+    AgentSessionQuery, ElicitationRequest, ElicitationResponse,
 };
 
-use crate::{
-    AgentError, AgentJournal, AgentResult, AgentSession, AgentState, AgentUpdate,
-    ElicitationProjection, ElicitationRequest, ElicitationResponse, journal::agent_update_record,
-};
+use crate::{AgentError, AgentPersistence, AgentResult};
 
-/// Result of one atomic durable input suspension or completion checkpoint.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AgentInputCheckpoint {
-    /// Replayed Session projection after the checkpoint.
-    pub session: AgentSession,
-    /// M1 wait identity correlated with the input request.
-    pub wait_id: String,
-    /// Newly committed semantic revision behind the segmented head CAS.
-    pub revision: String,
-}
-
-/// M2 durable typed-input operations over the shared M1 CAS authority.
+/// Two-phase constructor and committer for one atomic Agent/M1 input transition.
+///
+/// The caller retains the prepared [`AgentCommand`] until it receives an
+/// [`AgentCommit`]. Retrying the exact command is idempotent; preparing again
+/// after an unknown commit outcome would create a different source revision and
+/// is therefore intentionally not a retry mechanism.
 pub struct AgentInputController;
 
 impl AgentInputController {
-    /// Atomically project `RequiresAction` and register an M1 input wait.
-    pub fn suspend<S: DurableStore>(
-        coordinator: &mut DurableCoordinator<S>,
-        session_id: &str,
-        run_id: &str,
-        owner: WaitOwner,
-        request: ElicitationRequest,
-    ) -> AgentResult<AgentInputCheckpoint> {
-        if session_id.is_empty() || run_id.is_empty() || request.request_id.is_empty() {
-            return Err(AgentError::Validation(
-                "Session, Run, and elicitation identities must not be empty".to_owned(),
-            ));
-        }
-        compile_input_schema(&request)?;
-        let digest = canonical_digest(&(session_id, run_id, &request))
-            .map_err(|error| AgentError::Validation(error.to_string()))?;
-        let wait_id = format!("wait:agent-input:{digest}");
-        let update_base = format!("update:agent-input:{digest}");
-        let wait_schema = nullable_input_schema(&request.schema);
-        let updates = [
-            AgentUpdate::Elicitation {
-                update_id: format!("{update_base}:pending"),
-                elicitation: ElicitationProjection {
-                    wait_id: wait_id.clone(),
-                    request: request.clone(),
-                    response: None,
-                },
-            },
-            AgentUpdate::State {
-                update_id: format!("{update_base}:requires-action"),
-                state: AgentState::RequiresAction,
-                stop_reason: None,
-            },
-        ];
-        let mut session = load_session(coordinator, session_id)?;
-        for update in &updates {
-            session.apply(update.clone())?;
-        }
-        let records = updates
-            .iter()
-            .map(agent_update_record)
-            .collect::<AgentResult<Vec<_>>>()?;
-        let revision = coordinator
-            .checkpoint_journal_wait(
-                session_id,
-                &records,
-                &WaitCondition {
-                    wait_id: wait_id.clone(),
-                    run_id: run_id.to_owned(),
-                    kind: WaitKind::Input {
-                        correlation: request.request_id,
-                        schema: wait_schema,
-                    },
-                    consume_once: true,
-                    owner,
-                    state: WaitState::Pending,
-                    result: None,
-                },
-            )
-            .map_err(|error| AgentError::Persistence(error.to_string()))?;
-        Ok(AgentInputCheckpoint {
-            session,
-            wait_id,
-            revision,
-        })
-    }
-
-    /// Atomically resolve an M1 input wait and advance the Session projection.
-    pub fn complete<S: DurableStore>(
-        coordinator: &mut DurableCoordinator<S>,
+    /// Resolve one Session and request alias at a single revision, then prepare
+    /// the exact command which attaches that request to an existing pending M1
+    /// input Wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Session is absent, the revision changes, the
+    /// request alias already exists, or the command is invalid.
+    pub fn prepare_suspend<P: AgentPersistence + ?Sized>(
+        persistence: &mut P,
         session_id: &str,
         wait_id: &str,
-        result: &ArtifactRef,
-        response: ElicitationResponse,
-    ) -> AgentResult<AgentInputCheckpoint> {
-        let mut session = load_session(coordinator, session_id)?;
-        let current = session
-            .elicitations
-            .get(&response.request_id)
-            .cloned()
-            .ok_or_else(|| {
-                AgentError::NotFound(format!(
-                    "elicitation {} does not exist",
-                    response.request_id
-                ))
-            })?;
-        if current.wait_id != wait_id {
-            return Err(AgentError::Validation(format!(
-                "elicitation {} is correlated with {}, not {wait_id}",
-                response.request_id, current.wait_id
+        expected_run_id: &str,
+        expected_owner: &WaitOwner,
+        request: ElicitationRequest,
+    ) -> AgentResult<AgentCommand> {
+        let revision = require_session_revision(persistence, session_id)?;
+        let elicitation = persistence.read_agent_elicitation(&AgentElicitationQuery {
+            session_id: session_id.to_owned(),
+            request_id: request.request_id.clone(),
+            expected_revision: Some(revision.clone()),
+        })?;
+        if elicitation.current.is_some() {
+            return Err(AgentError::IllegalTransition(format!(
+                "elicitation {} already exists in Session {session_id}",
+                request.request_id
             )));
         }
-        if let Some(existing) = &current.response {
-            if existing != &response {
-                return Err(AgentError::IllegalTransition(format!(
-                    "elicitation {} was already completed with different content",
-                    response.request_id
-                )));
-            }
-            let wait = coordinator
-                .state()
-                .map_err(|error| AgentError::Persistence(error.to_string()))?
-                .waits
-                .get(wait_id)
-                .ok_or_else(|| AgentError::NotFound(format!("wait {wait_id} does not exist")))?;
-            if wait.state != WaitState::Completed || wait.result.as_ref() != Some(result) {
-                return Err(AgentError::Persistence(format!(
-                    "completed elicitation {} is inconsistent with wait {wait_id}",
-                    response.request_id
-                )));
-            }
-            let revision = coordinator.revision().ok_or_else(|| {
-                AgentError::Persistence("durable state is not initialized".to_owned())
-            })?;
-            return Ok(AgentInputCheckpoint {
-                session,
-                wait_id: wait_id.to_owned(),
-                revision: revision.to_owned(),
-            });
-        }
-        validate_input_completion(wait_id, &current.request, &response)?;
-        let update_base = wait_id.replacen("wait:", "update:", 1);
-        let elicitation_update = AgentUpdate::Elicitation {
-            update_id: format!("{update_base}:completed"),
-            elicitation: ElicitationProjection {
-                wait_id: wait_id.to_owned(),
-                request: current.request,
-                response: Some(response),
-            },
-        };
-        session.apply(elicitation_update.clone())?;
-        let state = if session
-            .elicitations
-            .values()
-            .any(|elicitation| elicitation.response.is_none())
-        {
-            AgentState::RequiresAction
-        } else {
-            AgentState::Running
-        };
-        let state_update = AgentUpdate::State {
-            update_id: format!("{update_base}:{}", state_update_suffix(state)),
-            state,
-            stop_reason: None,
-        };
-        session.apply(state_update.clone())?;
-        let updates = [elicitation_update, state_update];
-        let records = updates
-            .iter()
-            .map(agent_update_record)
-            .collect::<AgentResult<Vec<_>>>()?;
-        let revision = coordinator
-            .checkpoint_journal_wait_completion(session_id, &records, wait_id, result)
-            .map_err(|error| AgentError::Persistence(error.to_string()))?;
-        Ok(AgentInputCheckpoint {
-            session,
-            wait_id: wait_id.to_owned(),
+        AgentCommand::new(
             revision,
-        })
+            AgentCommandAction::Input(AgentInputCommand::Suspend {
+                session_id: session_id.to_owned(),
+                wait_id: wait_id.to_owned(),
+                expected_run_id: expected_run_id.to_owned(),
+                expected_owner: expected_owner.clone(),
+                request,
+            }),
+        )
+        .map_err(Into::into)
     }
-}
 
-fn compile_input_schema(request: &ElicitationRequest) -> AgentResult<jsonschema::Validator> {
-    jsonschema::draft202012::options()
-        .build(&request.schema)
-        .map_err(|error| {
-            AgentError::Validation(format!(
-                "elicitation {} has an invalid Draft 2020-12 schema: {error}",
-                request.request_id
+    /// Resolve one Session and pending request at a single revision, then
+    /// prepare the exact command which commits its response, M1 Wait result,
+    /// Continuation advance, and Session projection in one CAS.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Session or pending elicitation is absent,
+    /// stale, already complete, or owned by another Wait.
+    pub fn prepare_complete<P: AgentPersistence + ?Sized>(
+        persistence: &mut P,
+        session_id: &str,
+        wait_id: &str,
+        expected_run_id: &str,
+        expected_owner: &WaitOwner,
+        response: ElicitationResponse,
+    ) -> AgentResult<AgentCommand> {
+        let revision = require_session_revision(persistence, session_id)?;
+        let elicitation = persistence.read_agent_elicitation(&AgentElicitationQuery {
+            session_id: session_id.to_owned(),
+            request_id: response.request_id.clone(),
+            expected_revision: Some(revision.clone()),
+        })?;
+        let current = elicitation.current.ok_or_else(|| {
+            AgentError::NotFound(format!(
+                "elicitation {} does not exist in Session {session_id}",
+                response.request_id
             ))
-        })
-}
-
-fn nullable_input_schema(schema: &serde_json::Value) -> serde_json::Value {
-    let mut wrapped = serde_json::Map::new();
-    if let Some(object) = schema.as_object() {
-        for keyword in ["$schema", "$id", "$defs"] {
-            if let Some(value) = object.get(keyword) {
-                wrapped.insert(keyword.to_owned(), value.clone());
-            }
+        })?;
+        if current.elicitation.wait_id != wait_id {
+            return Err(AgentError::Validation(format!(
+                "elicitation {} belongs to {}, not {wait_id}",
+                response.request_id, current.elicitation.wait_id
+            )));
         }
+        if current.elicitation.response.is_some() {
+            return Err(AgentError::IllegalTransition(format!(
+                "elicitation {} is already complete; replay its retained command instead",
+                response.request_id
+            )));
+        }
+        AgentCommand::new(
+            revision,
+            AgentCommandAction::Input(AgentInputCommand::Complete {
+                session_id: session_id.to_owned(),
+                wait_id: wait_id.to_owned(),
+                expected_run_id: expected_run_id.to_owned(),
+                expected_owner: expected_owner.clone(),
+                response,
+            }),
+        )
+        .map_err(Into::into)
     }
-    wrapped.insert(
-        "anyOf".to_owned(),
-        serde_json::json!([schema, {"type": "null"}]),
-    );
-    serde_json::Value::Object(wrapped)
-}
 
-fn validate_input_completion(
-    wait_id: &str,
-    request: &ElicitationRequest,
-    response: &ElicitationResponse,
-) -> AgentResult<()> {
-    ElicitationProjection {
-        wait_id: wait_id.to_owned(),
-        request: request.clone(),
-        response: Some(response.clone()),
-    }
-    .validate()?;
-    let Some(value) = response.value.as_ref() else {
-        return Ok(());
-    };
-    let validator = compile_input_schema(request)?;
-    validator.validate(value).map_err(|error| {
-        AgentError::Validation(format!(
-            "elicitation {} value at {} does not satisfy schema at {}: {error}",
-            request.request_id,
-            error.instance_path(),
-            error.schema_path()
-        ))
-    })
-}
-
-const fn state_update_suffix(state: AgentState) -> &'static str {
-    match state {
-        AgentState::RequiresAction => "requires-action",
-        AgentState::Running => "running",
-        AgentState::Idle => "idle",
-        AgentState::Closed => "closed",
+    /// Commit or replay one previously prepared input command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command is not input-owned or persistence
+    /// cannot return a receipt which verifies against that exact command.
+    pub fn commit<P: AgentPersistence + ?Sized>(
+        persistence: &mut P,
+        command: &AgentCommand,
+    ) -> AgentResult<AgentCommit> {
+        if !matches!(command.action, AgentCommandAction::Input(_)) {
+            return Err(AgentError::Validation(
+                "AgentInputController accepts only Agent input commands".to_owned(),
+            ));
+        }
+        let commit = persistence.commit_agent(command)?;
+        commit.verify_for(command)?;
+        Ok(commit)
     }
 }
 
-fn load_session<S: DurableStore>(
-    coordinator: &mut DurableCoordinator<S>,
+fn require_session_revision<P: AgentPersistence + ?Sized>(
+    persistence: &mut P,
     session_id: &str,
-) -> AgentResult<AgentSession> {
-    let updates = AgentJournal::load(coordinator, session_id)?;
-    AgentSession::replay(session_id, updates)
+) -> AgentResult<String> {
+    let read = persistence.read_agent_session(&AgentSessionQuery {
+        session_id: session_id.to_owned(),
+        expected_revision: None,
+    })?;
+    if read.current.is_none() {
+        return Err(AgentError::NotFound(format!(
+            "Session {session_id} does not exist"
+        )));
+    }
+    Ok(read.revision)
 }

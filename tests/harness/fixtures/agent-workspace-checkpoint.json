@@ -1,0 +1,72 @@
+{
+  "agent_command_id": "sha256:5970942d9be554a47aaa36a8abb71de07c7caa19fe4fdd5000e873e9d4e6cb9a",
+  "run_id": "run:workspace-checkpoint",
+  "scope_id": "sha256:ac381b8e8bb094f4862cfa9377da77a4eda048e415b235666291228d1accf2d4",
+  "occurrence_id": "occurrence:workspace",
+  "phase": "start_abort_dispatch",
+  "source_machine_authority_root": "1111111111111111111111111111111111111111111111111111111111111111",
+  "machine_authority_root": "1111111111111111111111111111111111111111111111111111111111111111",
+  "core_batch_id": null,
+  "core_batch_receipt_id": null,
+  "dispatch_clock": null,
+  "source_continuation_digest": "sha256:8b3a03a63234b9da180e562e8592d35cf6399871084a78bc9fc8ae297fa1fc39",
+  "continuation": {
+    "continuation_version": "cymule.continuation-state/1",
+    "run_id": "run:workspace-checkpoint",
+    "plan_id": "sha256:9f676fd7a0b8719b7d089fffce8a95f4f22c27a4d934b939fb1c3c727bd90ba6",
+    "binding_context": "sha256:984731c5fd640528c9e5a1c416ad0a076bce25ce54fafa86b2bf1db76e5501b6",
+    "frames": [
+      {
+        "definition_id": "main",
+        "invocation_id": "sha256:3fcc1bd0c2eaf9595c1b0aa06b2bc266bca7713dfd39806e6a920399c2d940e4",
+        "invocation_path": [],
+        "scope_id": "scope:root",
+        "input": {
+          "identity_version": "cymule.artifact/2",
+          "artifact_id": "sha256:7649e09bdc06706674fb034f26efcf8171e650278d4a9f22d8100d427321b498",
+          "kind": "cymule.input/1"
+        },
+        "region_path": [],
+        "next_step": 0,
+        "locals": {}
+      },
+      {
+        "definition_id": "main",
+        "invocation_id": "sha256:3fcc1bd0c2eaf9595c1b0aa06b2bc266bca7713dfd39806e6a920399c2d940e4",
+        "invocation_path": [],
+        "scope_id": "sha256:ac381b8e8bb094f4862cfa9377da77a4eda048e415b235666291228d1accf2d4",
+        "input": {
+          "identity_version": "cymule.artifact/2",
+          "artifact_id": "sha256:7649e09bdc06706674fb034f26efcf8171e650278d4a9f22d8100d427321b498",
+          "kind": "cymule.input/1"
+        },
+        "region_path": [
+          0
+        ],
+        "next_step": 0,
+        "locals": {}
+      }
+    ],
+    "state": {
+      "identity_version": "cymule.artifact/2",
+      "artifact_id": "sha256:7649e09bdc06706674fb034f26efcf8171e650278d4a9f22d8100d427321b498",
+      "kind": "cymule.input/1"
+    },
+    "wait_set": [],
+    "scope_stack": [
+      "scope:root",
+      "sha256:ac381b8e8bb094f4862cfa9377da77a4eda048e415b235666291228d1accf2d4"
+    ],
+    "epoch": 0,
+    "execution_fence": 0,
+    "execution_claim": null,
+    "status": "ready"
+  },
+  "continuation_digest": "sha256:8b3a03a63234b9da180e562e8592d35cf6399871084a78bc9fc8ae297fa1fc39",
+  "effect_before": null,
+  "effect_after": null,
+  "outbox_before": null,
+  "outbox_after": null,
+  "lease_before": null,
+  "lease_after": null
+}

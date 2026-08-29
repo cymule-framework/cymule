@@ -1,5 +1,5 @@
 {
-  "ir_version": "cymule.ir/2",
+  "ir_version": "cymule.ir/3",
   "name": "hello_world",
   "entry": "main",
   "components": [
@@ -15,6 +15,7 @@
         "required": ["message"],
         "properties": { "message": { "type": "string" } }
       },
+      "output_artifact_kind": "cymule.component-output/1",
       "requirements": {}
     }
   ],

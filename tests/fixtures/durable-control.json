@@ -1,5 +1,17 @@
 {
-  "type": "query_domain",
-  "control_version": "cymule.durable-control/1",
-  "query_id": "query:cross-language-domain"
+  "type": "takeover_run",
+  "control_version": "cymule.durable-control/4",
+  "run_id": "run:cross-language",
+  "expected_fence": 7,
+  "execution": {
+    "owner": "driver:cross-language",
+    "clock": {
+      "clock_version": "cymule.clock-observation/2",
+      "observation_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "source_id": "clock:cross-language",
+      "source_generation": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "scope": "sha256:7aa23baf73ce53a540a6f3eddaa0175e6be22d751e5d5090d5d77485f58fa74c"
+    },
+    "ttl": 30
+  }
 }

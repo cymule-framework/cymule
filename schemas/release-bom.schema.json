@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cymule.dev/schemas/release-bom.schema.json",
+  "title": "Cymule Release BOM cymule.release-bom/2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bom_version", "release_generation", "workspace_version", "source_sha", "public_source_sha", "version_domain_registry_digest", "schemas", "packages", "domains", "migration_edges"],
+  "properties": {
+    "bom_version": { "const": "cymule.release-bom/2" },
+    "release_generation": { "type": "string", "minLength": 1 },
+    "workspace_version": { "$ref": "#/$defs/stableVersion" },
+    "source_sha": { "$ref": "#/$defs/sha" },
+    "public_source_sha": { "oneOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] },
+    "version_domain_registry_digest": { "$ref": "#/$defs/sha256" },
+    "schemas": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/schema" }, "uniqueItems": true },
+    "packages": { "type": "array", "minItems": 4, "items": { "$ref": "#/$defs/package" }, "uniqueItems": true },
+    "domains": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/domain" }, "uniqueItems": true },
+    "migration_edges": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+  },
+  "$defs": {
+    "stableVersion": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha1": { "type": "string", "pattern": "^sha1:[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "sha512": { "type": "string", "pattern": "^sha512:[0-9a-f]{128}$" },
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "id", "canonical_digest"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "format": "uri" },
+        "canonical_digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["package_id", "name", "version", "manifest_path", "manifest_digest", "publication"],
+      "properties": {
+        "package_id": { "type": "string", "pattern": "^(cargo|npm|python|go):.+$" },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "$ref": "#/$defs/stableVersion" },
+        "manifest_path": { "type": "string", "minLength": 1 },
+        "manifest_digest": { "$ref": "#/$defs/sha256" },
+        "publication": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/cargoPublication" },
+            { "$ref": "#/$defs/npmPublication" }
+          ]
+        }
+      }
+    },
+    "cargoPublication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "registry", "registry_identity", "content_digest", "provenance"],
+      "properties": {
+        "kind": { "const": "cargo" },
+        "registry": { "const": "https://crates.io/" },
+        "registry_identity": { "type": "string", "pattern": "^https://crates\\.io/crates/[a-z][a-z0-9_-]*/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
+        "content_digest": { "$ref": "#/$defs/sha256" },
+        "provenance": { "$ref": "#/$defs/cargoProvenance" }
+      }
+    },
+    "cargoProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "checksum", "download_url"],
+      "properties": {
+        "kind": { "const": "registry-checksum" },
+        "checksum": { "$ref": "#/$defs/sha256" },
+        "download_url": { "type": "string", "pattern": "^https://static\\.crates\\.io/crates/[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]*-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.crate$" }
+      }
+    },
+    "npmPublication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "registry", "registry_identity", "content_digest", "provenance"],
+      "properties": {
+        "kind": { "const": "npm" },
+        "registry": { "const": "https://registry.npmjs.org/" },
+        "registry_identity": { "type": "string", "pattern": "^https://registry\\.npmjs\\.org/.+/(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
+        "content_digest": { "$ref": "#/$defs/sha512" },
+        "provenance": { "$ref": "#/$defs/npmProvenance" }
+      }
+    },
+    "npmProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sha1", "integrity", "tarball_url", "attestations_url", "bundle_digest", "statement_digest", "certificate_identity", "certificate_issuer", "predicate_type", "workflow_ref", "source_sha", "signer_ref", "signer_sha"],
+      "properties": {
+        "kind": { "const": "sigstore" },
+        "sha1": { "$ref": "#/$defs/sha1" },
+        "integrity": { "type": "string", "pattern": "^sha512-[A-Za-z0-9+/]{86}==$" },
+        "tarball_url": { "type": "string", "pattern": "^https://registry\\.npmjs\\.org/.+" },
+        "attestations_url": { "type": "string", "pattern": "^https://registry\\.npmjs\\.org/-/.+" },
+        "bundle_digest": { "$ref": "#/$defs/sha256" },
+        "statement_digest": { "$ref": "#/$defs/sha256" },
+        "certificate_identity": { "const": "https://github.com/cymule-framework/cymule/.github/workflows/publish-npm-controller.yml@refs/heads/main" },
+        "certificate_issuer": { "const": "https://token.actions.githubusercontent.com" },
+        "predicate_type": { "const": "https://slsa.dev/provenance/v1" },
+        "workflow_ref": { "type": "string", "pattern": "^(refs/heads/main|refs/tags/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))$" },
+        "source_sha": { "$ref": "#/$defs/sha" },
+        "signer_ref": { "const": "https://github.com/cymule-framework/cymule/.github/workflows/publish-npm-controller.yml@refs/heads/main" },
+        "signer_sha": { "$ref": "#/$defs/sha" }
+      }
+    },
+    "domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "owner", "compatibility_mode"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "owner": { "type": "string", "minLength": 1 },
+        "compatibility_mode": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

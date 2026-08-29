@@ -3,6 +3,6 @@
   "command_id": "command:rehydration:fixture",
   "certificate_id": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "occurrence_ids": [
-    "sha256:e5195c71618aad53a091450520d0bbc02c559042a40a91215f3451324d89a941"
+    "sha256:7ef6e10b0dfa444061dbbfd6bef7eaf6b14ceae318e860bd29c03f140905ecdf"
   ]
 }

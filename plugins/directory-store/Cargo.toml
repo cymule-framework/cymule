@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme = "../../README.md"
+readme = "README.md"
 keywords.workspace = true
 publish.workspace = true
 
@@ -16,10 +16,17 @@ cymule-core.workspace = true
 cymule-durable.workspace = true
 fs4 = "1.1.0"
 serde.workspace = true
-serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [dev-dependencies]
+cymule-clock-system.workspace = true
+cymule-durable-protocol.workspace = true
+cymule-profile-protocol.workspace = true
+cymule-runtime.workspace = true
 cymule-test-world = { path = "../../tests/test-world" }
+serde_json.workspace = true
 tempfile = "3.27.0"
 
 [lints]

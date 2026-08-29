@@ -1,49 +1,17 @@
-//! Provider-neutral Plan DAG, impact, rollout, migration, and rollback semantics.
+//! Public Evolution profile contracts and the closed process-provider wire.
+//!
+//! Provider-independent semantics, normalized M4 state, exact receipts, and
+//! detached reduction are owned exclusively by
+//! [`cymule_profile_protocol::evolution`]. This crate intentionally contains no
+//! Durable transaction, generic history append, rollback, or persistence
+//! façade.
 
-mod adapters;
-mod compatibility;
-mod control;
-mod controller;
-mod durable;
-mod error;
-mod linker;
-mod live;
-mod live_control;
-mod model;
-mod registry_durable;
+mod wire;
 
-pub use adapters::{
-    MIGRATION_SAFE_POINT_VERSION, MigrationAdapter, MigrationAdapterDescriptor,
-    MigrationCapabilityChange, MigrationOutput, MigrationPreservation, MigrationRequest,
-    MigrationSafePoint, MigrationStateCoverage, ShadowBindingMode, ShadowDriver,
-    ShadowDriverDescriptor, ShadowEffectMode, ShadowOutput, ShadowRequest,
-};
-pub use compatibility::{
-    RELINK_COMPATIBILITY_VERSION, RelinkCompatibility, RelinkViolation, analyze_relink,
-};
-pub use control::{EVOLUTION_CONTROL_VERSION, EvolutionCommand};
-pub use controller::{EvolutionController, diff_plans};
-pub use durable::{DurableEvolutionController, EVOLUTION_CHECKPOINT_SCHEMA, EvolutionCheckpoint};
-pub use error::{EvolutionError, EvolutionResult};
-pub use linker::{
-    DEFINITION_REGISTRY_VERSION, DefinitionRegistry, DefinitionRegistrySnapshot, LinkedPlan,
-    PlanTemplate, ReferenceStrategy, SUBFLOW_REVISION_VERSION, SubflowReference, SubflowRevision,
-};
-pub use live::{
-    DurableLiveEvolutionController, LIVE_EVOLUTION_CHECKPOINT_SCHEMA, LIVE_EVOLUTION_VERSION,
-    LiveEvolutionCheckpoint, LiveEvolutionController, LiveEvolutionSnapshot, LiveMigrationCommand,
-    LivePublicationCommand, LivePublicationReceipt, LivePublicationRecord, LiveTemplateUpdate,
-};
-pub use live::{LiveVirtualClaimCommand, LiveVirtualClaimReceipt};
-pub use live_control::{
-    LIVE_EVOLUTION_CONTROL_VERSION, LiveEvolutionCommand, LiveEvolutionResponse,
-};
-pub use model::{
-    EvolutionSnapshot, GateOutcome, ImpactCone, MigrationReceipt, ObservationOutcome,
-    PatchOperation, PlanEdge, PlanNode, PlanPatch, RestartReceipt, RestartRequest, RolloutDecision,
-    RolloutEvaluation, RolloutGate, RolloutMode, RolloutObservation, RolloutTransition,
-    ShadowComparison,
-};
-pub use registry_durable::{
-    DEFINITION_REGISTRY_CHECKPOINT_SCHEMA, DefinitionRegistryCheckpoint, DurableDefinitionRegistry,
+pub use cymule_profile_protocol::evolution::*;
+pub use wire::{
+    EVOLUTION_PLUGIN_PROTOCOL_VERSION, EvolutionPluginFailure, EvolutionPluginMigrationRequest,
+    EvolutionPluginRequest, EvolutionPluginRequestEnvelope, EvolutionPluginResponse,
+    EvolutionPluginResponseEnvelope, MAX_EVOLUTION_PLUGIN_MESSAGE_BYTES,
+    decode_evolution_plugin_request, decode_evolution_plugin_response,
 };

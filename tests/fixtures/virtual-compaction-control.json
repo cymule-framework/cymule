@@ -1,8 +1,19 @@
 {
   "control_version": "cymule.virtual-compaction-control/1",
-  "command_id": "command:compaction:fixture",
+  "command_id": "sha256:255f81d33b87383a57214d5e8c21471a09d475281dc0c22afa620cd7ab034942",
   "region_id": "region:fixture",
-  "source_causal_cut": ["virtual:fixture:terminal"],
-  "compactor_binding": "binding:archive/fixture@1",
-  "compactor_revision": "compactor:fixture/1"
+  "source_causal_cut": [
+    "virtual:fixture:terminal"
+  ],
+  "work_ids": [
+    "work:fixture"
+  ],
+  "occurrence_ids": [
+    "sha256:7ef6e10b0dfa444061dbbfd6bef7eaf6b14ceae318e860bd29c03f140905ecdf"
+  ],
+  "archived_command_ids": [],
+  "archive": {
+    "binding": "binding:archive/fixture@1",
+    "revision": "compactor:fixture/1"
+  }
 }
