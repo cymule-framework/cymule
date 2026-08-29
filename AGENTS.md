@@ -240,13 +240,13 @@ Use this precedence order when guidance conflicts:
   failure contains no request because transport or strict decoding may fail
   before one exists. Success tags, nested execution outcomes, and returned
   evolution commands remain closed unions.
-- Exact echo equality preserves JSON object-member presence: omitted and
-  explicit `null` are different wires. Comparing two requests only after an
-  optional/defaulting typed decode is insufficient when that decode erases the
-  distinction. The same loss check applies to every typed Engine ingress: after
-  decoding, recursively compare the raw value with typed reserialization and
-  reject every explicit member that omission-only/defaulted serialization
-  erases, including `null` and empty collections.
+- Exact echo equality preserves the complete normalized JSON structure:
+  omitted and explicit `null` are different wires, arrays retain exact length
+  and order, and scalars cannot change. Comparing only after an
+  optional/defaulting or set-like typed decode is insufficient when that decode
+  erases members, collapses duplicates, reorders elements, or synthesizes
+  defaults. Every typed Engine ingress strict-decodes and integer-normalizes the
+  raw value, then requires its typed reserialization to be structurally equal.
   Required nullable members remain valid because typed serialization retains
   them.
 - Engine request echo is the single transport-correlation mechanism for Seal,
@@ -469,10 +469,13 @@ Use this precedence order when guidance conflicts:
   finalization stage, mirror receipt, GitHub settings snapshot, and GitHub
   control-plane receipt; private mirror shell writes must be statically matched
   to that public reader and never become a second registered source.
-- GitHub Release finalization also requires a separate protected contents-read
-  job to mint a repository-scoped Administration-read plus Actions-read App token and close a
-  15-minute `cymule.github-release-control-plane-receipt/2` from live immutable
-  Release, exact release/receipt tag rulesets, protected-environment, default-permission, and
+- GitHub Release finalization first requires a protected contents-read live
+  control-plane gate, with a repository-scoped Administration-read plus
+  Actions-read App token, before `actions/attest` may create the terminal BOM
+  attestation. After attestation, a separate protected contents-read job repeats
+  the live gate and closes a fresh 15-minute
+  `cymule.github-release-control-plane-receipt/2` from immutable Release, exact
+  release/receipt tag rulesets, protected-environment, default-permission, and
   default-branch authority. The contents writer receives no administration
   credential and validates the same-run/attempt receipt before every mutation,
   including before `--draft=false`. Settings administrators must not change

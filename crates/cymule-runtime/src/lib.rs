@@ -45,9 +45,9 @@ pub use protocol::{
     EngineFailureCategory, EngineIssue, EngineMigrationProviderTarget, EnginePhase,
     EnginePluginTarget, EngineProcessConfig, EngineRequestEnvelope, EngineResponseEnvelope,
     EngineResult, EngineRetryDisposition, EngineShadowProviderTarget, EngineStoreTarget,
-    MAX_EVOLUTION_TARGET_EXECUTION_BINDINGS, MAX_PROCESS_ARGUMENTS,
+    MAX_ENGINE_REQUEST_BYTES, MAX_EVOLUTION_TARGET_EXECUTION_BINDINGS, MAX_PROCESS_ARGUMENTS,
     MAX_PROCESS_ENVIRONMENT_ENTRIES, MAX_PROCESS_RUNTIME_ENTRIES,
 };
 pub use strict_json::{
-    decode_strict_json_value, validate_json_member_presence, validate_strict_json,
+    decode_strict_json_value, validate_json_typed_roundtrip, validate_strict_json,
 };

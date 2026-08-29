@@ -54,6 +54,11 @@
   through finite authoring builders and the real Engine facade. SDKs construct commands only; Rust resolves module
   revisions, invokes pinned migration/shadow plugins, counts observations, and
   admits promotion or rollback.
+- Every Evolution field that semantically names a Plan validates the exact
+  lowercase `sha256:<64 hex>` content-ID shape recursively before transport
+  and after response. Generic non-empty identities are never accepted for
+  patch parents, rollout fallback/target Plans, observations, migration
+  descriptors, edges, pins, continuations, or publication updates.
 - The Rust and three-language SDKs have no separate generic `DurableControl`,
   `EvolutionControl`, or `LiveEvolutionControl` submit interface. Those
   definition-only interfaces had no implementation or caller; preserve the
@@ -204,12 +209,22 @@
   classify failures, or reduce state locally. Run-weight updates are typed
   future scheduling commands.
 - Avoid runtime dependencies unless they materially improve correctness.
+- Every SDK bounds the complete UTF-8 encoded `cymule.engine/5` request
+  envelope to 64 MiB before starting a CLI process or invoking a custom
+  transport. An oversized caller request is local
+  `validation/correct_and_retry`; a child that closes stdin after emitting one
+  valid failure may not have that failure replaced by a pipe error.
 - Durable and live-evolution successes are recursively closed. Store, executor,
   migration, and shadow targets remain separate; queries send no executor.
 - Live evolution carries the migration provider only for an exact nested
   `migrate` command and the shadow provider only for an exact nested `shadow`
   command. Every other command carries neither, even when both providers are
   configured on the high-level client.
+- Migration target authority has exactly two forms: provider-free retained
+  replay, or a fresh request carrying both its exact adapter and the sole
+  revision-pinned executor for `to_plan`. Adapter-only and binding-only targets
+  are invalid. Shadow replay may likewise be provider-free; a fresh shadow uses
+  only its exact driver.
 - Every success payload is validated recursively, including Resource Handles,
   wait activations, durable commands, migration receipts, and mapped target
   Continuations. Mutating response loss is an unknown-world outcome in every

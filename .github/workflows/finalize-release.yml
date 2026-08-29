@@ -366,8 +366,66 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  attest:
+  control-plane-preflight:
     needs: [verify, freeze]
+    runs-on: ubuntu-24.04
+    environment: release-finalize
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.controller_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mint one repository-scoped pre-attestation settings token
+        id: preflight-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.CYMULE_RELEASE_CONTROL_APP_ID }}
+          private-key: ${{ secrets.CYMULE_RELEASE_CONTROL_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          permission-actions: read
+
+      - name: Require the live GitHub release control plane before attestation
+        env:
+          CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+          CONTROL_PLANE_TOKEN: ${{ steps.preflight-token.outputs.token }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+          RELEASE_TAG: v${{ needs.verify.outputs.version }}
+          RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}
+          MIRROR_RECEIPT_TAG_SHA: ${{ needs.verify.outputs.mirror_receipt_tag_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
+          git diff --quiet "$CONTROLLER_SHA" -- scripts/verify_github_release_settings.py
+          git fetch --no-tags origin main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
+          remote_refs=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
+          test "$(printf '%s\n' "$remote_refs" | grep -c .)" -eq 2
+          remote_tag_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
+          remote_release_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG^{}" '$2 == ref {print $1}')
+          test "$remote_tag_sha" = "$RELEASE_TAG_SHA"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+          mirror_receipt_ref="refs/tags/cymule-mirror/$RELEASE_SHA"
+          remote_mirror_receipt=$(git ls-remote origin "$mirror_receipt_ref")
+          test "$(printf '%s\n' "$remote_mirror_receipt" | grep -c .)" -eq 1
+          remote_mirror_receipt_tag_sha=$(printf '%s\n' "$remote_mirror_receipt" \
+            | awk -v ref="$mirror_receipt_ref" '$2 == ref {print $1}')
+          test "$remote_mirror_receipt_tag_sha" = "$MIRROR_RECEIPT_TAG_SHA"
+          GITHUB_TOKEN="$CONTROL_PLANE_TOKEN" \
+            python3 scripts/verify_github_release_settings.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --mirror-integration-id "${{ vars.CYMULE_GITHUB_MIRROR_INTEGRATION_ID }}" \
+              --release-tag-integration-id "${{ vars.CYMULE_GITHUB_RELEASE_TAG_INTEGRATION_ID }}" \
+              --npm-reviewer-team-id "${{ vars.CYMULE_GITHUB_NPM_REVIEWER_TEAM_ID }}" \
+              --crates-reviewer-team-id "${{ vars.CYMULE_GITHUB_CRATES_REVIEWER_TEAM_ID }}" \
+              --release-reviewer-team-id "${{ vars.CYMULE_GITHUB_RELEASE_REVIEWER_TEAM_ID }}"
+
+  attest:
+    needs: [verify, freeze, control-plane-preflight]
     runs-on: ubuntu-24.04
     environment: release-finalize
     permissions:
@@ -475,7 +533,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Mint one repository-scoped read-only settings token
+      - name: Mint one fresh repository-scoped receipt token
         id: control-plane-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:

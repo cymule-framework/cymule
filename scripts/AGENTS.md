@@ -43,6 +43,11 @@
   no request. Include omitted-versus-explicit-null mismatches. Correlation
   compares the actual serialized wire, including member presence, and never
   depends on an SDK reimplementation of Rust-derived identities.
+- Schema/SDK conformance pins `cymule_runtime::MAX_ENGINE_REQUEST_BYTES` as the
+  sole Rust 64 MiB envelope authority and locks the TypeScript, Python, and Go
+  mirrors. Each SDK must prove exact-limit admission, max-plus-one pre-spawn
+  rejection, valid early failure preservation, and rejection of an early-close
+  forged success.
 - Package witnesses cover all four SDKs: normalized Cargo archives, both npm
   names, a wheel installed into a clean virtual environment, and a fresh Go
   consumer module. Source-tree imports are not package evidence.

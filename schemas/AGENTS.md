@@ -294,6 +294,11 @@
   migration or shadow requests, observations, and deterministic gates. Provider
   endpoints, credentials, clocks, and Agent-loop state never enter this
   boundary.
+- Every field that names an admitted Plan anywhere inside Evolution commands,
+  provider descriptors, outcomes, receipts, and publication updates is an
+  exact lowercase SHA-256 content ID. A non-empty legacy identity is never a
+  valid Plan reference, including patch parents, rollout fallback/target
+  Plans, observations, and migration descriptor endpoints.
 - `live-evolution-control.schema.json` owns
   `cymule.live-evolution-control/6`. An `apply` carries only its exact nested
   semantic request; the retired outer `safe_point` member and public

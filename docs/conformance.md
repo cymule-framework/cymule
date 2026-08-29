@@ -1,33 +1,56 @@
 # Conformance
 
-Status: source integration exists for the Semantic Interpreter, Embedded,
-Durable Single Domain, Large Virtual Graph, and Live Evolution M4 profiles.
-Branch-wide conformance, version authority, package, and process-death evidence
-remain pending the final source freeze and complete gate run.
+Status: the Semantic Interpreter, Embedded, Durable Single Domain, Large Virtual
+Graph, Live Evolution M4, and optional Agent paths are source-implemented as one
+partial terminal candidate. Multiple focused gates have passed, but review is
+still changing the shared tree and the exact frozen-tree full gate is validation
+pending. No release tag, package publication, operator migration, or deployment
+exists for this candidate.
+
+## Status ladder
+
+- **Source-implemented** means the current checkout contains the terminal
+  contract and code path and has focused evidence. It does not mean that the
+  final tree is validated, published, operator-migrated, deployed, or
+  production-proven.
+- **Partial terminal candidate; validation pending** is the current integrated
+  state for M1, M3, and M4. It advances only after review findings are closed,
+  one exact tree is frozen, and that same tree passes the complete repository,
+  version-domain, schema, SDK, documentation, fault, and process-death gates.
+- **Released/published** requires separate immutable tag, package, provenance,
+  and release-control receipts for that validated source. None exists for this
+  candidate.
+- **Operator-migrated** and **deployed** are separate external states proved by
+  their runbook execution records and terminal environment readback. Neither
+  has occurred for this candidate, and neither can be inferred from source or
+  test presence.
 
 ## Profiles
 
 | Profile | Status | Required behavior |
 | --- | --- | --- |
-| Semantic Interpreter M0 | Implemented | frozen IR, canonical stores, admission, reducer, exact state replay |
-| Embedded M0 | Implemented | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
-| Durable Single Domain | Implemented | small-head CAS over one authenticated typed StateRoot, bounded active-state reopen and exact historical lookup, receipt-backed cold reclamation, multi-Run atomic creation, complete Continuations, identified persistent wait sources, Run-local effect authority with paged terminal recovery, leases, commit-gated/eager/explicit outbox policy, occurrence replay, atomic Resource handoff input activation, history compaction, ambiguous-effect reconciliation, four-language controls, production local adapters, and real process-death CAS sweeps |
-| Optional Agent Interaction plugin | Implemented plugin suite | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces, including fresh-only host dispatch, historical Context prefix reads, capacity-safe stream finalization, recovery fail-closed without reader proof, all-host-kind cases, and real process-death matrices; not a framework profile |
-| Large Virtual Graph M3 | Implemented | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker slot leases/recovery, four SDK controls, and restore |
+| Semantic Interpreter M0 | Source-implemented; validation pending | frozen IR, canonical stores, admission, reducer, exact state replay |
+| Embedded M0 | Source-implemented; validation pending | one-shot in-memory execution, suspension boundary, process plugins, SDK facade |
+| Durable Single Domain | Partial terminal candidate; validation pending | small-head CAS over one authenticated typed StateRoot, bounded active-state reopen and exact historical lookup, receipt-backed cold reclamation, multi-Run atomic creation, complete Continuations, identified persistent wait sources, Run-local effect authority with paged terminal recovery, leases, commit-gated/eager/explicit outbox policy, occurrence replay, atomic Resource handoff input activation, history compaction, ambiguous-effect reconciliation, four-language controls, official local adapters, and real process-death CAS sweeps |
+| Optional Agent Interaction plugin | Optional source implementation; validation pending | separately owned Session, occurrence, input, workspace, and stream behavior over generic M1 interfaces, including fresh-only host dispatch, historical Context prefix reads, capacity-safe stream finalization, recovery fail-closed without reader proof, all-host-kind cases, and real process-death matrices; not a framework profile |
+| Large Virtual Graph M3 | Partial terminal candidate; validation pending | bounded virtual regions, M1 checkpoints, exact parked index, binding-pinned occurrences, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker slot leases/recovery, four SDK controls, and restore |
 | Replicated Domain | Proposed | fenced ownership, failover, no split-brain commit |
 | Strong Isolation | Proposed | untrusted code, secret, network, and tenant isolation |
-| Live Evolution M4 | Implemented | unified registry/DAG/rollout/pin authority, reusable modules, default transitive latest-compatible relinking with reachable no-widening admission, template-plus-Plan history, exact patch admission, conservative extensible impact, exact-domain quiescence-gated migration and replacement, isolated shadow plugins, immutable mixed-version pins, deterministic canary gates, promotion/rollback, four SDK controls, complete Engine `/5` receipts, atomic `cymule.live-evolution-checkpoint/6` authority, and current-head lost-receipt recovery |
+| Live Evolution M4 | Partial terminal candidate; validation pending | unified registry/DAG/rollout/pin authority, reusable modules, default transitive latest-compatible relinking with reachable no-widening admission, template-plus-Plan history, exact patch admission, conservative extensible impact, exact-domain quiescence-gated migration and replacement, isolated shadow plugins, immutable mixed-version pins, deterministic canary gates, promotion/rollback, four SDK controls, complete Engine `/5` receipts, atomic `cymule.live-evolution-checkpoint/6` authority, and current-head lost-receipt recovery |
 
-The M0 rows do not claim persistence. M1 proves single-domain durable wait and
-nested-scope resumption, exact replay of recorded component outputs, three
-dispatch policies, reconciliation after an ambiguous dispatch, production
+The M0 rows do not claim persistence. The M1 source evidence covers
+single-domain durable wait and nested-scope resumption, exact replay of recorded
+component outputs, three
+dispatch policies, reconciliation after an ambiguous dispatch, official
 source adapters, authenticated StateRoot reopen, and real process death on both
 sides of every discovered Run CAS. It does not imply distributed consensus,
 provider-level exactly-once behavior, or multi-domain failover.
 
 ## Required semantic cases
 
-The local suite verifies:
+The source test inventory covers the following cases. Multiple focused runs
+have passed, but this inventory does not replace the pending frozen-tree full
+gate:
 
 - identical Plan Candidates seal to an identical Plan ID;
 - every definition/component/effect/typed-wait schema compiles under exact
@@ -49,9 +72,13 @@ The local suite verifies:
   including omitted-versus-explicit-null member mismatches, while failure
   contains no request and rejects one as unknown;
 - strict raw request and response values are compared recursively with typed
-  reserialization so omission-only optional members cannot accept an explicit
-  `null`; required nullable members remain accepted, including null Run query
-  results;
+  reserialization so omitted/synthesized members, collapsed or reordered
+  arrays, and changed scalars fail; required nullable members remain accepted,
+  including null Run query results;
+- all four SDKs admit an exact 64 MiB UTF-8 Engine envelope, reject max plus one
+  before process/custom transport invocation, preserve a complete early failure
+  despite stdin closure, and reject an early-close forged success with the
+  request's read-only or mutating recovery classification;
 - the common request echo correlates Seal, Resource, verification, Clock,
   durable/cancel, execution, and live-evolution responses without an SDK
   recomputing Rust-owned derived identities; operation-specific response and
@@ -252,7 +279,8 @@ or four language SDKs.
 
 ## Cross-axis scenario
 
-Status: implemented as independent fault families plus black-box campaigns.
+Status: source-implemented as independent fault families plus black-box
+campaigns; final frozen-tree validation pending.
 The suite composes mutating effects, ambiguous dispatch, future binding update,
 pinned reconciliation, obligation settlement, nested auto-commit scopes,
 stale-command and epoch fencing, then runs end-to-end process-death campaigns.

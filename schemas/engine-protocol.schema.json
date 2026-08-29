@@ -1289,8 +1289,8 @@
       "required": ["template_id", "previous_plan_id", "current_plan_id", "decision_id", "advanced"],
       "properties": {
         "template_id": { "type": "string", "minLength": 1 },
-        "previous_plan_id": { "type": "string", "minLength": 1 },
-        "current_plan_id": { "type": "string", "minLength": 1 },
+        "previous_plan_id": { "$ref": "#/$defs/contentId" },
+        "current_plan_id": { "$ref": "#/$defs/contentId" },
         "decision_id": { "type": ["string", "null"] },
         "advanced": { "type": "boolean" }
       }
@@ -1301,8 +1301,8 @@
       "required": ["edge_id", "from_plan", "to_plan", "operations"],
       "properties": {
         "edge_id": { "type": "string", "minLength": 1 },
-        "from_plan": { "type": "string", "minLength": 1 },
-        "to_plan": { "type": "string", "minLength": 1 },
+        "from_plan": { "$ref": "#/$defs/contentId" },
+        "to_plan": { "$ref": "#/$defs/contentId" },
         "operations": { "type": "array", "items": { "$ref": "#/$defs/patchOperation" } }
       }
     },

@@ -74,6 +74,7 @@ LiveEvolutionCommand = dict[str, Any]
 LiveEvolutionOutcome = dict[str, Any]
 DurableCommand = dict[str, Any]
 ENGINE_PROTOCOL_VERSION = "cymule.engine/5"
+_ENGINE_REQUEST_LIMIT = 64 * 1024 * 1024
 
 
 EvolutionStateFamily = Literal[
@@ -2110,6 +2111,40 @@ class VirtualSchedulingControlBuilder:
         }
 
 
+def _snapshot_engine_request(
+    request: dict[str, Any],
+) -> tuple[bytes, dict[str, Any]]:
+    envelope = {
+        "engine_protocol": ENGINE_PROTOCOL_VERSION,
+        "request": request,
+    }
+    _validate_json_value(envelope)
+    try:
+        encoded = json.dumps(
+            envelope, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, UnicodeEncodeError) as error:
+        raise _validation_error(
+            "invalid_engine_request", "Engine request could not be encoded"
+        ) from error
+    if len(encoded) > _ENGINE_REQUEST_LIMIT:
+        raise _validation_error(
+            "engine_request_too_large",
+            f"complete Engine request exceeds {_ENGINE_REQUEST_LIMIT} UTF-8 bytes",
+        )
+    wire_envelope = _strict_json_loads(encoded.decode("utf-8"))
+    if (
+        not isinstance(wire_envelope, dict)
+        or set(wire_envelope) != {"engine_protocol", "request"}
+        or wire_envelope.get("engine_protocol") != ENGINE_PROTOCOL_VERSION
+        or not isinstance(wire_envelope.get("request"), dict)
+    ):
+        raise _validation_error(
+            "invalid_engine_request", "Engine request envelope must be closed"
+        )
+    return encoded, wire_envelope["request"]
+
+
 class CliEngine:
     """CLI-backed Engine transport."""
 
@@ -2374,25 +2409,7 @@ class CliEngine:
                 "invalid_engine_timeout",
                 "Engine timeout must be a finite positive number of seconds",
             )
-        envelope_request = {
-            "engine_protocol": ENGINE_PROTOCOL_VERSION,
-            "request": request,
-        }
-        _validate_json_value(envelope_request)
-        try:
-            encoded = json.dumps(
-                envelope_request, separators=(",", ":"), allow_nan=False
-            ).encode()
-        except (TypeError, ValueError, OverflowError, UnicodeEncodeError) as error:
-            raise _validation_error(
-                "invalid_engine_request", "Engine request could not be encoded"
-            ) from error
-        wire_envelope = _strict_json_loads(encoded.decode("utf-8"))
-        if not isinstance(wire_envelope, dict):
-            raise _validation_error(
-                "invalid_engine_request", "Engine request envelope must be an object"
-            )
-        wire_request = wire_envelope["request"]
+        encoded, wire_request = _snapshot_engine_request(request)
         try:
             process = subprocess.Popen(
                 [self.executable, "rpc"],
@@ -2522,6 +2539,7 @@ class CliEngine:
             raise _response_loss_error(wire_request, "engine_process_failed")
         stdout = streams.get("stdout")
         stderr = streams.get("stderr")
+        input_failed = isinstance(streams.get("stdin"), BaseException)
         if (
             not isinstance(stdout, bytes)
             or not isinstance(stderr, bytes)
@@ -2533,6 +2551,10 @@ class CliEngine:
             envelope = _strict_json_loads(stdout.decode())
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             raise _response_loss_error(wire_request, "invalid_engine_response") from error
+        if input_failed and (
+            not isinstance(envelope, dict) or envelope.get("outcome") != "failure"
+        ):
+            raise _response_loss_error(wire_request, "engine_request_incomplete")
         if (
             isinstance(envelope, dict)
             and isinstance(envelope.get("engine_protocol"), str)
@@ -2646,16 +2668,42 @@ class DurableEngine:
 
     def observe_clock(self, run_id: str) -> ClockObservationRef:
         if self.clock is None:
-            raise ValueError("durable Clock target is missing")
-        request = {"type": "observe_clock", "target": self.clock, "run_id": run_id}
-        result = self.transport.observe_clock(self.clock, run_id)
+            raise _validation_error(
+                "missing_clock_provider", "durable Clock target is missing"
+            )
         try:
-            _validate_clock_observation_result(result)
+            DurableControlBuilder._identity("Run", run_id)
+            _validate_json_value(self.clock)
+            _validate_engine_clock_target(self.clock)
+            _, request = _snapshot_engine_request(
+                {"type": "observe_clock", "target": self.clock, "run_id": run_id}
+            )
+        except (EngineError, ValueError, TypeError) as error:
             if (
-                result["run_id"] != run_id
-                or result["observation"]["source_id"] != self.clock["source_id"]
-                or result["observation"]["source_generation"]
-                != self.clock["source_generation"]
+                isinstance(error, EngineError)
+                and error.failure["category"] == "validation"
+            ):
+                raise
+            raise _validation_error(
+                "clock_request_validation_failed",
+                "Clock observation request failed local validation",
+            ) from error
+        try:
+            result = self.transport.observe_clock(
+                copy.deepcopy(request["target"]), request["run_id"]
+            )
+        except Exception as error:
+            raise _transport_invocation_error(request, error) from error
+        try:
+            _validate_json_value(result)
+            result_snapshot = copy.deepcopy(result)
+            _validate_clock_observation_result(result_snapshot)
+            if (
+                result_snapshot["run_id"] != request["run_id"]
+                or result_snapshot["observation"]["source_id"]
+                != request["target"]["source_id"]
+                or result_snapshot["observation"]["source_generation"]
+                != request["target"]["source_generation"]
             ):
                 raise _transport_error(
                     "invalid_engine_response",
@@ -2663,7 +2711,7 @@ class DurableEngine:
                 )
         except (EngineError, KeyError, TypeError) as error:
             raise _response_loss_error(request, "invalid_engine_response") from error
-        return result["observation"]
+        return result_snapshot["observation"]
 
     def run_index_page(self, options: DurablePageQueryOptions) -> DurableQueryPage:
         response = self._submit(self._build_command(
@@ -2797,25 +2845,28 @@ class DurableEngine:
         ))
 
     def evolve(self, command: LiveEvolutionCommand) -> EvolutionCommit:
-        operation = (
-            command.get("command", {}).get("operation")
-            if command.get("operation") == "apply"
-            else None
-        )
-        target_plan = (
-            command["command"]["request"]["to_plan"]
-            if operation == "migrate"
-            else None
-        )
-        target_execution = self.target_execution_bindings.get(target_plan)
-        if target_plan is not None and target_execution is not None:
-            selected_target_executions = {
-                target_plan: copy.deepcopy(target_execution)
-            }
-        else:
-            selected_target_executions = {}
-        return self.transport.execute_live_evolution(
-            {
+        try:
+            _validate_json_value(command)
+            _validate_live_identity(self.evolution_id, "evolution")
+            _validate_live_evolution_command(command)
+            command_snapshot = copy.deepcopy(command)
+            operation = (
+                command_snapshot["command"]["operation"]
+                if command_snapshot["operation"] == "apply"
+                else None
+            )
+            target_plan = (
+                command_snapshot["command"]["request"]["to_plan"]
+                if operation == "migrate"
+                else None
+            )
+            target_execution = self.target_execution_bindings.get(target_plan)
+            selected_target_executions = (
+                {target_plan: copy.deepcopy(target_execution)}
+                if target_plan is not None and target_execution is not None
+                else {}
+            )
+            target: EngineEvolutionTarget = {
                 "store": self.store,
                 "migration_adapter": (
                     self.migration_adapter if operation == "migrate" else None
@@ -2824,10 +2875,80 @@ class DurableEngine:
                     self.shadow_driver if operation == "shadow" else None
                 ),
                 "target_execution_bindings": selected_target_executions,
-            },
-            self.evolution_id,
-            command,
-        )
+            }
+            _validate_json_value(target)
+            _validate_engine_evolution_target(target, command_snapshot)
+            _, request = _snapshot_engine_request(
+                {
+                    "type": "execute_live_evolution",
+                    "target": target,
+                    "evolution_id": self.evolution_id,
+                    "command": command_snapshot,
+                }
+            )
+        except (EngineError, KeyError, TypeError, ValueError) as error:
+            if (
+                isinstance(error, EngineError)
+                and error.failure["category"] == "validation"
+            ):
+                raise
+            raise _validation_error(
+                "evolution_request_validation_failed",
+                "live-evolution request failed local validation",
+            ) from error
+        expected_patch_plan_id: str | None = None
+        if (
+            request["command"]["operation"] == "apply"
+            and request["command"]["command"]["operation"] == "apply_patch"
+        ):
+            _, seal_request = _snapshot_engine_request(
+                {
+                    "type": "seal",
+                    "candidate": request["command"]["command"]["patch"]["target"],
+                }
+            )
+            try:
+                sealed = self.transport.seal(
+                    copy.deepcopy(seal_request["candidate"])
+                )
+            except Exception as error:
+                raise _transport_invocation_error(seal_request, error) from error
+            try:
+                _validate_json_value(sealed)
+                sealed_snapshot = copy.deepcopy(sealed)
+                _validate_sealed_plan(sealed_snapshot)
+                if not _wire_json_equal(
+                    sealed_snapshot["candidate"], seal_request["candidate"]
+                ):
+                    raise _transport_error(
+                        "invalid_engine_response",
+                        "sealed Plan does not match the patch target candidate",
+                    )
+                expected_patch_plan_id = sealed_snapshot["plan_id"]
+            except (EngineError, KeyError, TypeError) as error:
+                raise _response_loss_error(
+                    seal_request, "invalid_engine_response"
+                ) from error
+        try:
+            returned = self.transport.execute_live_evolution(
+                copy.deepcopy(request["target"]),
+                request["evolution_id"],
+                copy.deepcopy(request["command"]),
+            )
+        except Exception as error:
+            raise _transport_invocation_error(request, error) from error
+        try:
+            _validate_json_value(returned)
+            commit = copy.deepcopy(returned)
+            _validate_evolution_commit_for_request(
+                request["evolution_id"],
+                request["command"],
+                commit,
+                expected_patch_plan_id=expected_patch_plan_id,
+            )
+            return cast(EvolutionCommit, commit)
+        except (EngineError, KeyError, TypeError) as error:
+            raise _response_loss_error(request, "invalid_engine_response") from error
 
     def _submit(self, command: DurableCommand) -> dict[str, Any]:
         store_only = command["type"] in {
@@ -2842,12 +2963,76 @@ class DurableEngine:
             "run_item",
         }
         provider_only = command["type"] == "resolve_effect"
-        target: EngineDurableTarget = {"store": self.store}
-        if not store_only and self.plugin is not None:
-            target["executor"] = self.plugin
-        if not store_only and not provider_only and self.clock is not None:
-            target["clock"] = self.clock
-        return self.transport.execute_durable(target, command)
+        try:
+            _validate_json_value(command)
+            _validate_durable_command_response(command)
+            target: EngineDurableTarget = {"store": self.store}
+            if not store_only and self.plugin is not None:
+                target["executor"] = self.plugin
+            if not store_only and not provider_only and self.clock is not None:
+                target["clock"] = self.clock
+            _validate_json_value(target)
+            _validate_engine_durable_target(target, command)
+            _, request = _snapshot_engine_request(
+                {"type": "execute_durable", "target": target, "command": command}
+            )
+        except (EngineError, KeyError, TypeError, ValueError) as error:
+            if (
+                isinstance(error, EngineError)
+                and error.failure["category"] == "validation"
+            ):
+                raise
+            raise _validation_error(
+                "durable_request_validation_failed",
+                "durable request failed local validation",
+            ) from error
+        expected_start_plan_id: str | None = None
+        if request["command"]["type"] == "start_run":
+            _, seal_request = _snapshot_engine_request(
+                {"type": "seal", "candidate": request["command"]["candidate"]}
+            )
+            try:
+                sealed = self.transport.seal(
+                    copy.deepcopy(seal_request["candidate"])
+                )
+            except Exception as error:
+                raise _transport_invocation_error(seal_request, error) from error
+            try:
+                _validate_json_value(sealed)
+                sealed_snapshot = copy.deepcopy(sealed)
+                _validate_sealed_plan(sealed_snapshot)
+                if not _wire_json_equal(
+                    sealed_snapshot["candidate"], seal_request["candidate"]
+                ):
+                    raise _transport_error(
+                        "invalid_engine_response",
+                        "sealed Plan does not match the start candidate",
+                    )
+                expected_start_plan_id = sealed_snapshot["plan_id"]
+            except (EngineError, KeyError, TypeError) as error:
+                raise _response_loss_error(
+                    seal_request, "invalid_engine_response"
+                ) from error
+        try:
+            returned = self.transport.execute_durable(
+                copy.deepcopy(request["target"]), copy.deepcopy(request["command"])
+            )
+        except Exception as error:
+            raise _transport_invocation_error(request, error) from error
+        try:
+            _validate_json_value(returned)
+            response = copy.deepcopy(returned)
+            _validate_durable_response(response)
+            if not _durable_response_matches_command(
+                request["command"], response, expected_start_plan_id
+            ):
+                raise _transport_error(
+                    "invalid_engine_response",
+                    "durable response does not match its complete command",
+                )
+            return response
+        except (EngineError, KeyError, TypeError) as error:
+            raise _response_loss_error(request, "invalid_engine_response") from error
 
     def _run_page(
         self,
@@ -2931,6 +3116,18 @@ def _response_loss_error(request: dict[str, Any], code: str) -> EngineError:
             }
         )
     return _transport_error(code, "the Engine response was unavailable")
+
+
+def _transport_invocation_error(
+    request: dict[str, Any], error: Exception
+) -> EngineError:
+    if isinstance(error, EngineError):
+        try:
+            _validate_engine_failure(error.failure)
+        except EngineError:
+            return _response_loss_error(request, "invalid_engine_response")
+        return error
+    return _response_loss_error(request, "engine_transport_failed")
 
 
 def _unsupported_engine_protocol_error(
@@ -3032,6 +3229,10 @@ def _validate_json_value(value: object, active: set[int] | None = None) -> None:
                 _validate_json_value(child, active)
         finally:
             active.remove(identity)
+    elif value is not None and not isinstance(value, (bool, str, int, float)):
+        raise _validation_error(
+            "invalid_engine_request", "value is outside the JSON data model"
+        )
 
 
 def _strict_json_loads(value: str) -> object:
@@ -4234,9 +4435,25 @@ def _validate_engine_evolution_target(
             require_revision=True,
             expected_message_limit=8 * 1024 * 1024,
         )
-    if (operation == "migrate") != (target["migration_adapter"] is not None) or (
-        operation == "shadow"
-    ) != (target["shadow_driver"] is not None):
+    binding_count = len(target_executions)
+    if operation == "migrate":
+        valid_provider_shape = target["shadow_driver"] is None and (
+            target["migration_adapter"] is None
+            and binding_count == 0
+            or target["migration_adapter"] is not None
+            and binding_count == 1
+        )
+    elif operation == "shadow":
+        valid_provider_shape = (
+            target["migration_adapter"] is None and binding_count == 0
+        )
+    else:
+        valid_provider_shape = (
+            target["migration_adapter"] is None
+            and target["shadow_driver"] is None
+            and binding_count == 0
+        )
+    if not valid_provider_shape:
         raise _transport_error(
             "invalid_engine_response",
             "evolution Engine plugin presence does not match the command",
@@ -5643,7 +5860,11 @@ def _live_evolution_command_matches_outcome(
 
 
 def _validate_evolution_commit_for_request(
-    evolution_id: object, command_value: object, commit_value: object
+    evolution_id: object,
+    command_value: object,
+    commit_value: object,
+    *,
+    expected_patch_plan_id: str | None = None,
 ) -> None:
     _validate_evolution_commit(commit_value)
     receipt_value = commit_value["receipt"]
@@ -5656,6 +5877,18 @@ def _validate_evolution_commit_for_request(
             "invalid_engine_response",
             "evolution commit does not match its request",
         )
+    if expected_patch_plan_id is not None:
+        outcome = receipt_value["outcome"]
+        if (
+            not isinstance(outcome, dict)
+            or outcome.get("result") != "patch_applied"
+            or not isinstance(outcome.get("edge"), dict)
+            or outcome["edge"].get("to_plan") != expected_patch_plan_id
+        ):
+            raise _transport_error(
+                "invalid_engine_response",
+                "Plan patch commit does not match the Rust-sealed target Plan",
+            )
 
 
 def _validate_live_identity(value: object, label: str) -> None:
@@ -6412,7 +6645,10 @@ def _validate_evolution_command(value: object) -> None:
             {"from_plan", "target", "operations", "evidence"},
             "Plan patch",
         )
-        _validate_live_identity(patch["from_plan"], "parent Plan")
+        _validate_content_id(patch["from_plan"], "parent Plan")
+        _validate_plan_candidate(patch["target"])
+        _validate_patch_operations(patch["operations"])
+        _validate_artifact_ref(patch["evidence"])
     elif operation == "set_rollout":
         decision = _require_closed_record(
             value["decision"],
@@ -6420,6 +6656,9 @@ def _validate_evolution_command(value: object) -> None:
             "rollout decision",
         )
         _validate_live_identity(decision["decision_id"], "rollout decision")
+        _validate_content_id(decision["fallback_plan"], "rollout fallback Plan")
+        _validate_content_id(decision["target_plan"], "rollout target Plan")
+        _validate_rollout_mode(decision["mode"])
     elif operation == "select_occurrence":
         _validate_live_identity(value["occurrence_id"], "occurrence")
         _validate_live_identity(value["selection_id"], "occurrence selection")
@@ -6468,6 +6707,14 @@ def _validate_evolution_command(value: object) -> None:
             "rollout observation",
         )
         _validate_live_identity(observation["observation_id"], "rollout observation")
+        _validate_live_identity(observation["decision_id"], "rollout decision")
+        _validate_live_identity(observation["occurrence_id"], "rollout occurrence")
+        _validate_content_id(observation["plan_id"], "observed Plan")
+        if observation["outcome"] not in {"succeeded", "failed"}:
+            raise _transport_error(
+                "invalid_engine_response", "rollout observation outcome is invalid"
+            )
+        _validate_artifact_ref(observation["evidence"])
     elif operation == "apply_gate":
         gate = _require_closed_record(
             value["gate"],
@@ -6480,6 +6727,66 @@ def _validate_evolution_command(value: object) -> None:
         )
         _validate_live_identity(gate["gate_id"], "rollout gate")
         _validate_live_identity(value["next_decision_id"], "rollout decision")
+
+
+def _validate_patch_operations(value: object) -> None:
+    if not isinstance(value, list) or not value:
+        raise _transport_error(
+            "invalid_engine_response", "Plan patch operations are invalid"
+        )
+    previous: tuple[str, str] | None = None
+    for operation_value in value:
+        operation = _require_closed_record(
+            operation_value,
+            {"kind", "target", "before", "after"},
+            "patch operation",
+        )
+        _validate_live_identity(operation["kind"], "patch operation kind")
+        _validate_live_identity(operation["target"], "patch operation target")
+        valid_shape = {
+            "add": operation["before"] is None
+            and _is_lower_hex_digest(operation["after"]),
+            "remove": _is_lower_hex_digest(operation["before"])
+            and operation["after"] is None,
+            "replace": _is_lower_hex_digest(operation["before"])
+            and _is_lower_hex_digest(operation["after"])
+            and operation["before"] != operation["after"],
+        }.get(operation["kind"], False)
+        if not valid_shape:
+            raise _transport_error(
+                "invalid_engine_response", "Plan patch operation is malformed"
+            )
+        current = (operation["target"], operation["kind"])
+        if previous is not None and previous >= current:
+            raise _transport_error(
+                "invalid_engine_response",
+                "Plan patch operations are not in canonical order",
+            )
+        previous = current
+
+
+def _validate_rollout_mode(value: object) -> None:
+    if not isinstance(value, dict) or not isinstance(value.get("mode"), str):
+        raise _transport_error(
+            "invalid_engine_response", "rollout mode is invalid"
+        )
+    if value["mode"] == "canary":
+        _require_closed_record(value, {"mode", "basis_points"}, "rollout mode")
+        basis_points = value["basis_points"]
+        if (
+            not isinstance(basis_points, int)
+            or isinstance(basis_points, bool)
+            or not 0 <= basis_points <= 10_000
+        ):
+            raise _transport_error(
+                "invalid_engine_response", "canary rollout basis points are invalid"
+            )
+        return
+    _require_closed_record(value, {"mode"}, "rollout mode")
+    if value["mode"] not in {"shadow", "active", "rolled_back"}:
+        raise _transport_error(
+            "invalid_engine_response", "rollout mode is invalid"
+        )
 
 
 def _validate_live_evolution_command(value: object) -> None:

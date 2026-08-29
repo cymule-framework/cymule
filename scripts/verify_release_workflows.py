@@ -884,7 +884,14 @@ def verify_finalization_controller_boundary(text: str) -> None:
         )
 
     jobs = job_bodies(text)
-    expected_jobs = {"verify", "freeze", "attest", "control-plane", "publish"}
+    expected_jobs = {
+        "verify",
+        "freeze",
+        "control-plane-preflight",
+        "attest",
+        "control-plane",
+        "publish",
+    }
     if set(jobs) != expected_jobs:
         raise ValueError(
             "finalize-release.yml has an open or incomplete job set: "
@@ -897,6 +904,7 @@ def verify_finalization_controller_boundary(text: str) -> None:
         )
     verify = jobs.get("verify", "")
     freeze = jobs.get("freeze", "")
+    control_plane_preflight = jobs.get("control-plane-preflight", "")
     attest = jobs.get("attest", "")
     control_plane = jobs.get("control-plane", "")
     publish = jobs.get("publish", "")
@@ -970,8 +978,27 @@ def verify_finalization_controller_boundary(text: str) -> None:
         "path: ${{ runner.temp }}/release-finalization",
         "actions/upload-artifact@",
     )
-    required_attest = (
+    required_control_plane_preflight = (
         "needs: [verify, freeze]",
+        "environment: release-finalize",
+        "permissions:\n      contents: read",
+        "ref: ${{ needs.verify.outputs.controller_sha }}",
+        "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
+        "app-id: ${{ vars.CYMULE_RELEASE_CONTROL_APP_ID }}",
+        "private-key: ${{ secrets.CYMULE_RELEASE_CONTROL_APP_PRIVATE_KEY }}",
+        "permission-administration: read",
+        "permission-actions: read",
+        "owner: ${{ github.repository_owner }}",
+        "repositories: ${{ github.event.repository.name }}",
+        'git diff --quiet "$CONTROLLER_SHA" -- scripts/verify_github_release_settings.py',
+        'test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"',
+        'test "$remote_tag_sha" = "$RELEASE_TAG_SHA"',
+        'test "$remote_release_sha" = "$RELEASE_SHA"',
+        'test "$remote_mirror_receipt_tag_sha" = "$MIRROR_RECEIPT_TAG_SHA"',
+        "python3 scripts/verify_github_release_settings.py",
+    )
+    required_attest = (
+        "needs: [verify, freeze, control-plane-preflight]",
         "environment: release-finalize",
         "attestations: write",
         "contents: read",
@@ -1059,6 +1086,11 @@ def verify_finalization_controller_boundary(text: str) -> None:
     )
     missing = [fragment for fragment in required_verify if fragment not in verify]
     missing.extend(fragment for fragment in required_freeze if fragment not in freeze)
+    missing.extend(
+        fragment
+        for fragment in required_control_plane_preflight
+        if fragment not in control_plane_preflight
+    )
     missing.extend(fragment for fragment in required_attest if fragment not in attest)
     missing.extend(
         fragment for fragment in required_control_plane if fragment not in control_plane
@@ -1227,6 +1259,73 @@ def verify_finalization_controller_boundary(text: str) -> None:
             raise ValueError(
                 "finalize-release.yml data-only freeze executes payload or package code"
             )
+    if job_permissions(control_plane_preflight) != {"contents": "read"}:
+        raise ValueError(
+            "finalize-release.yml pre-attestation control-plane gate must have no write authority"
+        )
+    if control_plane_preflight.count("environment: release-finalize") != 1:
+        raise ValueError(
+            "finalize-release.yml pre-attestation control-plane gate must use the protected environment"
+        )
+    if action_names("finalize-release.yml", control_plane_preflight) != [
+        "actions/checkout",
+        "actions/create-github-app-token",
+    ]:
+        raise ValueError(
+            "finalize-release.yml pre-attestation control-plane gate has an unexpected action"
+        )
+    if any(
+        forbidden in control_plane_preflight
+        for forbidden in (
+            "contents: write",
+            "permission-administration: write",
+            "permission-actions: write",
+            "permission-contents: write",
+            "${{ github.token }}",
+            "finalize_release.py publish",
+            "gh release create",
+            "gh release upload",
+            "gh release edit",
+            "--receipt-output",
+            "actions/upload-artifact@",
+        )
+    ):
+        raise ValueError(
+            "finalize-release.yml pre-attestation control-plane gate has mutation or receipt authority"
+        )
+    if (
+        control_plane_preflight.count("actions/create-github-app-token@") != 1
+        or control_plane_preflight.count("permission-administration: read") != 1
+        or control_plane_preflight.count("permission-actions: read") != 1
+        or control_plane_preflight.count(
+            "python3 scripts/verify_github_release_settings.py"
+        )
+        != 1
+        or control_plane_preflight.count("run: |") != 1
+    ):
+        raise ValueError(
+            "finalize-release.yml pre-attestation control-plane gate is not one closed live verifier"
+        )
+    preflight_order = tuple(
+        control_plane_preflight.find(marker)
+        for marker in (
+            "actions/create-github-app-token@",
+            'git diff --quiet "$CONTROLLER_SHA" -- scripts/verify_github_release_settings.py',
+            "remote_mirror_receipt_tag_sha=",
+            "python3 scripts/verify_github_release_settings.py",
+        )
+    )
+    if any(offset < 0 for offset in preflight_order) or preflight_order != tuple(
+        sorted(preflight_order)
+    ):
+        raise ValueError(
+            "finalize-release.yml must pass live control-plane authority before attestation"
+        )
+    verify_remote_tag_readback(
+        control_plane_preflight,
+        "finalize-release.yml pre-attestation control plane",
+        tag_object=True,
+    )
     if job_permissions(attest) != {
         "attestations": "write",
         "contents": "read",
@@ -1862,8 +1961,9 @@ def verify_public_source_snapshot_helper(text: str) -> None:
         "GIT_CONFIG_GLOBAL=/dev/null",
         "GIT_NO_REPLACE_OBJECTS=1",
         'rev-parse --verify "$revision^{commit}"',
-        '.gitlab-ci.yml | .github/workflows/mirror.yml',
-        "versioning/version-domains.json | .gitlab/*",
+        'local root_component=${1%%/*}',
+        '.gitlab*) return 1',
+        ".github/workflows/mirror.yml | versioning/version-domains.json",
         'ls-tree -r -z --full-tree "$revision"',
         "100644 | 100755 | 120000",
         "for shift in 56 48 40 32 24 16 8 0",

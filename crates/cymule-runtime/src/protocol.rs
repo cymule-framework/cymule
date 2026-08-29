@@ -9,6 +9,8 @@ use crate::RuntimeError;
 
 /// Current Engine transport protocol.
 pub const ENGINE_PROTOCOL_VERSION: &str = "cymule.engine/5";
+/// Maximum UTF-8 bytes in one complete Engine request envelope.
+pub const MAX_ENGINE_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 
 /// Official directory-store provider identity understood by the CLI Engine.
 pub const ENGINE_DIRECTORY_STORE_PROVIDER: &str = "cymule.directory-store/5";

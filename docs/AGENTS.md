@@ -26,6 +26,9 @@
   the run's stage, attestation and control-plane receipt, not immutable BOM bytes.
 - Document the GitHub Artifact Attestation as the terminal content authority
   and an owner-enforced immutable GitHub Release as its discovery projection.
+  Require a live read-only GitHub control-plane gate before attestation and a
+  separate fresh short-lived receipt observation after attestation for the
+  writer.
   Keep the exact tag-App creator, live App-slug/App-ID and distinct bot-user-ID
   readback, raw tag-object lost-ack binding, environment
   Team/admin-bypass policy, separate Administration-read live-preflight App,

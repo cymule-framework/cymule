@@ -31,6 +31,7 @@ import (
 const EngineProtocolVersion = "cymule.engine/5"
 const maxExactInteger uint64 = 9_007_199_254_740_991
 const maxEngineOutputBytes = 16 * 1024 * 1024
+const maxEngineRequestBytes = 64 * 1024 * 1024
 const maxInlineResourceBytes = 1024 * 1024
 const maxArtifactBytes = 8 * 1024 * 1024
 const maxArtifactBase64Bytes = ((maxArtifactBytes + 2) / 3) * 4
@@ -926,6 +927,9 @@ func validateEvolutionCommandSemantics(command EvolutionCommand) error {
 		if err := validatePlanCandidateWire(command.Patch.Target); err != nil {
 			return err
 		}
+		if err := validatePatchOperations(command.Patch.Operations); err != nil {
+			return err
+		}
 		return validateArtifactRef(command.Patch.Evidence)
 	case "set_rollout":
 		if command.Decision == nil || !validEvolutionIdentity(command.Decision.DecisionID) ||
@@ -954,9 +958,15 @@ func validateEvolutionCommandSemantics(command EvolutionCommand) error {
 		}
 		return validateShadowRequest(*command.Shadow)
 	case "observe":
-		if command.Observation == nil || !validEvolutionIdentity(command.Observation.ObservationID) {
+		if command.Observation == nil ||
+			!validEvolutionIdentity(command.Observation.ObservationID) ||
+			!validEvolutionIdentity(command.Observation.DecisionID) ||
+			!validEvolutionIdentity(command.Observation.OccurrenceID) ||
+			!validSHA256ID(command.Observation.PlanID) ||
+			!slices.Contains([]string{"succeeded", "failed"}, command.Observation.Outcome) {
 			return fmt.Errorf("rollout observation command is invalid")
 		}
+		return validateArtifactRef(command.Observation.Evidence)
 	case "apply_gate":
 		if command.Gate == nil || !validEvolutionIdentity(command.Gate.GateID) ||
 			!validEvolutionIdentity(command.NextDecisionID) {
@@ -964,6 +974,38 @@ func validateEvolutionCommandSemantics(command EvolutionCommand) error {
 		}
 	default:
 		return fmt.Errorf("evolution command operation is unknown")
+	}
+	return nil
+}
+
+func validatePatchOperations(operations []PatchOperation) error {
+	if len(operations) == 0 {
+		return fmt.Errorf("Plan patch requires a non-empty structural diff")
+	}
+	var previousTarget, previousKind string
+	for index, operation := range operations {
+		if !validEvolutionIdentity(operation.Kind) || !validEvolutionIdentity(operation.Target) {
+			return fmt.Errorf("Plan patch operation identity is invalid")
+		}
+		validShape := false
+		switch operation.Kind {
+		case "add":
+			validShape = operation.Before == nil && operation.After != nil && validBareSHA256(*operation.After)
+		case "remove":
+			validShape = operation.Before != nil && validBareSHA256(*operation.Before) && operation.After == nil
+		case "replace":
+			validShape = operation.Before != nil && operation.After != nil &&
+				validBareSHA256(*operation.Before) && validBareSHA256(*operation.After) &&
+				*operation.Before != *operation.After
+		}
+		if !validShape {
+			return fmt.Errorf("Plan patch operation is malformed")
+		}
+		if index > 0 && (previousTarget > operation.Target ||
+			previousTarget == operation.Target && previousKind >= operation.Kind) {
+			return fmt.Errorf("Plan patch operations are not in canonical order")
+		}
+		previousTarget, previousKind = operation.Target, operation.Kind
 	}
 	return nil
 }
@@ -6384,10 +6426,6 @@ func validateEngineEvolutionTarget(target EngineEvolutionTarget, command LiveEvo
 			required = "shadow"
 		}
 	}
-	if (required == "migration") != (target.MigrationAdapter != nil) ||
-		(required == "shadow") != (target.ShadowDriver != nil) {
-		return fmt.Errorf("evolution Engine plugin presence does not match its command")
-	}
 	if target.TargetExecutionBindings == nil || len(target.TargetExecutionBindings) > 1 {
 		return fmt.Errorf("target execution bindings are outside bounds")
 	}
@@ -6400,6 +6438,21 @@ func validateEngineEvolutionTarget(target EngineEvolutionTarget, command LiveEvo
 		); err != nil {
 			return err
 		}
+	}
+	validProviderShape := false
+	switch required {
+	case "migration":
+		validProviderShape = target.ShadowDriver == nil &&
+			(target.MigrationAdapter == nil && len(target.TargetExecutionBindings) == 0 ||
+				target.MigrationAdapter != nil && len(target.TargetExecutionBindings) == 1)
+	case "shadow":
+		validProviderShape = target.MigrationAdapter == nil && len(target.TargetExecutionBindings) == 0
+	default:
+		validProviderShape = target.MigrationAdapter == nil && target.ShadowDriver == nil &&
+			len(target.TargetExecutionBindings) == 0
+	}
+	if !validProviderShape {
+		return fmt.Errorf("evolution Engine plugin presence does not match its command")
 	}
 	if target.MigrationAdapter != nil {
 		adapter := target.MigrationAdapter
@@ -7317,6 +7370,12 @@ func (engine CliEngine) request(request any, response any) error {
 	if err != nil {
 		return validationFailure("invalid_engine_request", "Engine request could not be encoded")
 	}
+	if len(input) > maxEngineRequestBytes {
+		return validationFailure(
+			"engine_request_too_large",
+			fmt.Sprintf("complete Engine request exceeds %d UTF-8 bytes", maxEngineRequestBytes),
+		)
+	}
 	inputValue, err := decodeUniqueJSON(input)
 	if err != nil {
 		return validationFailure("invalid_engine_request", "Engine request is outside the strict JSON domain")
@@ -7356,17 +7415,30 @@ func (engine CliEngine) request(request any, response any) error {
 	}
 	command := exec.Command(executable, "rpc")
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.Stdin = bytes.NewReader(input)
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		return transportFailure("engine_stdin_unavailable", "the Engine stdin pipe is unavailable")
+	}
 	stdout := newBoundedOutput(maxEngineOutputBytes)
 	stderr := newBoundedOutput(maxEngineOutputBytes)
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if startErr := command.Start(); startErr != nil {
+		_ = stdin.Close()
 		if ctx.Err() != nil {
 			return interruptedFailure(request, ctx.Err(), false)
 		}
 		return transportFailure("engine_start_failed", "the Engine process could not be started")
 	}
+	inputDone := make(chan error, 1)
+	go func() {
+		_, writeErr := stdin.Write(input)
+		closeErr := stdin.Close()
+		if writeErr == nil {
+			writeErr = closeErr
+		}
+		inputDone <- writeErr
+	}()
 	waitDone := make(chan error, 1)
 	go func() {
 		waitDone <- command.Wait()
@@ -7374,6 +7446,10 @@ func (engine CliEngine) request(request any, response any) error {
 	waitErr, interrupted, residualGroup, terminationErr := awaitEngineProcess(
 		ctx, command.Process.Pid, waitDone,
 	)
+	// A complete Engine response remains authoritative when the child closed
+	// stdin early; joining the writer prevents a goroutine leak, while its
+	// expected EPIPE cannot replace a decoded success/failure envelope.
+	inputErr := <-inputDone
 	if terminationErr != nil {
 		return responseLossFailure(request, "engine_process_termination_failed")
 	}
@@ -7388,6 +7464,13 @@ func (engine CliEngine) request(request any, response any) error {
 	}
 	if waitErr != nil {
 		return responseLossFailure(request, "engine_process_failed")
+	}
+	if inputErr != nil {
+		value, decodeErr := decodeUniqueJSON(stdout.bytes())
+		object, objectOK := value.(map[string]any)
+		if decodeErr != nil || !objectOK || object["outcome"] != "failure" {
+			return responseLossFailure(request, "engine_request_incomplete")
+		}
 	}
 	return decodeEngineResponseForRequest(stdout.bytes(), response, sentRequest)
 }

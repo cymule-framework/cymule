@@ -1,11 +1,18 @@
 # Roadmap
 
 The roadmap is profile-driven. A milestone is complete only when its complete
-fault-oriented conformance family passes.
+fault-oriented conformance family passes on one frozen source generation.
+Source implementation, validation, release/publication, operator migration, and
+deployment are separate states; see the [status ladder](conformance.md#status-ladder).
+The current terminal refactor is source-implemented with multiple focused gates,
+but remains a partial terminal candidate with final frozen-tree validation
+pending. It has no release tag, package publication, operator migration, or
+deployment.
 
 ## M0 - Semantic kernel
 
-Status: implemented in 0.1.0.
+Status: source-implemented in the current candidate; frozen-tree validation
+pending for the refactored generation. This is not a release claim for 0.1.0.
 
 - frozen IR and canonical identity;
 - VEC and attempt epoch fencing;
@@ -17,7 +24,9 @@ Status: implemented in 0.1.0.
 
 ## M1 - Durable single domain
 
-Status: implemented for one production single-domain authority.
+Status: partial terminal candidate; source-implemented for one single-domain
+authority, with final frozen-tree validation pending. No production rollout is
+claimed.
 
 - provider-neutral small-head CAS over one typed StateRoot, bounded active-state
   reopen plus exact historical lookup, receipt-backed cold reclamation, full
@@ -64,13 +73,14 @@ Status: implemented for one production single-domain authority.
 - a separate real-process matrix kills both sides of every discovered M1 Run
   CAS and verifies terminal state plus external provider counts;
 - persistent HTTP/timer sources, filesystem/conditional-object Resources, and
-  a restart-monotonic clock adapter complete the production substrate set;
+  a restart-monotonic clock adapter form the official source adapter set;
 - Rust, TypeScript, Python, and Go expose one closed mutation/query control
   union while Rust remains the only admission authority.
 
 ## Optional plugin track - Agent interaction
 
-Status: implemented optional plugin profile.
+Status: optional source implementation; validation pending with the terminal
+candidate. It is not released or deployed evidence.
 
 This track is not a Cymule framework milestone or a requirement for M1, M3, or
 M4 conformance. The optional
@@ -91,7 +101,8 @@ do not block the framework roadmap.
 
 ## M3 - Large virtual work
 
-Status: implemented.
+Status: partial terminal candidate; source-implemented, validation pending on
+the final frozen tree.
 
 - virtual regions, opaque cursors, bounded materialization, parked indexes,
   capability-aware claims, fencing, deterministic Run fairness, and portable
@@ -129,7 +140,8 @@ Status: implemented.
 
 ## M4 - Live evolution
 
-Status: implemented for one provider-neutral durable domain.
+Status: partial terminal candidate; source-implemented for one provider-neutral
+durable domain, validation pending on the final frozen tree.
 
 - immutable future binding updates and occurrence pinning are implemented;
 - sealed Plan DAG nodes, content-addressed patch edges, cycle rejection,

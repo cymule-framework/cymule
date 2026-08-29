@@ -33,6 +33,9 @@ use serde_json::json;
 const STORE_DOMAIN: &str = "domain:agent-process-kill";
 const SESSION_ID: &str = "session:agent-process-kill";
 const TOOL_ID: &str = "tool:agent-process-kill";
+const CLOSE_SESSION_ID: &str = "session:agent-close-process-kill";
+const CLOSE_PENDING_TOOL_ID: &str = "tool:agent-close-pending";
+const CLOSE_IN_PROGRESS_TOOL_ID: &str = "tool:agent-close-in-progress";
 const HOST_TOOL_ID: &str = "tool:agent-process-kill-host";
 const OCCURRENCE_ID: &str = "occurrence:agent-process-kill";
 const STREAM_ID: &str = "stream:agent-process-kill";
@@ -676,6 +679,135 @@ fn complete_tool<P: AgentPersistence>(persistence: &mut P) -> AgentResult<()> {
     }
 }
 
+fn close_session_read<P: AgentPersistence>(
+    persistence: &mut P,
+) -> AgentResult<agent_protocol::AgentSessionRead> {
+    let query = agent_protocol::AgentSessionQuery {
+        session_id: CLOSE_SESSION_ID.to_owned(),
+        expected_revision: None,
+    };
+    let read = persistence.read_agent_session(&query)?;
+    read.verify_for(&query)?;
+    Ok(read)
+}
+
+fn close_tool_read<P: AgentPersistence>(
+    persistence: &mut P,
+    tool_call_id: &str,
+) -> AgentResult<agent_protocol::AgentToolRead> {
+    let query = agent_protocol::AgentToolQuery {
+        session_id: CLOSE_SESSION_ID.to_owned(),
+        tool_call_id: tool_call_id.to_owned(),
+        expected_revision: None,
+    };
+    let read = persistence.read_agent_tool(&query)?;
+    read.verify_for(&query)?;
+    Ok(read)
+}
+
+fn close_tool_projection(
+    tool_call_id: &str,
+    status: agent_protocol::ToolCallStatus,
+) -> agent_protocol::ToolCall {
+    agent_protocol::ToolCall {
+        tool_call_id: tool_call_id.to_owned(),
+        operation: "test.agent.close".to_owned(),
+        status,
+        input: json!({"tool": tool_call_id}),
+        output: None,
+        locations: vec!["workspace:agent-close-process-kill".to_owned()],
+    }
+}
+
+fn commit_close_tool<P: AgentPersistence>(
+    persistence: &mut P,
+    update_id: &str,
+    tool_call_id: &str,
+    status: agent_protocol::ToolCallStatus,
+) -> AgentResult<agent_protocol::AgentCommit> {
+    let command = agent_protocol::AgentCommand::new(
+        close_session_read(persistence)?.revision,
+        agent_protocol::AgentCommandAction::SessionUpdate {
+            session_id: CLOSE_SESSION_ID.to_owned(),
+            update: agent_protocol::AgentUpdate::Tool {
+                update_id: update_id.to_owned(),
+                tool: close_tool_projection(tool_call_id, status),
+            },
+        },
+    )?;
+    let commit = persistence.commit_agent(&command)?;
+    commit.verify_for(&command)?;
+    Ok(commit)
+}
+
+fn prepare_close_baseline<P: AgentPersistence>(persistence: &mut P) -> AgentResult<()> {
+    commit_close_tool(
+        persistence,
+        "update:agent-close:pending:1",
+        CLOSE_PENDING_TOOL_ID,
+        agent_protocol::ToolCallStatus::Pending,
+    )?;
+    commit_close_tool(
+        persistence,
+        "update:agent-close:second-pending:2",
+        CLOSE_IN_PROGRESS_TOOL_ID,
+        agent_protocol::ToolCallStatus::Pending,
+    )?;
+    commit_close_tool(
+        persistence,
+        "update:agent-close:in-progress:3",
+        CLOSE_IN_PROGRESS_TOOL_ID,
+        agent_protocol::ToolCallStatus::InProgress,
+    )?;
+
+    let session = close_session_read(persistence)?
+        .current
+        .ok_or_else(|| AgentError::NotFound("Agent Close Session is missing".to_owned()))?;
+    assert_eq!(session.state, agent_protocol::AgentState::Idle);
+    assert_eq!(
+        session
+            .nonterminal_tools
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [CLOSE_IN_PROGRESS_TOOL_ID, CLOSE_PENDING_TOOL_ID]
+    );
+    for (tool_call_id, expected_status) in [
+        (
+            CLOSE_IN_PROGRESS_TOOL_ID,
+            agent_protocol::ToolCallStatus::InProgress,
+        ),
+        (
+            CLOSE_PENDING_TOOL_ID,
+            agent_protocol::ToolCallStatus::Pending,
+        ),
+    ] {
+        let current = close_tool_read(persistence, tool_call_id)?
+            .current
+            .ok_or_else(|| AgentError::NotFound(format!("Agent Tool {tool_call_id} is missing")))?;
+        assert_eq!(current.tool.status, expected_status);
+        session.nonterminal_tools[tool_call_id].verify_for(&current)?;
+    }
+    Ok(())
+}
+
+fn close_command<P: AgentPersistence>(
+    persistence: &mut P,
+) -> AgentResult<agent_protocol::AgentCommand> {
+    agent_protocol::AgentCommand::new(
+        close_session_read(persistence)?.revision,
+        agent_protocol::AgentCommandAction::SessionUpdate {
+            session_id: CLOSE_SESSION_ID.to_owned(),
+            update: agent_protocol::AgentUpdate::State {
+                update_id: "update:agent-close:closed:4".to_owned(),
+                state: agent_protocol::AgentState::Closed,
+                stop_reason: None,
+            },
+        },
+    )
+    .map_err(Into::into)
+}
+
 fn converge_occurrence<P: AgentPersistence>(
     mut persistence: P,
     host: LedgerHost,
@@ -920,6 +1052,161 @@ fn assert_terminal_scenario<P: AgentPersistence>(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct CloseTerminalEvidence {
+    command: agent_protocol::AgentCommand,
+    receipt: agent_protocol::AgentCommandReceipt,
+    session: agent_protocol::AgentSessionCurrent,
+    tools: BTreeMap<String, agent_protocol::AgentToolCurrent>,
+}
+
+fn verify_close_receipt_source(receipt: &agent_protocol::AgentCommandReceipt) -> AgentResult<()> {
+    let agent_protocol::AgentCommandSource::Session {
+        session: source_session,
+        update: source_update,
+    } = &receipt.source
+    else {
+        return Err(AgentError::RuntimeDefect {
+            code: "agent_close_process_kill_source_shape".to_owned(),
+            message: "Agent Close receipt did not retain its Session source".to_owned(),
+        });
+    };
+    assert_eq!(source_session.session_id, CLOSE_SESSION_ID);
+    assert_eq!(source_session.state, agent_protocol::AgentState::Idle);
+    assert_eq!(source_session.nonterminal_tools.len(), 2);
+    assert!(source_update.update.is_none());
+    let agent_protocol::AgentSessionEntrySource::Close {
+        tools: source_tools,
+    } = &source_update.entry
+    else {
+        return Err(AgentError::RuntimeDefect {
+            code: "agent_close_process_kill_entry_shape".to_owned(),
+            message: "Agent Close receipt did not retain its complete Tool source".to_owned(),
+        });
+    };
+    let source_statuses = source_tools
+        .iter()
+        .map(|current| {
+            source_session.nonterminal_tools[&current.tool.tool_call_id].verify_for(current)?;
+            Ok((current.tool.tool_call_id.as_str(), current.tool.status))
+        })
+        .collect::<AgentResult<Vec<_>>>()?;
+    assert_eq!(
+        source_statuses,
+        [
+            (
+                CLOSE_IN_PROGRESS_TOOL_ID,
+                agent_protocol::ToolCallStatus::InProgress,
+            ),
+            (
+                CLOSE_PENDING_TOOL_ID,
+                agent_protocol::ToolCallStatus::Pending,
+            ),
+        ]
+    );
+    Ok(())
+}
+
+fn close_receipt_outcome(
+    command: &agent_protocol::AgentCommand,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> AgentResult<(
+    agent_protocol::AgentSessionCurrent,
+    BTreeMap<String, agent_protocol::AgentToolCurrent>,
+)> {
+    let agent_protocol::AgentCommandOutcome::Session(postcondition) = &receipt.outcome else {
+        return Err(AgentError::RuntimeDefect {
+            code: "agent_close_process_kill_outcome_shape".to_owned(),
+            message: "Agent Close receipt did not return a Session postcondition".to_owned(),
+        });
+    };
+    let agent_protocol::AgentSessionUpdateEffect::Closed {
+        tools: cancelled_tools,
+    } = &postcondition.effect
+    else {
+        return Err(AgentError::RuntimeDefect {
+            code: "agent_close_process_kill_effect_shape".to_owned(),
+            message: "Agent Close receipt did not return its Tool cancellations".to_owned(),
+        });
+    };
+    assert_eq!(
+        postcondition.session.state,
+        agent_protocol::AgentState::Closed
+    );
+    assert!(postcondition.session.nonterminal_tools.is_empty());
+    assert_eq!(cancelled_tools.len(), 2);
+
+    let mut tools = BTreeMap::new();
+    for cancelled in cancelled_tools {
+        assert_eq!(cancelled.session_id, CLOSE_SESSION_ID);
+        assert_eq!(
+            cancelled.tool.status,
+            agent_protocol::ToolCallStatus::Cancelled
+        );
+        assert_eq!(cancelled.admitted_by, command.command_id);
+        let tool_call_id = cancelled.tool.tool_call_id.clone();
+        assert!(
+            tools
+                .insert(tool_call_id.clone(), cancelled.clone())
+                .is_none(),
+            "Agent Close receipt must not duplicate Tool {tool_call_id}"
+        );
+    }
+    assert_eq!(
+        tools.keys().map(String::as_str).collect::<Vec<_>>(),
+        [CLOSE_IN_PROGRESS_TOOL_ID, CLOSE_PENDING_TOOL_ID]
+    );
+    Ok((postcondition.session.clone(), tools))
+}
+
+fn close_terminal_evidence<P: AgentPersistence>(
+    persistence: &mut P,
+    command: &agent_protocol::AgentCommand,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> AgentResult<CloseTerminalEvidence> {
+    receipt.verify_for(command)?;
+    verify_close_receipt_source(receipt)?;
+    let (expected_session, tools) = close_receipt_outcome(command, receipt)?;
+
+    let session = close_session_read(persistence)?
+        .current
+        .ok_or_else(|| AgentError::NotFound("closed Agent Session is missing".to_owned()))?;
+    assert_eq!(session, expected_session);
+    assert_eq!(session.state, agent_protocol::AgentState::Closed);
+    assert!(session.nonterminal_tools.is_empty());
+    for (tool_call_id, expected) in &tools {
+        let current = close_tool_read(persistence, tool_call_id)?
+            .current
+            .ok_or_else(|| {
+                AgentError::NotFound(format!("cancelled Tool {tool_call_id} is missing"))
+            })?;
+        assert_eq!(&current, expected);
+        assert!(matches!(
+            current.tool.status,
+            agent_protocol::ToolCallStatus::Completed
+                | agent_protocol::ToolCallStatus::Failed
+                | agent_protocol::ToolCallStatus::Cancelled
+        ));
+    }
+
+    Ok(CloseTerminalEvidence {
+        command: command.clone(),
+        receipt: receipt.clone(),
+        session,
+        tools,
+    })
+}
+
+fn read_recorded_command(path: &Path) -> AgentResult<agent_protocol::AgentCommand> {
+    let bytes = fs::read(path).expect("recorded Agent Close command reads");
+    let command: agent_protocol::AgentCommand =
+        cymule_core::decode_json(&bytes).map_err(|error| AgentError::Encoding {
+            message: error.to_string(),
+        })?;
+    command.verify()?;
+    Ok(command)
+}
+
 #[test]
 fn agent_process_kill_worker_entry() {
     let Ok(database) = std::env::var("CYMULE_AGENT_KILL_DB") else {
@@ -957,6 +1244,41 @@ fn agent_process_kill_worker_entry() {
     converge_scenario(persistence, LedgerHost { database: ledger })
         .expect("Agent worker reaches its selected CAS boundary");
     panic!("Agent kill worker unexpectedly completed");
+}
+
+#[test]
+fn agent_close_process_kill_worker_entry() {
+    let Ok(database) = std::env::var("CYMULE_AGENT_CLOSE_KILL_DB") else {
+        return;
+    };
+    let marker = PathBuf::from(
+        std::env::var("CYMULE_AGENT_CLOSE_KILL_MARKER").expect("Agent Close kill marker exists"),
+    );
+    let command_path = PathBuf::from(
+        std::env::var("CYMULE_AGENT_CLOSE_KILL_COMMAND").expect("Agent Close command path exists"),
+    );
+    let phase = match std::env::var("CYMULE_AGENT_CLOSE_KILL_PHASE")
+        .expect("Agent Close kill phase exists")
+        .as_str()
+    {
+        "before_commit" => KillPhase::BeforeCommit,
+        "after_commit" => KillPhase::AfterCommit,
+        phase => panic!("unknown Agent Close kill phase {phase}"),
+    };
+    let mut runtime = open_runtime(Path::new(&database));
+    let mut providers = UnusedAgentProviders;
+    let mut persistence = FaultingPersistence::killing(
+        runtime.agent(&mut providers),
+        phase,
+        1,
+        marker,
+        command_path,
+    );
+    let command = close_command(&mut persistence).expect("Agent Close command seals");
+    persistence
+        .commit_agent(&command)
+        .expect("Agent Close worker reaches its selected CAS boundary");
+    panic!("Agent Close kill worker unexpectedly completed");
 }
 
 struct AgentFaultCase {
@@ -1051,6 +1373,172 @@ impl AgentFaultCase {
     }
 }
 
+struct AgentCloseFaultCase {
+    _world: TestWorld,
+    database: PathBuf,
+    marker: PathBuf,
+    command_path: PathBuf,
+}
+
+impl AgentCloseFaultCase {
+    fn new(seed: u64) -> Self {
+        let world = TestWorld::new(seed).expect("Agent Close fault world creates");
+        let database = world
+            .domain()
+            .path("agent-close.sqlite")
+            .expect("Agent Close Store path resolves");
+        let marker = world
+            .domain()
+            .path("close-kill-ready")
+            .expect("Agent Close kill marker path resolves");
+        let command_path = world
+            .domain()
+            .path("close-command.json")
+            .expect("Agent Close command path resolves");
+        initialize_store(&database);
+        {
+            let mut runtime = open_runtime(&database);
+            let mut providers = UnusedAgentProviders;
+            prepare_close_baseline(&mut runtime.agent(&mut providers))
+                .expect("Agent Close baseline retains both non-terminal Tools");
+        }
+        assert_sqlite_integrity(&database);
+        Self {
+            _world: world,
+            database,
+            marker,
+            command_path,
+        }
+    }
+
+    fn kill_close(&self, phase: KillPhase) {
+        let mut command = Command::new(std::env::current_exe().expect("test executable resolves"));
+        command
+            .arg("--exact")
+            .arg("agent_close_process_kill_worker_entry")
+            .arg("--nocapture")
+            .env("CYMULE_AGENT_CLOSE_KILL_DB", &self.database)
+            .env("CYMULE_AGENT_CLOSE_KILL_MARKER", &self.marker)
+            .env("CYMULE_AGENT_CLOSE_KILL_COMMAND", &self.command_path)
+            .env("CYMULE_AGENT_CLOSE_KILL_PHASE", phase.label())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        let mut child = ManagedChild::spawn(&mut command).expect("Agent Close kill worker starts");
+        child
+            .wait_for_content(
+                &self.marker,
+                format!("1:{}", phase.label()).as_bytes(),
+                Duration::from_secs(20),
+            )
+            .expect("Agent Close worker reaches its CAS barrier");
+        assert_eq!(
+            child
+                .terminate()
+                .expect("Agent Close worker is reaped")
+                .signal(),
+            Some(9)
+        );
+        assert!(child.is_reaped());
+        assert_sqlite_integrity(&self.database);
+    }
+
+    fn converge_close(&self, phase: KillPhase) -> CloseTerminalEvidence {
+        let evidence = {
+            let mut runtime = open_runtime(&self.database);
+            let mut providers = UnusedAgentProviders;
+            let mut persistence = runtime.agent(&mut providers);
+            let command = read_recorded_command(&self.command_path)
+                .expect("recorded Agent Close command verifies");
+            let revision_before = close_session_read(&mut persistence)
+                .expect("Agent Close source revision reads")
+                .revision;
+            let first = persistence
+                .commit_agent(&command)
+                .expect("same Agent Close command converges after process death");
+            first
+                .verify_for(&command)
+                .expect("converged Agent Close commit verifies");
+            match phase {
+                KillPhase::BeforeCommit => assert_eq!(
+                    first.committed_revision.as_ref(),
+                    Some(&first.observed_revision),
+                    "pre-CAS death must leave the same Close command to commit"
+                ),
+                KillPhase::AfterCommit => assert!(
+                    first.committed_revision.is_none(),
+                    "post-CAS death must replay the already retained Close receipt"
+                ),
+            }
+            let evidence = close_terminal_evidence(&mut persistence, &command, &first.receipt)
+                .expect("converged Agent Close terminal state reads exactly");
+            let revision_after_first = close_session_read(&mut persistence)
+                .expect("converged Agent Close revision reads")
+                .revision;
+            match phase {
+                KillPhase::BeforeCommit => assert_ne!(
+                    revision_before, revision_after_first,
+                    "pre-CAS death must leave the open and closed StateRoot heads distinct"
+                ),
+                KillPhase::AfterCommit => assert_eq!(
+                    revision_before, revision_after_first,
+                    "post-CAS death recovery must observe the already closed StateRoot head"
+                ),
+            }
+
+            let replay = persistence
+                .commit_agent(&command)
+                .expect("exact Agent Close command replays");
+            replay
+                .verify_for(&command)
+                .expect("exact Agent Close replay verifies");
+            assert!(replay.committed_revision.is_none());
+            assert_eq!(replay.observed_revision, revision_after_first);
+            assert_eq!(replay.receipt, first.receipt);
+            assert_eq!(
+                close_session_read(&mut persistence)
+                    .expect("post-replay Agent Close revision reads")
+                    .revision,
+                revision_after_first,
+                "exact Close replay must not write another StateRoot"
+            );
+            assert_eq!(
+                close_terminal_evidence(&mut persistence, &command, &replay.receipt)
+                    .expect("post-replay Agent Close state reads exactly"),
+                evidence,
+                "exact Close replay must not duplicate or omit Session/Tool state"
+            );
+            evidence
+        };
+        assert_sqlite_integrity(&self.database);
+        evidence
+    }
+
+    fn close_without_death(&self) -> CloseTerminalEvidence {
+        let evidence = {
+            let mut runtime = open_runtime(&self.database);
+            let mut providers = UnusedAgentProviders;
+            let mut persistence = runtime.agent(&mut providers);
+            let command =
+                close_command(&mut persistence).expect("baseline Agent Close command seals");
+            let commit = persistence
+                .commit_agent(&command)
+                .expect("baseline Agent Close commits");
+            commit
+                .verify_for(&command)
+                .expect("baseline Agent Close commit verifies");
+            assert_eq!(
+                commit.committed_revision.as_ref(),
+                Some(&commit.observed_revision)
+            );
+            close_terminal_evidence(&mut persistence, &command, &commit.receipt)
+                .expect("baseline Agent Close terminal state reads exactly")
+        };
+        assert_sqlite_integrity(&self.database);
+        evidence
+    }
+}
+
 fn agent_cas_boundary_count() -> usize {
     let case = AgentFaultCase::new(0);
     let mut runtime = open_runtime(&case.database);
@@ -1082,6 +1570,25 @@ fn every_agent_owned_cas_boundary_survives_real_process_death() {
             case.kill_at(phase, fail_at);
             case.recover();
         }
+    }
+}
+
+#[test]
+fn session_close_atomically_cancels_all_tools_across_real_process_death() {
+    let expected = AgentCloseFaultCase::new(10_000).close_without_death();
+    for (index, phase) in [KillPhase::BeforeCommit, KillPhase::AfterCommit]
+        .into_iter()
+        .enumerate()
+    {
+        let case = AgentCloseFaultCase::new(
+            10_001 + u64::try_from(index).expect("Agent Close phase index fits u64"),
+        );
+        case.kill_close(phase);
+        assert_eq!(
+            case.converge_close(phase),
+            expected,
+            "{phase:?} recovery must exactly match the no-death terminal authority"
+        );
     }
 }
 

@@ -4293,6 +4293,7 @@ impl EffectDispatch {
     pub fn verify_wire(&self) -> DurableResult<()> {
         validate_sha256_identity("effect intent", &self.intent_id)?;
         validate_wire_non_empty("effect Run", &self.run_id)?;
+        validate_sha256_identity("effect origin Plan", &self.origin_plan_id)?;
         validate_wire_non_empty("effect operation", &self.operation)?;
         validate_sha256_identity("effect occurrence binding", &self.occurrence_binding)?;
         self.input

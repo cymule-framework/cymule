@@ -17,6 +17,10 @@ range bound, and an equal metadata replay re-syncs retained files and directory
 entries before returning success.
 
 Each root carries the exact `cymule.resource-fs-layout/2` physical marker.
+Generation `/1` is an intentional hard cut with no reader or in-place migrator;
+internal test roots must be drained, reset, and reseeded through the current
+store boundary described in the
+[migration runbook](../../docs/migrations/resource-fs-layout-generation-2.md).
 Opening a non-empty unmarked root or another generation fails before a current
 upload can create a second authority. The root, fixed directories, generated
 entries, and recursive import children are opened beneath no-follow directory
@@ -89,9 +93,12 @@ budget, and every entry is at most 1 MiB including its newline. Upload IDs and
 records include the full configured binding, so bindings sharing a root cannot
 resume each other's uploads. Binding-derived physical subdirectories also
 isolate objects, catalogs, and manifest indexes, so deleting one binding cannot
-remove identical bytes retained by another. Opaque locators must exactly equal the Handle's retained
-content digest. This plugin is suitable for local and single-host deployments,
-not shared distributed storage.
+remove identical bytes retained by another. Deletion derives payload,
+manifest-index, and manifest-index-catalog cleanup from that physical family
+digest; it does not depend on whether the initiating semantic deletion target
+retains a manifest descriptor. Opaque locators must exactly equal the Handle's
+retained content digest. This plugin is suitable for local and single-host
+deployments, not shared distributed storage.
 
 Lifecycle deletion is provider-bound: the adapter receives only the durable
 `ResourceDeletionTarget`, exact-matches its physical-family binding, removes

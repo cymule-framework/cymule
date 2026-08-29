@@ -9,19 +9,23 @@ cargo add cymule-executor-process
 
 At construction, the executor captures the selected executable and optional
 working-directory tree. The resolved root is opened component-by-component
-without following symlinks; every descendant is opened relative to its retained
-parent descriptor with `O_NOFOLLOW`, and metadata plus bytes come from that same
-descriptor. Traversal uses an explicit heap stack, so an admitted directory
-chain cannot exhaust the executor thread's call stack. Every request runs from a
-fresh private materialization. Materialization and reclamation retain the root
-and parent descriptors, pass one component to `*at`, use an iterative heap
-cursor, and keep constant descriptor usage across depth. Root and directory
-modes are fixed at `0700`, the sealed executable at `0500`, and working files at
-authenticated `0600` or `0700`; umask and source-directory mode cannot
-reinterpret that `/2` generation. Therefore paths may exceed `PATH_MAX`, and
-so a plugin that changes its own file or working data cannot change a later
-occurrence. When no working tree is configured, the child runs from that fresh
-private occurrence root; it never inherits the caller's current directory. Its
+without following symlinks and retained as capture authority. Heap traversal
+frames keep relative components and sorted names, then reopen a needed parent
+from that root one component at a time. Each reopened directory is checked
+against its retained device/inode identity; each entry's metadata and bytes
+come from the same `O_NOFOLLOW` descriptor. Capture therefore keeps only
+root/current/child descriptors across arbitrary depth, and host `EMFILE` or
+`ENFILE` exhaustion remains a retryable substrate failure. Every request runs
+from a fresh private materialization. Materialization and reclamation likewise
+retain the root and parent descriptors, pass one component to `*at`, use an
+iterative heap cursor, and keep constant descriptor usage across depth. Root
+and directory modes are fixed at `0700`, the sealed executable at `0500`, and
+working files at authenticated `0600` or `0700`; umask and source-directory
+mode cannot reinterpret that `/2` generation. Therefore descendant paths may
+exceed `PATH_MAX`, and a plugin that changes its own file or working data cannot
+change a later occurrence. When no working tree is configured, the child runs
+from that fresh private occurrence root; it never inherits the caller's current
+directory. Its
 canonical implementation revision covers the executable,
 arguments, explicit environment, working tree, declared runtime closure,
 deadline, and byte limits; use that revision in `cymule.execution-binding/2`.

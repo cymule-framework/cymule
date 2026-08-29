@@ -2311,6 +2311,7 @@ export interface EngineTransport {
 
 const DEFAULT_ENGINE_TIMEOUT_MS = 30_000;
 const ENGINE_STREAM_LIMIT = 16 * 1024 * 1024;
+const ENGINE_REQUEST_LIMIT = 64 * 1024 * 1024;
 
 export class CliEngine {
   constructor(
@@ -2521,24 +2522,8 @@ export class CliEngine {
         new Error("Engine timeout must be a positive safe integer in milliseconds"),
       );
     }
-    const envelopeRequest = { engine_protocol: ENGINE_PROTOCOL_VERSION, request };
-    let encodedRequest: string;
-    let wireEnvelope: unknown;
-    try {
-      encodedRequest = encodeStrictJson(envelopeRequest);
-      wireEnvelope = parseStrictJson(encodedRequest);
-    } catch (error) {
-      throw localValidationError(
-        "validate_request",
-        "request_encoding_failed",
-        error,
-      );
-    }
-    if (!isRecord(wireEnvelope) || !isRecord(wireEnvelope.request)) {
-      throw transportError("request_encoding_failed", "encoded Engine request is invalid");
-    }
-    const wireRequest = wireEnvelope.request as EngineRequest;
-    const stdout = await runEngineProcess(
+    const { encodedRequest, wireRequest } = snapshotEngineRequest(request);
+    const transport = await runEngineProcess(
       this.executable,
       encodedRequest,
       wireRequest,
@@ -2547,12 +2532,20 @@ export class CliEngine {
     );
     let rawEnvelope: unknown;
     try {
-      rawEnvelope = parseStrictJson(stdout);
+      rawEnvelope = parseStrictJson(transport.stdout);
     } catch (error) {
       throw responseLossError(
         wireRequest,
         "invalid_engine_response",
         error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (transport.inputFailed
+      && (!isRecord(rawEnvelope) || rawEnvelope.outcome !== "failure")) {
+      throw responseLossError(
+        wireRequest,
+        "engine_request_incomplete",
+        "the Engine closed stdin before receiving the complete request",
       );
     }
     if (isRecord(rawEnvelope) && typeof rawEnvelope.engine_protocol === "string"
@@ -2663,34 +2656,64 @@ export class DurableEngine {
     input: Json,
     execution: ExecutionClaimRequest,
   ): Promise<DurableResponse> {
-    return await this.submit(DurableControlBuilder.startRun(runId, candidate, input, execution));
+    return await this.submit(this.buildCommand(
+      () => DurableControlBuilder.startRun(runId, candidate, input, execution),
+    ));
   }
 
   async observeClock(runId: string): Promise<ClockObservationRef> {
-    if (this.clock === undefined) throw new Error("durable Clock target is missing");
-    const request: EngineRequest = {
-      type: "observe_clock",
-      target: this.clock,
-      run_id: runId,
-    };
-    const result = await this.#transport.observeClock(this.clock, runId);
+    if (this.clock === undefined) {
+      throw localValidationError(
+        "observe_clock",
+        "missing_clock_provider",
+        new Error("durable Clock target is missing"),
+      );
+    }
+    let request: Extract<EngineRequest, { type: "observe_clock" }>;
     try {
-      validateClockObservationResult(result);
-      if (result.run_id !== runId
-        || result.observation.source_id !== this.clock.source_id
-        || result.observation.source_generation !== this.clock.source_generation) {
+      requireRequestRunIdentity(runId);
+      assertStrictJson(this.clock);
+      validateEngineClockTarget(this.clock);
+      const snapshot = snapshotEngineRequest({
+        type: "observe_clock",
+        target: this.clock,
+        run_id: runId,
+      });
+      request = snapshot.wireRequest as Extract<EngineRequest, { type: "observe_clock" }>;
+    } catch (error) {
+      if (error instanceof EngineError && error.failure.category === "validation") throw error;
+      throw localValidationError("observe_clock", "clock_request_validation_failed", error);
+    }
+    let result: ClockObservationResult;
+    try {
+      result = await this.#transport.observeClock(
+        structuredClone(request.target),
+        request.run_id,
+      );
+    } catch (error) {
+      throw transportInvocationError(request, error);
+    }
+    try {
+      assertStrictJson(result);
+      const resultSnapshot = structuredClone(result);
+      validateClockObservationResult(resultSnapshot);
+      if (resultSnapshot.run_id !== request.run_id
+        || resultSnapshot.observation.source_id !== request.target.source_id
+        || resultSnapshot.observation.source_generation !== request.target.source_generation) {
         throw new Error("Clock observation result does not match its request");
       }
+      return resultSnapshot.observation;
     } catch (error) {
       throw responseLossError(request, "invalid_engine_response", errorMessage(error));
     }
-    return result.observation;
   }
 
   async runIndexPage(
     options: DurablePageQueryOptions,
   ): Promise<DurableQueryPage<DurableRunIndexSummary>> {
-    const response = await this.submit(DurableControlBuilder.runIndexPage(options));
+    const response = await this.submit(this.buildCommand(
+      () => DurableControlBuilder.runIndexPage(options),
+    ));
     if (response.type !== "run_index_page") {
       throw unexpectedResponse("run_index_page", response.type);
     }
@@ -2702,7 +2725,7 @@ export class DurableEngine {
     expectedRevision: string | null,
   ): Promise<Extract<DurableResponse, { type: "run_current" }>> {
     const response = await this.submit(
-      DurableControlBuilder.runCurrent(runId, expectedRevision),
+      this.buildCommand(() => DurableControlBuilder.runCurrent(runId, expectedRevision)),
     );
     if (response.type !== "run_current") throw unexpectedResponse("run_current", response.type);
     return response;
@@ -2712,7 +2735,9 @@ export class DurableEngine {
     runId: string,
     options: DurablePageQueryOptions,
   ): Promise<DurableQueryPage<DurableWaitSummary>> {
-    const response = await this.submit(DurableControlBuilder.runWaitPage(runId, options));
+    const response = await this.submit(this.buildCommand(
+      () => DurableControlBuilder.runWaitPage(runId, options),
+    ));
     if (response.type !== "run_wait_page") {
       throw unexpectedResponse("run_wait_page", response.type);
     }
@@ -2723,7 +2748,9 @@ export class DurableEngine {
     runId: string,
     options: DurablePageQueryOptions,
   ): Promise<DurableQueryPage<DurableEffectSummary>> {
-    const response = await this.submit(DurableControlBuilder.runEffectPage(runId, options));
+    const response = await this.submit(this.buildCommand(
+      () => DurableControlBuilder.runEffectPage(runId, options),
+    ));
     if (response.type !== "run_effect_page") {
       throw unexpectedResponse("run_effect_page", response.type);
     }
@@ -2734,7 +2761,9 @@ export class DurableEngine {
     runId: string,
     options: DurablePageQueryOptions,
   ): Promise<DurableQueryPage<DurableOccurrenceSummary>> {
-    const response = await this.submit(DurableControlBuilder.runOccurrencePage(runId, options));
+    const response = await this.submit(this.buildCommand(
+      () => DurableControlBuilder.runOccurrencePage(runId, options),
+    ));
     if (response.type !== "run_occurrence_page") {
       throw unexpectedResponse("run_occurrence_page", response.type);
     }
@@ -2745,7 +2774,9 @@ export class DurableEngine {
     runId: string,
     options: DurablePageQueryOptions,
   ): Promise<DurableQueryPage<DurableAttemptSummary>> {
-    const response = await this.submit(DurableControlBuilder.runAttemptPage(runId, options));
+    const response = await this.submit(this.buildCommand(
+      () => DurableControlBuilder.runAttemptPage(runId, options),
+    ));
     if (response.type !== "run_attempt_page") {
       throw unexpectedResponse("run_attempt_page", response.type);
     }
@@ -2755,13 +2786,17 @@ export class DurableEngine {
   async runItem(
     query: DurableRunItemQuery,
   ): Promise<Extract<DurableResponse, { type: "run_item" }>> {
-    const response = await this.submit(DurableControlBuilder.runItem(query));
+    const response = await this.submit(this.buildCommand(
+      () => DurableControlBuilder.runItem(query),
+    ));
     if (response.type !== "run_item") throw unexpectedResponse("run_item", response.type);
     return response;
   }
 
   async resume(runId: string, execution: ExecutionClaimRequest): Promise<DurableResponse> {
-    return await this.submit(DurableControlBuilder.resumeRun(runId, execution));
+    return await this.submit(this.buildCommand(
+      () => DurableControlBuilder.resumeRun(runId, execution),
+    ));
   }
 
   async takeover(
@@ -2769,7 +2804,9 @@ export class DurableEngine {
     expectedFence: number,
     execution: ExecutionClaimRequest,
   ): Promise<DurableResponse> {
-    return await this.submit(DurableControlBuilder.takeoverRun(runId, expectedFence, execution));
+    return await this.submit(this.buildCommand(
+      () => DurableControlBuilder.takeoverRun(runId, expectedFence, execution),
+    ));
   }
 
   async signal(
@@ -2779,7 +2816,9 @@ export class DurableEngine {
     value: Json,
   ): Promise<DurableResponse> {
     return await this.submit(
-      DurableControlBuilder.activateSignal(activationId, key, waitIds, value),
+      this.buildCommand(
+        () => DurableControlBuilder.activateSignal(activationId, key, waitIds, value),
+      ),
     );
   }
 
@@ -2787,7 +2826,9 @@ export class DurableEngine {
     intentId: string,
     execution: ExecutionClaimRequest,
   ): Promise<DurableResponse> {
-    return await this.submit(DurableControlBuilder.releaseEffect(intentId, execution));
+    return await this.submit(this.buildCommand(
+      () => DurableControlBuilder.releaseEffect(intentId, execution),
+    ));
   }
 
   async resolveEffect(
@@ -2801,16 +2842,18 @@ export class DurableEngine {
     resolution: EffectResolution,
     value: Json,
   ): Promise<DurableResponse> {
-    return await this.submit(DurableControlBuilder.resolveEffect(
-      resolutionId,
-      runId,
-      intentId,
-      executionBinding,
-      occurrenceBinding,
-      claimOwner,
-      claimEpoch,
-      resolution,
-      value,
+    return await this.submit(this.buildCommand(
+      () => DurableControlBuilder.resolveEffect(
+        resolutionId,
+        runId,
+        intentId,
+        executionBinding,
+        occurrenceBinding,
+        claimOwner,
+        claimEpoch,
+        resolution,
+        value,
+      ),
     ));
   }
 
@@ -2819,33 +2862,105 @@ export class DurableEngine {
     runId: string,
     reason: Json,
   ): Promise<DurableResponse> {
-    return await this.submit(DurableControlBuilder.cancelRun(cancellationId, runId, reason));
+    return await this.submit(this.buildCommand(
+      () => DurableControlBuilder.cancelRun(cancellationId, runId, reason),
+    ));
   }
 
   async evolve(command: LiveEvolutionCommand): Promise<EvolutionCommit> {
-    let operation: EvolutionCommand["operation"] | undefined;
-    let targetPlan: string | undefined;
-    if (command.operation === "apply") {
-      operation = command.command.operation;
-      if (command.command.operation === "migrate") {
-        targetPlan = command.command.request.to_plan;
+    let request: Extract<EngineRequest, { type: "execute_live_evolution" }>;
+    try {
+      assertStrictJson(command);
+      validateLiveEvolutionCommand(command);
+      if (!isWireIdentity(this.evolutionId)) {
+        throw new Error("evolution identity must contain 1..=256 Unicode scalars without controls");
       }
-    }
-    const targetExecution = targetPlan === undefined
-      ? undefined
-      : this.targetExecutionBindings[targetPlan];
-    return await this.#transport.executeLiveEvolution(
-      {
+      const commandSnapshot = structuredClone(command);
+      const operation = commandSnapshot.operation === "apply"
+        ? commandSnapshot.command.operation
+        : undefined;
+      const targetPlan = commandSnapshot.operation === "apply"
+          && commandSnapshot.command.operation === "migrate"
+        ? commandSnapshot.command.request.to_plan
+        : undefined;
+      const targetExecution = targetPlan === undefined
+        ? undefined
+        : this.targetExecutionBindings[targetPlan];
+      const target: EngineEvolutionTarget = {
         store: typeof this.store === "string" ? directoryStore(this.store) : this.store,
         migration_adapter: operation === "migrate" ? this.migrationAdapter ?? null : null,
         shadow_driver: operation === "shadow" ? this.shadowDriver ?? null : null,
         target_execution_bindings: targetPlan !== undefined && targetExecution !== undefined
           ? { [targetPlan]: structuredClone(targetExecution) }
           : {},
-      },
-      this.evolutionId,
-      command,
-    );
+      };
+      assertStrictJson(target);
+      validateEngineEvolutionTarget(target, commandSnapshot);
+      request = snapshotEngineRequest({
+        type: "execute_live_evolution",
+        target,
+        evolution_id: this.evolutionId,
+        command: commandSnapshot,
+      }).wireRequest as Extract<EngineRequest, { type: "execute_live_evolution" }>;
+    } catch (error) {
+      if (error instanceof EngineError && error.failure.category === "validation") throw error;
+      throw localValidationError(
+        "execute_live_evolution",
+        "evolution_request_validation_failed",
+        error,
+      );
+    }
+    let expectedPatchTargetPlan: string | undefined;
+    if (request.command.operation === "apply"
+      && request.command.command.operation === "apply_patch") {
+      const sealRequest = snapshotEngineRequest({
+        type: "seal",
+        candidate: request.command.command.patch.target,
+      }).wireRequest as Extract<EngineRequest, { type: "seal" }>;
+      let sealed: SealedPlan;
+      try {
+        sealed = await this.#transport.seal(structuredClone(sealRequest.candidate));
+      } catch (error) {
+        throw transportInvocationError(sealRequest, error);
+      }
+      try {
+        assertStrictJson(sealed);
+        const sealedSnapshot = structuredClone(sealed);
+        validateSealedPlan(sealedSnapshot);
+        if (!wireValuesEqual(sealedSnapshot.candidate, sealRequest.candidate)) {
+          throw new Error("sealed Plan does not match the exact patch target candidate");
+        }
+        expectedPatchTargetPlan = sealedSnapshot.plan_id;
+      } catch (error) {
+        throw responseLossError(sealRequest, "invalid_engine_response", errorMessage(error));
+      }
+    }
+    let returned: EvolutionCommit;
+    try {
+      returned = await this.#transport.executeLiveEvolution(
+        structuredClone(request.target),
+        request.evolution_id,
+        structuredClone(request.command),
+      );
+    } catch (error) {
+      throw transportInvocationError(request, error);
+    }
+    try {
+      assertStrictJson(returned);
+      const commit = structuredClone(returned);
+      validateEvolutionCommit(commit);
+      if (!evolutionCommitMatchesRequest(
+        request.evolution_id,
+        request.command,
+        commit,
+        expectedPatchTargetPlan,
+      )) {
+        throw new Error("Evolution commit does not match its complete request");
+      }
+      return commit;
+    } catch (error) {
+      throw responseLossError(request, "invalid_engine_response", errorMessage(error));
+    }
   }
 
   private async submit(command: DurableCommand): Promise<DurableResponse> {
@@ -2855,16 +2970,89 @@ export class DurableEngine {
       command.type === "run_occurrence_page" || command.type === "run_attempt_page" ||
       command.type === "run_item";
     const providerOnly = command.type === "resolve_effect";
-    const store = typeof this.store === "string" ? directoryStore(this.store) : this.store;
-    const executor = this.executor;
-    return await this.#transport.executeDurable(
-      {
+    let request: Extract<EngineRequest, { type: "execute_durable" }>;
+    try {
+      assertStrictJson(command);
+      validateDurableCommand(command);
+      const store = typeof this.store === "string" ? directoryStore(this.store) : this.store;
+      const executor = this.executor;
+      const target: EngineDurableTarget = {
         store,
         ...(!storeOnly && executor !== undefined ? { executor } : {}),
         ...(!storeOnly && !providerOnly && this.clock !== undefined ? { clock: this.clock } : {}),
-      },
-      command,
-    );
+      };
+      assertStrictJson(target);
+      validateEngineDurableTarget(target, command);
+      request = snapshotEngineRequest({
+        type: "execute_durable",
+        target,
+        command,
+      }).wireRequest as Extract<EngineRequest, { type: "execute_durable" }>;
+    } catch (error) {
+      if (error instanceof EngineError && error.failure.category === "validation") throw error;
+      throw localValidationError(
+        "execute_durable",
+        "durable_request_validation_failed",
+        error,
+      );
+    }
+    let expectedStartPlan: string | undefined;
+    if (request.command.type === "start_run") {
+      const sealRequest = snapshotEngineRequest({
+        type: "seal",
+        candidate: request.command.candidate,
+      }).wireRequest as Extract<EngineRequest, { type: "seal" }>;
+      let sealed: SealedPlan;
+      try {
+        sealed = await this.#transport.seal(structuredClone(sealRequest.candidate));
+      } catch (error) {
+        throw transportInvocationError(sealRequest, error);
+      }
+      try {
+        assertStrictJson(sealed);
+        const sealedSnapshot = structuredClone(sealed);
+        validateSealedPlan(sealedSnapshot);
+        if (!wireValuesEqual(sealedSnapshot.candidate, sealRequest.candidate)) {
+          throw new Error("sealed Plan does not match the exact start candidate");
+        }
+        expectedStartPlan = sealedSnapshot.plan_id;
+      } catch (error) {
+        throw responseLossError(sealRequest, "invalid_engine_response", errorMessage(error));
+      }
+    }
+    let returned: DurableResponse;
+    try {
+      returned = await this.#transport.executeDurable(
+        structuredClone(request.target),
+        structuredClone(request.command),
+      );
+    } catch (error) {
+      throw transportInvocationError(request, error);
+    }
+    try {
+      assertStrictJson(returned);
+      const response = structuredClone(returned);
+      validateDurableResponse(response);
+      if (!durableResponseMatchesCommand(request.command, response, expectedStartPlan)) {
+        throw new Error("durable response does not match its complete command");
+      }
+      return response;
+    } catch (error) {
+      throw responseLossError(request, "invalid_engine_response", errorMessage(error));
+    }
+  }
+
+  private buildCommand(factory: () => DurableCommand): DurableCommand {
+    try {
+      return factory();
+    } catch (error) {
+      if (error instanceof EngineError && error.failure.category === "validation") throw error;
+      throw localValidationError(
+        "verify_durable_command",
+        "durable_command_validation_failed",
+        error,
+      );
+    }
   }
 }
 
@@ -2874,8 +3062,8 @@ async function runEngineProcess(
   request: EngineRequest,
   timeoutMs: number,
   signal: AbortSignal | undefined,
-): Promise<string> {
-  return await new Promise<string>((resolve, reject) => {
+): Promise<{ stdout: string; inputFailed: boolean }> {
+  return await new Promise<{ stdout: string; inputFailed: boolean }>((resolve, reject) => {
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawn(executable, ["rpc"], {
@@ -2891,6 +3079,7 @@ async function runEngineProcess(
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let requestBegan = child.pid !== undefined;
+    let inputFailed = false;
     let terminalError: EngineError | undefined;
     let state: "starting" | "running" | "terminating" | "closed" | "settled" =
       "starting";
@@ -2948,8 +3137,10 @@ async function runEngineProcess(
         terminate(responseLossError(request, "engine_diagnostic_too_large"));
       }
     });
+    // A conforming Engine may reject the request and close stdin before the
+    // writer drains. Its complete stdout envelope remains the sole result.
     child.stdin.once("error", () => {
-      terminate(responseLossError(request, "engine_io_failed"));
+      inputFailed = true;
     });
     child.once("close", (code) => {
       if (state === "settled") return;
@@ -2965,9 +3156,10 @@ async function runEngineProcess(
         return;
       }
       try {
-        resolve(
-          new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(stdoutChunks)),
-        );
+        resolve({
+          stdout: new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(stdoutChunks)),
+          inputFailed,
+        });
       } catch (error) {
         reject(responseLossError(request, "invalid_engine_response", errorMessage(error)));
       }
@@ -3056,6 +3248,39 @@ type EngineRequest =
 interface EngineRequestPreflight {
   expectedPatchTargetPlan?: string;
   expectedStartPlan?: string;
+}
+
+function snapshotEngineRequest(request: EngineRequest): {
+  encodedRequest: string;
+  wireRequest: EngineRequest;
+} {
+  let encodedRequest: string;
+  let wireEnvelope: unknown;
+  try {
+    encodedRequest = encodeStrictJson({
+      engine_protocol: ENGINE_PROTOCOL_VERSION,
+      request,
+    });
+    if (Buffer.byteLength(encodedRequest, "utf8") > ENGINE_REQUEST_LIMIT) {
+      throw localValidationError(
+        "validate_request",
+        "engine_request_too_large",
+        new Error(`complete Engine request exceeds ${ENGINE_REQUEST_LIMIT} UTF-8 bytes`),
+      );
+    }
+    wireEnvelope = parseStrictJson(encodedRequest);
+  } catch (error) {
+    if (error instanceof EngineError && error.failure.category === "validation") throw error;
+    throw localValidationError("validate_request", "request_encoding_failed", error);
+  }
+  if (!isRecord(wireEnvelope) || !isRecord(wireEnvelope.request)) {
+    throw localValidationError(
+      "validate_request",
+      "request_encoding_failed",
+      new Error("encoded Engine request is invalid"),
+    );
+  }
+  return { encodedRequest, wireRequest: wireEnvelope.request as EngineRequest };
 }
 
 type EngineResponse =
@@ -4023,8 +4248,15 @@ function validateEngineEvolutionTarget(
     }
     validateEnginePluginTarget(target, true, 8 * 1024 * 1024);
   }
-  if ((operation === "migrate") !== (value.migration_adapter !== null)
-    || (operation === "shadow") !== (value.shadow_driver !== null)) {
+  const bindingCount = Object.keys(value.target_execution_bindings).length;
+  const validProviderShape = operation === "migrate"
+    ? value.shadow_driver === null
+      && (value.migration_adapter === null && bindingCount === 0
+        || value.migration_adapter !== null && bindingCount === 1)
+    : operation === "shadow"
+    ? value.migration_adapter === null && bindingCount === 0
+    : value.migration_adapter === null && value.shadow_driver === null && bindingCount === 0;
+  if (!validProviderShape) {
     throw transportError(
       "invalid_engine_response",
       "evolution Engine plugin presence does not match the command",
@@ -4257,13 +4489,29 @@ function validateEvolutionCommand(value: unknown): void {
   }
   requireWireIdentities(value, ["command_id"], "evolution command");
   if (value.operation === "apply_patch") {
-    if (!isRecord(value.patch) || !isWireIdentity(value.patch.from_plan)) {
+    requireClosedRecord(
+      value.patch,
+      ["from_plan", "target", "operations", "evidence"],
+      "Plan patch",
+    );
+    if (!isContentId(value.patch.from_plan)) {
       throw transportError("invalid_engine_response", "Plan patch parent identity is invalid");
     }
+    validatePlanCandidate(value.patch.target);
+    validatePatchOperations(value.patch.operations);
+    validateArtifactRef(value.patch.evidence);
   } else if (value.operation === "set_rollout") {
-    if (!isRecord(value.decision) || !isWireIdentity(value.decision.decision_id)) {
+    requireClosedRecord(
+      value.decision,
+      ["decision_id", "fallback_plan", "target_plan", "mode"],
+      "rollout decision",
+    );
+    if (!isWireIdentity(value.decision.decision_id)
+      || !isContentId(value.decision.fallback_plan)
+      || !isContentId(value.decision.target_plan)) {
       throw transportError("invalid_engine_response", "rollout decision identity is invalid");
     }
+    validateRolloutMode(value.decision.mode);
   } else if (value.operation === "select_occurrence") {
     requireWireIdentities(value, ["occurrence_id", "selection_id"], "occurrence selection");
     validateArtifactRef(value.execution_binding);
@@ -4295,14 +4543,57 @@ function validateEvolutionCommand(value: unknown): void {
     }
     validateArtifactRef((value.request as Record<string, unknown>).input);
   } else if (value.operation === "observe") {
-    if (!isRecord(value.observation) || !isWireIdentity(value.observation.observation_id)) {
+    requireClosedRecord(
+      value.observation,
+      ["observation_id", "decision_id", "occurrence_id", "plan_id", "outcome", "evidence"],
+      "rollout observation",
+    );
+    if (!isWireIdentity(value.observation.observation_id)
+      || !isWireIdentity(value.observation.decision_id)
+      || !isWireIdentity(value.observation.occurrence_id)
+      || !isContentId(value.observation.plan_id)
+      || !new Set(["succeeded", "failed"]).has(String(value.observation.outcome))) {
       throw transportError("invalid_engine_response", "rollout observation identity is invalid");
     }
+    validateArtifactRef(value.observation.evidence);
   } else if (value.operation === "apply_gate") {
     validateRolloutGate(value.gate);
     if (!isWireIdentity(value.next_decision_id)) {
       throw transportError("invalid_engine_response", "next rollout decision identity is invalid");
     }
+  }
+}
+
+function validatePatchOperations(value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw transportError("invalid_engine_response", "Plan patch operations are invalid");
+  }
+  let previous: [string, string] | undefined;
+  for (const operation of value) {
+    requireClosedRecord(operation, ["kind", "target", "before", "after"], "patch operation");
+    if (!isWireIdentity(operation.kind) || !isWireIdentity(operation.target)) {
+      throw transportError("invalid_engine_response", "Plan patch operation identity is invalid");
+    }
+    const validShape = operation.kind === "add"
+      ? operation.before === null && isDigest(operation.after)
+      : operation.kind === "remove"
+      ? isDigest(operation.before) && operation.after === null
+      : operation.kind === "replace"
+      ? isDigest(operation.before)
+        && isDigest(operation.after)
+        && operation.before !== operation.after
+      : false;
+    if (!validShape) {
+      throw transportError("invalid_engine_response", "Plan patch operation is malformed");
+    }
+    const current: [string, string] = [operation.target, operation.kind];
+    if (previous !== undefined && compareWireTuples(previous, current) >= 0) {
+      throw transportError(
+        "invalid_engine_response",
+        "Plan patch operations are not in canonical order",
+      );
+    }
+    previous = current;
   }
 }
 
@@ -6229,6 +6520,22 @@ function responseLossError(request: EngineRequest, code: string, detail = "the E
     });
   }
   return transportError(code, detail);
+}
+
+function transportInvocationError(request: EngineRequest, error: unknown): EngineError {
+  if (error instanceof EngineError) {
+    try {
+      validateEngineFailure(error.failure);
+      return error;
+    } catch (validation) {
+      return responseLossError(
+        request,
+        "invalid_engine_response",
+        errorMessage(validation),
+      );
+    }
+  }
+  return responseLossError(request, "engine_transport_failed", errorMessage(error));
 }
 
 function requestCanMutate(request: EngineRequest): boolean {

@@ -7784,6 +7784,8 @@ fn query_run_index_page(
                 value_id,
                 crate::StateRootLeafKind::RunCurrent,
                 resolver,
+                crate::DurableRunCurrent::verify,
+                |current| current.run_id.as_str(),
             )?;
             Ok(crate::DurableRunIndexSummary {
                 run_id: current.run_id,
@@ -7835,6 +7837,8 @@ fn query_run_wait_page(
                 value_id,
                 crate::StateRootLeafKind::Wait,
                 resolver,
+                WaitCondition::verify_wire,
+                |wait| wait.wait_id.as_str(),
             )?;
             Ok(crate::DurableWaitSummary {
                 wait_id: value.wait_id,
@@ -7873,6 +7877,8 @@ fn query_run_effect_page(
                 value_id,
                 crate::StateRootLeafKind::Outbox,
                 resolver,
+                EffectDispatch::verify_wire,
+                |effect| effect.intent_id.as_str(),
             )?;
             Ok(crate::DurableEffectSummary {
                 intent_id: value.intent_id,
@@ -7913,6 +7919,8 @@ fn query_run_occurrence_page(
                 value_id,
                 crate::StateRootLeafKind::ComponentOccurrence,
                 resolver,
+                ComponentOccurrence::verify,
+                |occurrence| occurrence.occurrence_id.as_str(),
             )?;
             Ok(crate::DurableOccurrenceSummary {
                 occurrence_id: value.occurrence_id,
@@ -7951,6 +7959,8 @@ fn query_run_attempt_page(
                 value_id,
                 crate::StateRootLeafKind::OperationAttempt,
                 resolver,
+                OperationAttempt::verify,
+                |attempt| attempt.attempt_id.as_str(),
             )?;
             Ok(crate::DurableAttemptSummary {
                 attempt_id: value.attempt_id,
@@ -8164,15 +8174,426 @@ where
 }
 
 fn load_required_query_leaf<T>(
-    _key: &str,
+    key: &str,
     value_id: &str,
     kind: crate::StateRootLeafKind,
     resolver: &mut dyn crate::StateRootResolver,
+    verify: fn(&T) -> DurableResult<()>,
+    primary_identity: fn(&T) -> &str,
 ) -> DurableResult<T>
 where
     T: serde::de::DeserializeOwned + serde::Serialize,
 {
-    crate::state_root::load_typed_state_value(value_id, kind, resolver)
+    let value = crate::state_root::load_typed_state_value(value_id, kind, resolver)?;
+    if let Err(error) = verify(&value) {
+        return Err(DurableError::Integrity {
+            code: "query_page_leaf_invalid".to_owned(),
+            message: format!("authenticated durable query page leaf is invalid: {error}"),
+        });
+    }
+    if primary_identity(&value) != key {
+        return Err(DurableError::Integrity {
+            code: "query_page_leaf_key_mismatch".to_owned(),
+            message: "durable query page leaf changed its authenticated primary identity"
+                .to_owned(),
+        });
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod query_page_leaf_closure_tests {
+    use std::fmt::Debug;
+
+    use super::*;
+    use crate::state_root::{
+        STATE_ROOT_VALUE_VERSION, StateRootLeafKind, StateRootObject, StateRootValue,
+        StateValueObject,
+    };
+
+    #[derive(Default)]
+    struct QueryLeafResolver {
+        objects: BTreeMap<String, StateRootObject>,
+        loads: usize,
+    }
+
+    impl QueryLeafResolver {
+        fn insert<T: serde::Serialize>(&mut self, kind: StateRootLeafKind, value: &T) -> String {
+            let value = StateRootValue::Leaf {
+                kind,
+                canonical_json: String::from_utf8(
+                    cymule_core::canonical_bytes(value).expect("query leaf canonicalizes"),
+                )
+                .expect("canonical JSON is UTF-8"),
+            };
+            value.verify().expect("query leaf wire is well formed");
+            let object_id = cymule_core::content_id(STATE_ROOT_VALUE_VERSION, &value)
+                .expect("query leaf value identity derives");
+            let object = StateRootObject::Value(StateValueObject {
+                value_version: STATE_ROOT_VALUE_VERSION.to_owned(),
+                object_id: object_id.clone(),
+                value,
+            });
+            object
+                .verify()
+                .expect("query leaf value object is internally closed");
+            self.objects.insert(object_id.clone(), object);
+            object_id
+        }
+
+        fn authenticate(
+            &mut self,
+            key: &str,
+            value_id: &str,
+        ) -> crate::state_root::StateMapKeyPageEntry {
+            let (root, nodes) = cymule_authenticated_collections::build_map(vec![(
+                key.to_owned(),
+                value_id.to_owned(),
+            )])
+            .expect("query page map builds")
+            .into_parts();
+            for node in nodes {
+                let object = StateRootObject::MapNode(node);
+                self.objects.insert(object.object_id().to_owned(), object);
+            }
+            let page = crate::state_root::load_state_map_key_page(
+                &root,
+                None,
+                1,
+                crate::state_root::MAX_STATE_MAP_KEY_PAGE_BYTES,
+                self,
+            )
+            .expect("query page range proof authenticates");
+            assert!(page.next_position.is_none());
+            page.entries
+                .into_iter()
+                .next()
+                .expect("one authenticated query leaf exists")
+        }
+    }
+
+    impl crate::StateRootResolver for QueryLeafResolver {
+        fn pinned_manifest_id(&self) -> &'static str {
+            "query-page-leaf-closure-test"
+        }
+
+        fn load_state_root_object(
+            &mut self,
+            object_id: &str,
+        ) -> DurableResult<Option<StateRootObject>> {
+            self.loads += 1;
+            Ok(self.objects.get(object_id).cloned())
+        }
+    }
+
+    fn assert_key_mismatch<T>(
+        family: &str,
+        value: &T,
+        kind: StateRootLeafKind,
+        verify: fn(&T) -> DurableResult<()>,
+        primary_identity: fn(&T) -> &str,
+    ) where
+        T: Debug + serde::de::DeserializeOwned + serde::Serialize,
+    {
+        verify(value).unwrap_or_else(|error| panic!("valid {family} fixture failed: {error}"));
+        let mut resolver = QueryLeafResolver::default();
+        let value_id = resolver.insert(kind, value);
+        let entry = resolver.authenticate("authenticated:foreign-primary-identity", &value_id);
+        let page_loads = resolver.loads;
+        let error = load_required_query_leaf(
+            &entry.key,
+            &entry.value_id,
+            kind,
+            &mut resolver,
+            verify,
+            primary_identity,
+        )
+        .expect_err("a valid leaf under another authenticated key must fail");
+        assert!(matches!(error, DurableError::Integrity { code, .. }
+            if code == "query_page_leaf_key_mismatch"));
+        assert_eq!(
+            resolver.loads - page_loads,
+            1,
+            "{family} must load its proved value once"
+        );
+    }
+
+    fn assert_hidden_corruption_precedes_key_binding<T>(
+        family: &str,
+        value: &T,
+        kind: StateRootLeafKind,
+        verify: fn(&T) -> DurableResult<()>,
+        primary_identity: fn(&T) -> &str,
+    ) where
+        T: Debug + serde::de::DeserializeOwned + serde::Serialize,
+    {
+        let mut resolver = QueryLeafResolver::default();
+        let value_id = resolver.insert(kind, value);
+        let entry = resolver.authenticate("authenticated:foreign-primary-identity", &value_id);
+        let page_loads = resolver.loads;
+        let error = load_required_query_leaf(
+            &entry.key,
+            &entry.value_id,
+            kind,
+            &mut resolver,
+            verify,
+            primary_identity,
+        )
+        .expect_err("a malformed hidden leaf field must fail");
+        assert!(matches!(error, DurableError::Integrity { code, .. }
+            if code == "query_page_leaf_invalid"));
+        assert_eq!(
+            resolver.loads - page_loads,
+            1,
+            "{family} must load its proved value once"
+        );
+    }
+
+    fn run_current() -> crate::DurableRunCurrent {
+        let current = crate::DurableRunCurrent {
+            run_id: "run:query-page-closure".to_owned(),
+            plan_id: cymule_core::content_id("cymule.test.query-page-plan/1", &())
+                .expect("Plan identity derives"),
+            execution_binding: cymule_core::artifact_ref(
+                cymule_core::EXECUTION_BINDING_ARTIFACT_KIND,
+                b"query-page-binding",
+            )
+            .expect("execution binding derives"),
+            continuation_status: ContinuationStatus::Ready,
+            epoch: 0,
+            execution_fence: 0,
+            result: None,
+            execution_status: RunExecutionStatus::Active,
+            world_settlement: cymule_core::WorldSettlementStatus::Settled,
+        };
+        current.verify().expect("Run current verifies");
+        current
+    }
+
+    fn wait() -> WaitCondition {
+        let wait = WaitCondition {
+            wait_id: cymule_core::content_id("cymule.test.query-page-wait/1", &())
+                .expect("Wait identity derives"),
+            run_id: "run:query-page-closure".to_owned(),
+            kind: WaitKind::Signal {
+                key: "signal:query-page-closure".to_owned(),
+            },
+            consume_once: true,
+            owner: WaitOwner {
+                invocation_id: "invocation:query-page-closure".to_owned(),
+                definition_id: "definition:query-page-closure".to_owned(),
+                region_path: Vec::new(),
+                site_id: "site:query-page-closure".to_owned(),
+                step_index: 0,
+                bind: None,
+            },
+            state: WaitState::Pending,
+            result: None,
+        };
+        wait.verify_wire().expect("Wait verifies");
+        wait
+    }
+
+    fn effect() -> EffectDispatch {
+        let effect = EffectDispatch {
+            intent_id: cymule_core::content_id("cymule.test.query-page-effect/1", &())
+                .expect("Effect identity derives"),
+            run_id: "run:query-page-closure".to_owned(),
+            origin_plan_id: cymule_core::content_id("cymule.test.query-page-plan/1", &())
+                .expect("origin Plan identity derives"),
+            operation: "effect.query-page-closure".to_owned(),
+            input: cymule_core::artifact_ref(cymule_core::EFFECT_ARGS_ARTIFACT_KIND, b"{}")
+                .expect("Effect input derives"),
+            execution_binding: cymule_core::artifact_ref(
+                cymule_core::EXECUTION_BINDING_ARTIFACT_KIND,
+                b"query-page-binding",
+            )
+            .expect("execution binding derives"),
+            occurrence_binding: cymule_core::content_id(
+                "cymule.test.query-page-effect-binding/1",
+                &(),
+            )
+            .expect("Effect occurrence binding derives"),
+            execution_availability: cymule_core::EffectExecutionAvailability::Available,
+            reconciliation: cymule_core::ReconciliationState::NotRequired,
+            state: OutboxState::Pending,
+            claim_epoch: 0,
+            claim_owner: None,
+            result: None,
+        };
+        effect.verify_wire().expect("Effect dispatch verifies");
+        effect
+    }
+
+    fn component_frontier() -> (ComponentOccurrence, OperationAttempt) {
+        let run_id = "run:query-page-closure";
+        let input = cymule_core::artifact_ref("cymule.test.query-page-input/1", b"input")
+            .expect("component input derives");
+        let binding_context = cymule_core::artifact_ref(
+            cymule_core::EXECUTION_BINDING_ARTIFACT_KIND,
+            b"query-page-binding",
+        )
+        .expect("component binding derives")
+        .artifact_id;
+        let occurrence_binding =
+            cymule_core::content_id("cymule.test.query-page-component-binding/1", &())
+                .expect("component occurrence binding derives");
+        let mut occurrence = ComponentOccurrence {
+            occurrence_version: crate::COMPONENT_OCCURRENCE_VERSION.to_owned(),
+            occurrence_id: String::new(),
+            run_id: run_id.to_owned(),
+            plan_id: cymule_core::content_id("cymule.test.query-page-plan/1", &())
+                .expect("component Plan identity derives"),
+            binding_context,
+            invocation_id: "invocation:query-page-closure".to_owned(),
+            invocation_path: Vec::new(),
+            definition_id: "definition:query-page-closure".to_owned(),
+            region_path: Vec::new(),
+            site_id: "site:query-page-closure".to_owned(),
+            step_index: 0,
+            component: "component.query-page-closure".to_owned(),
+            input,
+            outcome: None,
+            occurrence_binding: occurrence_binding.clone(),
+            implementation_revision: "implementation:query-page-closure".to_owned(),
+            attempt_count: 1,
+            latest_attempt_id: String::new(),
+            continuation_digest: None,
+            state: crate::ComponentOccurrenceState::Pending,
+        };
+        occurrence.occurrence_id = crate::model::component_occurrence_id(&occurrence)
+            .expect("component occurrence identity derives");
+        let continuation_attempt_id =
+            cymule_core::content_id("cymule.test.query-page-continuation-attempt/1", &())
+                .expect("Continuation Attempt identity derives");
+        let identity = crate::model::OperationAttemptIdentity {
+            occurrence_id: &occurrence.occurrence_id,
+            attempt_ordinal: 1,
+            previous_attempt_id: None,
+            run_id,
+            continuation_attempt_id: &continuation_attempt_id,
+            execution_claim_owner: "worker:query-page-closure",
+            execution_claim_fence: 1,
+            operation_occurrence_binding: &occurrence_binding,
+        };
+        let attempt_id = crate::model::operation_attempt_id(&identity)
+            .expect("provider Attempt identity derives");
+        let attempt = OperationAttempt {
+            attempt_version: crate::OPERATION_ATTEMPT_VERSION.to_owned(),
+            attempt_id: attempt_id.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            run_id: run_id.to_owned(),
+            attempt_ordinal: 1,
+            previous_attempt_id: None,
+            continuation_attempt_id: continuation_attempt_id.clone(),
+            execution_claim_owner: "worker:query-page-closure".to_owned(),
+            execution_claim_fence: 1,
+            operation_occurrence_binding: occurrence_binding,
+            transport_request_id: cymule_core::content_id(
+                crate::model::TRANSPORT_REQUEST_ID_DOMAIN,
+                &(attempt_id.as_str(), continuation_attempt_id.as_str()),
+            )
+            .expect("transport request identity derives"),
+            state: crate::OperationAttemptState::Running,
+            outcome: None,
+        };
+        occurrence.latest_attempt_id = attempt_id;
+        occurrence.verify().expect("component occurrence verifies");
+        attempt.verify().expect("provider Attempt verifies");
+        (occurrence, attempt)
+    }
+
+    #[test]
+    fn five_query_page_leaf_families_close_keys_and_hidden_semantics() {
+        let current = run_current();
+        assert_key_mismatch(
+            "Run current",
+            &current,
+            StateRootLeafKind::RunCurrent,
+            crate::DurableRunCurrent::verify,
+            |value| value.run_id.as_str(),
+        );
+        let mut corrupt_current = current;
+        corrupt_current.plan_id.clear();
+        assert_hidden_corruption_precedes_key_binding(
+            "Run current",
+            &corrupt_current,
+            StateRootLeafKind::RunCurrent,
+            crate::DurableRunCurrent::verify,
+            |value| value.run_id.as_str(),
+        );
+
+        let wait = wait();
+        assert_key_mismatch(
+            "Wait",
+            &wait,
+            StateRootLeafKind::Wait,
+            WaitCondition::verify_wire,
+            |value| value.wait_id.as_str(),
+        );
+        let mut corrupt_wait = wait;
+        corrupt_wait.owner.site_id.clear();
+        assert_hidden_corruption_precedes_key_binding(
+            "Wait",
+            &corrupt_wait,
+            StateRootLeafKind::Wait,
+            WaitCondition::verify_wire,
+            |value| value.wait_id.as_str(),
+        );
+
+        let effect = effect();
+        assert_key_mismatch(
+            "Effect dispatch",
+            &effect,
+            StateRootLeafKind::Outbox,
+            EffectDispatch::verify_wire,
+            |value| value.intent_id.as_str(),
+        );
+        let mut corrupt_effect = effect;
+        corrupt_effect.origin_plan_id.clear();
+        assert_hidden_corruption_precedes_key_binding(
+            "Effect dispatch",
+            &corrupt_effect,
+            StateRootLeafKind::Outbox,
+            EffectDispatch::verify_wire,
+            |value| value.intent_id.as_str(),
+        );
+
+        let (occurrence, attempt) = component_frontier();
+        assert_key_mismatch(
+            "component occurrence",
+            &occurrence,
+            StateRootLeafKind::ComponentOccurrence,
+            ComponentOccurrence::verify,
+            |value| value.occurrence_id.as_str(),
+        );
+        let mut corrupt_occurrence = occurrence;
+        corrupt_occurrence.implementation_revision.clear();
+        assert_hidden_corruption_precedes_key_binding(
+            "component occurrence",
+            &corrupt_occurrence,
+            StateRootLeafKind::ComponentOccurrence,
+            ComponentOccurrence::verify,
+            |value| value.occurrence_id.as_str(),
+        );
+
+        assert_key_mismatch(
+            "provider Attempt",
+            &attempt,
+            StateRootLeafKind::OperationAttempt,
+            OperationAttempt::verify,
+            |value| value.attempt_id.as_str(),
+        );
+        let mut corrupt_attempt = attempt;
+        corrupt_attempt.transport_request_id.clear();
+        assert_hidden_corruption_precedes_key_binding(
+            "provider Attempt",
+            &corrupt_attempt,
+            StateRootLeafKind::OperationAttempt,
+            OperationAttempt::verify,
+            |value| value.attempt_id.as_str(),
+        );
+    }
 }
 
 fn ensure_query_source(

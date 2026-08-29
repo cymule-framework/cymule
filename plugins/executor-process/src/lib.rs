@@ -42,6 +42,8 @@ const CLOSURE_MODE_BYTES: usize = size_of::<u32>();
 const CLOSURE_DISCRIMINANT_BYTES: usize = size_of::<u8>();
 const MAX_PROCESS_CONFIGURATION_FOOTPRINT: usize = 8 * 1024 * 1024;
 const MAX_CAPTURED_DIRECTORY_ENTRIES: usize = 65_536;
+#[cfg(unix)]
+const PROCESS_CAPTURE_DESCRIPTOR_EXHAUSTED_CODE: &str = "process_capture_descriptor_exhausted";
 const MAX_CLEANUP_ENTRIES_PER_DIRECTORY: usize = MAX_CAPTURED_DIRECTORY_ENTRIES;
 const MAX_CLEANUP_TOTAL_ENTRIES: usize = MAX_CAPTURED_DIRECTORY_ENTRIES + 2;
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
@@ -3103,8 +3105,8 @@ fn capture_directory(path: &Path, budget: &mut ClosureBudget) -> RuntimeResult<C
             "process working directory must be an absolute directory",
         ));
     }
-    let resolved = fs::canonicalize(path).map_err(|_| {
-        RuntimeError::plugin_defect("process working directory could not be resolved")
+    let resolved = fs::canonicalize(path).map_err(|error| {
+        capture_directory_io_error(&error, "process working directory could not be resolved")
     })?;
     let directory = open_absolute_directory(&resolved)?;
     capture_open_directory(directory, budget)
@@ -3162,26 +3164,24 @@ fn capture_open_directory(
 #[cfg(unix)]
 fn open_absolute_directory(path: &Path) -> RuntimeResult<nix::dir::Dir> {
     use nix::dir::Dir;
-    use nix::fcntl::OFlag;
     use nix::sys::stat::Mode;
 
-    let flags = OFlag::O_RDONLY
-        | OFlag::O_DIRECTORY
-        | OFlag::O_CLOEXEC
-        | OFlag::O_NOFOLLOW
-        | OFlag::O_NONBLOCK;
-    let mut directory = Dir::open(Path::new("/"), flags, Mode::empty()).map_err(|_| {
-        RuntimeError::plugin_defect("process working directory root could not be opened")
+    let flags = capture_directory_open_flags();
+    let mut directory = Dir::open(Path::new("/"), flags, Mode::empty()).map_err(|error| {
+        capture_directory_errno_error(error, "process working directory root could not be opened")
     })?;
     for component in path.components() {
         match component {
             Component::RootDir => {}
             Component::Normal(name) => {
-                directory = Dir::openat(&directory, name, flags, Mode::empty()).map_err(|_| {
-                    RuntimeError::plugin_defect(
+                directory = Dir::openat(&directory, name, flags, Mode::empty()).map_err(
+                    |error| {
+                        capture_directory_errno_error(
+                            error,
                         "process working directory components must be accessible directories without symlinks",
-                    )
-                })?;
+                        )
+                    },
+                )?;
             }
             Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
                 return Err(RuntimeError::plugin_defect(
@@ -3194,22 +3194,70 @@ fn open_absolute_directory(path: &Path) -> RuntimeResult<nix::dir::Dir> {
 }
 
 #[cfg(unix)]
+fn capture_directory_open_flags() -> nix::fcntl::OFlag {
+    use nix::fcntl::OFlag;
+
+    OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK
+}
+
+#[cfg(unix)]
+fn capture_entry_open_flags() -> nix::fcntl::OFlag {
+    use nix::fcntl::OFlag;
+
+    OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK
+}
+
+#[cfg(unix)]
+fn capture_directory_io_error(
+    error: &std::io::Error,
+    defect_message: &'static str,
+) -> RuntimeError {
+    if matches!(
+        error.raw_os_error(),
+        Some(nix::libc::EMFILE | nix::libc::ENFILE)
+    ) {
+        capture_descriptor_exhausted()
+    } else {
+        RuntimeError::plugin_defect(defect_message)
+    }
+}
+
+#[cfg(unix)]
+fn capture_directory_errno_error(
+    error: nix::errno::Errno,
+    defect_message: &'static str,
+) -> RuntimeError {
+    if matches!(error, nix::errno::Errno::EMFILE | nix::errno::Errno::ENFILE) {
+        capture_descriptor_exhausted()
+    } else {
+        RuntimeError::plugin_defect(defect_message)
+    }
+}
+
+#[cfg(unix)]
+fn capture_descriptor_exhausted() -> RuntimeError {
+    RuntimeError::substrate(
+        PROCESS_CAPTURE_DESCRIPTOR_EXHAUSTED_CODE,
+        "process working-directory capture exhausted host descriptor capacity",
+    )
+}
+
+#[cfg(unix)]
 struct DirectoryCaptureFrame {
-    directory: nix::dir::Dir,
     relative_parent: String,
     entries: std::vec::IntoIter<std::ffi::CString>,
 }
 
 #[cfg(unix)]
 fn directory_capture_frame(
-    mut directory: nix::dir::Dir,
+    directory: &mut nix::dir::Dir,
     relative_parent: String,
     budget: &mut ClosureBudget,
 ) -> RuntimeResult<DirectoryCaptureFrame> {
     let mut entries = Vec::new();
     for entry in directory.iter() {
-        let entry = entry.map_err(|_| {
-            RuntimeError::plugin_defect("process working directory could not be read")
+        let entry = entry.map_err(|error| {
+            capture_directory_errno_error(error, "process working directory could not be read")
         })?;
         let name = entry.file_name();
         if name.to_bytes() == b"." || name.to_bytes() == b".." {
@@ -3218,31 +3266,107 @@ fn directory_capture_frame(
         budget.count_directory_entry()?;
         entries.push(name.to_owned());
     }
+    entries.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     Ok(DirectoryCaptureFrame {
-        directory,
         relative_parent,
         entries: entries.into_iter(),
     })
 }
 
 #[cfg(unix)]
+#[derive(Clone, Debug)]
+struct CaptureDirectoryComponent {
+    name: std::ffi::CString,
+    identity: PrivateDirectoryIdentity,
+}
+
+#[cfg(unix)]
+fn reopen_capture_directory(
+    root: &nix::dir::Dir,
+    components: &[CaptureDirectoryComponent],
+) -> RuntimeResult<Option<nix::dir::Dir>> {
+    use nix::dir::Dir;
+    use nix::sys::stat::{Mode, fstat};
+
+    let flags = capture_directory_open_flags();
+    let mut current = None;
+    for component in components {
+        let next = match current.as_ref() {
+            Some(directory) => {
+                Dir::openat(directory, component.name.as_c_str(), flags, Mode::empty())
+            }
+            None => Dir::openat(root, component.name.as_c_str(), flags, Mode::empty()),
+        }
+        .map_err(|error| {
+            capture_directory_errno_error(error, "process working directory changed during capture")
+        })?;
+        let metadata = fstat(&next).map_err(|error| {
+            capture_directory_errno_error(
+                error,
+                "process working directory metadata could not be read",
+            )
+        })?;
+        let identity = PrivateDirectoryIdentity {
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+        };
+        if identity != component.identity {
+            return Err(RuntimeError::plugin_defect(
+                "process working directory changed during capture",
+            ));
+        }
+        current = Some(next);
+    }
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn open_capture_entry(
+    root: &nix::dir::Dir,
+    current: Option<&nix::dir::Dir>,
+    name: &std::ffi::CStr,
+) -> RuntimeResult<std::os::fd::OwnedFd> {
+    use nix::fcntl::openat;
+    use nix::sys::stat::Mode;
+
+    match current {
+        Some(directory) => openat(directory, name, capture_entry_open_flags(), Mode::empty()),
+        None => openat(root, name, capture_entry_open_flags(), Mode::empty()),
+    }
+    .map_err(|error| {
+        capture_directory_errno_error(
+            error,
+            "process working directory entries must be readable without following symlinks",
+        )
+    })
+}
+
+#[cfg(unix)]
 fn capture_directory_entries(
-    directory: nix::dir::Dir,
+    mut directory: nix::dir::Dir,
     directories: &mut Vec<CapturedDirectoryEntry>,
     files: &mut Vec<CapturedFile>,
     budget: &mut ClosureBudget,
 ) -> RuntimeResult<()> {
-    use nix::fcntl::{OFlag, openat};
-    use nix::sys::stat::{Mode, SFlag, fstat};
+    use nix::sys::stat::{SFlag, fstat};
 
-    let flags = OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK;
-    let mut frames = vec![directory_capture_frame(directory, String::new(), budget)?];
+    let mut frames = vec![directory_capture_frame(
+        &mut directory,
+        String::new(),
+        budget,
+    )?];
+    let mut components = Vec::new();
+    let mut current = None;
     while let Some(frame) = frames.last_mut() {
         let Some(name) = frame.entries.next() else {
             let completed = frames
                 .pop()
                 .ok_or_else(|| RuntimeError::plugin_defect("process directory traversal failed"))?;
             if !completed.relative_parent.is_empty() {
+                current.take();
+                components.pop().ok_or_else(|| {
+                    RuntimeError::plugin_defect("process directory traversal failed")
+                })?;
                 budget.charge(CLOSURE_MODE_BYTES)?;
                 directories.push(CapturedDirectoryEntry {
                     relative_path: completed.relative_parent,
@@ -3253,21 +3377,32 @@ fn capture_directory_entries(
         };
         let relative =
             charge_and_join_relative_path(&frame.relative_parent, name.as_c_str(), budget)?;
-        let descriptor =
-            openat(&frame.directory, name.as_c_str(), flags, Mode::empty()).map_err(|_| {
-                RuntimeError::plugin_defect(
-                    "process working directory entries must be readable without following symlinks",
-                )
-            })?;
-        let metadata = fstat(&descriptor).map_err(|_| {
-            RuntimeError::plugin_defect("process working directory metadata could not be read")
+        if current.is_none() && !components.is_empty() {
+            current = reopen_capture_directory(&directory, &components)?;
+        }
+        let descriptor = open_capture_entry(&directory, current.as_ref(), name.as_c_str())?;
+        let metadata = fstat(&descriptor).map_err(|error| {
+            capture_directory_errno_error(
+                error,
+                "process working directory metadata could not be read",
+            )
         })?;
         let file_type = SFlag::from_bits_truncate(metadata.st_mode);
         if file_type == SFlag::S_IFDIR {
-            let child = nix::dir::Dir::from_fd(descriptor).map_err(|_| {
-                RuntimeError::plugin_defect("process working directory could not be opened")
+            let identity = PrivateDirectoryIdentity {
+                device: metadata.st_dev,
+                inode: metadata.st_ino,
+            };
+            let mut child = nix::dir::Dir::from_fd(descriptor).map_err(|error| {
+                capture_directory_errno_error(
+                    error,
+                    "process working directory could not be opened",
+                )
             })?;
-            frames.push(directory_capture_frame(child, relative, budget)?);
+            let child_frame = directory_capture_frame(&mut child, relative, budget)?;
+            components.push(CaptureDirectoryComponent { name, identity });
+            current = Some(child);
+            frames.push(child_frame);
         } else if file_type == SFlag::S_IFREG {
             budget.charge(CLOSURE_MODE_BYTES)?;
             let (bytes, mode) = capture_directory_file(File::from(descriptor), budget)?;
@@ -4364,6 +4499,108 @@ mod tests {
         )])
     }
 
+    #[cfg(unix)]
+    struct DeepDirectoryChain {
+        root: nix::dir::Dir,
+        root_identity: super::PrivateDirectoryIdentity,
+        deepest: Option<nix::dir::Dir>,
+        components: Vec<super::CaptureDirectoryComponent>,
+    }
+
+    #[cfg(unix)]
+    impl DeepDirectoryChain {
+        fn create(root: &std::path::Path, depth: usize) -> Self {
+            use nix::dir::Dir;
+            use nix::sys::stat::{Mode, fstat, mkdirat};
+
+            let root = Dir::open(root, super::capture_directory_open_flags(), Mode::empty())
+                .expect("chain root opens");
+            let root_metadata = fstat(&root).expect("chain root metadata reads");
+            let mut chain = Self {
+                root,
+                root_identity: super::PrivateDirectoryIdentity {
+                    device: root_metadata.st_dev,
+                    inode: root_metadata.st_ino,
+                },
+                deepest: None,
+                components: Vec::with_capacity(depth),
+            };
+            for _ in 0..depth {
+                match chain.deepest.as_ref() {
+                    Some(directory) => mkdirat(directory, "d", Mode::S_IRWXU),
+                    None => mkdirat(&chain.root, "d", Mode::S_IRWXU),
+                }
+                .expect("chain directory creates");
+                let child = match chain.deepest.as_ref() {
+                    Some(directory) => Dir::openat(
+                        directory,
+                        "d",
+                        super::capture_directory_open_flags(),
+                        Mode::empty(),
+                    ),
+                    None => Dir::openat(
+                        &chain.root,
+                        "d",
+                        super::capture_directory_open_flags(),
+                        Mode::empty(),
+                    ),
+                }
+                .expect("chain child opens");
+                let metadata = fstat(&child).expect("chain child metadata reads");
+                chain.components.push(super::CaptureDirectoryComponent {
+                    name: std::ffi::CString::new("d").expect("fixed component has no NUL"),
+                    identity: super::PrivateDirectoryIdentity {
+                        device: metadata.st_dev,
+                        inode: metadata.st_ino,
+                    },
+                });
+                chain.deepest = Some(child);
+            }
+            chain
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for DeepDirectoryChain {
+        fn drop(&mut self) {
+            use nix::dir::Dir;
+            use nix::sys::stat::{Mode, fstat};
+            use nix::unistd::{UnlinkatFlags, unlinkat};
+
+            let Some(mut current) = self.deepest.take() else {
+                return;
+            };
+            while let Some(component) = self.components.pop() {
+                let Ok(parent) = Dir::openat(
+                    &current,
+                    "..",
+                    super::capture_directory_open_flags(),
+                    Mode::empty(),
+                ) else {
+                    return;
+                };
+                let Ok(parent_metadata) = fstat(&parent) else {
+                    return;
+                };
+                let parent_identity = super::PrivateDirectoryIdentity {
+                    device: parent_metadata.st_dev,
+                    inode: parent_metadata.st_ino,
+                };
+                let expected_parent = self
+                    .components
+                    .last()
+                    .map_or(self.root_identity, |entry| entry.identity);
+                if parent_identity != expected_parent
+                    || unlinkat(&parent, component.name.as_c_str(), UnlinkatFlags::RemoveDir)
+                        .is_err()
+                {
+                    return;
+                }
+                current = parent;
+            }
+        }
+    }
+
     #[test]
     fn byte_limits_reject_overflow_instead_of_clamping_it() {
         assert_eq!(
@@ -4783,49 +5020,11 @@ mod tests {
             open_absolute_directory, sha256_bytes,
         };
         use cymule_runtime::PluginHost;
-        use nix::dir::Dir;
-        use nix::fcntl::OFlag;
-        use nix::sys::stat::{Mode, mkdirat};
-        use nix::unistd::{UnlinkatFlags, unlinkat};
         use std::os::unix::fs::PermissionsExt;
         use std::time::{Duration, Instant};
 
         const DEPTH: usize = 1_024;
         const TEST_STACK_BYTES: usize = 128 * 1024;
-
-        struct DeepDirectoryChain {
-            directories: Vec<Dir>,
-        }
-
-        impl DeepDirectoryChain {
-            fn create(root: &std::path::Path, depth: usize) -> Self {
-                let flags = OFlag::O_RDONLY
-                    | OFlag::O_DIRECTORY
-                    | OFlag::O_CLOEXEC
-                    | OFlag::O_NOFOLLOW
-                    | OFlag::O_NONBLOCK;
-                let mut directories = Vec::with_capacity(depth + 1);
-                directories.push(Dir::open(root, flags, Mode::empty()).expect("chain root opens"));
-                for _ in 0..depth {
-                    let parent = directories.last().expect("chain retains its parent");
-                    mkdirat(parent, "d", Mode::S_IRWXU).expect("chain directory creates");
-                    directories.push(
-                        Dir::openat(parent, "d", flags, Mode::empty())
-                            .expect("chain directory opens"),
-                    );
-                }
-                Self { directories }
-            }
-        }
-
-        impl Drop for DeepDirectoryChain {
-            fn drop(&mut self) {
-                drop(self.directories.pop());
-                while let Some(parent) = self.directories.pop() {
-                    let _ = unlinkat(&parent, "d", UnlinkatFlags::RemoveDir);
-                }
-            }
-        }
 
         let fixture = tempfile::tempdir().expect("fixture directory creates");
         let chain = DeepDirectoryChain::create(fixture.path(), DEPTH);
@@ -4937,6 +5136,109 @@ mod tests {
             .describe()
             .expect("deep captured directory materializes, executes, and reclaims");
         assert_eq!(manifest.implementation_id, "process:deep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deep_capture_uses_constant_descriptors_under_a_low_process_limit() {
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("unit test executable resolves"),
+        )
+        .arg("--exact")
+        .arg("tests::deep_capture_low_descriptor_limit_helper")
+        .arg("--nocapture")
+        .env("CYMULE_TEST_CAPTURE_LOW_FD_LIMIT", "1")
+        .status()
+        .expect("low-descriptor capture helper starts");
+        assert!(status.success(), "low-descriptor capture helper failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deep_capture_low_descriptor_limit_helper() {
+        use super::{
+            ClosureBudget, DEFAULT_PROCESS_CLOSURE_LIMIT,
+            PROCESS_CAPTURE_DESCRIPTOR_EXHAUSTED_CODE, capture_open_directory,
+            open_absolute_directory,
+        };
+        use cymule_runtime::RuntimeError;
+
+        const DEPTH: usize = 1_024;
+        const DESCRIPTOR_LIMIT: nix::libc::rlim_t = 24;
+        if std::env::var_os("CYMULE_TEST_CAPTURE_LOW_FD_LIMIT").is_none() {
+            return;
+        }
+
+        let limit = nix::libc::rlimit {
+            rlim_cur: DESCRIPTOR_LIMIT,
+            rlim_max: DESCRIPTOR_LIMIT,
+        };
+        // SAFETY: this isolated helper intentionally owns an irreversible low
+        // descriptor ceiling until the test process exits.
+        assert_eq!(
+            unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &raw const limit) },
+            0
+        );
+
+        let deep_fixture = tempfile::tempdir().expect("deep fixture creates under low limit");
+        let chain = DeepDirectoryChain::create(deep_fixture.path(), DEPTH);
+        let resolved = std::fs::canonicalize(deep_fixture.path()).expect("deep root resolves");
+        let mut budget = ClosureBudget::new(DEFAULT_PROCESS_CLOSURE_LIMIT);
+        let captured = capture_open_directory(
+            open_absolute_directory(&resolved).expect("deep root authority opens"),
+            &mut budget,
+        )
+        .expect("deep capture stays inside the low descriptor ceiling");
+        assert_eq!(captured.directories.len(), DEPTH);
+        drop(captured);
+        drop(chain);
+        drop(deep_fixture);
+
+        let exhausted_fixture =
+            tempfile::tempdir().expect("exhaustion fixture creates under low limit");
+        std::fs::write(exhausted_fixture.path().join("value"), b"captured")
+            .expect("exhaustion entry writes");
+        let resolved =
+            std::fs::canonicalize(exhausted_fixture.path()).expect("exhaustion root resolves");
+        let authority =
+            open_absolute_directory(&resolved).expect("exhaustion root authority opens");
+        let mut retained = Vec::new();
+        loop {
+            match std::fs::File::open("/dev/null") {
+                Ok(file) => retained.push(file),
+                Err(error)
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(nix::libc::EMFILE | nix::libc::ENFILE)
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => panic!("unexpected descriptor exhaustion error: {error}"),
+            }
+        }
+        let mut budget = ClosureBudget::new(DEFAULT_PROCESS_CLOSURE_LIMIT);
+        assert!(matches!(
+            capture_open_directory(authority, &mut budget),
+            Err(RuntimeError::Substrate { code, .. })
+                if code == PROCESS_CAPTURE_DESCRIPTOR_EXHAUSTED_CODE
+        ));
+        drop(retained);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_descriptor_exhaustion_remains_a_substrate_failure() {
+        use super::{PROCESS_CAPTURE_DESCRIPTOR_EXHAUSTED_CODE, capture_directory_errno_error};
+        use cymule_runtime::RuntimeError;
+
+        for error in [nix::errno::Errno::EMFILE, nix::errno::Errno::ENFILE] {
+            assert!(matches!(
+                capture_directory_errno_error(error, "must not be used"),
+                RuntimeError::Substrate { code, .. }
+                    if code == PROCESS_CAPTURE_DESCRIPTOR_EXHAUSTED_CODE
+            ));
+        }
     }
 
     #[cfg(unix)]

@@ -1,9 +1,12 @@
 # M1 Durable Single-Domain Profile
 
-Status: partial. The terminal implementation is integrated in the worktree;
-complete repository validation and independent review remain in progress. This
-document describes the current authority boundaries, not a production rollout
-or an assertion that every conformance gate has passed.
+Status: partial terminal candidate; source-implemented, validation pending. The
+terminal implementation is integrated and has passed multiple focused gates,
+but review is still changing the tree and the final frozen-tree full gate has
+not passed. This document describes the terminal authority boundaries, not a
+release, package publication, operator migration, deployment, production
+rollout, or assertion that every conformance gate has passed. Promotion follows
+the [conformance status ladder](../conformance.md#status-ladder).
 
 The [semantic specification](../specification.md) is the single normative
 source. This profile maps those laws to the current Durable control and Store
@@ -202,7 +205,8 @@ wire generations, fallback decoders, and dual-write compatibility are not
 supported. Operator-owned one-time transitions are documented in
 [Migration runbooks](../migrations/README.md).
 
-A complete profile claim requires focused and whole-workspace tests for
+Promotion from this partial terminal candidate to a validated source candidate
+requires focused and whole-workspace tests for
 ordinary execution, illegal transitions, exact replay, stale writers, claim
 takeover, response loss, real process death, tampered reachable objects,
 compaction, cold reclamation, and all four SDK chains against the current Rust

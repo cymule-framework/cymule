@@ -272,8 +272,9 @@
   positions, and files above the byte-exact scan limit cannot bypass admission.
   ZIP, tar/container, common compressed-archive magic, and Git LFS pointers are
   terminal rejection canaries. ZIP coverage includes a real prefixed deflated
-  archive whose compressed payload contains the secret canary plus a clean
-  non-ZIP record containing `PK` signatures, so neither SFX bypass nor
+  archive whose compressed payload contains the secret canary, a real split ZIP
+  final volume whose earlier local headers are unavailable, plus a clean non-ZIP
+  record containing `PK` signatures, so neither SFX/multi-disk bypass nor
   signature-only false positives can pass. The no-credential scanner must scan the actual
   candidate job artifact, not only a fixture. Registry-only, commit-message,
   author, parent/history, and coherent bundle/manifest replacements must fail

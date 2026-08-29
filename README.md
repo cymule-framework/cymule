@@ -24,13 +24,18 @@ are rebuildable projections. Languages, databases, queues, sandboxes,
 providers, and deployment topologies remain replaceable realizations rather
 than framework semantics.
 
-> **Project status:** the current unreleased source targets the complete
-> single-domain execution profile: durable suspension and recovery, honest
-> effect handling, bounded virtual work, safe live evolution, and an optional
-> Agent interaction plugin. Final cross-language, package, and release gates are
-> still required before these source APIs belong to a published version. Cymule
-> is not a distributed consensus system or an untrusted-code isolation
-> boundary. See the [roadmap](docs/roadmap.md) for those separate future
+> **Project status:** the current unreleased tree is a **partial terminal
+> candidate** for the complete single-domain execution profile: durable
+> suspension and recovery, honest effect handling, bounded virtual work, safe
+> live evolution, and an optional Agent interaction plugin. Those terminal
+> paths are source-implemented and have passed multiple focused gates, but the
+> exact source generation is still changing under review and its final frozen
+> full gate is validation pending. No release tag, package publication,
+> operator migration, or deployment exists for this candidate; code presence
+> is not published or production evidence. Cymule is not a distributed
+> consensus system or an untrusted-code isolation boundary. See the
+> [conformance status](docs/conformance.md#status-ladder) and
+> [roadmap](docs/roadmap.md) for the promotion gates and separate future
 > profiles.
 
 ## What Cymule gives you
@@ -97,7 +102,8 @@ framework core, CLI, or SDK semantics.
 
 ## Official plugins
 
-Cymule ships a day-one adapter set without making any provider canonical:
+The current source candidate includes a day-one adapter set without making any
+provider canonical:
 
 - SQLite and atomic-directory durable stores;
 - content-addressed filesystem and Apache `object_store` Resources;
@@ -115,9 +121,11 @@ limitations, mature dependencies, and the RocksDB assessment.
 
 ## How live evolution works
 
-**Implementation status:** source integration is in progress. Branch-wide
-verification, version-domain closure, package witnesses, and release evidence
-remain pending until the final source generation is frozen and all gates pass.
+**Implementation status:** source-implemented as a partial terminal candidate;
+validation pending. Multiple focused profile gates have passed, but branch-wide
+verification, version-domain closure, and independent review must be rerun on
+one final frozen source generation before it can become a validated source
+candidate. Package and release evidence do not exist for this candidate.
 
 Application source can reference a reusable module with
 `latest_compatible` (the default) or pin one exact revision. `latest` is an
@@ -264,8 +272,9 @@ cargo run -p cymule-example-hello-world -- Ada --unknown-once
 The example checks what happened to the original action instead of blindly
 sending it again.
 
-Published packages may trail this source generation. Check the registry's exact
-versioned API before embedding a published facade or CLI:
+No published package or release tag carries this terminal source candidate.
+Published packages may therefore expose an older generation; check the
+registry's exact versioned API before embedding a published facade or CLI:
 
 ```sh
 cargo search cymule
@@ -552,26 +561,32 @@ See [Architecture](docs/architecture.md) and the
 
 ## SDK and tooling support
 
+Every `Source-implemented; validation pending` row describes code in this exact
+checkout, not a released, operator-migrated, deployed, or production surface.
+Promotion requires the frozen-tree gates in
+[Conformance](docs/conformance.md#status-ladder), followed independently by the
+applicable release and operator receipts.
+
 | Surface | Status | Notes |
 | --- | --- | --- |
-| Rust SDK | Implemented | Native builder, typed contracts, and `Engine` trait. |
-| TypeScript SDK | Implemented | Builder and CLI-backed engine client. |
-| Python SDK | Implemented | Dependency-light builder and engine client. |
-| Go SDK | Implemented | Builder and engine client. |
-| Cross-Run Resources | Implemented | Four SDK builders, Rust sealing, bounded resolver/store interfaces, keyed handoff authority with per-target indexes, atomic input activation, and official filesystem/object-store adapters. |
-| Durable execution control | Implemented | Four-language issued-Clock observation with current-head claim admission and historical replay, start, resume, explicit takeover, wait admission, effect release, cancellation, Run query, and domain query commands admitted by Rust. |
-| Durable wait activation | Implemented | Identified signal/timer records, bounded parked indexes, persistent HTTP/timer sources, exact acknowledgement-loss replay, and reopen-safe epoch advance. |
-| Durable effect policies | Implemented | Nested commit gates, eager observation binding, explicit caller release, Run-local outbox authority, Core-bound paged failure/cancellation, and ambiguity reconciliation. |
-| Large virtual work | Implemented | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker recovery, durable checkpoints, and four SDK controls. |
-| Virtual work control | Implemented | Binding-pinned attempts, work/lease fencing, explicit recovery, closed dispositions, and four SDK transport interfaces. |
-| Live evolution | Implemented | Unified definition/DAG/rollout authority, compatible transitive relinking, complete Engine `/5` receipts, atomic `cymule.live-evolution-checkpoint/6` state, current-head historical replay, durable occurrence pins, content-backed safe-point migration and shadow evidence, canary gates, and rollback. |
-| Agent interaction plugin | Optional, implemented | Fresh-only identified host dispatch, head/count-pinned Context history, input/workspace coupling, capacity-safe staged/external streams, and real process-death fault matrices. |
-| Process plugin protocol | Implemented | JSON request/response reference transport. |
-| JSON Schema contracts | Implemented | Draft 2020-12 Plan and protocol schemas. |
-| MLIR workbench | Partial | Generic-operation syntax and MLIR 22 smoke validation. |
+| Rust SDK | Source-implemented; validation pending | Native builder, typed contracts, and `Engine` trait. |
+| TypeScript SDK | Source-implemented; validation pending | Builder and CLI-backed engine client. |
+| Python SDK | Source-implemented; validation pending | Dependency-light builder and engine client. |
+| Go SDK | Source-implemented; validation pending | Builder and engine client. |
+| Cross-Run Resources | Source-implemented; validation pending | Four SDK builders, Rust sealing, bounded resolver/store interfaces, keyed handoff authority with per-target indexes, atomic input activation, and official filesystem/object-store adapters. |
+| Durable execution control | Partial terminal candidate; validation pending | Four-language issued-Clock observation with current-head claim admission and historical replay, start, resume, explicit takeover, wait admission, effect release, cancellation, Run query, and domain query commands admitted by Rust. |
+| Durable wait activation | Partial terminal candidate; validation pending | Identified signal/timer records, bounded parked indexes, persistent HTTP/timer sources, exact acknowledgement-loss replay, and reopen-safe epoch advance. |
+| Durable effect policies | Partial terminal candidate; validation pending | Nested commit gates, eager observation binding, explicit caller release, Run-local outbox authority, Core-bound paged failure/cancellation, and ambiguity reconciliation. |
+| Large virtual work | Partial terminal candidate; validation pending | Bounded materialization, weighted fairness, verified cursor migration, certified cold compaction/partial rehydration, fenced multi-worker recovery, durable checkpoints, and four SDK controls. |
+| Virtual work control | Partial terminal candidate; validation pending | Binding-pinned attempts, work/lease fencing, explicit recovery, closed dispositions, and four SDK transport interfaces. |
+| Live evolution | Partial terminal candidate; validation pending | Unified definition/DAG/rollout authority, compatible transitive relinking, complete Engine `/5` receipts, atomic `cymule.live-evolution-checkpoint/6` state, current-head historical replay, durable occurrence pins, content-backed safe-point migration and shadow evidence, canary gates, and rollback. |
+| Agent interaction plugin | Optional source implementation; validation pending | Fresh-only identified host dispatch, head/count-pinned Context history, input/workspace coupling, capacity-safe staged/external streams, and real process-death fault matrices. |
+| Process plugin protocol | Source-implemented; validation pending | JSON request/response reference transport. |
+| JSON Schema contracts | Source-implemented; validation pending | Draft 2020-12 Plan and protocol schemas. |
+| MLIR workbench | Partial source implementation | Generic-operation syntax and MLIR 22 smoke validation. |
 
 The process protocol is intentionally simple and useful for local integration.
-It is not the only possible production transport. Future WIT or network
+It is not the only possible deployment transport. Future WIT or network
 transports can implement the same `PluginHost` behavior.
 
 Public packages and release artifacts are produced only by GitHub Actions after
@@ -580,7 +595,7 @@ publishing and provenance; local development commands never publish releases.
 
 ## Capabilities and limits
 
-Today Cymule provides:
+The current source candidate provides:
 
 - **Exact semantic execution:** sealed Plans, canonical identities, typed
   idempotent Commands, causal replay, fenced attempts and effects, and explicit
@@ -649,8 +664,8 @@ scripts                 complete repository verification
   Commands, scopes, effects, bindings, and replay.
 - [Architecture](docs/architecture.md) — trust boundary, compiler/runtime split,
   plugins, and durable storage interfaces.
-- [Conformance](docs/conformance.md) — implemented profiles and fault-oriented
-  test cases.
+- [Conformance](docs/conformance.md) — source-candidate profile status,
+  promotion gates, and fault-oriented test cases.
 - [Research landscape](docs/research-landscape.md) — similarities and deliberate
   differences from maintained execution systems and standards.
 - [Roadmap](docs/roadmap.md) — durable execution, agent integration, large

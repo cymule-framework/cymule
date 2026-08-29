@@ -118,7 +118,14 @@ const evolutionTargetFor = (
         process: processTarget(process.execPath, shadowRequest.driver_revision),
       }
       : null,
-    target_execution_bindings: {},
+    target_execution_bindings: migrationRequest === undefined
+      ? {}
+      : {
+          [migrationRequest.to_plan]: {
+            ...processTarget(process.execPath),
+            revision: migrationRequest.adapter_revision,
+          },
+        },
   };
 };
 
@@ -417,6 +424,218 @@ process.stdin.on("end", () => {
       (error: unknown) => error instanceof EngineError
         && error.failure.category === "transport_failure"
         && error.failure.code === "engine_start_failed",
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("TypeScript admits an exact 64 MiB Engine envelope and rejects the next UTF-8 byte", async () => {
+  const requestLimit = 64 * 1024 * 1024;
+  const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-request-limit-"));
+  const executable = join(directory, "early-failure-engine");
+  const started = join(directory, "started");
+  const failure = {
+    engine_protocol: "cymule.engine/5",
+    outcome: "failure",
+    error: {
+      category: "validation",
+      phase: "validate_request",
+      code: "synthetic_engine_rejection",
+      message: "the synthetic Engine rejected the request without reading stdin",
+      retry_disposition: "correct_and_retry",
+    },
+  };
+  writeFileSync(
+    executable,
+    `#!/bin/sh
+printf '%s' started > ${JSON.stringify(started)}
+exec 0<&-
+printf '%s' '${JSON.stringify(failure)}'
+`,
+  );
+  chmodSync(executable, 0o700);
+
+  const baseCandidate = new FlowBuilder("request-limit", {}, {})
+    .finish({ kind: "input" });
+  const utf8Prefix = "🧪";
+  const envelopeBytes = (candidate: PlanCandidate): number => Buffer.byteLength(
+    JSON.stringify({
+      engine_protocol: "cymule.engine/5",
+      request: { type: "seal", candidate },
+    }),
+    "utf8",
+  );
+  const prefixCandidate: PlanCandidate = {
+    ...baseCandidate,
+    metadata: { padding: utf8Prefix },
+  };
+  const remainingBytes = requestLimit - envelopeBytes(prefixCandidate);
+  assert.ok(remainingBytes > 0);
+  const exactPadding = `${utf8Prefix}${"x".repeat(remainingBytes)}`;
+  const exactCandidate: PlanCandidate = {
+    ...prefixCandidate,
+    metadata: { padding: exactPadding },
+  };
+  const oversizedCandidate: PlanCandidate = {
+    ...prefixCandidate,
+    metadata: { padding: `${exactPadding}x` },
+  };
+  assert.equal(envelopeBytes(exactCandidate), requestLimit);
+  assert.equal(envelopeBytes(oversizedCandidate), requestLimit + 1);
+
+  try {
+    await assert.rejects(
+      () => new CliEngine(executable).seal(exactCandidate),
+      (error: unknown) => error instanceof EngineError
+        && error.failure.category === "validation"
+        && error.failure.code === "synthetic_engine_rejection"
+        && error.failure.retry_disposition === "correct_and_retry",
+    );
+    assert.equal(existsSync(started), true, "the exact-limit request did not spawn the Engine");
+
+    rmSync(started, { force: true });
+    await assert.rejects(
+      () => new CliEngine(executable).seal(oversizedCandidate),
+      (error: unknown) => error instanceof EngineError
+        && error.failure.category === "validation"
+        && error.failure.phase === "validate_request"
+        && error.failure.code === "engine_request_too_large"
+        && error.failure.retry_disposition === "correct_and_retry",
+    );
+    assert.equal(existsSync(started), false, "the oversized request spawned the Engine");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("TypeScript rejects an early-close Engine success by request mutation authority", async () => {
+  const contentId = (digit: string) => `sha256:${digit.repeat(64)}`;
+  const requestBytes = 4 * 1024 * 1024;
+  const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-early-success-"));
+  const readExecutable = join(directory, "read-success-engine");
+  const mutationExecutable = join(directory, "mutation-success-engine");
+  const writeEarlyCloseEngine = (path: string, body: string): void => {
+    const encodedBody = Buffer.from(body, "utf8").toString("base64");
+    writeFileSync(
+      path,
+      `#!/bin/sh
+exec 0<&-
+exec ${JSON.stringify(process.execPath)} -e 'eval(Buffer.from("${encodedBody}", "base64").toString("utf8"))'
+`,
+    );
+    chmodSync(path, 0o700);
+  };
+
+  const readBase = new FlowBuilder("early-read-success", {}, {})
+    .finish({ kind: "input" });
+  const readPrefix: PlanCandidate = { ...readBase, metadata: { padding: "" } };
+  const readEnvelopeBytes = (candidate: PlanCandidate): number => Buffer.byteLength(
+    JSON.stringify({
+      engine_protocol: "cymule.engine/5",
+      request: { type: "seal", candidate },
+    }),
+    "utf8",
+  );
+  const readPaddingLength = requestBytes - readEnvelopeBytes(readPrefix);
+  assert.ok(readPaddingLength > 0);
+  const readCandidate: PlanCandidate = {
+    ...readPrefix,
+    metadata: { padding: "x".repeat(readPaddingLength) },
+  };
+  assert.equal(readEnvelopeBytes(readCandidate), requestBytes);
+  writeEarlyCloseEngine(
+    readExecutable,
+    `
+const candidate = JSON.parse(${JSON.stringify(JSON.stringify(readPrefix))});
+candidate.metadata.padding = "x".repeat(${readPaddingLength});
+const request = { type: "seal", candidate };
+process.stdout.write(JSON.stringify({
+  engine_protocol: "cymule.engine/5",
+  outcome: "success",
+  request,
+  response: {
+    type: "sealed",
+    plan: { plan_id: ${JSON.stringify(contentId("1"))}, candidate },
+  },
+}));
+`,
+  );
+
+  const cancellationId = "cancel:early-success";
+  const cancelRunId = "run:early-success";
+  const cancelPrefix = DurableControlBuilder.cancelRun(
+    cancellationId,
+    cancelRunId,
+    { padding: "" },
+  );
+  const cancelTarget = durableTargetFor(cancelPrefix);
+  const mutationEnvelopeBytes = (command: DurableCommand): number => Buffer.byteLength(
+    JSON.stringify({
+      engine_protocol: "cymule.engine/5",
+      request: { type: "execute_durable", target: cancelTarget, command },
+    }),
+    "utf8",
+  );
+  const mutationPaddingLength = requestBytes - mutationEnvelopeBytes(cancelPrefix);
+  assert.ok(mutationPaddingLength > 0);
+  const cancel = DurableControlBuilder.cancelRun(
+    cancellationId,
+    cancelRunId,
+    { padding: "x".repeat(mutationPaddingLength) },
+  );
+  assert.equal(mutationEnvelopeBytes(cancel), requestBytes);
+  writeEarlyCloseEngine(
+    mutationExecutable,
+    `
+const target = JSON.parse(${JSON.stringify(JSON.stringify(cancelTarget))});
+const command = JSON.parse(${JSON.stringify(JSON.stringify(cancelPrefix))});
+command.reason.padding = "x".repeat(${mutationPaddingLength});
+const request = { type: "execute_durable", target, command };
+process.stdout.write(JSON.stringify({
+  engine_protocol: "cymule.engine/5",
+  outcome: "success",
+  request,
+  response: {
+    type: "durable_executed",
+    response: {
+      type: "run_cancelled",
+      receipt: {
+        receipt_version: "cymule.run-cancellation-receipt/1",
+        command: {
+          cancellation_id: command.cancellation_id,
+          run_id: command.run_id,
+          reason: command.reason,
+        },
+        boundary: {
+          status: "cancelled",
+          reason: {
+            identity_version: "cymule.artifact/2",
+            artifact_id: ${JSON.stringify(contentId("2"))},
+            kind: "cymule.cancellation-reason/1",
+          },
+        },
+        receipt_id: ${JSON.stringify("3".repeat(64))},
+      },
+    },
+  },
+}));
+`,
+  );
+
+  try {
+    await assert.rejects(
+      () => new CliEngine(readExecutable).seal(readCandidate),
+      (error: unknown) => error instanceof EngineError
+        && error.failure.category === "transport_failure"
+        && error.failure.code === "engine_request_incomplete",
+    );
+    await assert.rejects(
+      () => new CliEngine(mutationExecutable).executeDurable(cancelTarget, cancel),
+      (error: unknown) => error instanceof EngineError
+        && error.failure.category === "unknown_world_outcome"
+        && error.failure.code === "engine_request_incomplete"
+        && error.failure.retry_disposition === "reconcile",
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -1710,6 +1929,8 @@ test("TypeScript live-evolution successes are recursively closed and self-consis
   const configuredStore = directoryStore("unused");
   const migrationProvider = evolutionTargetFor(commands.migrated!, configuredStore)
     .migration_adapter as EngineMigrationProviderTarget;
+  const targetExecutionBindings = evolutionTargetFor(commands.migrated!, configuredStore)
+    .target_execution_bindings;
   const shadowProvider = evolutionTargetFor(commands.shadow_recorded!, configuredStore)
     .shadow_driver as EngineShadowProviderTarget;
   for (const limit of [16 * 1024 * 1024 - 1, 16 * 1024 * 1024 + 1]) {
@@ -1789,6 +2010,7 @@ test("TypeScript live-evolution successes are recursively closed and self-consis
           evolutionId,
           migrationProvider,
           shadowProvider,
+          targetExecutionBindings,
         ).evolve(command),
         undefined,
         "cymule.engine/5",
@@ -1816,7 +2038,7 @@ test("TypeScript live-evolution successes are recursively closed and self-consis
           store: directoryStore("unused"),
           migration_adapter: migrationProvider,
           shadow_driver: null,
-          target_execution_bindings: {},
+          target_execution_bindings: targetExecutionBindings,
         },
         evolutionId,
         commands.migrated!,
@@ -3284,6 +3506,333 @@ test("TypeScript durable Clock rejects a typed result bound to another Run", asy
       && error.failure.code === "invalid_engine_response"
       && error.failure.retry_disposition === "reconcile",
   );
+});
+
+test("TypeScript DurableEngine closes custom transport validation and response-loss boundaries", async () => {
+  const contentId = (digit: string) => `sha256:${digit.repeat(64)}`;
+  const clock = sqliteClock(
+    "/tmp/cymule-custom-transport-clock",
+    "clock:custom-transport",
+    contentId("1"),
+  );
+  const calls = {
+    seal: 0,
+    observeClock: 0,
+    executeDurable: 0,
+    executeLiveEvolution: 0,
+  };
+  let durableResult: unknown = {
+    type: "run_index_page",
+    page: {
+      observed_revision: contentId("2"),
+      source_root: "3".repeat(64),
+      items: [],
+      next_cursor: null,
+    },
+  };
+  let durableRejection: Error | undefined;
+  let evolutionResult: unknown;
+  let evolutionRejection: Error | undefined;
+  const transport: EngineTransport = {
+    async seal(): Promise<never> {
+      calls.seal += 1;
+      throw new Error("unexpected custom seal call");
+    },
+    async observeClock(): Promise<never> {
+      calls.observeClock += 1;
+      throw new Error("unexpected custom Clock call");
+    },
+    async executeDurable() {
+      calls.executeDurable += 1;
+      if (durableRejection !== undefined) throw durableRejection;
+      return structuredClone(durableResult) as never;
+    },
+    async executeLiveEvolution() {
+      calls.executeLiveEvolution += 1;
+      if (evolutionRejection !== undefined) throw evolutionRejection;
+      return structuredClone(evolutionResult) as never;
+    },
+  };
+  const store = directoryStore("unused");
+  const executor = processTarget(process.execPath);
+
+  await assert.rejects(
+    () => new DurableEngine(store, executor, clock, transport)
+      .resume("", fixtureExecution()),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "validation"
+      && error.failure.phase === "verify_durable_command"
+      && error.failure.code === "durable_command_validation_failed"
+      && error.failure.retry_disposition === "correct_and_retry",
+  );
+  await assert.rejects(
+    () => new DurableEngine(store, undefined, clock, transport)
+      .resume("run:missing-executor", fixtureExecution()),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "validation"
+      && error.failure.code === "durable_request_validation_failed"
+      && error.failure.retry_disposition === "correct_and_retry",
+  );
+  await assert.rejects(
+    () => new DurableEngine(store, executor, undefined, transport)
+      .resume("run:missing-clock", fixtureExecution()),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "validation"
+      && error.failure.code === "durable_request_validation_failed"
+      && error.failure.retry_disposition === "correct_and_retry",
+  );
+  await assert.rejects(
+    () => new DurableEngine(store, executor, undefined, transport)
+      .observeClock("run:missing-clock"),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "validation"
+      && error.failure.phase === "observe_clock"
+      && error.failure.code === "missing_clock_provider"
+      && error.failure.retry_disposition === "correct_and_retry",
+  );
+  await assert.rejects(
+    () => new DurableEngine(
+      store,
+      executor,
+      { ...clock, source_generation: `sha256:${"A".repeat(64)}` },
+      transport,
+    ).observeClock("run:invalid-clock"),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "validation"
+      && error.failure.phase === "observe_clock"
+      && error.failure.code === "clock_request_validation_failed"
+      && error.failure.retry_disposition === "correct_and_retry",
+  );
+  assert.deepEqual(calls, {
+    seal: 0,
+    observeClock: 0,
+    executeDurable: 0,
+    executeLiveEvolution: 0,
+  });
+
+  const durable = new DurableEngine(
+    store,
+    executor,
+    clock,
+    transport,
+    "evolution:custom-transport",
+  );
+  await assert.rejects(
+    () => durable.runCurrent("run:forged-read", null),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "transport_failure"
+      && error.failure.code === "invalid_engine_response",
+  );
+  await assert.rejects(
+    () => durable.cancel("cancel:forged-mutation", "run:forged-mutation", null),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "unknown_world_outcome"
+      && error.failure.code === "invalid_engine_response"
+      && error.failure.retry_disposition === "reconcile",
+  );
+
+  const definition = new FlowBuilder("custom-transport-evolution", {}, {})
+    .finish({ kind: "input" }).definitions[0]!;
+  const liveCommand = LiveEvolutionControlBuilder.publishDefinition(
+    "command:custom-transport-evolution",
+    "module:custom-transport-evolution",
+    definition,
+    [],
+  );
+  evolutionResult = evolutionCommit(
+    "evolution:forged-other",
+    liveCommand,
+    {
+      result: "definition_published",
+      revision: {
+        revision_version: "cymule.subflow-revision/2",
+        revision_id: contentId("4"),
+        logical_ref: "module:custom-transport-evolution",
+        sequence: 1,
+        definition,
+        references: [],
+      },
+    },
+  );
+  await assert.rejects(
+    () => durable.evolve(liveCommand),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "unknown_world_outcome"
+      && error.failure.code === "invalid_engine_response"
+      && error.failure.retry_disposition === "reconcile",
+  );
+
+  durableRejection = new Error("custom read transport rejected");
+  await assert.rejects(
+    () => durable.runCurrent("run:rejected-read", null),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "transport_failure"
+      && error.failure.phase === "transport"
+      && error.failure.code === "engine_transport_failed"
+      && error.failure.message === "custom read transport rejected",
+  );
+  durableRejection = new Error("custom mutation transport rejected");
+  await assert.rejects(
+    () => durable.cancel("cancel:rejected-mutation", "run:rejected-mutation", null),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "unknown_world_outcome"
+      && error.failure.phase === "transport"
+      && error.failure.code === "engine_transport_failed"
+      && error.failure.retry_disposition === "reconcile",
+  );
+  durableRejection = new EngineError({
+    category: "unknown_world_outcome",
+    phase: "transport",
+    code: "forged_retry_matrix",
+    message: "the custom transport forged an unsafe retry disposition",
+    retry_disposition: "retry_same_request",
+  });
+  await assert.rejects(
+    () => durable.runCurrent("run:forged-engine-error", null),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "transport_failure"
+      && error.failure.code === "invalid_engine_response"
+      && error.failure.retry_disposition === undefined,
+  );
+  await assert.rejects(
+    () => durable.cancel(
+      "cancel:forged-engine-error",
+      "run:forged-engine-error",
+      null,
+    ),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "unknown_world_outcome"
+      && error.failure.code === "invalid_engine_response"
+      && error.failure.retry_disposition === "reconcile",
+  );
+  const validFailure = {
+    category: "validation" as const,
+    phase: "validate_request" as const,
+    code: "custom_validation",
+    message: "the custom transport returned a valid structured failure",
+    retry_disposition: "correct_and_retry" as const,
+  };
+  durableRejection = new EngineError(validFailure);
+  await assert.rejects(
+    () => durable.runCurrent("run:valid-engine-error", null),
+    (error: unknown) => {
+      if (!(error instanceof EngineError)) return false;
+      assert.deepEqual(error.failure, validFailure);
+      return true;
+    },
+  );
+  evolutionRejection = new Error("custom evolution transport rejected");
+  await assert.rejects(
+    () => durable.evolve(liveCommand),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "unknown_world_outcome"
+      && error.failure.code === "engine_transport_failed"
+      && error.failure.retry_disposition === "reconcile",
+  );
+});
+
+test("TypeScript rejects every legacy or uppercase Evolution Plan identity before transport", async () => {
+  let calls = 0;
+  const transport: EngineTransport = {
+    async seal(): Promise<never> {
+      calls += 1;
+      throw new Error("invalid Evolution command reached seal");
+    },
+    async observeClock(): Promise<never> {
+      calls += 1;
+      throw new Error("invalid Evolution command reached Clock");
+    },
+    async executeDurable(): Promise<never> {
+      calls += 1;
+      throw new Error("invalid Evolution command reached durable transport");
+    },
+    async executeLiveEvolution(): Promise<never> {
+      calls += 1;
+      throw new Error("invalid Evolution command reached live transport");
+    },
+  };
+  const durable = new DurableEngine(
+    directoryStore("unused"),
+    undefined,
+    undefined,
+    transport,
+    "evolution:plan-identity-preflight",
+  );
+  const contentId = (digit: string) => `sha256:${digit.repeat(64)}`;
+  const candidate = new FlowBuilder("evolution-plan-identity", {}, {})
+    .finish({ kind: "input" });
+  const evidence = {
+    identity_version: "cymule.artifact/2" as const,
+    artifact_id: contentId("4"),
+    kind: "cymule.evolution-evidence/1",
+  };
+  const operations = [{
+    kind: "add",
+    target: "definition:next",
+    before: null,
+    after: "5".repeat(64),
+  }];
+  const commandFor = new Map<string, (invalidPlan: string) => LiveEvolutionCommand>([
+    ["patch.from_plan", (invalidPlan) => LiveEvolutionControlBuilder.apply(
+      "command:invalid-patch-parent",
+      "template:plan-identity",
+      EvolutionControlBuilder.applyPatch("command:invalid-patch-parent:inner", {
+        from_plan: invalidPlan,
+        target: candidate,
+        operations,
+        evidence,
+      }),
+    )],
+    ["rollout.fallback_plan", (invalidPlan) => LiveEvolutionControlBuilder.apply(
+      "command:invalid-rollout-fallback",
+      "template:plan-identity",
+      EvolutionControlBuilder.setRollout("command:invalid-rollout-fallback:inner", {
+        decision_id: "decision:plan-identity",
+        fallback_plan: invalidPlan,
+        target_plan: contentId("2"),
+        mode: { mode: "active" },
+      }),
+    )],
+    ["rollout.target_plan", (invalidPlan) => LiveEvolutionControlBuilder.apply(
+      "command:invalid-rollout-target",
+      "template:plan-identity",
+      EvolutionControlBuilder.setRollout("command:invalid-rollout-target:inner", {
+        decision_id: "decision:plan-identity",
+        fallback_plan: contentId("1"),
+        target_plan: invalidPlan,
+        mode: { mode: "active" },
+      }),
+    )],
+    ["observation.plan_id", (invalidPlan) => LiveEvolutionControlBuilder.apply(
+      "command:invalid-observation-plan",
+      "template:plan-identity",
+      EvolutionControlBuilder.observe("command:invalid-observation-plan:inner", {
+        observation_id: "observation:plan-identity",
+        decision_id: "decision:plan-identity",
+        occurrence_id: "occurrence:plan-identity",
+        plan_id: invalidPlan,
+        outcome: "succeeded",
+        evidence,
+      }),
+    )],
+  ]);
+  for (const [field, build] of commandFor) {
+    for (const [variant, invalidPlan] of [
+      ["legacy", "plan:legacy"],
+      ["uppercase", `sha256:${"A".repeat(64)}`],
+    ] as const) {
+      await assert.rejects(
+        () => durable.evolve(build(invalidPlan)),
+        (error: unknown) => error instanceof EngineError
+          && error.failure.category === "validation"
+          && error.failure.phase === "execute_live_evolution"
+          && error.failure.code === "evolution_request_validation_failed"
+          && error.failure.retry_disposition === "correct_and_retry",
+        `${field} accepted a ${variant} Plan identity`,
+      );
+    }
+  }
+  assert.equal(calls, 0, "invalid Evolution Plan identities reached the custom transport");
 });
 
 test("TypeScript rejects malformed Resource integrity relationships", async () => {

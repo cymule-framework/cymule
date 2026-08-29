@@ -16,13 +16,16 @@
   private occurrence, and fails before growing its name collection past either
   ceiling. `/2` fixes root/directories at `0700`, the sealed executable at
   `0500`, and working files at `0600` or `0700`.
-- Resolve the configured working-directory root once, open every resolved root
-  component without following a symlink, and traverse descendants exclusively
-  through retained directory descriptors plus `openat(O_NOFOLLOW)`. Metadata
-  and bytes must come from the same opened descriptor; never inspect a path and
-  reopen it later. Keep traversal frames on an explicit heap stack: directory
-  depth is bounded by the closure byte and entry ceilings, never by recursive
-  growth of the executor thread's call stack.
+- Resolve the configured working-directory root once and retain that exact root
+  descriptor. Capture frames keep only a heap-owned relative component path and
+  sorted names. Reopen each parent from the retained root one component at a
+  time with `openat(O_NOFOLLOW)`, authenticate every reopened component by its
+  retained device/inode identity, and hold only root/current/child descriptors
+  regardless of depth. Metadata and bytes come from the same opened entry
+  descriptor; never reopen an entry through a complete pathname. `EMFILE` and
+  `ENFILE` are retryable substrate exhaustion, not plugin defects. Directory
+  depth is bounded by closure byte and entry ceilings, never by recursive stack
+  growth or a raised descriptor limit.
 - A missing configured working-directory tree selects the fresh private
   occurrence root. Never inherit the Engine process's ambient current
   directory.

@@ -1,12 +1,13 @@
 # M4 Live Evolution Profile
 
-Implementation status: implemented in source for the provider-neutral,
-single-domain profile.
-
-Conformance status: focused reducer and process-wire suites are required for
-every change. A complete profile claim additionally requires the final frozen
-tree's Durable, Engine, schema, SDK, documentation, and branch-wide gates; an
-earlier partial run is not current evidence.
+Status: partial terminal candidate; source-implemented for the provider-neutral,
+single-domain profile, validation pending. Multiple focused reducer,
+process-wire, Durable, and cross-language gates have passed, but review is still
+changing the tree. Promotion requires the final frozen tree's Durable, Engine,
+schema, SDK, documentation, process-death, and branch-wide gates; an earlier
+partial run is not current evidence. No release tag, package publication,
+operator migration, or deployment exists for this candidate. See the
+[conformance status ladder](../conformance.md#status-ladder).
 
 ## Terminal authority
 
@@ -24,7 +25,7 @@ surface is:
 - exact command-receipt reads with `EvolutionReceiptQuery`; and
 - `commit(EvolutionPersistenceCommand) -> EvolutionCommit`.
 
-Production M4 code exposes no raw `DurableTransaction`, generic delta,
+Current source M4 code exposes no raw `DurableTransaction`, generic delta,
 untyped history append, StateRoot mutation, caller-authored source view, or
 caller-authored postcondition. Pre-normalized persistence generations have no
 reader, writer, or compatibility bridge.
@@ -74,6 +75,12 @@ preconditions only. They never carry a safe point, Continuation, provider
 product, read set, StateRoot, manifest, or CAS token. Durable derives the typed
 source view and Run authority from one pinned root; fixed providers may produce
 only non-serializable authority after deterministic preparation.
+
+Every field that names an admitted Plan is an exact lowercase SHA-256 content
+ID, including patch parents, rollout fallback and target Plans, observations,
+migration descriptors and requests, edges, pins, Continuations, and publication
+updates. The schema and all four SDK validators reject non-empty legacy Plan
+labels before provider or Store I/O.
 
 The all-ever command alias is checked immediately after strict command
 validation and before current reads, Run-source derivation, provider Describe,
@@ -261,4 +268,5 @@ Focused conformance covers:
 Concrete metrics backends, traffic routers, deployments, state stores,
 schema-specific transformation code, shadow sandboxes, and Agent/Session
 controllers remain plugins or operator policy. Distributed ownership and
-cross-domain federation are outside the implemented single-domain M4 profile.
+cross-domain federation are outside the source-implemented single-domain M4
+terminal candidate.

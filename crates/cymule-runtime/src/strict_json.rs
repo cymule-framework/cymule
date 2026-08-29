@@ -30,20 +30,18 @@ pub fn decode_strict_json_value(input: &[u8]) -> Result<Value, String> {
     cymule_core::decode_json(input).map_err(|error| error.to_string())
 }
 
-/// Reject every explicit object member that typed serialization omits.
+/// Require one lossless typed JSON round trip.
 ///
-/// Serde's optional/defaulted fields can deserialize absent, `null`, or empty
-/// values into the same typed value and then omit that value during
-/// serialization. Frozen Engine schemas assign one legal member-presence wire,
-/// so typed admission must reject every erased member. Other representational
-/// differences, including normalized mathematical integer tokens, remain with
-/// the owning typed and schema contracts.
+/// The raw value must already have passed [`decode_strict_json_value`], so safe
+/// mathematical integers have one normalized token before this comparison.
+/// Typed decoding may not erase or synthesize object members, collapse or
+/// reorder array elements, or change any scalar. Frozen Engine schemas assign
+/// one legal structure, including collection cardinality and order.
 ///
 /// # Errors
 ///
-/// Returns the exact JSON pointer when typed normalization erased an explicit
-/// member that the wire contract distinguishes from omission.
-pub fn validate_json_member_presence(raw: &Value, normalized: &Value) -> Result<(), String> {
+/// Returns the exact JSON pointer of the first structural difference.
+pub fn validate_json_typed_roundtrip(raw: &Value, normalized: &Value) -> Result<(), String> {
     fn pointer_member(member: &str) -> String {
         member.replace('~', "~0").replace('/', "~1")
     }
@@ -64,14 +62,32 @@ pub fn validate_json_member_presence(raw: &Value, normalized: &Value) -> Result<
                         }
                     }
                 }
+                for member in normalized.keys() {
+                    if !raw.contains_key(member) {
+                        return Err(format!(
+                            "typed normalization synthesized object member at {path}/{}",
+                            pointer_member(member)
+                        ));
+                    }
+                }
             }
             (Value::Array(raw), Value::Array(normalized)) => {
+                if raw.len() != normalized.len() {
+                    return Err(format!(
+                        "typed normalization changed array length at {path}: {} became {}",
+                        raw.len(),
+                        normalized.len()
+                    ));
+                }
                 for (index, (raw_value, normalized_value)) in raw.iter().zip(normalized).enumerate()
                 {
                     visit(raw_value, normalized_value, &format!("{path}/{index}"))?;
                 }
             }
-            _ => {}
+            _ if raw == normalized => {}
+            _ => {
+                return Err(format!("typed normalization changed JSON value at {path}"));
+            }
         }
         Ok(())
     }
@@ -114,13 +130,13 @@ mod tests {
     }
 
     #[test]
-    fn member_presence_rejects_every_erased_explicit_member_recursively() {
+    fn typed_roundtrip_rejects_every_structural_change_recursively() {
         let raw = serde_json::json!({
             "outer": [{
                 "erased": null,
                 "retained": null,
                 "non_null_difference": "raw",
-                "number": 1.0,
+                "number": 1,
             }],
         });
         let normalized = serde_json::json!({
@@ -129,7 +145,7 @@ mod tests {
                 "number": 1,
             }],
         });
-        let error = validate_json_member_presence(&raw, &normalized)
+        let error = validate_json_typed_roundtrip(&raw, &normalized)
             .expect_err("an explicit nested null may not disappear");
         assert!(error.ends_with("/outer/0/erased"));
 
@@ -137,10 +153,10 @@ mod tests {
             "outer": [{
                 "retained": null,
                 "non_null_difference": "raw",
-                "number": 1.0,
+                "number": 1,
             }],
         });
-        let error = validate_json_member_presence(&retained_only, &normalized)
+        let error = validate_json_typed_roundtrip(&retained_only, &normalized)
             .expect_err("an explicitly present defaulted member may not disappear");
         assert!(error.ends_with("/outer/0/non_null_difference"));
 
@@ -150,15 +166,42 @@ mod tests {
             serde_json::json!({"value": ""}),
             serde_json::json!({"value": false}),
         ] {
-            let error = validate_json_member_presence(&erased, &serde_json::json!({}))
+            let error = validate_json_typed_roundtrip(&erased, &serde_json::json!({}))
                 .expect_err("every explicitly present omitted default is lossy");
             assert!(error.ends_with("/value"));
         }
 
-        validate_json_member_presence(
-            &serde_json::json!({"retained": null, "number": 1.0}),
+        validate_json_typed_roundtrip(
+            &serde_json::json!({"retained": null, "number": 1}),
             &serde_json::json!({"retained": null, "number": 1}),
         )
         .expect("required nullable members and normalized numbers remain present");
+
+        for (raw, normalized, expected) in [
+            (
+                serde_json::json!({"items": ["one", "one"]}),
+                serde_json::json!({"items": ["one"]}),
+                "/items",
+            ),
+            (
+                serde_json::json!({"items": ["one", "two"]}),
+                serde_json::json!({"items": ["two", "one"]}),
+                "/items/0",
+            ),
+            (
+                serde_json::json!({"value": "raw"}),
+                serde_json::json!({"value": "normalized"}),
+                "/value",
+            ),
+            (
+                serde_json::json!({}),
+                serde_json::json!({"defaulted": false}),
+                "/defaulted",
+            ),
+        ] {
+            let error = validate_json_typed_roundtrip(&raw, &normalized)
+                .expect_err("typed round trips may not change JSON structure or scalars");
+            assert!(error.contains(expected), "unexpected diagnostic: {error}");
+        }
     }
 }

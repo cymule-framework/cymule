@@ -124,7 +124,7 @@
       "properties": {
         "adapter_id": { "$ref": "#/$defs/id" },
         "adapter_revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-        "from_plan": { "$ref": "#/$defs/id" },
+        "from_plan": { "$ref": "#/$defs/contentId" },
         "to_plan": { "$ref": "#/$defs/contentId" },
         "plan_edge_id": { "$ref": "#/$defs/id" },
         "compatibility_id": { "$ref": "#/$defs/id" },
@@ -200,7 +200,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["from_plan", "target", "operations", "evidence"],
       "properties": {
-        "from_plan": { "$ref": "#/$defs/id" },
+        "from_plan": { "$ref": "#/$defs/contentId" },
         "target": { "$ref": "plan-candidate.schema.json" },
         "operations": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/patchOperation" } },
         "evidence": { "$ref": "#/$defs/artifact" }
@@ -219,8 +219,8 @@
       "required": ["decision_id", "fallback_plan", "target_plan", "mode"],
       "properties": {
         "decision_id": { "$ref": "#/$defs/id" },
-        "fallback_plan": { "$ref": "#/$defs/id" },
-        "target_plan": { "$ref": "#/$defs/id" },
+        "fallback_plan": { "$ref": "#/$defs/contentId" },
+        "target_plan": { "$ref": "#/$defs/contentId" },
         "mode": { "$ref": "#/$defs/mode" }
       }
     },

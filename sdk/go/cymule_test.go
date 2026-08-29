@@ -165,6 +165,186 @@ func fixedPlan() SealedPlan {
 	}
 }
 
+func TestEngineRequestLimitIsPreSpawnAndPreservesEarlyFailure(t *testing.T) {
+	directory := t.TempDir()
+	marker := filepath.Join(directory, "spawned")
+	executable := filepath.Join(directory, "engine")
+	failureEnvelope := `{"engine_protocol":"cymule.engine/5","outcome":"failure","error":{"category":"validation","phase":"validate_request","code":"fixture_rejected","message":"fixture rejected the request","retry_disposition":"correct_and_retry"}}`
+	script := fmt.Sprintf("#!/bin/sh\n: > %q\nprintf '%%s' %q\n", marker, failureEnvelope)
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	candidate := fixedCandidate()
+	candidate.Metadata["padding"] = ""
+	request := map[string]any{"type": "seal", "candidate": candidate}
+	requestBytes, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelopeBytes, err := json.Marshal(struct {
+		EngineProtocol string          `json:"engine_protocol"`
+		Request        json.RawMessage `json:"request"`
+	}{EngineProtocolVersion, requestBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(envelopeBytes) >= maxEngineRequestBytes {
+		t.Fatalf("test envelope overhead unexpectedly reached the bound: %d", len(envelopeBytes))
+	}
+	candidate.Metadata["padding"] = strings.Repeat("x", maxEngineRequestBytes-len(envelopeBytes))
+
+	engine := CliEngine{Executable: executable, Timeout: 5 * time.Second}
+	_, err = engine.Seal(candidate)
+	failure, ok := errors.AsType[EngineFailure](err)
+	if !ok || failure.Code != "fixture_rejected" || failure.Category != "validation" ||
+		failure.RetryDisposition != "correct_and_retry" {
+		t.Fatalf("exact-bound early failure was not preserved: %#v, %v", failure, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("exact-bound request did not start the Engine: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	candidate.Metadata["padding"] += "x"
+	_, err = engine.Seal(candidate)
+	failure, ok = errors.AsType[EngineFailure](err)
+	if !ok || failure.Category != "validation" || failure.Code != "engine_request_too_large" ||
+		failure.RetryDisposition != "correct_and_retry" {
+		t.Fatalf("max-plus-one request was not a local validation failure: %#v, %v", failure, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("max-plus-one request started the Engine: %v", err)
+	}
+
+	writeSuccessEngine := func(name string, output []byte) string {
+		t.Helper()
+		path := filepath.Join(directory, name)
+		body := fmt.Sprintf("#!/bin/sh\nprintf '%%s' %q\n", string(output))
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	readCandidate := fixedCandidate()
+	readCandidate.Metadata["padding"] = strings.Repeat("x", 2*1024*1024)
+	readRequest := map[string]any{"type": "seal", "candidate": readCandidate}
+	readOutput, err := json.Marshal(map[string]any{
+		"engine_protocol": EngineProtocolVersion,
+		"outcome":         "success",
+		"request":         readRequest,
+		"response": map[string]any{
+			"type": "sealed",
+			"plan": SealedPlan{PlanID: fixedContentID("a"), Candidate: readCandidate},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(readOutput) >= maxEngineOutputBytes {
+		t.Fatalf("forged read success exceeds the response fixture bound: %d", len(readOutput))
+	}
+	readEngine := CliEngine{Executable: writeSuccessEngine("forged-read", readOutput), Timeout: 5 * time.Second}
+	_, err = readEngine.Seal(readCandidate)
+	failure, ok = errors.AsType[EngineFailure](err)
+	if !ok || failure.Category != "transport_failure" || failure.Code != "engine_request_incomplete" {
+		t.Fatalf("early-close read success was not rejected: %#v, %v", failure, err)
+	}
+
+	runID := "run:forged-early-success"
+	runInput := map[string]any{"padding": strings.Repeat("x", 2*1024*1024)}
+	runPlan := fixedPlan()
+	runPlugin := testProcessPlugin(t, "/bin/true")
+	runRequest := map[string]any{
+		"type": "run", "plan": runPlan, "input": runInput,
+		"plugin": runPlugin, "run_id": runID,
+	}
+	runOutput, err := json.Marshal(map[string]any{
+		"engine_protocol": EngineProtocolVersion,
+		"outcome":         "success",
+		"request":         runRequest,
+		"response": map[string]any{
+			"type": "execution_boundary",
+			"execution": map[string]any{
+				"status": "completed",
+				"result": map[string]any{
+					"run_id": runID, "plan_id": runPlan.PlanID, "value": nil,
+					"projection_digest":  strings.Repeat("a", 64),
+					"precondition_token": "pre:1:sha256:" + strings.Repeat("b", 64),
+					"effects":            []string{},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runOutput) >= maxEngineOutputBytes {
+		t.Fatalf("forged mutation success exceeds the response fixture bound: %d", len(runOutput))
+	}
+	runEngine := CliEngine{Executable: writeSuccessEngine("forged-mutation", runOutput), Timeout: 5 * time.Second}
+	_, err = runEngine.Run(runPlan, runInput, runPlugin, runID)
+	failure, ok = errors.AsType[EngineFailure](err)
+	if !ok || failure.Category != "unknown_world_outcome" ||
+		failure.Code != "engine_request_incomplete" || failure.RetryDisposition != "reconcile" {
+		t.Fatalf("early-close mutation success was not reconciled: %#v, %v", failure, err)
+	}
+}
+
+func TestEvolutionPlanFieldsRejectLegacyAndNonLowercaseIdentities(t *testing.T) {
+	after := strings.Repeat("a", 64)
+	evidence := ArtifactRef{
+		IdentityVersion: "cymule.artifact/2",
+		ArtifactID:      fixedContentID("e"),
+		Kind:            "cymule.evolution-evidence/1",
+	}
+	patch := func() EvolutionCommand {
+		return ApplyPlanPatch("command:patch", PlanPatch{
+			FromPlan: fixedContentID("1"), Target: fixedCandidate(),
+			Operations: []PatchOperation{{Kind: "add", Target: "definition:added", After: &after}},
+			Evidence:   evidence,
+		})
+	}
+	decision := func() EvolutionCommand {
+		return SetEvolutionRollout("command:rollout", RolloutDecision{
+			DecisionID: "decision:rollout", FallbackPlan: fixedContentID("2"),
+			TargetPlan: fixedContentID("3"), Mode: RolloutMode{Mode: "active"},
+		})
+	}
+	observation := func() EvolutionCommand {
+		return ObserveEvolutionRollout("command:observe", RolloutObservation{
+			ObservationID: "observation:terminal", DecisionID: "decision:rollout",
+			OccurrenceID: "occurrence:terminal", PlanID: fixedContentID("3"),
+			Outcome: "succeeded", Evidence: evidence,
+		})
+	}
+	cases := []struct {
+		name   string
+		build  func() EvolutionCommand
+		mutate func(*EvolutionCommand, string)
+	}{
+		{"patch.from_plan", patch, func(command *EvolutionCommand, invalid string) { command.Patch.FromPlan = invalid }},
+		{"decision.fallback_plan", decision, func(command *EvolutionCommand, invalid string) { command.Decision.FallbackPlan = invalid }},
+		{"decision.target_plan", decision, func(command *EvolutionCommand, invalid string) { command.Decision.TargetPlan = invalid }},
+		{"observation.plan_id", observation, func(command *EvolutionCommand, invalid string) { command.Observation.PlanID = invalid }},
+	}
+	for _, invalid := range []string{"plan:legacy", "sha256:" + strings.Repeat("A", 64)} {
+		for _, test := range cases {
+			command := test.build()
+			if err := validateEvolutionCommandSemantics(command); err != nil {
+				t.Fatalf("valid %s command was rejected before mutation: %v", test.name, err)
+			}
+			test.mutate(&command, invalid)
+			if err := validateEvolutionCommandSemantics(command); err == nil {
+				t.Fatalf("%s accepted invalid Plan identity %q", test.name, invalid)
+			}
+		}
+	}
+}
+
 func testProcessConfig(t *testing.T, executable string) EngineProcessConfig {
 	t.Helper()
 	absolute, err := filepath.Abs(executable)
@@ -224,6 +404,9 @@ func testEvolutionTargetForCommand(t *testing.T, command LiveEvolutionCommand) E
 				AdapterID: request.AdapterID, AdapterRevision: request.AdapterRevision,
 				Process: testPinnedProcessPlugin(t, "/bin/true", request.AdapterRevision),
 			}
+			execution := testProcessPlugin(t, "/bin/true")
+			execution.Revision = request.AdapterRevision
+			target.TargetExecutionBindings[request.ToPlan] = execution
 		case "shadow":
 			request := command.Command.Shadow
 			if request == nil {
@@ -2525,6 +2708,9 @@ func TestDurableEngineSelectsOnlyTheEvolutionProviderRequiredByOperation(t *test
 			client := DurableEngine{
 				Store:            DirectoryStore("unused"),
 				MigrationAdapter: &migrationProvider, ShadowDriver: &shadowProvider,
+				TargetExecutionBindings: map[string]EnginePluginTarget{
+					targetPlan: targetExecutor,
+				},
 				Transport: engineWithSuccess(t, liveEvolutionExecuted(evolutionID, testCase.command, testCase.outcome)),
 			}
 			if _, err := client.Evolve(testCase.command); err != nil {
@@ -2539,7 +2725,8 @@ func TestDurableEngineSelectsOnlyTheEvolutionProviderRequiredByOperation(t *test
 		t.Fatal(err)
 	}
 	_, err := (DurableEngine{
-		Store: DirectoryStore("unused"), Transport: CliEngine{Executable: executable},
+		Store: DirectoryStore("unused"), MigrationAdapter: &migrationProvider,
+		Transport: CliEngine{Executable: executable},
 	}).Evolve(migration)
 	requireFailure(t, err, "validation", "invalid_engine_request", "correct_and_retry")
 	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {

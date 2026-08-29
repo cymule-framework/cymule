@@ -19,6 +19,89 @@ fn spawn_rpc() -> std::process::Child {
         .expect("real Cymule RPC process starts")
 }
 
+fn assert_blocked_rpc_output_is_interrupted(signal: nix::sys::signal::Signal) {
+    let mut child = spawn_rpc();
+    let large_value = "x".repeat(900_000);
+    let request = serde_json::to_vec(&serde_json::json!({
+        "engine_protocol": "cymule.engine/5",
+        "request": {
+            "type": "seal_resource",
+            "candidate": {
+                "resource_version": "cymule.resource/3",
+                "shape": "inline",
+                "media_type": "application/json",
+                "inline": {
+                    "encoding": "json",
+                    "value": large_value
+                },
+                "integrity": { "kind": "inline" }
+            }
+        }
+    }))
+    .expect("large legal Engine request serializes");
+    child
+        .stdin
+        .take()
+        .expect("child stdin is piped")
+        .write_all(&request)
+        .expect("large legal Engine request writes");
+
+    {
+        use std::os::fd::AsFd;
+
+        let stdout = child.stdout.as_ref().expect("child stdout is piped");
+        let mut readiness = [nix::poll::PollFd::new(
+            stdout.as_fd(),
+            nix::poll::PollFlags::POLLIN,
+        )];
+        assert!(
+            nix::poll::poll(&mut readiness, 5_000_u16).expect("stdout readiness polls") > 0,
+            "large response begins writing before cancellation"
+        );
+    }
+    let child_pid = i32::try_from(child.id()).expect("child PID fits the platform PID domain");
+    let child_pid = nix::unistd::Pid::from_raw(child_pid);
+    nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGSTOP)
+        .expect("SIGSTOP freezes the child after response output begins");
+    assert!(
+        matches!(
+            nix::sys::wait::waitpid(child_pid, Some(nix::sys::wait::WaitPidFlag::WUNTRACED))
+                .expect("stopped child status reads"),
+            nix::sys::wait::WaitStatus::Stopped(_, nix::sys::signal::Signal::SIGSTOP)
+        ),
+        "large-response child reaches a real stopped output state"
+    );
+    nix::sys::signal::kill(child_pid, signal).expect("signal reaches the output-blocked RPC child");
+    nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGCONT)
+        .expect("SIGCONT releases the signal-pending RPC child");
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("child status reads") {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "RPC child ignored {signal:?} while stdout remained blocked"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("child stderr is piped")
+        .read_to_string(&mut stderr)
+        .expect("transport diagnostic reads");
+    assert!(
+        !status.success(),
+        "failure to carry the response is a process transport failure: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("Engine response output was cancelled"),
+        "unexpected output cancellation diagnostic: {stderr:?}"
+    );
+}
+
 fn run_direct(arguments: &[&str], input: &[u8]) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_cymule"))
         .args(arguments)
@@ -34,6 +117,17 @@ fn run_direct(arguments: &[&str], input: &[u8]) -> std::process::Output {
         .write_all(input)
         .expect("direct command input writes");
     child.wait_with_output().expect("direct command exits")
+}
+
+fn run_rpc(input: &[u8]) -> std::process::Output {
+    let mut child = spawn_rpc();
+    child
+        .stdin
+        .take()
+        .expect("child stdin is piped")
+        .write_all(input)
+        .expect("RPC input writes");
+    child.wait_with_output().expect("RPC child exits")
 }
 
 #[test]
@@ -91,6 +185,47 @@ fn partial_open_stdin_is_interrupted_by_sigint() {
     assert_eq!(envelope["error"]["category"], "cancelled");
     assert_eq!(envelope["error"]["code"], "engine_read_cancelled");
     assert_eq!(envelope["error"]["retry_disposition"], "never");
+}
+
+#[test]
+fn blocked_rpc_stdout_is_interrupted_by_sigterm_and_sigint() {
+    for signal in [
+        nix::sys::signal::Signal::SIGTERM,
+        nix::sys::signal::Signal::SIGINT,
+    ] {
+        assert_blocked_rpc_output_is_interrupted(signal);
+    }
+}
+
+#[test]
+fn rpc_rejects_typed_decoding_that_collapses_array_elements() {
+    let mut activation: Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/wait-activation.json"))
+            .expect("shared wait activation fixture decodes");
+    let repeated = activation["wait_ids"][0].clone();
+    activation["wait_ids"]
+        .as_array_mut()
+        .expect("wait IDs are an array")
+        .push(repeated);
+    let request = serde_json::to_vec(&serde_json::json!({
+        "engine_protocol": "cymule.engine/5",
+        "request": {
+            "type": "verify_wait_activation",
+            "activation": activation
+        }
+    }))
+    .expect("duplicate wait request serializes");
+    let output = run_rpc(&request);
+    assert!(
+        output.status.success(),
+        "semantic rejection remains a valid Engine envelope: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("response is JSON");
+    assert_eq!(envelope["outcome"], "failure");
+    assert_eq!(envelope["error"]["category"], "validation");
+    assert_eq!(envelope["error"]["code"], "invalid_engine_request");
+    assert_eq!(envelope["error"]["retry_disposition"], "correct_and_retry");
 }
 
 #[test]

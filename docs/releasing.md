@@ -408,7 +408,15 @@ the current controller is bound outside those stable bytes by the finalization
 stage, Artifact Attestation, and same-run control-plane receipt. Publication
 evidence never substitutes one authority for another.
 
-The protected attestation job has `contents: read`, uses a full-history
+Before any terminal BOM attestation is issued, a protected `contents: read`
+pre-attestation job mints a repository-scoped App token with only Administration
+read and Actions read, rebinds current main plus both raw tag objects, and runs
+the complete live settings verifier. It emits no receipt or cross-job artifact.
+A failed immutable-Release, ruleset, environment, Actions-default, or
+default-branch gate therefore prevents `actions/attest` from creating authority.
+
+The protected attestation job depends on that successful live gate, has
+`contents: read`, uses a full-history
 `release-authority` checkout, rechecks that controller
 SHA is still public `main`, re-reads the raw remote tag ref against
 `release_tag_sha` and its peeled commit against `release_sha`, and revalidates
@@ -422,7 +430,9 @@ workflow artifact.
 
 After attestation, a separately protected `contents: read` control-plane job
 mints one repository-scoped installation token with only Administration read
-and Actions read. It reads
+and Actions read and repeats the complete live gate. This second observation is
+not a substitute for the pre-attestation gate; it exists to give the writer one
+fresh bounded receipt after the attestation work has completed. It reads
 immutable-Release owner enforcement, all four exact release/receipt tag
 rulesets, the default
 Actions permission ceiling, the default-branch rule authority, and all three

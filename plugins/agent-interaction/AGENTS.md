@@ -199,7 +199,11 @@
   before and after every Session/Tool, host-occurrence, and staged-stream CAS.
   Recovery first replays the exact recorded command receipt, then uses the
   current occurrence recovery API; it must never redispatch a retained provider
-  result. Every case checkpoints WAL and repeats SQLite integrity checks.
+  result. Its Session-Close matrix separately retains Pending and InProgress
+  Tools, kills immediately before and after the one Close CAS, and requires the
+  same recorded command to converge to the exact no-death Closed Session and
+  complete Cancelled Tool set without another replay write. Every case
+  checkpoints WAL and repeats SQLite integrity checks.
 - Use targeted `rustfmt` for owned Rust files. Do not run workspace-wide
   formatting in a shared worktree.
 - Run profile-protocol all-target checks and lib tests, then the complete

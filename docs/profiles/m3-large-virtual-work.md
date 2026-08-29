@@ -1,8 +1,12 @@
 # M3 Large Virtual Work Profile
 
-Status: partial terminal candidate. The normalized reducers and bounded provider
-contracts are implemented; complete public Durable integration and the final
-fault, packaging, schema and cross-language gates are not yet closed.
+Status: partial terminal candidate; source-implemented, validation pending. The
+normalized reducers, bounded provider contracts, and public Durable integration
+are integrated and have passed multiple focused gates. Review is still changing
+the tree, so the final frozen-tree fault, schema, cross-language, and complete
+repository gates have not passed. No tag, package publication, operator
+migration, or deployment exists for this candidate. Promotion follows the
+[conformance status ladder](../conformance.md#status-ladder).
 
 ## Authority
 
@@ -125,7 +129,8 @@ the exact M1 roots and Resource retention authority.
 
 ## Verification boundary
 
-Before marking the complete profile implemented, the public Durable path must
+Before promoting this partial terminal candidate to a validated source
+candidate, the public Durable path must
 pass materialization, fairness, empty claim, lease renewal, recovery, late
 output, park/wake, migration, archive, retirement and exact replay tests.
 Fault sweeps must inject failure before and after the relevant CAS/provider

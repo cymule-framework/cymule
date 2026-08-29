@@ -51,6 +51,13 @@
   absence boolean, or removed-byte claim. Removal is idempotent and returns
   success only after synced exact-family absence readback; lifecycle admission
   and the terminal receipt remain M1-owned.
+  The physical family's content digest, not the initiating target's optional
+  manifest descriptor, owns removal of the payload, manifest-index directory,
+  and manifest-index catalog record. A semantic object-shaped target sharing a
+  family with a manifest publication must leave no permanent manifest metadata.
+  Payload readback verifies the closed physical family encoding: either the raw
+  content SHA-256 or a streamed canonical manifest whose descriptor ID equals
+  that same family digest; target shape is not physical deletion authority.
   An already absent object still requires syncing its owning directory before
   acknowledging deletion, because an earlier unlink may have lost its sync.
   Publishing and deletion take the same non-blocking cross-process claim keyed
@@ -118,6 +125,9 @@
   check-then-open traversal. Validate root and binding namespace inventories as
   streams; a malformed high-cardinality root must not first materialize every
   entry name.
+  Generation `/1` has no compatibility reader or in-place migration. Internal
+  test roots must follow the registered drain/reset/reseed runbook before `/2`
+  admission; never reinterpret or copy `/1` physical entries into `/2`.
 - Ordinary-file opens are non-blocking and no-follow, and verify the opened
   descriptor before reading, truncating or writing. A FIFO or device in an
   owned namespace must fail as an invalid entry, not wait for a peer.

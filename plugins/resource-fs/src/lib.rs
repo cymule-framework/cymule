@@ -2614,7 +2614,7 @@ impl ResourceDeleter for FsResourceStore {
             .expect("verified deletion target has a SHA-256 digest");
         let mut retained = open_regular_at_optional(&self.directories.objects, name)?;
         if let Some(file) = &mut retained {
-            verify_deletion_target_file(file, target)?;
+            verify_deletion_family_file(file, target)?;
         }
         self.persist_deletion_tombstone(&mut retention_claim)?;
         #[cfg(test)]
@@ -2628,21 +2628,21 @@ impl ResourceDeleter for FsResourceStore {
             remove_file_at(&self.directories.objects, name)?;
         }
         self.directories.objects.sync_all().map_err(substrate)?;
-        let mut manifest_absent = true;
-        if let Some(descriptor) = &target.manifest {
-            let index_name = Self::manifest_index_name(descriptor)?;
-            remove_manifest_index_directory(&self.directories.manifest_indexes, &index_name)?;
-            self.directories
-                .manifest_indexes
-                .sync_all()
-                .map_err(substrate)?;
-            let catalog_name = Self::catalog_name(MANIFEST_INDEX_VERSION, &descriptor.digest);
-            remove_file_at(&self.directories.catalog, &catalog_name)?;
-            self.directories.catalog.sync_all().map_err(substrate)?;
-            manifest_absent = !entry_exists(&self.directories.manifest_indexes, &index_name)?
-                && !entry_exists(&self.directories.catalog, &catalog_name)?;
-        }
-        if entry_exists(&self.directories.objects, name)? || !manifest_absent {
+        remove_manifest_index_directory(&self.directories.manifest_indexes, name)?;
+        self.directories
+            .manifest_indexes
+            .sync_all()
+            .map_err(substrate)?;
+        let catalog_name = Self::catalog_name(
+            MANIFEST_INDEX_VERSION,
+            &target.subject.family.content_digest,
+        );
+        remove_file_at(&self.directories.catalog, &catalog_name)?;
+        self.directories.catalog.sync_all().map_err(substrate)?;
+        if entry_exists(&self.directories.objects, name)?
+            || entry_exists(&self.directories.manifest_indexes, name)?
+            || entry_exists(&self.directories.catalog, &catalog_name)?
+        {
             return Err(integrity(
                 "filesystem_cleanup_invalid",
                 "filesystem deletion target remains present after provider readback".to_owned(),
@@ -3674,41 +3674,49 @@ fn verify_resource_file(file: &mut File, resource: &ResourceHandle) -> ResourceR
     Ok(())
 }
 
-fn verify_deletion_target_file(
+fn verify_deletion_family_file(
     file: &mut File,
     target: &ResourceDeletionTarget,
 ) -> ResourceResult<()> {
     target.verify()?;
-    let Some(expected_manifest) = &target.manifest else {
-        return verify_content_file(
-            file,
-            &target.subject.family.content_digest,
-            target.content_size,
-        );
-    };
     if file.metadata().map_err(substrate)?.len() != target.content_size {
         return Err(integrity(
             "filesystem_cleanup_invalid",
-            "filesystem deletion manifest size changed".to_owned(),
+            "filesystem deletion family size changed".to_owned(),
         ));
     }
     file.seek(SeekFrom::Start(0)).map_err(substrate)?;
-    let mut verifier = ResourceManifestStreamVerifier::new();
+    let mut content_hasher = Sha256::new();
+    let mut manifest_verifier = Some(ResourceManifestStreamVerifier::new());
     let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let count = file.read(&mut buffer).map_err(substrate)?;
         if count == 0 {
             break;
         }
-        verifier.push(&buffer[..count])?;
+        content_hasher.update(&buffer[..count]);
+        if let Some(verifier) = &mut manifest_verifier
+            && verifier.push(&buffer[..count]).is_err()
+        {
+            manifest_verifier = None;
+        }
     }
-    if verifier.finish()? != *expected_manifest {
-        return Err(integrity(
-            "filesystem_cleanup_invalid",
-            "filesystem deletion manifest bytes changed".to_owned(),
-        ));
+    let expected = &target.subject.family.content_digest;
+    let content_digest = format!("sha256:{}", hex_digest(&content_hasher.finalize()));
+    if content_digest.as_str() == expected.as_str() {
+        return Ok(());
     }
-    Ok(())
+    if let Some(verifier) = manifest_verifier
+        && let Ok(descriptor) = verifier.finish()
+        && descriptor.digest == *expected
+        && descriptor.size == target.content_size
+    {
+        return Ok(());
+    }
+    Err(integrity(
+        "filesystem_cleanup_invalid",
+        "filesystem deletion payload matches neither physical family encoding".to_owned(),
+    ))
 }
 
 fn core_error(error: impl std::fmt::Display) -> ResourceError {
@@ -3931,6 +3939,148 @@ mod tests {
             reopened.stat(&publication.resource, &publication.locators),
             Err(ResourceError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn physical_family_deletion_removes_manifest_metadata_without_a_manifest_target() {
+        let directory = tempdir().expect("temporary directory");
+        let root = directory.path().join("store");
+        let source = directory.path().join("source");
+        fs::create_dir(&source).expect("source directory creates");
+        fs::write(source.join("entry.txt"), b"entry").expect("source entry writes");
+        let binding = "fs:cross-shape-deletion";
+        let mut store = FsResourceStore::open(&root, binding).expect("store opens");
+        let manifest_publication = store
+            .import_directory(&source, "import:cross-shape-deletion")
+            .expect("directory publishes");
+        let descriptor = manifest_publication
+            .resource
+            .manifest
+            .as_ref()
+            .expect("directory publication retains a manifest descriptor");
+        let digest = descriptor.digest.clone();
+        let object_resource = ResourceCandidate {
+            resource_version: cymule_resource::RESOURCE_VERSION.to_owned(),
+            shape: ResourceShape::Object,
+            media_type: "application/octet-stream".to_owned(),
+            inline: None,
+            integrity: ResourceIntegrity::Content {
+                digest: digest.clone(),
+                size: descriptor.size,
+            },
+            manifest: None,
+            annotations: BTreeMap::new(),
+        }
+        .seal()
+        .expect("object-shaped semantic descriptor seals");
+        let object_publication = ResourcePublication {
+            locators: ResourceLocatorSet {
+                locator_version: RESOURCE_LOCATOR_VERSION.to_owned(),
+                resource_id: object_resource.resource_id.clone(),
+                resolver_binding: binding.to_owned(),
+                locations: vec![ResourceLocation::Opaque {
+                    reference: digest.clone(),
+                }],
+            },
+            resource: object_resource,
+        };
+        object_publication
+            .verify()
+            .expect("object-shaped publication verifies");
+        let manifest_family = ResourceRetentionFamily::from_publication(&manifest_publication)
+            .expect("manifest family derives");
+        let object_family = ResourceRetentionFamily::from_publication(&object_publication)
+            .expect("object family derives");
+        assert_eq!(manifest_family, object_family);
+        assert_ne!(
+            manifest_publication.resource.resource_id,
+            object_publication.resource.resource_id
+        );
+        let target = ResourceDeletionTarget::from_publication(&object_publication)
+            .expect("object-shaped deletion target derives");
+        assert!(target.manifest.is_none());
+
+        let key = digest
+            .strip_prefix("sha256:")
+            .expect("verified digest has a SHA-256 prefix");
+        let catalog_name = FsResourceStore::catalog_name(MANIFEST_INDEX_VERSION, &digest);
+        assert!(entry_exists(&store.directories.objects, key).unwrap());
+        assert!(entry_exists(&store.directories.manifest_indexes, key).unwrap());
+        assert!(entry_exists(&store.directories.catalog, &catalog_name).unwrap());
+
+        store
+            .delete_and_verify_absent(&target)
+            .expect("physical family deletion converges");
+        assert!(!entry_exists(&store.directories.objects, key).unwrap());
+        assert!(!entry_exists(&store.directories.manifest_indexes, key).unwrap());
+        assert!(!entry_exists(&store.directories.catalog, &catalog_name).unwrap());
+        drop(store);
+
+        let mut reopened = FsResourceStore::open_read_only(&root, binding)
+            .expect("deleted store reopens read-only");
+        assert!(!entry_exists(&reopened.directories.manifest_indexes, key).unwrap());
+        assert!(!entry_exists(&reopened.directories.catalog, &catalog_name).unwrap());
+        assert!(
+            reopened
+                .get_catalog_record(MANIFEST_INDEX_VERSION, &digest)
+                .expect("manifest catalog absence reads")
+                .is_none()
+        );
+        assert!(matches!(
+            reopened.stat(
+                &manifest_publication.resource,
+                &manifest_publication.locators
+            ),
+            Err(ResourceError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn physical_family_deletion_rejects_bytes_outside_both_encodings_before_tombstone() {
+        let directory = tempdir().expect("temporary directory");
+        let root = directory.path().join("store");
+        let binding = "fs:deletion-integrity";
+        let mut store = FsResourceStore::open(&root, binding).expect("store opens");
+        let session = store
+            .begin_write(&ResourceWriteIntent {
+                write_id: "write:deletion-integrity".to_owned(),
+                shape: ResourceShape::Object,
+                media_type: "application/octet-stream".to_owned(),
+                annotations: BTreeMap::new(),
+            })
+            .expect("write begins");
+        store
+            .write_chunk(&session, 0, b"original")
+            .expect("bytes persist");
+        let publication = store.commit_write(&session).expect("object publishes");
+        let target = ResourceDeletionTarget::from_publication(&publication)
+            .expect("deletion target derives");
+        let key = target
+            .subject
+            .family
+            .content_digest
+            .strip_prefix("sha256:")
+            .expect("verified digest has a SHA-256 prefix");
+        fs::write(
+            root.join("objects")
+                .join(binding_namespace(binding))
+                .join(key),
+            b"tampered",
+        )
+        .expect("same-size corruption seeds");
+
+        assert!(matches!(
+            store.delete_and_verify_absent(&target),
+            Err(ResourceError::Integrity { code, .. }) if code == "filesystem_cleanup_invalid"
+        ));
+        let control_name = FsResourceStore::retention_lock_name(&target.subject.family)
+            .expect("retention control name derives");
+        assert_eq!(
+            fs::read(root.join("locks").join(control_name))
+                .expect("unfenced retention control reads"),
+            b""
+        );
+        assert!(entry_exists(&store.directories.objects, key).unwrap());
     }
 
     #[test]

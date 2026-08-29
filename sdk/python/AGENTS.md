@@ -79,8 +79,9 @@
 - Verification successes must return the exact wait activation or control
   command submitted on the wire. A `sealed_resource` success must recursively
   validate the complete Handle and equal the submitted Candidate after removing
-  only the Rust-owned `resource_id` and normalizing the omitted empty annotation
-  map.
+  only the Rust-owned `resource_id`. Omitted Resource `annotations` is distinct
+  from an explicit empty map: builders omit an empty map and admission rejects
+  `{}` rather than normalizing it.
 - Optional Engine failure and issue members are omission-only and reject
   explicit `null`. Failure codes use the ASCII-only
   `^[a-z][a-z0-9_]{0,199}$` contract, and category/retry pairs must match the

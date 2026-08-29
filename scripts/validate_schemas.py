@@ -103,6 +103,25 @@ def main() -> int:
         raise SystemExit("usage: validate_schemas.py ROOT CYMULE_BIN")
     root = Path(sys.argv[1]).resolve()
     engine = Path(sys.argv[2]).resolve()
+    engine_request_limit_sources = {
+        "crates/cymule-runtime/src/protocol.rs": (
+            "pub const MAX_ENGINE_REQUEST_BYTES: usize = 64 * 1024 * 1024;"
+        ),
+        "crates/cymule-cli/src/main.rs": "MAX_ENGINE_REQUEST_BYTES",
+        "crates/cymule-sdk/src/client.rs": "MAX_ENGINE_REQUEST_BYTES",
+        "sdk/typescript/src/index.ts": (
+            "const ENGINE_REQUEST_LIMIT = 64 * 1024 * 1024;"
+        ),
+        "sdk/python/src/cymule/__init__.py": (
+            "_ENGINE_REQUEST_LIMIT = 64 * 1024 * 1024"
+        ),
+        "sdk/go/cymule.go": "const maxEngineRequestBytes = 64 * 1024 * 1024",
+    }
+    for relative, authority in engine_request_limit_sources.items():
+        if authority not in (root / relative).read_text(encoding="utf-8"):
+            raise AssertionError(
+                f"{relative} drifted from the shared 64 MiB Engine request bound"
+            )
     schema_paths = sorted((root / "schemas").glob("*.schema.json"))
     schemas = [load(path) for path in schema_paths]
     for schema in schemas:
@@ -3505,6 +3524,119 @@ def main() -> int:
     patch_command = next(
         command for command in evolution_variants if command["operation"] == "apply_patch"
     )
+    rollout_command = next(
+        command for command in evolution_variants if command["operation"] == "set_rollout"
+    )
+    observation_command = next(
+        command for command in evolution_variants if command["operation"] == "observe"
+    )
+    for label, command, path in (
+        ("patch.from_plan", patch_command, ("patch", "from_plan")),
+        (
+            "decision.fallback_plan",
+            rollout_command,
+            ("decision", "fallback_plan"),
+        ),
+        (
+            "decision.target_plan",
+            rollout_command,
+            ("decision", "target_plan"),
+        ),
+        (
+            "observation.plan_id",
+            observation_command,
+            ("observation", "plan_id"),
+        ),
+    ):
+        for invalid_plan in ("plan:legacy", "sha256:" + "A" * 64):
+            malformed = json.loads(json.dumps(command))
+            malformed[path[0]][path[1]] = invalid_plan
+            assert_invalid(
+                evolution_validator,
+                malformed,
+                f"Evolution schema accepted invalid Plan identity at {label}",
+            )
+    migration_descriptor_validator = Draft202012Validator(
+        {
+            "$ref": (
+                "https://cymule.dev/schemas/evolution-control.schema.json"
+                "#/$defs/migrationDescriptor"
+            )
+        },
+        registry=registry,
+    )
+    migration_descriptor = {
+        "adapter_id": "adapter:terminal",
+        "adapter_revision": "sha256:" + "1" * 64,
+        "from_plan": "sha256:" + "2" * 64,
+        "to_plan": "sha256:" + "3" * 64,
+        "plan_edge_id": "edge:terminal",
+        "compatibility_id": "compatibility:terminal",
+        "from_schema": "schema:source",
+        "to_schema": "schema:target",
+        "state_coverage": "total_reachable_state",
+        "failure_and_cancellation": "preserved",
+        "budget_and_ownership": "preserved",
+        "authority_and_effects": "no_widening",
+    }
+    migration_descriptor_validator.validate(migration_descriptor)
+    for invalid_plan in ("plan:legacy", "sha256:" + "A" * 64):
+        malformed_descriptor = dict(migration_descriptor)
+        malformed_descriptor["from_plan"] = invalid_plan
+        assert_invalid(
+            migration_descriptor_validator,
+            malformed_descriptor,
+            "Evolution schema accepted invalid migration descriptor source Plan",
+        )
+    for definition, valid_value, plan_fields in (
+        (
+            "planEdge",
+            {
+                "edge_id": "edge:terminal",
+                "from_plan": "sha256:" + "1" * 64,
+                "to_plan": "sha256:" + "2" * 64,
+                "operations": [
+                    {
+                        "kind": "add",
+                        "target": "definition:next",
+                        "before": None,
+                        "after": "3" * 64,
+                    }
+                ],
+            },
+            ("from_plan", "to_plan"),
+        ),
+        (
+            "templateUpdate",
+            {
+                "template_id": "template:terminal",
+                "previous_plan_id": "sha256:" + "1" * 64,
+                "current_plan_id": "sha256:" + "2" * 64,
+                "decision_id": "sha256:" + "3" * 64,
+                "advanced": True,
+            },
+            ("previous_plan_id", "current_plan_id"),
+        ),
+    ):
+        response_validator = Draft202012Validator(
+            {
+                "$ref": (
+                    "https://cymule.dev/schemas/engine-protocol.schema.json"
+                    f"#/$defs/{definition}"
+                )
+            },
+            registry=registry,
+        )
+        response_validator.validate(valid_value)
+        for plan_field in plan_fields:
+            for invalid_plan in ("plan:legacy", "sha256:" + "A" * 64):
+                malformed_response = dict(valid_value)
+                malformed_response[plan_field] = invalid_plan
+                assert_invalid(
+                    response_validator,
+                    malformed_response,
+                    f"Engine schema accepted invalid Evolution {definition}.{plan_field}",
+                )
     for malformed_operation in (
         {"kind": "replace", "before": None, "after": "2" * 64},
         {

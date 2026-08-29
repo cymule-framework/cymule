@@ -117,8 +117,9 @@ Stop without dispatching a release if any of the following holds:
 7. Keep default Actions permissions read-only with pull-request approval
    disabled. Confirm only `finalize-release.yml` grants job-level
    `contents: write`. Within that workflow, require a separate protected
-   `contents: read` attestation job and a sole `contents: write` projection job
-   with no third-party Action steps.
+   `contents: read` live-settings gate before attestation, a separate
+   `contents: read` attestation job, a fresh post-attestation receipt job, and a
+   sole `contents: write` projection job with no third-party Action steps.
 8. Run the live readback:
 
    ```sh

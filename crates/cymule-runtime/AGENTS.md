@@ -96,11 +96,12 @@
 - Official Store dispatch uses only the terminal physical provider generations:
   `cymule.directory-store/5` and `cymule.sqlite-store/6`. Earlier selectors are
   rejected without a compatibility alias or reader.
-- Strictly parsed Engine values must retain raw object-member presence through
-  typed admission. Recursively reject every explicit member when typed
-  reserialization omits it, including `null` and empty defaulted collections;
-  do not canonicalize unrelated legal JSON representations or reject required
-  nullable members that remain present.
+- Strictly parsed Engine values must survive a complete lossless typed round
+  trip. After mathematical-integer normalization, recursively require exact
+  object members, array length and order, and scalar values; reject erased or
+  synthesized members, collapsed set duplicates, and reordered elements.
+  Required nullable members remain valid because typed serialization retains
+  them.
 - Strict JSON treats integer as a mathematical type: normalize every safe
   integral token such as `1.0` or `1e0` to an integer before typed decoding and
   success echo construction. Preserve finite fractional values for untyped JSON
@@ -194,3 +195,7 @@
 - Embedded completion, wait, explicit release, and reconciliation are closed
   success-side `ExecutionOutcome` variants. Never flatten release or
   reconciliation-required state into an Engine failure string.
+- `cymule_runtime::MAX_ENGINE_REQUEST_BYTES` is the sole Rust authority for the
+  complete 64 MiB Engine request-envelope bound. CLI ingress and the Rust SDK
+  import it; other-language SDKs mirror the same value and conformance tests
+  pin their encoded UTF-8 pre-spawn behavior.

@@ -37,9 +37,10 @@
 - CLI-backed clients accept only `cymule.engine/5`; a v4 envelope is malformed
   transport and must not enter a compatibility decoder.
 - After typed response-envelope decoding and before failure, echo, or payload
-  admission, compare the strict raw response with typed reserialization and
-  reject every explicit member erased by omission-only/defaulted serialization.
-  Classify this as an invalid transport response for reads and
+  admission, compare the normalized strict raw response with typed
+  reserialization and require exact members, array length/order, and scalar
+  values. Classify every erased/synthesized member, collapsed/reordered array,
+  or changed scalar as an invalid transport response for reads and
   `unknown_world_outcome/reconcile` for mutations; required nullable members
   remain admitted.
 - A typed v5 failure is authoritative only after `EngineFailure::verify`
@@ -51,8 +52,10 @@
   require every success to echo that retained inner `EngineRequest` exactly
   before validating its response. Never rebuild correlation from a Rust-derived
   Plan/Resource/Clock/rollout identity or compare a pre-serialization host
-  value. Preserve raw JSON member presence: omitted and explicit `null` do not
-  match, even if typed decoding maps both to `None`. Failure has no request echo
+  value. Preserve the complete normalized raw JSON structure: omitted and
+  explicit `null` do not match, arrays cannot collapse or reorder, and scalars
+  cannot change even if typed decoding maps values to one host representation.
+  Failure has no request echo
   because request decoding may not have completed; a predecessor success without
   the echo fails closed. Classify invalid echo from a mutating request as
   `unknown_world_outcome/reconcile`; a non-mutating request receives an invalid
@@ -64,11 +67,16 @@
   process spawn are local `validation/correct_and_retry`, never transport loss.
   Mathematical integer tokens normalize before typed admission; lexical
   decimal or exponent notation is not a second integer contract.
+- Import `cymule_runtime::MAX_ENGINE_REQUEST_BYTES` and reject a complete
+  encoded envelope above that 64 MiB bound before spawn. If stdin closes early,
+  preserve only a fully validated Engine failure; accepting a success requires
+  the complete request write, otherwise classify response loss by the original
+  request's mutation authority.
 - Every `verify_*` success must return the exact request-owned activation or
   command object for that operation. A self-validating payload with the right
   response tag is not sufficient; compare its typed value with the request
-  decoded from the retained submitted wire. The earlier raw-member-presence
-  admission remains the sole authority for omission-versus-null fidelity.
+  decoded from the retained submitted wire. The earlier lossless typed
+  round-trip admission remains the sole authority for wire fidelity.
 - The Rust `Engine` surface returns `EngineFailure`, not `CoreError`. Preserve
   remote category, phase, code, contract issues, and retry disposition exactly;
   synthesize `transport_failure` only when no valid Engine envelope was received.
@@ -121,6 +129,9 @@
 - `DurableEngine` validates every complete durable command before invoking a
   custom or CLI transport. Caller-invalid identities are local `validation`
   with `correct_and_retry`, never transport failure or unknown world outcome.
+  It also verifies the constructed Store/executor/Clock target, validates the
+  Clock request Run before observation, and validates the 256-scalar Evolution
+  authority plus complete provider target before custom transport invocation.
   SDK-owned query identities retain per-Run trace correlation through a
   fixed-length digest, independently of caller Run length. They use a distinct
   trace-only namespace and never duplicate the durable authority's

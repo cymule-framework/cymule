@@ -26,7 +26,7 @@ use cymule_runtime::{
     EngineFailure, EngineFailureCategory, EngineMigrationProviderTarget, EnginePhase,
     EnginePluginTarget, EngineRequestEnvelope, EngineResponseEnvelope, EngineResult,
     EngineRetryDisposition, EngineShadowProviderTarget, EngineStoreTarget, ExecutionOutcome,
-    validate_json_member_presence, validate_strict_json,
+    MAX_ENGINE_REQUEST_BYTES, validate_json_typed_roundtrip, validate_strict_json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -198,20 +198,7 @@ impl CliEngine {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(interrupted_failure(request, "cancelled", false));
         }
-        let encoded_request = serde_json::to_vec(&EngineRequestEnvelope::new(request))
-            .map_err(|error| local_request_failure("request_encoding_failed", error))?;
-        validate_strict_json(&encoded_request)
-            .map_err(|error| local_request_failure("request_encoding_failed", error))?;
-        let sent_envelope: EngineRequestEnvelope<Value> = decode_json(&encoded_request)
-            .map_err(|error| local_request_failure("request_encoding_failed", error))?;
-        let mut sent_inner = sent_envelope.request;
-        normalize_mathematical_integers(&mut sent_inner);
-        let sent_request: EngineRequest = serde_json::from_value(sent_inner.clone())
-            .map_err(|error| local_request_failure("request_encoding_failed", error))?;
-        let normalized_request = serde_json::to_value(&sent_request)
-            .map_err(|error| local_request_failure("request_encoding_failed", error))?;
-        validate_json_member_presence(&sent_inner, &normalized_request)
-            .map_err(|error| local_request_failure("request_encoding_failed", error))?;
+        let (encoded_request, sent_inner, sent_request) = snapshot_cli_request(request)?;
         let deadline = Instant::now().checked_add(self.timeout).ok_or_else(|| {
             local_request_failure("invalid_timeout", "timeout exceeds the clock range")
         })?;
@@ -241,7 +228,7 @@ impl CliEngine {
         let input_done = AtomicBool::new(false);
         let output_done = AtomicBool::new(false);
         let diagnostic_done = AtomicBool::new(false);
-        let (status, stdout) = std::thread::scope(|scope| {
+        let (status, stdout, input_failed) = std::thread::scope(|scope| {
             let input_complete = &input_done;
             let input_bytes = &encoded_request;
             let input = scope.spawn(move || {
@@ -267,10 +254,11 @@ impl CliEngine {
                 deadline,
                 [&input_done, &output_done, &diagnostic_done],
             );
-            let input = input
+            let input_failed = input
                 .join()
                 .map_err(|_| ())
-                .and_then(|value| value.map_err(|_| ()));
+                .and_then(|value| value.map_err(|_| ()))
+                .is_err();
             let output = output
                 .join()
                 .map_err(|_| ())
@@ -279,10 +267,10 @@ impl CliEngine {
                 .join()
                 .map_err(|_| ())
                 .and_then(|value| value.map_err(|_| ()));
-            if input.is_err() || output.is_err() || diagnostic.is_err() {
+            if output.is_err() || diagnostic.is_err() {
                 return Err(response_loss_failure(&sent_request, "engine_io_failed"));
             }
-            status.map(|status| (status, output.expect("checked output")))
+            status.map(|status| (status, output.expect("checked output"), input_failed))
         })?;
         if !status.success() {
             return Err(response_loss_failure(
@@ -290,11 +278,7 @@ impl CliEngine {
                 "engine_process_failed",
             ));
         }
-        validate_strict_json(&stdout)
-            .map_err(|_| response_loss_failure(&sent_request, "invalid_engine_response"))?;
-        let raw_envelope: Value = decode_json(&stdout)
-            .map_err(|_| response_loss_failure(&sent_request, "invalid_engine_response"))?;
-        admit_raw_engine_response(&sent_request, &sent_inner, &raw_envelope)
+        admit_cli_output(&sent_request, &sent_inner, &stdout, input_failed)
     }
 
     fn wait_for_engine_completion(
@@ -414,6 +398,49 @@ impl CliEngine {
             )),
         }
     }
+}
+
+fn snapshot_cli_request(request: &EngineRequest) -> EngineResult<(Vec<u8>, Value, EngineRequest)> {
+    let encoded = serde_json::to_vec(&EngineRequestEnvelope::new(request))
+        .map_err(|error| local_request_failure("request_encoding_failed", error))?;
+    if encoded.len() > MAX_ENGINE_REQUEST_BYTES {
+        return Err(local_request_failure(
+            "engine_request_too_large",
+            format!("complete Engine request exceeds {MAX_ENGINE_REQUEST_BYTES} UTF-8 bytes"),
+        ));
+    }
+    validate_strict_json(&encoded)
+        .map_err(|error| local_request_failure("request_encoding_failed", error))?;
+    let envelope: EngineRequestEnvelope<Value> = decode_json(&encoded)
+        .map_err(|error| local_request_failure("request_encoding_failed", error))?;
+    let mut inner = envelope.request;
+    normalize_mathematical_integers(&mut inner);
+    let typed: EngineRequest = serde_json::from_value(inner.clone())
+        .map_err(|error| local_request_failure("request_encoding_failed", error))?;
+    let normalized = serde_json::to_value(&typed)
+        .map_err(|error| local_request_failure("request_encoding_failed", error))?;
+    validate_json_typed_roundtrip(&inner, &normalized)
+        .map_err(|error| local_request_failure("request_encoding_failed", error))?;
+    Ok((encoded, inner, typed))
+}
+
+fn admit_cli_output(
+    sent_request: &EngineRequest,
+    sent_inner: &Value,
+    stdout: &[u8],
+    input_failed: bool,
+) -> EngineResult<EngineResponse> {
+    validate_strict_json(stdout)
+        .map_err(|_| response_loss_failure(sent_request, "invalid_engine_response"))?;
+    let raw_envelope: Value = decode_json(stdout)
+        .map_err(|_| response_loss_failure(sent_request, "invalid_engine_response"))?;
+    if input_failed && raw_envelope.get("outcome").and_then(Value::as_str) != Some("failure") {
+        return Err(response_loss_failure(
+            sent_request,
+            "engine_request_incomplete",
+        ));
+    }
+    admit_raw_engine_response(sent_request, sent_inner, &raw_envelope)
 }
 
 const ENGINE_STREAM_LIMIT: usize = 16 * 1024 * 1024;
@@ -822,7 +849,7 @@ fn admit_raw_engine_response(
     let mut normalized_raw = raw_envelope.clone();
     normalize_mathematical_integers(&mut normalized_raw);
     let envelope: EngineResponseEnvelope<Value, EngineResponse> =
-        serde_json::from_value(normalized_raw).map_err(|error| {
+        serde_json::from_value(normalized_raw.clone()).map_err(|error| {
             invalid_typed_response(
                 request_is_mutating(request),
                 "response envelope",
@@ -836,7 +863,7 @@ fn admit_raw_engine_response(
             &error.to_string(),
         )
     })?;
-    validate_json_member_presence(raw_envelope, &normalized_envelope).map_err(|error| {
+    validate_json_typed_roundtrip(&normalized_raw, &normalized_envelope).map_err(|error| {
         invalid_typed_response(request_is_mutating(request), "response envelope", &error)
     })?;
     admit_engine_response(request, sent_inner, envelope)
@@ -1463,6 +1490,14 @@ impl<E: Engine> DurableEngine<E> {
             failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
             failure
         })?;
+        if !valid_wire_identity(run_id) {
+            return Err(facade_validation_failure(
+                EnginePhase::ObserveClock,
+                "invalid_run_identity",
+                "Clock observation Run identity must contain 1..=512 non-control Unicode scalars",
+            ));
+        }
+        clock.verify()?;
         let result = self.transport.observe_clock(clock, run_id)?;
         verify_clock_observation(clock, run_id, &result)
             .map_err(|error| invalid_typed_response(true, "Clock observation reference", &error))?;
@@ -1809,7 +1844,18 @@ impl<E: Engine> DurableEngine<E> {
     /// commit. A mismatched commit is an uncertain mutation, not permission to retry.
     pub fn evolve(&self, command: &LiveEvolutionCommand) -> EngineResult<EvolutionCommit> {
         verify_live_evolution_preflight(command)?;
+        if self.evolution_id.is_empty()
+            || self.evolution_id.chars().count() > 256
+            || self.evolution_id.chars().any(char::is_control)
+        {
+            return Err(facade_validation_failure(
+                EnginePhase::ExecuteLiveEvolution,
+                "invalid_evolution_identity",
+                "evolution identity must contain 1..=256 non-control Unicode scalars",
+            ));
+        }
         let target = self.evolution_target(command);
+        verify_evolution_target_preflight(&target, command)?;
         let commit = self
             .transport
             .execute_live_evolution(&target, &self.evolution_id, command)?;
@@ -1855,6 +1901,7 @@ impl<E: Engine> DurableEngine<E> {
                 .then(|| self.clock.clone())
                 .flatten(),
         };
+        target.verify()?;
         let response = self.transport.execute_durable(&target, command)?;
         verify_durable_response(command, &response).map_err(|error| {
             invalid_typed_response(
@@ -1894,6 +1941,16 @@ fn missing_durable_capability(code: &'static str, message: &'static str) -> Engi
         code,
         message,
     );
+    failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
+    failure
+}
+
+fn facade_validation_failure(
+    phase: EnginePhase,
+    code: &'static str,
+    message: &'static str,
+) -> EngineFailure {
+    let mut failure = EngineFailure::new(EngineFailureCategory::Validation, phase, code, message);
     failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
     failure
 }
@@ -2197,7 +2254,7 @@ mod tests {
     }
     #[derive(Clone)]
     struct PreflightProbe {
-        live_mutation_invoked: Arc<AtomicBool>,
+        invoked: Arc<AtomicBool>,
     }
 
     impl Engine for PreflightProbe {
@@ -2228,7 +2285,11 @@ mod tests {
             _target: &EngineClockTarget,
             _run_id: &str,
         ) -> EngineResult<ClockObservationResult> {
-            unreachable!("preflight probe only accepts live evolution")
+            self.invoked.store(true, Ordering::Release);
+            Err(EngineFailure::transport(
+                "preflight_probe_invoked",
+                "invalid Clock request reached the transport",
+            ))
         }
 
         fn verify_evolution_command(
@@ -2250,7 +2311,11 @@ mod tests {
             _target: &EngineDurableTarget,
             _command: &DurableCommand,
         ) -> EngineResult<DurableResponse> {
-            unreachable!("preflight probe only accepts live evolution")
+            self.invoked.store(true, Ordering::Release);
+            Err(EngineFailure::transport(
+                "preflight_probe_invoked",
+                "invalid durable request reached the transport",
+            ))
         }
 
         fn execute_live_evolution(
@@ -2259,7 +2324,7 @@ mod tests {
             _evolution_id: &str,
             _command: &LiveEvolutionCommand,
         ) -> EngineResult<EvolutionCommit> {
-            self.live_mutation_invoked.store(true, Ordering::Release);
+            self.invoked.store(true, Ordering::Release);
             Err(EngineFailure::transport(
                 "preflight_probe_invoked",
                 "invalid command reached the mutation transport",
@@ -2886,6 +2951,90 @@ mod tests {
     }
 
     #[test]
+    fn typed_response_array_collapse_and_reorder_fail_with_request_authority() {
+        let first = format!("sha256:{}", "a".repeat(64));
+        let second = format!("sha256:{}", "b".repeat(64));
+        let command = DurableCommand::ActivateWait {
+            control_version: DURABLE_CONTROL_VERSION.to_owned(),
+            activation_id: "activation:typed-roundtrip".to_owned(),
+            source: WaitActivationSource::Signal {
+                key: "signal:typed-roundtrip".to_owned(),
+            },
+            wait_ids: BTreeSet::from([first.clone(), second.clone()]),
+            value: serde_json::json!({"accepted": true}),
+        };
+
+        let read = EngineRequest::VerifyDurableCommand {
+            command: command.clone(),
+        };
+        let read_inner = serde_json::to_value(&read).expect("read request serializes");
+        let read_response = serde_json::to_value(EngineResponseEnvelope::success(
+            read_inner.clone(),
+            EngineResponse::VerifiedDurableCommand {
+                command: command.clone(),
+            },
+        ))
+        .expect("read response serializes");
+
+        let activation = WaitActivation {
+            activation_version: cymule_durable_protocol::WAIT_ACTIVATION_VERSION.to_owned(),
+            activation_id: "activation:typed-roundtrip".to_owned(),
+            source: WaitActivationSource::Signal {
+                key: "signal:typed-roundtrip".to_owned(),
+            },
+            wait_ids: BTreeSet::from([first.clone(), second.clone()]),
+            result: semantic_artifact(
+                cymule_durable_protocol::WAIT_RESULT_ARTIFACT_KIND,
+                "typed roundtrip result",
+            ),
+        };
+        let mutation = EngineRequest::ExecuteDurable {
+            target: EngineDurableTarget::query(EngineStoreTarget::directory("domain")),
+            command,
+        };
+        let mutation_inner = serde_json::to_value(&mutation).expect("mutation request serializes");
+        let mutation_response = serde_json::to_value(EngineResponseEnvelope::success(
+            mutation_inner.clone(),
+            EngineResponse::DurableExecuted {
+                response: DurableResponse::WaitActivated {
+                    receipt: cymule_durable_protocol::WaitActivationReceipt {
+                        receipt_version: cymule_durable_protocol::WAIT_ACTIVATION_RECEIPT_VERSION
+                            .to_owned(),
+                        activation,
+                        applied_wait_ids: BTreeSet::new(),
+                        ready_run_ids: BTreeSet::new(),
+                    },
+                },
+            },
+        ))
+        .expect("mutation response serializes");
+
+        for malformed in [
+            serde_json::json!([first.clone(), first.clone(), second.clone()]),
+            serde_json::json!([second.clone(), first.clone()]),
+        ] {
+            let mut raw_read = read_response.clone();
+            raw_read["response"]["command"]["wait_ids"] = malformed.clone();
+            let failure = admit_raw_engine_response(&read, &read_inner, &raw_read)
+                .expect_err("read response array normalization must fail closed");
+            assert_eq!(failure.category, EngineFailureCategory::TransportFailure);
+            assert_eq!(failure.code.as_ref(), "invalid_engine_response");
+            assert_eq!(failure.retry_disposition, None);
+
+            let mut raw_mutation = mutation_response.clone();
+            raw_mutation["response"]["response"]["receipt"]["activation"]["wait_ids"] = malformed;
+            let failure = admit_raw_engine_response(&mutation, &mutation_inner, &raw_mutation)
+                .expect_err("mutation response array normalization must require reconciliation");
+            assert_eq!(failure.category, EngineFailureCategory::UnknownWorldOutcome);
+            assert_eq!(failure.code.as_ref(), "invalid_engine_response");
+            assert_eq!(
+                failure.retry_disposition,
+                Some(EngineRetryDisposition::Reconcile)
+            );
+        }
+    }
+
+    #[test]
     fn durable_run_current_accepts_a_512_scalar_run_response() {
         let run_id = "🦀".repeat(512);
         assert_eq!(run_id.chars().count(), 512);
@@ -3090,11 +3239,91 @@ mod tests {
     }
 
     #[test]
+    fn invalid_configured_facade_targets_never_reach_custom_transport() {
+        let invoked = Arc::new(AtomicBool::new(false));
+        let probe = || PreflightProbe {
+            invoked: Arc::clone(&invoked),
+        };
+        let invalid_store = EngineStoreTarget {
+            provider: String::new(),
+            location: "domain".to_owned(),
+            domain: None,
+        };
+        let failure = DurableEngine::from_transport(probe(), invalid_store)
+            .run_current("run:invalid-store", None)
+            .expect_err("invalid Store target must fail before custom transport");
+        assert_eq!(failure.category, EngineFailureCategory::Validation);
+
+        let mut invalid_executor = process_target("executor");
+        invalid_executor.process.executable = "relative-executable".to_owned();
+        let failure =
+            DurableEngine::from_transport(probe(), EngineStoreTarget::directory("domain"))
+                .with_executor(invalid_executor)
+                .with_clock(clock_target())
+                .resume("run:invalid-executor", execution())
+                .expect_err("invalid executor target must fail before custom transport");
+        assert_eq!(failure.category, EngineFailureCategory::Validation);
+
+        let mut invalid_clock = clock_target();
+        invalid_clock.source_generation = format!("sha256:{}", "A".repeat(64));
+        let durable =
+            DurableEngine::from_transport(probe(), EngineStoreTarget::directory("domain"))
+                .with_clock(invalid_clock);
+        let failure = durable
+            .observe_clock("run:invalid-clock")
+            .expect_err("invalid Clock target must fail before custom transport");
+        assert_eq!(failure.category, EngineFailureCategory::Validation);
+
+        let durable =
+            DurableEngine::from_transport(probe(), EngineStoreTarget::directory("domain"))
+                .with_clock(clock_target());
+        let failure = durable
+            .observe_clock("")
+            .expect_err("invalid Clock Run must fail before custom transport");
+        assert_eq!(failure.category, EngineFailureCategory::Validation);
+        assert_eq!(failure.code.as_ref(), "invalid_run_identity");
+
+        let failure =
+            DurableEngine::from_transport(probe(), EngineStoreTarget::directory("domain"))
+                .with_evolution_id("")
+                .evolve(&live_command_fixture())
+                .expect_err("invalid evolution identity must fail before custom transport");
+        assert_eq!(failure.category, EngineFailureCategory::Validation);
+        assert_eq!(failure.code.as_ref(), "invalid_evolution_identity");
+
+        let migration = migration_command_fixture();
+        let LiveEvolutionCommand::Apply { command, .. } = &migration else {
+            unreachable!("migration fixture is an Apply command")
+        };
+        let EvolutionCommand::Migrate { request, .. } = command.as_ref() else {
+            unreachable!("migration fixture contains Migrate")
+        };
+        let mut process = process_target("migration");
+        process.revision = Some(request.adapter_revision.clone());
+        process.process.message_limit = 16 * 1024 * 1024;
+        let failure =
+            DurableEngine::from_transport(probe(), EngineStoreTarget::directory("domain"))
+                .with_migration_adapter(EngineMigrationProviderTarget {
+                    adapter_id: request.adapter_id.clone(),
+                    adapter_revision: request.adapter_revision.clone(),
+                    process,
+                })
+                .evolve(&migration)
+                .expect_err("adapter-only migration target must fail before custom transport");
+        assert_eq!(failure.category, EngineFailureCategory::Validation);
+        assert_eq!(failure.code.as_ref(), "evolution_target_validation_failed");
+        assert!(
+            !invoked.load(Ordering::Acquire),
+            "invalid configured target reached the custom transport"
+        );
+    }
+
+    #[test]
     fn start_missing_capabilities_fails_before_seal_transport() {
         let invoked = Arc::new(AtomicBool::new(false));
         let durable = DurableEngine::from_transport(
             PreflightProbe {
-                live_mutation_invoked: Arc::clone(&invoked),
+                invoked: Arc::clone(&invoked),
             },
             EngineStoreTarget::directory("domain"),
         );
@@ -3300,7 +3529,7 @@ mod tests {
         let invoked = Arc::new(AtomicBool::new(false));
         let durable = DurableEngine::from_transport(
             PreflightProbe {
-                live_mutation_invoked: Arc::clone(&invoked),
+                invoked: Arc::clone(&invoked),
             },
             EngineStoreTarget::directory("domain"),
         );
@@ -4459,6 +4688,167 @@ mod tests {
         error
             .verify()
             .expect("local validation failure is wire-valid");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn engine_request_exact_limit_preserves_early_failure_and_max_plus_one_never_spawns() {
+        let directory = tempfile::tempdir().expect("isolated Engine fixture directory");
+        let executable = directory.path().join("early-failure-engine");
+        let marker = directory.path().join("spawned");
+        let mut remote_failure = EngineFailure::new(
+            EngineFailureCategory::Validation,
+            EnginePhase::ValidateRequest,
+            "fixture_rejected",
+            "fixture rejected the request",
+        );
+        remote_failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
+        let output = serde_json::to_string(
+            &EngineResponseEnvelope::<Value, EngineResponse>::failure(remote_failure),
+        )
+        .expect("failure envelope serializes");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\n: > {:?}\nprintf '%s' '{}'\n",
+                marker.display().to_string(),
+                output,
+            ),
+        )
+        .expect("Engine fixture writes");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("Engine fixture metadata reads")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions)
+            .expect("Engine fixture becomes executable");
+
+        let mut candidate = empty_candidate();
+        candidate
+            .metadata
+            .insert("padding".to_owned(), String::new());
+        let base = serde_json::to_vec(&EngineRequestEnvelope::new(&EngineRequest::Seal {
+            candidate: candidate.clone(),
+        }))
+        .expect("base request serializes");
+        assert!(base.len() < MAX_ENGINE_REQUEST_BYTES);
+        candidate.metadata.insert(
+            "padding".to_owned(),
+            "x".repeat(MAX_ENGINE_REQUEST_BYTES - base.len()),
+        );
+
+        let engine = CliEngine::new(&executable).with_timeout(Duration::from_secs(5));
+        let failure = engine
+            .seal(&candidate)
+            .expect_err("exact-bound request reaches the early-failure Engine");
+        assert_eq!(failure.category, EngineFailureCategory::Validation);
+        assert_eq!(failure.code.as_ref(), "fixture_rejected");
+        assert_eq!(
+            failure.retry_disposition,
+            Some(EngineRetryDisposition::CorrectAndRetry)
+        );
+        assert!(
+            marker.is_file(),
+            "exact-bound request did not start the Engine"
+        );
+        std::fs::remove_file(&marker).expect("spawn marker resets");
+
+        candidate
+            .metadata
+            .get_mut("padding")
+            .expect("padding remains present")
+            .push('x');
+        let failure = engine
+            .seal(&candidate)
+            .expect_err("max-plus-one request is rejected before spawn");
+        assert_eq!(failure.category, EngineFailureCategory::Validation);
+        assert_eq!(failure.code.as_ref(), "engine_request_too_large");
+        assert_eq!(
+            failure.retry_disposition,
+            Some(EngineRetryDisposition::CorrectAndRetry)
+        );
+        assert!(!marker.exists(), "max-plus-one request started the Engine");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn early_stdin_close_cannot_forge_read_or_mutation_success() {
+        let directory = tempfile::tempdir().expect("isolated Engine fixture directory");
+        let write_engine = |name: &str, output: &str| {
+            let executable = directory.path().join(name);
+            std::fs::write(&executable, format!("#!/bin/sh\nprintf '%s' '{output}'\n"))
+                .expect("Engine fixture writes");
+            let mut permissions = std::fs::metadata(&executable)
+                .expect("Engine fixture metadata reads")
+                .permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&executable, permissions)
+                .expect("Engine fixture becomes executable");
+            executable
+        };
+
+        let mut read_candidate = empty_candidate();
+        read_candidate
+            .metadata
+            .insert("padding".to_owned(), "x".repeat(2 * 1024 * 1024));
+        let read_plan = cymule_core::seal_plan(read_candidate.clone()).expect("read Plan seals");
+        let read_request = EngineRequest::Seal {
+            candidate: read_candidate.clone(),
+        };
+        let read_inner = serde_json::to_value(&read_request).expect("read request serializes");
+        let read_output = serde_json::to_string(&EngineResponseEnvelope::success(
+            read_inner,
+            EngineResponse::Sealed { plan: read_plan },
+        ))
+        .expect("read success serializes");
+        assert!(read_output.len() < ENGINE_STREAM_LIMIT);
+        let read_engine = write_engine("forged-read-success", &read_output);
+        let failure = CliEngine::new(read_engine)
+            .with_timeout(Duration::from_secs(5))
+            .seal(&read_candidate)
+            .expect_err("an incomplete read request cannot accept a forged success");
+        assert_eq!(failure.category, EngineFailureCategory::TransportFailure);
+        assert_eq!(failure.code.as_ref(), "engine_request_incomplete");
+        assert_eq!(failure.retry_disposition, None);
+
+        let plan = cymule_core::seal_plan(empty_candidate()).expect("mutation Plan seals");
+        let run_id = "run:forged-early-success";
+        let input = Value::String("x".repeat(2 * 1024 * 1024));
+        let mutation = EngineRequest::Run {
+            plan: plan.clone(),
+            input: input.clone(),
+            plugin: process_target("plugin"),
+            run_id: run_id.to_owned(),
+        };
+        let mutation_inner = serde_json::to_value(&mutation).expect("mutation request serializes");
+        let mutation_output = serde_json::to_string(&EngineResponseEnvelope::success(
+            mutation_inner,
+            EngineResponse::ExecutionBoundary {
+                execution: ExecutionOutcome::Completed {
+                    result: cymule_runtime::ExecutionResult {
+                        run_id: run_id.to_owned(),
+                        plan_id: plan.plan_id.clone(),
+                        value: Value::Null,
+                        projection_digest: "a".repeat(64),
+                        precondition_token: format!("pre:1:sha256:{}", "b".repeat(64)),
+                        effects: Vec::new(),
+                    },
+                },
+            },
+        ))
+        .expect("mutation success serializes");
+        assert!(mutation_output.len() < ENGINE_STREAM_LIMIT);
+        let mutation_engine = write_engine("forged-mutation-success", &mutation_output);
+        let failure = CliEngine::new(mutation_engine)
+            .with_timeout(Duration::from_secs(5))
+            .run(&plan, &input, &process_target("plugin"), run_id)
+            .expect_err("an incomplete mutation request cannot accept a forged success");
+        assert_eq!(failure.category, EngineFailureCategory::UnknownWorldOutcome);
+        assert_eq!(failure.code.as_ref(), "engine_request_incomplete");
+        assert_eq!(
+            failure.retry_disposition,
+            Some(EngineRetryDisposition::Reconcile)
+        );
     }
 
     #[cfg(unix)]

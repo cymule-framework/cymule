@@ -3655,6 +3655,28 @@ jobs:
                 )
             )
         with self.assertRaisesRegex(
+            ValueError, "does not freeze data|before attestation"
+        ):
+            release_workflows.verify_finalization_controller_boundary(
+                finalize.replace(
+                    "    needs: [verify, freeze, control-plane-preflight]",
+                    "    needs: [verify, freeze]",
+                    1,
+                )
+            )
+        with self.assertRaisesRegex(
+            ValueError, "mutation or receipt authority|does not freeze data"
+        ):
+            preflight_receipt = finalize.replace(
+                "              --release-reviewer-team-id \"${{ vars.CYMULE_GITHUB_RELEASE_REVIEWER_TEAM_ID }}\"\n\n  attest:",
+                "              --release-reviewer-team-id \"${{ vars.CYMULE_GITHUB_RELEASE_REVIEWER_TEAM_ID }}\" \\\n"
+                "              --receipt-output \"$RUNNER_TEMP/early-receipt.json\"\n\n  attest:",
+                1,
+            )
+            release_workflows.verify_finalization_controller_boundary(
+                preflight_receipt
+            )
+        with self.assertRaisesRegex(
             ValueError, "does not freeze data|frozen current controller"
         ):
             release_workflows.verify_finalization_controller_boundary(
@@ -4863,6 +4885,8 @@ class PublicMirrorControllerTests(unittest.TestCase):
             "max_blob_bytes=$((8 * 1024 * 1024))",
             "oversized-blob 'exceeds public mirror blob limit'",
             "prefixed-deflated-zip 'unsupported archive/container blob (zip)'",
+            "split-zip-final-volume",
+            "zip -X -0 -s 64k",
             "expect_scan_accepted ordinary-pk-bytes",
             "for accepted_version in 8.24.3 v8.24.3",
             "$'v8.24.3\\nextra-output'",
@@ -4871,6 +4895,8 @@ class PublicMirrorControllerTests(unittest.TestCase):
             "historical-pat-path",
             "historical-private-host-path",
             "root-gitlab-prefix",
+            '"$private_source/.gitlab-control"',
+            'test "$valid_candidate_snapshot" = "$valid_source_snapshot"',
         ):
             self.assertIn(fragment, black_box)
 

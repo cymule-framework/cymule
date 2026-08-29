@@ -37,16 +37,17 @@ use cymule_runtime::{
     EmbeddedRuntime, EngineClockTarget, EngineContractSide, EngineDurableTarget, EngineFailure,
     EngineFailureCategory, EngineIssue, EnginePhase, EnginePluginTarget, EngineRequestEnvelope,
     EngineResponseEnvelope, EngineRetryDisposition, ExecutionBinding, ExecutionBindingAdmission,
-    ExecutionOutcome, PluginHost, decode_strict_json_value, validate_json_member_presence,
-    verify_execution_request, verify_plan,
+    ExecutionOutcome, MAX_ENGINE_REQUEST_BYTES, PluginHost, decode_strict_json_value,
+    validate_json_typed_roundtrip, verify_execution_request, verify_plan,
 };
 use cymule_store_sqlite::SqliteStore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const MAX_ENGINE_RPC_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const ENGINE_RPC_READ_POLL_MILLIS: u16 = 25;
 const ENGINE_RPC_READ_CHUNK_BYTES: usize = 64 * 1024;
+#[cfg(unix)]
+const ENGINE_RPC_WRITE_POLL_MILLIS: u16 = 25;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -183,13 +184,16 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
         Ok(input) => decode_and_execute_request_with_cancellation(&input, Some(&cancellation)),
         Err(error) => Err(error),
     };
-    let response = match response {
-        Ok((request, response)) => EngineResponseEnvelope::success(request, response),
-        Err(error) => {
-            EngineResponseEnvelope::<Value, EngineResponse>::failure(error.into_wire_failure())
-        }
+    let (response, response_is_failure) = match response {
+        Ok((request, response)) => (EngineResponseEnvelope::success(request, response), false),
+        Err(error) => (
+            EngineResponseEnvelope::<Value, EngineResponse>::failure(error.into_wire_failure()),
+            true,
+        ),
     };
-    print_json(&response)
+    let output_cancellation =
+        (!(response_is_failure && cancellation.is_cancelled())).then_some(&cancellation);
+    write_rpc_response(&response, output_cancellation)
 }
 
 #[cfg(unix)]
@@ -241,7 +245,7 @@ where
                 "Engine stdin descriptor became invalid",
             ));
         }
-        let remaining = MAX_ENGINE_RPC_REQUEST_BYTES
+        let remaining = MAX_ENGINE_REQUEST_BYTES
             .checked_sub(input.len())
             .ok_or_else(rpc_read_invariant_failure)?;
         let remaining_with_overflow = remaining
@@ -292,7 +296,7 @@ fn rpc_request_too_large() -> EngineFailure {
         EngineFailureCategory::Validation,
         EnginePhase::DecodeRequest,
         "engine_request_too_large",
-        format!("Engine request exceeds the fixed {MAX_ENGINE_RPC_REQUEST_BYTES} byte bound"),
+        format!("Engine request exceeds the fixed {MAX_ENGINE_REQUEST_BYTES} byte bound"),
     );
     failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
     failure
@@ -303,6 +307,96 @@ fn rpc_read_invariant_failure() -> EngineFailure {
         "engine_read_invariant_failed",
         "Engine request reader violated its fixed byte accounting invariant",
     )
+}
+
+fn write_rpc_response<T: Serialize>(
+    value: &T,
+    cancellation: Option<&ProcessCancellation>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    write_rpc_bytes(&io::stdout(), &bytes, cancellation)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_rpc_bytes<F>(
+    descriptor: &F,
+    bytes: &[u8],
+    cancellation: Option<&ProcessCancellation>,
+) -> Result<(), io::Error>
+where
+    F: AsFd,
+{
+    let descriptor_flags =
+        nix::fcntl::fcntl(descriptor, nix::fcntl::FcntlArg::F_GETFL).map_err(io::Error::from)?;
+    let nonblocking_flags =
+        nix::fcntl::OFlag::from_bits_retain(descriptor_flags) | nix::fcntl::OFlag::O_NONBLOCK;
+    nix::fcntl::fcntl(descriptor, nix::fcntl::FcntlArg::F_SETFL(nonblocking_flags))
+        .map_err(io::Error::from)?;
+
+    let mut written = 0_usize;
+    while written < bytes.len() {
+        if cancellation.is_some_and(ProcessCancellation::is_cancelled) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Engine response output was cancelled",
+            ));
+        }
+        let mut readiness = [nix::poll::PollFd::new(
+            descriptor.as_fd(),
+            nix::poll::PollFlags::POLLOUT,
+        )];
+        let ready = match nix::poll::poll(&mut readiness, ENGINE_RPC_WRITE_POLL_MILLIS) {
+            Ok(ready) => ready,
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => return Err(io::Error::from(error)),
+        };
+        if ready == 0 {
+            continue;
+        }
+        let events = readiness[0]
+            .revents()
+            .ok_or_else(|| io::Error::other("Engine stdout returned unknown readiness flags"))?;
+        if events.intersects(
+            nix::poll::PollFlags::POLLERR
+                | nix::poll::PollFlags::POLLHUP
+                | nix::poll::PollFlags::POLLNVAL,
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Engine stdout became unavailable",
+            ));
+        }
+        match nix::unistd::write(descriptor, &bytes[written..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "Engine stdout accepted no response bytes",
+                ));
+            }
+            Ok(count) => {
+                written = written.checked_add(count).ok_or_else(|| {
+                    io::Error::other("Engine response output byte accounting overflowed")
+                })?;
+            }
+            Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => {}
+            Err(error) => return Err(io::Error::from(error)),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_rpc_bytes<F>(
+    _descriptor: &F,
+    _bytes: &[u8],
+    _cancellation: Option<&ProcessCancellation>,
+) -> Result<(), io::Error> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Engine RPC process cancellation requires Unix",
+    ))
 }
 
 #[cfg(test)]
@@ -371,7 +465,7 @@ fn decode_and_execute_request_with_cancellation(
         failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
         failure
     })?;
-    validate_json_member_presence(&retained_request, &normalized_request).map_err(|error| {
+    validate_json_typed_roundtrip(&retained_request, &normalized_request).map_err(|error| {
         let mut failure = EngineFailure::new(
             EngineFailureCategory::Validation,
             EnginePhase::ValidateRequest,
@@ -2256,7 +2350,7 @@ where
     let retained = decode_strict_json_value(&bytes)?;
     let value: T = serde_json::from_value(retained.clone())?;
     let normalized = serde_json::to_value(&value)?;
-    validate_json_member_presence(&retained, &normalized)?;
+    validate_json_typed_roundtrip(&retained, &normalized)?;
     Ok(value)
 }
 
@@ -2278,7 +2372,7 @@ mod tests {
     };
     #[cfg(unix)]
     use super::{
-        MAX_ENGINE_RPC_REQUEST_BYTES, decode_strict_json_value, read_rpc_input_from_descriptor,
+        MAX_ENGINE_REQUEST_BYTES, decode_strict_json_value, read_rpc_input_from_descriptor,
     };
     use cymule_core::{Definition, Expression, Region};
     use cymule_directory_store::DirectoryStore;
@@ -2633,7 +2727,7 @@ mod tests {
         };
         let envelope = serde_json::to_vec(&EngineRequestEnvelope::new(request))
             .expect("maximum legal Engine request serializes");
-        assert!(envelope.len() < MAX_ENGINE_RPC_REQUEST_BYTES);
+        assert!(envelope.len() < MAX_ENGINE_REQUEST_BYTES);
         let (reader, mut writer) = UnixStream::pair().expect("test stream opens");
         let expected = envelope.clone();
         let writer = std::thread::spawn(move || {
@@ -2710,7 +2804,7 @@ mod tests {
         let (reader, mut writer) = UnixStream::pair().expect("test stream opens");
         let writer = std::thread::spawn(move || {
             let chunk = vec![b'x'; 64 * 1024].into_boxed_slice();
-            let mut remaining = MAX_ENGINE_RPC_REQUEST_BYTES + 1;
+            let mut remaining = MAX_ENGINE_REQUEST_BYTES + 1;
             while remaining > 0 {
                 let count = remaining.min(chunk.len());
                 writer

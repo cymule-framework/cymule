@@ -108,12 +108,12 @@ Run and Clock source generation with the exact request before exposing the
 nested reference; SDKs MUST NOT implement the Clock-scope derivation.
 
 Typed Engine admission MUST also compare each strictly parsed raw request or
-response with its typed reserialization before executing or exposing it. If a
-raw object member is present but typed serialization omits it, admission MUST
-fail recursively, including explicit `null` and empty defaulted collections
-inside arrays. This check does not canonicalize other legal representations and
-does not reject a required nullable member whose typed serialization retains
-`null`. Request
+response with its typed reserialization before executing or exposing it. The
+comparison is lossless after mathematical-integer normalization: object-member
+presence, array length and order, value kind, and scalar value must all remain
+identical. Typed decoding must not omit or synthesize a member, collapse or
+reorder a collection, or replace a scalar. This check does not reject a required
+nullable member whose typed serialization retains `null`. Request
 failure is `validation/correct_and_retry` before operation I/O; malformed
 responses follow the read-only invalid-response versus mutating
 `unknown_world_outcome/reconcile` boundary above.
@@ -136,7 +136,12 @@ that observes SIGINT/SIGTERM cancellation while a partial pipe remains open.
 The complete Engine envelope has one fixed 64 MiB raw limit; byte 64 MiB plus
 one MUST terminate before strict JSON decoding or typed allocation. This bound
 is wider than every currently admitted inner provider message plus envelope
-overhead and is not an operation-specific payload limit.
+overhead and is not an operation-specific payload limit. Every SDK MUST apply
+the same bound to its actual UTF-8 encoded complete envelope before starting a
+CLI process or invoking a custom transport. If a child closes stdin before the
+complete request is written, only one fully validated failure envelope remains
+authoritative; a success is response loss and follows the request's read-only
+versus mutating recovery classification.
 
 SDKs MUST preserve the complete failure object. Process status and stderr are
 transport diagnostics only and MUST NOT become a parallel semantic error path.
@@ -1667,7 +1672,9 @@ unknown world outcome requiring reconciliation.
 SDKs may construct and transport its patch, selection, migration, shadow,
 restart, observation, and gate operations, but only the Rust M4 controller
 resolves dependencies, invokes plugins, evaluates evidence, or mutates durable
-state.
+state. Every field that names an admitted Plan in commands, provider
+descriptors, outcomes, receipts, or publication updates MUST be a lowercase
+SHA-256 content ID; a generic non-empty identity is not a Plan reference.
 
 ## 13. Replay
 

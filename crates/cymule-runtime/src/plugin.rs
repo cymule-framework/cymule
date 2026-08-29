@@ -575,7 +575,7 @@ where
             code: code.to_owned(),
             message: error.to_string(),
         })?;
-    crate::validate_json_member_presence(&raw, &normalized).map_err(|message| {
+    crate::validate_json_typed_roundtrip(&raw, &normalized).map_err(|message| {
         RuntimeError::PluginDefect {
             code: code.to_owned(),
             message,

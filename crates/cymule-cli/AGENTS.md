@@ -73,8 +73,9 @@
   binds the opaque scope to that Run; clients compare the returned Run with the
   exact request and never rederive the scope.
 - Direct file/stdin commands use the same duplicate-free, exact-number and
-  lossless typed member-presence gate as RPC. Explicit nulls and empty defaults
-  that typed serialization omits are invalid wires.
+  lossless typed round-trip gate as RPC. Explicit nulls and empty defaults that
+  typed serialization omits, synthesized defaults, collapsed array elements,
+  reordered arrays, and changed scalars are invalid wires.
 - Embedded Run Plan/input/Run-ID and complete `EnginePluginTarget` admission
   precede process construction and describe. Embedded and durable process paths
   copy the exact arguments, explicit environment, working directory, runtime
@@ -143,6 +144,10 @@
   most 64 MiB including the Engine envelope. The reader terminates on max plus
   one before JSON allocation; non-Unix cancellation construction fails before
   stdin is read.
+- RPC stdout uses the same cancellation source with nonblocking bounded polling.
+  A blocked response write must terminate promptly on SIGINT/SIGTERM; because
+  the protocol could not be carried, that path is a nonzero transport failure,
+  never a fabricated success or a second semantic envelope.
 - The package is `cymule-cli` and installs the `cymule` binary. Keep binary
   rustdoc disabled so it cannot collide with the public `cymule` facade library;
   user API documentation belongs to the facade and profile crates.

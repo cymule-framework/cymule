@@ -454,7 +454,7 @@ where
         .map_err(|error| EvolutionError::Validation(error.to_string()))?;
     let normalized = serde_json::to_value(&message)
         .map_err(|error| EvolutionError::Validation(error.to_string()))?;
-    cymule_runtime::validate_json_member_presence(&raw, &normalized)
+    cymule_runtime::validate_json_typed_roundtrip(&raw, &normalized)
         .map_err(EvolutionError::Validation)?;
     Ok(message)
 }

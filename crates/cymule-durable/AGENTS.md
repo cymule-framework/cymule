@@ -41,8 +41,10 @@
   copy changed trie paths and logs copy their authenticated append spines.
   Never defer a whole-domain traversal until the first command.
 - A verified persistent-map range page retains each selected key's authenticated
-  value-object identity. Query projection loads that exact typed value once;
-  never discard the range proof result and repeat an exact-key proof per item.
+  value-object identity. A query projection loads that exact typed value once,
+  validates the complete leaf before projection, and then binds the authenticated
+  map key to that leaf's primary identity. Never discard the range proof result
+  and repeat an exact-key proof per item.
 - Typed DurableOperation::Put* values are complete normalized postconditions.
   An unchanged projection is valid when Core events or sibling fields advance.
   StateRoot alone compares exact encoded values and lowers only real physical

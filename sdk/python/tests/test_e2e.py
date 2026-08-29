@@ -2625,13 +2625,18 @@ class EndToEndTest(unittest.TestCase):
                 "/bin/true", shadow_request["driver_revision"]
             ),
         }
+        target_execution = process_target("/bin/true")
+        target_execution["revision"] = _content_id("9")
+        exact_target = {
+            "store": store,
+            "migration_adapter": copy.deepcopy(migration_provider),
+            "shadow_driver": None,
+            "target_execution_bindings": {
+                migration_request["to_plan"]: target_execution
+            },
+        }
         for limit in (16 * 1024 * 1024 - 1, 16 * 1024 * 1024 + 1):
-            invalid_target = {
-                "store": store,
-                "migration_adapter": copy.deepcopy(migration_provider),
-                "shadow_driver": None,
-                "target_execution_bindings": {},
-            }
+            invalid_target = copy.deepcopy(exact_target)
             invalid_target["migration_adapter"]["process"]["process"][
                 "message_limit"
             ] = limit
@@ -2644,16 +2649,6 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(
                 invalid_limit.exception.failure["category"], "validation"
             )
-        target_execution = process_target("/bin/true")
-        target_execution["revision"] = _content_id("9")
-        exact_target = {
-            "store": store,
-            "migration_adapter": copy.deepcopy(migration_provider),
-            "shadow_driver": None,
-            "target_execution_bindings": {
-                migration_request["to_plan"]: target_execution
-            },
-        }
         invalid_target_bindings = []
         missing_target_bindings = copy.deepcopy(exact_target)
         del missing_target_bindings["target_execution_bindings"]
@@ -2697,7 +2692,9 @@ class EndToEndTest(unittest.TestCase):
                     "store": store,
                     "migration_adapter": migration_provider,
                     "shadow_driver": None,
-                    "target_execution_bindings": {},
+                    "target_execution_bindings": {
+                        migration_request["to_plan"]: target_execution
+                    },
                 },
             ),
             (
@@ -2739,6 +2736,7 @@ class EndToEndTest(unittest.TestCase):
                     evolution_id,
                     migration_provider,
                     shadow_provider,
+                    target["target_execution_bindings"],
                 )
                 self.assertEqual(durable.evolve(command), commit)
 
@@ -2815,6 +2813,80 @@ class EndToEndTest(unittest.TestCase):
                             "command": command,
                         }
                     )
+
+    def test_python_evolution_plan_fields_require_lowercase_content_ids(
+        self,
+    ) -> None:
+        candidate = FlowBuilder(
+            "evolution_plan_fields", {}, {}
+        ).finish({"kind": "input"})
+        patch = EvolutionControlBuilder.apply_patch(
+            "command:plan-fields:patch",
+            {
+                "from_plan": _content_id("1"),
+                "target": candidate,
+                "operations": [
+                    {
+                        "kind": "add",
+                        "target": "definition:added",
+                        "before": None,
+                        "after": "2" * 64,
+                    }
+                ],
+                "evidence": _artifact("3", "cymule.evolution-evidence/1"),
+            },
+        )
+        rollout = EvolutionControlBuilder.set_rollout(
+            "command:plan-fields:rollout",
+            {
+                "decision_id": "decision:plan-fields",
+                "fallback_plan": _content_id("4"),
+                "target_plan": _content_id("5"),
+                "mode": {"mode": "active"},
+            },
+        )
+        observation = EvolutionControlBuilder.observe(
+            "command:plan-fields:observation",
+            {
+                "observation_id": "observation:plan-fields",
+                "decision_id": "decision:plan-fields",
+                "occurrence_id": "occurrence:plan-fields",
+                "plan_id": _content_id("5"),
+                "outcome": "succeeded",
+                "evidence": _artifact("6", "cymule.evolution-evidence/1"),
+            },
+        )
+        for command in (patch, rollout, observation):
+            _validate_evolution_command(command)
+
+        cases = (
+            ("patch.from_plan", patch, "patch", "from_plan"),
+            (
+                "rollout.fallback_plan",
+                rollout,
+                "decision",
+                "fallback_plan",
+            ),
+            ("rollout.target_plan", rollout, "decision", "target_plan"),
+            (
+                "observation.plan_id",
+                observation,
+                "observation",
+                "plan_id",
+            ),
+        )
+        for label, command, container, field in cases:
+            for invalid in ("plan:legacy", "sha256:" + "A" * 64):
+                malformed = copy.deepcopy(command)
+                malformed[container][field] = invalid
+                with self.subTest(field=label, invalid=invalid), self.assertRaises(
+                    EngineError
+                ) as rejected:
+                    _validate_evolution_command(malformed)
+                self.assertEqual(
+                    rejected.exception.failure["code"],
+                    "invalid_engine_response",
+                )
 
     def test_python_m4_identities_use_a_distinct_unicode_scalar_domain(self) -> None:
         maximum = "🙂" * 256
@@ -3201,6 +3273,451 @@ class EndToEndTest(unittest.TestCase):
                 invalid_completed["result"]["run_id"] = invalid
                 with self.assertRaises(EngineError):
                     _validate_execution_outcome(invalid_completed)
+
+    def test_python_high_level_durable_engine_closes_custom_transport(
+        self,
+    ) -> None:
+        store = directory_store("unused")
+        plugin = process_target("/bin/true")
+        clock = sqlite_clock(
+            "clock.sqlite",
+            "clock:cross-language",
+            _content_id("2"),
+        )
+
+        class NoCallTransport:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def execute_durable(
+                self,
+                target: dict[str, object],
+                command: dict[str, object],
+            ) -> dict[str, object]:
+                del target, command
+                self.calls += 1
+                raise AssertionError("invalid durable request reached transport")
+
+            def observe_clock(
+                self, target: dict[str, object], run_id: str
+            ) -> dict[str, object]:
+                del target, run_id
+                self.calls += 1
+                raise AssertionError("invalid Clock request reached transport")
+
+        def assert_local_validation(
+            engine: DurableEngine,
+            transport: NoCallTransport,
+            invoke: Callable[[DurableEngine], object],
+        ) -> None:
+            with self.assertRaises(EngineError) as rejected:
+                invoke(engine)
+            self.assertEqual(rejected.exception.failure["category"], "validation")
+            self.assertEqual(
+                rejected.exception.failure["retry_disposition"],
+                "correct_and_retry",
+            )
+            self.assertEqual(transport.calls, 0)
+
+        validation_cases = (
+            (
+                "invalid command",
+                plugin,
+                clock,
+                lambda engine: engine.run_current("", None),
+            ),
+            (
+                "missing executor",
+                None,
+                clock,
+                lambda engine: engine.resume(
+                    "run:missing-executor", fixture_execution()
+                ),
+            ),
+            (
+                "missing Clock",
+                plugin,
+                None,
+                lambda engine: engine.resume(
+                    "run:missing-clock", fixture_execution()
+                ),
+            ),
+            (
+                "missing Clock observation target",
+                plugin,
+                None,
+                lambda engine: engine.observe_clock("run:missing-clock"),
+            ),
+        )
+        for label, selected_plugin, selected_clock, invoke in validation_cases:
+            transport = NoCallTransport()
+            engine = DurableEngine(
+                store,
+                selected_plugin,
+                selected_clock,
+                transport,  # type: ignore[arg-type]
+            )
+            with self.subTest(case=label):
+                assert_local_validation(engine, transport, invoke)
+
+        invalid_plugin = copy.deepcopy(plugin)
+        invalid_plugin["process"]["executable"] = "relative-executable"
+        invalid_clock = copy.deepcopy(clock)
+        invalid_clock["source_generation"] = "sha256:" + "A" * 64
+        invalid_store_transport = NoCallTransport()
+        invalid_executor_transport = NoCallTransport()
+        invalid_clock_transport = NoCallTransport()
+        configured_target_cases = (
+            (
+                "invalid Store",
+                invalid_store_transport,
+                DurableEngine(
+                    {"provider": "", "location": "unused"},
+                    None,
+                    None,
+                    invalid_store_transport,  # type: ignore[arg-type]
+                ),
+                lambda engine: engine.run_current("run:invalid-store", None),
+            ),
+            (
+                "invalid executor",
+                invalid_executor_transport,
+                DurableEngine(
+                    store,
+                    invalid_plugin,
+                    clock,
+                    invalid_executor_transport,  # type: ignore[arg-type]
+                ),
+                lambda engine: engine.resume(
+                    "run:invalid-executor", fixture_execution()
+                ),
+            ),
+            (
+                "invalid Clock",
+                invalid_clock_transport,
+                DurableEngine(
+                    store,
+                    plugin,
+                    invalid_clock,
+                    invalid_clock_transport,  # type: ignore[arg-type]
+                ),
+                lambda engine: engine.observe_clock("run:invalid-clock"),
+            ),
+        )
+        for label, transport, engine, invoke in configured_target_cases:
+            with self.subTest(case=label):
+                assert_local_validation(engine, transport, invoke)
+
+        class ReturningTransport:
+            def __init__(
+                self,
+                *,
+                durable_response: dict[str, object] | None = None,
+                evolution_commit: dict[str, object] | None = None,
+            ) -> None:
+                self.durable_response = durable_response
+                self.evolution_commit = evolution_commit
+
+            def execute_durable(
+                self,
+                target: dict[str, object],
+                command: dict[str, object],
+            ) -> dict[str, object]:
+                del target, command
+                assert self.durable_response is not None
+                return copy.deepcopy(self.durable_response)
+
+            def execute_live_evolution(
+                self,
+                target: dict[str, object],
+                evolution_id: str,
+                command: dict[str, object],
+            ) -> dict[str, object]:
+                del target, evolution_id, command
+                assert self.evolution_commit is not None
+                return copy.deepcopy(self.evolution_commit)
+
+        forged_current = {
+            "type": "run_current",
+            "observed_revision": _content_id("7"),
+            "source_root": "8" * 64,
+            "current": {
+                "run_id": "run:forged",
+                "plan_id": _content_id("9"),
+                "execution_binding": _artifact(
+                    "a", "cymule.execution-binding/2"
+                ),
+                "continuation_status": "ready",
+                "epoch": 0,
+                "execution_fence": 0,
+                "result": None,
+                "execution_status": {"status": "active"},
+                "world_settlement": "settled",
+            },
+        }
+        read_transport = ReturningTransport(durable_response=forged_current)
+        with self.assertRaises(EngineError) as forged_read:
+            DurableEngine(
+                store,
+                None,
+                None,
+                read_transport,  # type: ignore[arg-type]
+            ).run_current("run:expected", None)
+        self.assertEqual(
+            forged_read.exception.failure["category"], "transport_failure"
+        )
+        self.assertEqual(
+            forged_read.exception.failure["code"], "invalid_engine_response"
+        )
+        self.assertNotIn("retry_disposition", forged_read.exception.failure)
+
+        forged_boundary = {
+            "type": "run_boundary",
+            "boundary": {
+                "status": "completed",
+                "result": {
+                    "run_id": "run:forged",
+                    "plan_id": _content_id("b"),
+                    "value": None,
+                    "projection_digest": "c" * 64,
+                    "precondition_token": f"pre:0:{_content_id('d')}",
+                    "effects": [],
+                },
+            },
+        }
+        mutation_transport = ReturningTransport(
+            durable_response=forged_boundary
+        )
+        with self.assertRaises(EngineError) as forged_mutation:
+            DurableEngine(
+                store,
+                plugin,
+                clock,
+                mutation_transport,  # type: ignore[arg-type]
+            ).resume("run:expected", fixture_execution())
+        self.assertEqual(
+            forged_mutation.exception.failure["category"],
+            "unknown_world_outcome",
+        )
+        self.assertEqual(
+            forged_mutation.exception.failure["retry_disposition"],
+            "reconcile",
+        )
+
+        outcomes = _fixed_live_evolution_outcomes()
+        published = copy.deepcopy(outcomes["definition_published"])
+        revision = published["revision"]
+        evolution_command = LiveEvolutionControlBuilder.publish_definition(
+            "command:custom-transport-commit",
+            revision["logical_ref"],
+            revision["definition"],
+            revision["references"],
+        )
+        forged_commit = _evolution_commit(evolution_command, published)
+        forged_commit["receipt"]["command"]["command"]["command_id"] = (
+            "command:forged"
+        )
+        commit_transport = ReturningTransport(
+            evolution_commit=forged_commit
+        )
+        with self.assertRaises(EngineError) as forged_commit_failure:
+            DurableEngine(
+                store,
+                None,
+                None,
+                commit_transport,  # type: ignore[arg-type]
+            ).evolve(evolution_command)
+        self.assertEqual(
+            forged_commit_failure.exception.failure["category"],
+            "unknown_world_outcome",
+        )
+        self.assertEqual(
+            forged_commit_failure.exception.failure["retry_disposition"],
+            "reconcile",
+        )
+
+        class RaisingTransport:
+            def execute_durable(
+                self,
+                target: dict[str, object],
+                command: dict[str, object],
+            ) -> dict[str, object]:
+                del target, command
+                raise RuntimeError("ordinary custom transport failure")
+
+            def execute_live_evolution(
+                self,
+                target: dict[str, object],
+                evolution_id: str,
+                command: dict[str, object],
+            ) -> dict[str, object]:
+                del target, evolution_id, command
+                raise RuntimeError("ordinary custom transport failure")
+
+        exception_cases = (
+            (
+                "read",
+                DurableEngine(
+                    store,
+                    None,
+                    None,
+                    RaisingTransport(),  # type: ignore[arg-type]
+                ),
+                lambda engine: engine.run_current("run:transport-error", None),
+                "transport_failure",
+                None,
+            ),
+            (
+                "mutation",
+                DurableEngine(
+                    store,
+                    plugin,
+                    clock,
+                    RaisingTransport(),  # type: ignore[arg-type]
+                ),
+                lambda engine: engine.resume(
+                    "run:transport-error", fixture_execution()
+                ),
+                "unknown_world_outcome",
+                "reconcile",
+            ),
+            (
+                "evolution commit",
+                DurableEngine(
+                    store,
+                    None,
+                    None,
+                    RaisingTransport(),  # type: ignore[arg-type]
+                ),
+                lambda engine: engine.evolve(evolution_command),
+                "unknown_world_outcome",
+                "reconcile",
+            ),
+        )
+        for label, engine, invoke, category, retry in exception_cases:
+            with self.subTest(exception=label), self.assertRaises(
+                EngineError
+            ) as structured:
+                invoke(engine)
+            self.assertEqual(structured.exception.failure["category"], category)
+            self.assertEqual(
+                structured.exception.failure["code"], "engine_transport_failed"
+            )
+            if retry is None:
+                self.assertNotIn(
+                    "retry_disposition", structured.exception.failure
+                )
+            else:
+                self.assertEqual(
+                    structured.exception.failure["retry_disposition"], retry
+                )
+
+        class EngineFailureTransport:
+            def __init__(self, failure: dict[str, object]) -> None:
+                self.failure = failure
+
+            def execute_durable(
+                self,
+                target: dict[str, object],
+                command: dict[str, object],
+            ) -> dict[str, object]:
+                del target, command
+                raise EngineError(copy.deepcopy(self.failure))
+
+        malformed_failure = {
+            "category": "unknown_world_outcome",
+            "phase": "transport",
+            "code": "malformed_recovery_matrix",
+            "message": "unknown outcomes cannot be retried as the same request",
+            "retry_disposition": "retry_same_request",
+        }
+        malformed_cases = (
+            (
+                "read",
+                DurableEngine(
+                    store,
+                    None,
+                    None,
+                    EngineFailureTransport(
+                        malformed_failure
+                    ),  # type: ignore[arg-type]
+                ),
+                lambda engine: engine.run_current("run:malformed-failure", None),
+                "transport_failure",
+                None,
+            ),
+            (
+                "mutation",
+                DurableEngine(
+                    store,
+                    plugin,
+                    clock,
+                    EngineFailureTransport(
+                        malformed_failure
+                    ),  # type: ignore[arg-type]
+                ),
+                lambda engine: engine.resume(
+                    "run:malformed-failure", fixture_execution()
+                ),
+                "unknown_world_outcome",
+                "reconcile",
+            ),
+        )
+        for label, engine, invoke, category, retry in malformed_cases:
+            with self.subTest(malformed_failure=label), self.assertRaises(
+                EngineError
+            ) as rejected:
+                invoke(engine)
+            self.assertEqual(rejected.exception.failure["category"], category)
+            self.assertEqual(
+                rejected.exception.failure["code"], "invalid_engine_response"
+            )
+            if retry is None:
+                self.assertNotIn(
+                    "retry_disposition", rejected.exception.failure
+                )
+            else:
+                self.assertEqual(
+                    rejected.exception.failure["retry_disposition"], retry
+                )
+
+        valid_failure = {
+            "category": "validation",
+            "phase": "validate_request",
+            "code": "custom_transport_validation",
+            "message": "custom transport rejected the request",
+            "retry_disposition": "correct_and_retry",
+        }
+        valid_failure_cases = (
+            (
+                DurableEngine(
+                    store,
+                    None,
+                    None,
+                    EngineFailureTransport(
+                        valid_failure
+                    ),  # type: ignore[arg-type]
+                ),
+                lambda engine: engine.run_current("run:valid-failure", None),
+            ),
+            (
+                DurableEngine(
+                    store,
+                    plugin,
+                    clock,
+                    EngineFailureTransport(
+                        valid_failure
+                    ),  # type: ignore[arg-type]
+                ),
+                lambda engine: engine.resume(
+                    "run:valid-failure", fixture_execution()
+                ),
+            ),
+        )
+        for engine, invoke in valid_failure_cases:
+            with self.assertRaises(EngineError) as preserved:
+                invoke(engine)
+            self.assertEqual(preserved.exception.failure, valid_failure)
 
     def test_python_classifies_mutating_response_loss_as_unknown(self) -> None:
         engine = CliEngine(
@@ -3934,6 +4451,210 @@ time.sleep(30)
                     invalid.exception.failure["code"], "invalid_engine_timeout"
                 )
                 self.assertFalse(os.path.exists(started))
+
+    def test_python_engine_request_limit_counts_the_complete_utf8_envelope(
+        self,
+    ) -> None:
+        limit = 64 * 1024 * 1024
+
+        def encoded_size(padding: str) -> int:
+            return len(
+                json.dumps(
+                    {
+                        "engine_protocol": "cymule.engine/5",
+                        "request": {
+                            "type": "seal",
+                            "candidate": {"padding": padding},
+                        },
+                    },
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            )
+
+        empty_size = encoded_size("")
+        unicode_unit_size = encoded_size("🧪") - empty_size
+        remaining = limit - empty_size
+        padding = "🧪" * (remaining // unicode_unit_size) + "x" * (
+            remaining % unicode_unit_size
+        )
+        self.assertGreater(unicode_unit_size, 1)
+        self.assertEqual(encoded_size(padding), limit)
+
+        failure = {
+            "category": "validation",
+            "phase": "validate_request",
+            "code": "synthetic_failure",
+            "message": "synthetic Engine failure",
+            "retry_disposition": "correct_and_retry",
+        }
+        envelope = json.dumps(
+            {
+                "engine_protocol": "cymule.engine/5",
+                "outcome": "failure",
+                "error": failure,
+            },
+            separators=(",", ":"),
+        )
+
+        def write_nonreading_engine(executable: str, marker: str) -> None:
+            with open(executable, "w", encoding="utf-8") as script:
+                script.write(
+                    f'''#!/usr/bin/env python3
+from pathlib import Path
+import sys
+
+Path({marker!r}).write_text("started", encoding="utf-8")
+sys.stdout.write({envelope!r})
+'''
+                )
+            os.chmod(executable, 0o700)
+
+        with tempfile.TemporaryDirectory(
+            prefix="cymule-python-request-limit-"
+        ) as directory:
+            exact_engine = os.path.join(directory, "engine-exact")
+            exact_marker = exact_engine + ".started"
+            write_nonreading_engine(exact_engine, exact_marker)
+            with self.assertRaises(EngineError) as remote_failure:
+                CliEngine(exact_engine, timeout_seconds=10).seal(
+                    {"padding": padding}
+                )
+            self.assertEqual(remote_failure.exception.failure, failure)
+            self.assertTrue(os.path.exists(exact_marker))
+
+            oversized_engine = os.path.join(directory, "engine-oversized")
+            oversized_marker = oversized_engine + ".started"
+            write_nonreading_engine(oversized_engine, oversized_marker)
+            with self.assertRaises(EngineError) as oversized:
+                CliEngine(oversized_engine, timeout_seconds=10).seal(
+                    {"padding": padding + "x"}
+                )
+            self.assertEqual(
+                oversized.exception.failure["category"], "validation"
+            )
+            self.assertEqual(
+                oversized.exception.failure["code"],
+                "engine_request_too_large",
+            )
+            self.assertEqual(
+                oversized.exception.failure["retry_disposition"],
+                "correct_and_retry",
+            )
+            self.assertFalse(os.path.exists(oversized_marker))
+
+            early_candidate = FlowBuilder(
+                "early_close_success", {}, {}
+            ).finish({"kind": "input"})
+            early_candidate["metadata"] = {
+                "padding": "x" * (4 * 1024 * 1024)
+            }
+            plan = {
+                "plan_id": _content_id("1"),
+                "candidate": early_candidate,
+            }
+
+            def write_nonreading_success_engine(
+                executable: str,
+                request: dict[str, object],
+                response: dict[str, object],
+            ) -> None:
+                success = json.dumps(
+                    {
+                        "engine_protocol": "cymule.engine/5",
+                        "outcome": "success",
+                        "request": request,
+                        "response": response,
+                    },
+                    separators=(",", ":"),
+                )
+                with open(executable, "w", encoding="utf-8") as script:
+                    script.write(
+                        f'''#!/usr/bin/env python3
+import sys
+
+sys.stdout.write({success!r})
+'''
+                    )
+                os.chmod(executable, 0o700)
+
+            forged_read_request = {
+                "type": "seal",
+                "candidate": early_candidate,
+            }
+            forged_read_engine = os.path.join(
+                directory, "engine-early-success-read"
+            )
+            write_nonreading_success_engine(
+                forged_read_engine,
+                forged_read_request,
+                {"type": "sealed", "plan": plan},
+            )
+            with self.assertRaises(EngineError) as forged_read:
+                CliEngine(forged_read_engine, timeout_seconds=10).seal(
+                    early_candidate
+                )
+            self.assertEqual(
+                forged_read.exception.failure["category"],
+                "transport_failure",
+            )
+            self.assertEqual(
+                forged_read.exception.failure["code"],
+                "engine_request_incomplete",
+            )
+            self.assertNotIn(
+                "retry_disposition", forged_read.exception.failure
+            )
+
+            forged_mutation_request = {
+                "type": "run",
+                "plan": plan,
+                "input": None,
+                "plugin": process_target("/bin/true"),
+                "run_id": "run:early-success",
+            }
+            forged_mutation_engine = os.path.join(
+                directory, "engine-early-success-mutation"
+            )
+            write_nonreading_success_engine(
+                forged_mutation_engine,
+                forged_mutation_request,
+                {
+                    "type": "execution_boundary",
+                    "execution": {
+                        "status": "completed",
+                        "result": {
+                            "run_id": "run:early-success",
+                            "plan_id": plan["plan_id"],
+                            "value": None,
+                            "projection_digest": "2" * 64,
+                            "precondition_token": f"pre:0:{_content_id('3')}",
+                            "effects": [],
+                        },
+                    },
+                },
+            )
+            with self.assertRaises(EngineError) as forged_mutation:
+                CliEngine(
+                    forged_mutation_engine, timeout_seconds=10
+                ).run(
+                    plan,
+                    None,
+                    forged_mutation_request["plugin"],
+                    "run:early-success",
+                )
+            self.assertEqual(
+                forged_mutation.exception.failure["category"],
+                "unknown_world_outcome",
+            )
+            self.assertEqual(
+                forged_mutation.exception.failure["code"],
+                "engine_request_incomplete",
+            )
+            self.assertEqual(
+                forged_mutation.exception.failure["retry_disposition"],
+                "reconcile",
+            )
 
     def test_python_rejects_invalid_live_command_before_starting_engine(self) -> None:
         candidate = FlowBuilder("invalid_live_local", {}, {}).finish({"kind": "input"})
