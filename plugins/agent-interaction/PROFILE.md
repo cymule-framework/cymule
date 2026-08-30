@@ -373,11 +373,13 @@ Agent/M1 transition.
 ## Wire and compatibility
 
 Current persisted command and receipt selectors are `cymule.agent-command/4`
-and `cymule.agent-command-receipt/4`; their complete-body IDs use
-`cymule.agent-command-id/2` and `cymule.agent-command-receipt-id/2`; bounded Session metadata is
-`cymule.agent-session-current/2`, and the current closed schema generation is
-`cymule.agent/8`. Publication intent/reservation use `/2`; target claims use
-`cymule.agent-target-claim-current/1` with separate key and identity domains.
+and `cymule.agent-command-receipt/5`; their complete-body IDs use
+`cymule.agent-command-id/2` and `cymule.agent-command-receipt-id/3`; bounded
+Session metadata is `cymule.agent-session-current/2`, and the current closed
+schema generation is `cymule.agent/9`. Publication intent/reservation use `/2`
+and `/3`; target
+claims use `cymule.agent-target-claim-current/2` with key `/1` and identity
+`/2` domains.
 Recovery observations use their own content-ID generation. All persisted unions
 deny unknown fields.
 There is no reader or writer for the removed aggregate Session, recursive

@@ -550,7 +550,7 @@ only Virtual `RetireArchive` may atomically commit terminal retirement and its
 exact `cymule.resource-archive-release/1`; generic release MUST reject it. An
 Agent external-stream pin MUST first be introduced as `Reserved` by the
 pre-publication reservation CAS. The same CAS MUST acquire one independent
-`cymule.agent-target-claim-current/1`, addressed exactly by Session, target kind,
+`cymule.agent-target-claim-current/2`, addressed exactly by Session, target kind,
 and local Message/Tool identity; Message role MUST NOT enter its key. Direct
 Message writes, every ordinary Tool transition, Session Close, staged Finalize,
 and external Finalize MUST exact-read that family rather than scanning open
@@ -558,8 +558,11 @@ streams. A terminal target advances to `Materialized`. External publication
 advances absence or `Released` to `Reserved` before provider I/O, then the same
 Finalize command advances its exact reservation to `Materialized`. Durable
 `NotApplied` Abort advances it to `Released`; later reuse MUST increment the
-generation and bind the immediate predecessor claim plus its admitting receipt,
-preventing ABA and generation jumps. `Materialized` has no successor. That CAS
+generation and bind the immediate predecessor claim plus its admitting command;
+the retained receipt authenticates non-reservation predecessors. This prevents
+ABA and generation jumps. Generation is capped at 64; exhausting 32
+complete reserve/release reuse cycles requires a new target identity.
+`Materialized` has no successor. That CAS
 and `BeginDelete` mutate the same
 physical-family current, so exactly one can win before provider I/O. Only a
 fresh reservation or NotApplied rearm acknowledgement MAY invoke publish.

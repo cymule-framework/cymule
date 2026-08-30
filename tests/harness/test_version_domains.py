@@ -1201,12 +1201,12 @@ fn quotes(bytes: &[u8]) -> bool {
             "MachineSnapshot::VERSION",
         )
         self.assertEqual(
-            by_version["cymule.agent/8"]["sources"][0]["symbol"],
+            by_version["cymule.agent/9"]["sources"][0]["symbol"],
             "$token:/title",
         )
         malformed = copy.deepcopy(self.registry)
         agent = next(
-            domain for domain in malformed["domains"] if domain["version"] == "cymule.agent/8"
+            domain for domain in malformed["domains"] if domain["version"] == "cymule.agent/9"
         )
         agent["sources"][0]["symbol"] = "/type"
         with self.assertRaisesRegex(ValueError, "source anchor"):
@@ -1277,7 +1277,7 @@ fn quotes(bytes: &[u8]) -> bool {
     def test_tracked_plugin_schema_requires_fragment_owned_digest(self) -> None:
         malformed = copy.deepcopy(self.registry)
         agent = next(
-            domain for domain in malformed["domains"] if domain["version"] == "cymule.agent/8"
+            domain for domain in malformed["domains"] if domain["version"] == "cymule.agent/9"
         )
         agent["schemas"] = []
         with self.assertRaisesRegex(ValueError, "agent-protocol.schema.json requires exactly one root owner"):
@@ -1445,7 +1445,7 @@ fn quotes(bytes: &[u8]) -> bool {
                 "crates/cymule-profile-protocol/src/agent.rs",
                 "AGENT_STREAM_KEY_DOMAIN",
             ),
-            "cymule.agent-target-claim-id/1": (
+            "cymule.agent-target-claim-id/2": (
                 "crates/cymule-profile-protocol/src/agent.rs",
                 "AGENT_TARGET_CLAIM_ID_DOMAIN",
             ),
@@ -1475,8 +1475,9 @@ fn quotes(bytes: &[u8]) -> bool {
         )
         version_domains.validate_identity_source_dependencies(publication)
 
-        reservation = by_version["cymule.agent-stream-publication-reservation/2"]
+        reservation = by_version["cymule.agent-stream-publication-reservation/3"]
         reservation_dependencies = {
+            "cymule.agent-stream-publication-dispatch-id/1",
             "cymule.agent-stream-publication-intent/2",
             "cymule.resource-pin-receipt/3",
             "cymule.resource-retention-family/1",
@@ -1542,20 +1543,20 @@ fn quotes(bytes: &[u8]) -> bool {
 
     def test_agent_command_receipt_registers_resource_lifecycle_receipts(self) -> None:
         by_version = {domain["version"]: domain for domain in self.registry["domains"]}
-        receipt = by_version["cymule.agent-command-receipt/4"]
+        receipt = by_version["cymule.agent-command-receipt/5"]
         lifecycle_receipts = {
             "cymule.resource-pin-receipt/3",
             "cymule.resource-release-receipt/3",
         }
         self.assertTrue(lifecycle_receipts.issubset(receipt["embeds"]))
         self.assertTrue(lifecycle_receipts.issubset(receipt["depends_on"]))
-        claim = by_version["cymule.agent-target-claim-current/1"]
+        claim = by_version["cymule.agent-target-claim-current/2"]
         self.assertEqual(claim["sources"][0]["role"], "persistence_discriminator")
         self.assertEqual(claim["schemas"][0]["fragment"], "#/$defs/agentTargetClaimCurrent")
-        self.assertIn("cymule.agent-target-claim-current/1", receipt["depends_on"])
+        self.assertIn("cymule.agent-target-claim-current/2", receipt["depends_on"])
         self.assertIn(
-            "cymule.agent-target-claim-current/1",
-            by_version["cymule.agent/8"]["depends_on"],
+            "cymule.agent-target-claim-current/2",
+            by_version["cymule.agent/9"]["depends_on"],
         )
 
     def test_coupled_checkpoint_receipt_and_key_are_registered(self) -> None:
@@ -1872,15 +1873,16 @@ fn quotes(bytes: &[u8]) -> bool {
             domain["version"]: domain for domain in self.registry["domains"]
         }
         versions = set(by_version)
-        self.assertIn("cymule.agent/8", versions)
+        self.assertIn("cymule.agent/9", versions)
         self.assertTrue(
             {
                 "cymule.agent-command-id/2",
                 "cymule.agent-command/4",
-                "cymule.agent-command-receipt-id/2",
-                "cymule.agent-command-receipt/4",
+                "cymule.agent-command-receipt-id/3",
+                "cymule.agent-command-receipt/5",
                 "cymule.agent-session-current/2",
-                "cymule.agent-stream-publication-reservation/2",
+                "cymule.agent-stream-publication-dispatch-id/1",
+                "cymule.agent-stream-publication-reservation/3",
                 "cymule.agent-stream-key/1",
                 "cymule.agent-stream-chunk-key/1",
             }.issubset(versions)
@@ -1950,12 +1952,13 @@ fn quotes(bytes: &[u8]) -> bool {
         for version in (
             "cymule.agent-command-id/2",
             "cymule.agent-command/4",
-            "cymule.agent-command-receipt-id/2",
-            "cymule.agent-command-receipt/4",
+            "cymule.agent-command-receipt-id/3",
+            "cymule.agent-command-receipt/5",
+            "cymule.agent-stream-publication-dispatch-id/1",
             "cymule.agent-stream-publication-intent/2",
-            "cymule.agent-stream-publication-reservation/2",
-            "cymule.agent-target-claim-current/1",
-            "cymule.agent/8",
+            "cymule.agent-stream-publication-reservation/3",
+            "cymule.agent-target-claim-current/2",
+            "cymule.agent/9",
             "cymule.directory-store/5",
             "cymule.durable-state-root/5",
             "cymule.durable-state-value/5",
@@ -1965,8 +1968,8 @@ fn quotes(bytes: &[u8]) -> bool {
             self.assertEqual(by_version[version]["migration"], generation_five)
         self.assertTrue(
             {
-                "cymule.agent-target-claim-current/1",
-                "cymule.agent-target-claim-id/1",
+                "cymule.agent-target-claim-current/2",
+                "cymule.agent-target-claim-id/2",
                 "cymule.agent-target-claim-key/1",
             }.issubset(versions)
         )

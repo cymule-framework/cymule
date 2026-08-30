@@ -312,8 +312,8 @@
   receipt-to-update and update-to-receipt closure, and StateRoot admission
   requires the same exact one-to-one operation set in the receipt CAS.
   A Materialized claim authenticates the complete Message or Tool projection
-  from its admitting receipt, not only the target key, terminal phase, or
-  `admitted_by` field.
+  from the receipt for its admitting command, not only the target key,
+  terminal phase, or `admitted_by` field.
   Every non-pristine `AgentSessionCurrent` likewise exact-matches its admitting
   receipt in the CAS and full audit. The only receipt-free Session current is
   the exact pristine constructor value at a parent-absent key; exact read accepts
@@ -354,7 +354,9 @@
   the retained source, and advances by one. Each non-genesis claim retains its
   immediate predecessor claim and admitting command IDs; replay resolves that
   edge through the already retained Agent receipt, without a separate journal
-  or global history scan. A reservation-phase
+  or global history scan. The protocol's 64-generation ceiling bounds this
+  per-key replay and keeps full-audit work linear in the number of target keys.
+  A reservation-phase
   stream read authenticates its original Open receipt plus
   exact retained unterminated Finalize command, not equality with the old Open
   projection alone. It also rejects a self-consistent reservation whose intent

@@ -4,7 +4,7 @@
     "generation": "source-0.2.0-unreleased-generation-3",
     "workspace_version": "0.2.0",
     "state": "source",
-    "source_snapshot_digest": "sha256:4af0c8e3654dcf4bcc0243608ce8d75fee0b815cb4f002632519f3ce7274904c",
+    "source_snapshot_digest": "sha256:353992d9f45862d034bc7fd40bd16238d96236e9d7e1570f9ec8af58d21c65e7",
     "baseline_source_snapshot_digest": "sha256:e3783a1ae7e61f331d90f7d456f60eb132712ba1f70e1b7f2363078a3c31540a",
     "predecessor_registry_digest": null,
     "predecessor_source_snapshot_digest": null,
@@ -176,7 +176,7 @@
     },
     {
       "domain": "cymule.agent-command-receipt-id",
-      "version": "cymule.agent-command-receipt-id/2",
+      "version": "cymule.agent-command-receipt-id/3",
       "kind": "receipt",
       "owner": "cymule-profile-protocol",
       "writers": [
@@ -226,7 +226,7 @@
     },
     {
       "domain": "cymule.agent-command-receipt",
-      "version": "cymule.agent-command-receipt/4",
+      "version": "cymule.agent-command-receipt/5",
       "kind": "receipt",
       "owner": "cymule-profile-protocol",
       "writers": [
@@ -243,12 +243,12 @@
         }
       ],
       "embeds": [
-        "cymule.agent-target-claim-current/1",
+        "cymule.agent-target-claim-current/2",
         "cymule.resource-pin-receipt/3",
         "cymule.resource-release-receipt/3"
       ],
       "depends_on": [
-        "cymule.agent-target-claim-current/1",
+        "cymule.agent-target-claim-current/2",
         "cymule.resource-pin-receipt/3",
         "cymule.resource-release-receipt/3"
       ],
@@ -432,7 +432,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:9d09be622f1cd700ebfefee3dca7b70008a89d93723d1579c8e5b9bcccf20560",
+          "canonical_digest": "sha256:18cbd8490d184764bc3c826c75abd2b51b60ffdce692275e6099138272e7e52b",
           "fragment": "#/$defs/agentHostBinding",
           "root": false
         }
@@ -965,7 +965,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:9d09be622f1cd700ebfefee3dca7b70008a89d93723d1579c8e5b9bcccf20560",
+          "canonical_digest": "sha256:18cbd8490d184764bc3c826c75abd2b51b60ffdce692275e6099138272e7e52b",
           "root": false,
           "fragment": "#/$defs/recoveryObservation"
         }
@@ -1026,7 +1026,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:9d09be622f1cd700ebfefee3dca7b70008a89d93723d1579c8e5b9bcccf20560",
+          "canonical_digest": "sha256:18cbd8490d184764bc3c826c75abd2b51b60ffdce692275e6099138272e7e52b",
           "fragment": "#/$defs/agentSessionCurrent",
           "root": false
         }
@@ -1274,6 +1274,64 @@
       "defined_at_source_snapshot_digest": null
     },
     {
+      "domain": "cymule.agent-stream-publication-dispatch-id",
+      "version": "cymule.agent-stream-publication-dispatch-id/1",
+      "kind": "receipt",
+      "owner": "cymule-profile-protocol",
+      "writers": [
+        "cymule-profile-protocol"
+      ],
+      "readers": [
+        "cymule-agent",
+        "cymule-profile-protocol"
+      ],
+      "sources": [
+        {
+          "path": "crates/cymule-profile-protocol/src/agent.rs",
+          "symbol": "AGENT_STREAM_PUBLICATION_DISPATCH_ID_DOMAIN",
+          "role": "content_id_domain"
+        }
+      ],
+      "embeds": [
+        "cymule.agent-stream-publication-intent/2",
+        "cymule.resource-pin-receipt/3"
+      ],
+      "depends_on": [
+        "cymule.agent-stream-publication-intent/2",
+        "cymule.jcs/1",
+        "cymule.resource-pin-receipt/3"
+      ],
+      "consumers": {
+        "schemas": [],
+        "types": [
+          "crates/cymule-profile-protocol/src/agent.rs::AGENT_STREAM_PUBLICATION_DISPATCH_ID_DOMAIN"
+        ],
+        "packages": [
+          "cymule-agent",
+          "cymule-profile-protocol"
+        ]
+      },
+      "generator_paths": [
+        "crates/cymule-profile-protocol/src/agent.rs"
+      ],
+      "compatibility_mode": "exact-reject",
+      "migration": {
+        "mode": "unsupported",
+        "edge": null,
+        "runbook": "docs/migrations/durable-state-root-generation-5.md"
+      },
+      "removal_gate": null,
+      "conformance": [
+        "rust-agent-plugin",
+        "rust-profile-protocol"
+      ],
+      "schemas": [],
+      "literal_locations": [
+        "crates/cymule-profile-protocol/src/agent.rs"
+      ],
+      "defined_at_source_snapshot_digest": null
+    },
+    {
       "domain": "cymule.agent-stream-publication-intent",
       "version": "cymule.agent-stream-publication-intent/2",
       "kind": "persistence",
@@ -1330,7 +1388,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:9d09be622f1cd700ebfefee3dca7b70008a89d93723d1579c8e5b9bcccf20560",
+          "canonical_digest": "sha256:18cbd8490d184764bc3c826c75abd2b51b60ffdce692275e6099138272e7e52b",
           "root": false,
           "fragment": "#/$defs/agentStreamPublicationIntent"
         }
@@ -1343,7 +1401,7 @@
     },
     {
       "domain": "cymule.agent-stream-publication-reservation",
-      "version": "cymule.agent-stream-publication-reservation/2",
+      "version": "cymule.agent-stream-publication-reservation/3",
       "kind": "persistence",
       "owner": "cymule-profile-protocol",
       "writers": [
@@ -1363,12 +1421,14 @@
         }
       ],
       "embeds": [
+        "cymule.agent-stream-publication-dispatch-id/1",
         "cymule.agent-stream-publication-intent/2",
         "cymule.resource-pin-receipt/3",
         "cymule.resource-retention-family/1",
         "cymule.resource-retention-subject/1"
       ],
       "depends_on": [
+        "cymule.agent-stream-publication-dispatch-id/1",
         "cymule.agent-stream-publication-intent/2",
         "cymule.jcs/1",
         "cymule.resource-pin-receipt/3",
@@ -1408,7 +1468,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:9d09be622f1cd700ebfefee3dca7b70008a89d93723d1579c8e5b9bcccf20560",
+          "canonical_digest": "sha256:18cbd8490d184764bc3c826c75abd2b51b60ffdce692275e6099138272e7e52b",
           "root": false,
           "fragment": "#/$defs/agentStreamPublicationReservation"
         }
@@ -1477,7 +1537,7 @@
     },
     {
       "domain": "cymule.agent-target-claim-current",
-      "version": "cymule.agent-target-claim-current/1",
+      "version": "cymule.agent-target-claim-current/2",
       "kind": "persistence",
       "owner": "cymule-profile-protocol",
       "writers": [
@@ -1499,10 +1559,10 @@
         }
       ],
       "embeds": [
-        "cymule.agent-target-claim-id/1"
+        "cymule.agent-target-claim-id/2"
       ],
       "depends_on": [
-        "cymule.agent-target-claim-id/1"
+        "cymule.agent-target-claim-id/2"
       ],
       "consumers": {
         "schemas": [
@@ -1539,7 +1599,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:9d09be622f1cd700ebfefee3dca7b70008a89d93723d1579c8e5b9bcccf20560",
+          "canonical_digest": "sha256:18cbd8490d184764bc3c826c75abd2b51b60ffdce692275e6099138272e7e52b",
           "root": false,
           "fragment": "#/$defs/agentTargetClaimCurrent"
         }
@@ -1552,7 +1612,7 @@
     },
     {
       "domain": "cymule.agent-target-claim-id",
-      "version": "cymule.agent-target-claim-id/1",
+      "version": "cymule.agent-target-claim-id/2",
       "kind": "persistence",
       "owner": "cymule-profile-protocol",
       "writers": [
@@ -1571,10 +1631,10 @@
         }
       ],
       "embeds": [
-        "cymule.agent-target-claim-current/1"
+        "cymule.agent-target-claim-current/2"
       ],
       "depends_on": [
-        "cymule.agent-target-claim-current/1",
+        "cymule.agent-target-claim-current/2",
         "cymule.jcs/1"
       ],
       "consumers": {
@@ -1941,7 +2001,7 @@
     },
     {
       "domain": "cymule.agent",
-      "version": "cymule.agent/8",
+      "version": "cymule.agent/9",
       "kind": "semantic",
       "owner": "cymule-agent",
       "writers": [
@@ -1963,8 +2023,8 @@
         "cymule.agent-recovery-observation/1",
         "cymule.agent-session-current/2",
         "cymule.agent-stream-publication-intent/2",
-        "cymule.agent-stream-publication-reservation/2",
-        "cymule.agent-target-claim-current/1",
+        "cymule.agent-stream-publication-reservation/3",
+        "cymule.agent-target-claim-current/2",
         "cymule.artifact/2",
         "cymule.clock-observation/2",
         "cymule.framework-resource-handle/4",
@@ -1975,8 +2035,8 @@
         "cymule.agent-recovery-observation/1",
         "cymule.agent-session-current/2",
         "cymule.agent-stream-publication-intent/2",
-        "cymule.agent-stream-publication-reservation/2",
-        "cymule.agent-target-claim-current/1",
+        "cymule.agent-stream-publication-reservation/3",
+        "cymule.agent-target-claim-current/2",
         "cymule.artifact/2",
         "cymule.clock-observation/2",
         "cymule.framework-resource-handle/4",
@@ -2012,7 +2072,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:9d09be622f1cd700ebfefee3dca7b70008a89d93723d1579c8e5b9bcccf20560",
+          "canonical_digest": "sha256:18cbd8490d184764bc3c826c75abd2b51b60ffdce692275e6099138272e7e52b",
           "root": true
         }
       ],

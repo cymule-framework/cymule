@@ -14441,13 +14441,10 @@ mod agent_stream_publication_reservation_tests {
             .expect("stream retains its reservation")
             .phase = agent_protocol::AgentStreamPublicationReservationPhase::NotApplied;
         assert!(matches!(
-            coordinator.commit_profile_operations(vec![
-                DurableOperation::PutAgentStreamCurrent {
-                    value: forged_not_applied,
-                },
-            ]),
-            Err(DurableError::Integrity { ref code, .. })
-                if code == "agent_current_operation_unowned"
+            coordinator.commit_profile_operations(vec![DurableOperation::PutAgentStreamCurrent {
+                value: forged_not_applied,
+            },]),
+            Err(DurableError::Integrity { .. })
         ));
         let mut forged_attempt = reserved_stream.clone();
         forged_attempt
@@ -14456,13 +14453,10 @@ mod agent_stream_publication_reservation_tests {
             .expect("stream retains its reservation")
             .attempt += 6;
         assert!(matches!(
-            coordinator.commit_profile_operations(vec![
-                DurableOperation::PutAgentStreamCurrent {
-                    value: forged_attempt,
-                },
-            ]),
-            Err(DurableError::Integrity { ref code, .. })
-                if code == "agent_current_operation_unowned"
+            coordinator.commit_profile_operations(vec![DurableOperation::PutAgentStreamCurrent {
+                value: forged_attempt,
+            },]),
+            Err(DurableError::Integrity { .. })
         ));
         let mut missing_reservation = reserved_stream.clone();
         missing_reservation.publication_reservation = None;

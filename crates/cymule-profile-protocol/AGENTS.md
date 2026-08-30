@@ -96,6 +96,8 @@
   through `Reserved`, `Materialized`, or `Released` with a monotonic generation.
   Every non-genesis generation binds its immediate predecessor claim and
   admitting command IDs, so higher generation alone is never lineage proof.
+  Generation is capped at 64, bounding any receipt-linked replay; exhausted
+  reuse requires a new Message or Tool identity.
   Direct Message and terminal Tool writes materialize it; non-terminal Tool
   writes reject Reserved/Materialized; Session Close materializes every
   Cancelled Tool in claim-key order. Before provider I/O, an external Finalize
@@ -138,7 +140,7 @@
   validator owns this state-dependent capacity for helpers, public snapshot
   commands, current reads, and receipt replay alike.
 - These Agent bounds and the required counters belong to the current unfrozen
-  internal `cymule.agent/8` hard cut. Omitted counters, omitted target-claim
+  internal `cymule.agent/9` hard cut. Omitted counters, omitted target-claim
   sources, omitted publication reservations, and historical aggregate stream
   shapes have no default, compatibility decoder, or migration fallback;
   freeze the final schema digest with this release generation.

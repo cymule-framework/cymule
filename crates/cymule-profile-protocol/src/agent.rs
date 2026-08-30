@@ -37,13 +37,16 @@ pub const AGENT_STREAM_PUBLICATION_INTENT_VERSION: &str =
     "cymule.agent-stream-publication-intent/2";
 /// Frozen persisted pre-publication reservation generation.
 pub const AGENT_STREAM_PUBLICATION_RESERVATION_VERSION: &str =
-    "cymule.agent-stream-publication-reservation/2";
+    "cymule.agent-stream-publication-reservation/3";
+/// Content identity domain for one exact publication attempt and phase.
+pub const AGENT_STREAM_PUBLICATION_DISPATCH_ID_DOMAIN: &str =
+    "cymule.agent-stream-publication-dispatch-id/1";
 /// Frozen current generation for one exact Agent target claim.
-pub const AGENT_TARGET_CLAIM_CURRENT_VERSION: &str = "cymule.agent-target-claim-current/1";
+pub const AGENT_TARGET_CLAIM_CURRENT_VERSION: &str = "cymule.agent-target-claim-current/2";
 /// Domain-separated key for one Session-local Message or Tool target.
 pub const AGENT_TARGET_CLAIM_KEY_DOMAIN: &str = "cymule.agent-target-claim-key/1";
 /// Content identity domain for one exact target-claim generation.
-pub const AGENT_TARGET_CLAIM_ID_DOMAIN: &str = "cymule.agent-target-claim-id/1";
+pub const AGENT_TARGET_CLAIM_ID_DOMAIN: &str = "cymule.agent-target-claim-id/2";
 const AGENT_OCCURRENCE_TRANSITION_ID_DOMAIN: &str = "cymule.agent-occurrence-transition-id/1";
 const AGENT_UPDATE_DIGEST_DOMAIN: &str = "cymule.agent-update-current/1";
 const AGENT_MESSAGE_DIGEST_DOMAIN: &str = "cymule.agent-message-current/1";
@@ -100,6 +103,8 @@ pub const MAX_AGENT_PAGE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_AGENT_VALUE_ENTRIES: usize = 256;
 /// Maximum distinct reconciliation observations retained by one occurrence.
 pub const MAX_AGENT_RECOVERY_OBSERVATIONS: usize = 64;
+/// Maximum generations retained for one exact role-free Agent target.
+pub const MAX_AGENT_TARGET_CLAIM_GENERATION: u64 = 64;
 /// Maximum concurrently non-terminal tools retained by one Session.
 pub const MAX_AGENT_NONTERMINAL_TOOLS: usize = 64;
 /// Maximum summed before/Cancelled canonical bytes reserved for Session close.
@@ -4505,7 +4510,7 @@ pub struct AgentTargetClaimCurrent {
     /// Exact immediate predecessor claim identity, absent only at generation one.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub predecessor_claim_id: Option<String>,
-    /// Command receipt which retains the immediate predecessor, absent at genesis.
+    /// Command identity which admitted the immediate predecessor, absent at genesis.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub predecessor_admitted_by: Option<String>,
     /// Closed reservation/materialization lifecycle.
@@ -4566,7 +4571,7 @@ impl AgentTargetClaimCurrent {
         )?;
         validate_identity("Agent Session", &self.session_id)?;
         self.target.verify()?;
-        if self.generation == 0 || self.generation > MAX_EXACT_INTEGER {
+        if self.generation == 0 || self.generation > MAX_AGENT_TARGET_CLAIM_GENERATION {
             return Err(ProtocolError::Validation(
                 "Agent target-claim generation is outside the exact integer range".to_owned(),
             ));
@@ -5625,6 +5630,8 @@ pub struct AgentStreamPublicationReservation {
     pub reservation_version: String,
     /// Content identity of the immutable intent and Resource obligation.
     pub reservation_id: String,
+    /// Content identity of reservation, attempt, and current phase.
+    pub dispatch_id: String,
     /// Framework-derived immutable provider authority.
     pub intent: AgentStreamPublicationIntent,
     /// Exact reserved Resource pin receipt and resulting family count.
@@ -5650,6 +5657,12 @@ impl AgentStreamPublicationReservation {
         )?;
         let reservation = Self {
             reservation_version: AGENT_STREAM_PUBLICATION_RESERVATION_VERSION.to_owned(),
+            dispatch_id: agent_stream_publication_dispatch_id(
+                &intent,
+                &resource_pin_receipt,
+                1,
+                AgentStreamPublicationReservationPhase::DispatchClaimed,
+            )?,
             reservation_id,
             intent,
             resource_pin_receipt,
@@ -5701,6 +5714,17 @@ impl AgentStreamPublicationReservation {
                     .to_owned(),
             ));
         }
+        let expected_dispatch = agent_stream_publication_dispatch_id(
+            &self.intent,
+            &self.resource_pin_receipt,
+            self.attempt,
+            self.phase,
+        )?;
+        if self.dispatch_id != expected_dispatch {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent stream publication dispatch does not match its attempt and phase".to_owned(),
+            ));
+        }
         validate_canonical_size(
             "Agent stream publication reservation",
             self,
@@ -5729,6 +5753,12 @@ impl AgentStreamPublicationReservation {
             )
         })?;
         next.phase = AgentStreamPublicationReservationPhase::DispatchClaimed;
+        next.dispatch_id = agent_stream_publication_dispatch_id(
+            &next.intent,
+            &next.resource_pin_receipt,
+            next.attempt,
+            next.phase,
+        )?;
         next.verify()?;
         Ok(next)
     }
@@ -5748,9 +5778,28 @@ impl AgentStreamPublicationReservation {
         }
         let mut next = self.clone();
         next.phase = AgentStreamPublicationReservationPhase::NotApplied;
+        next.dispatch_id = agent_stream_publication_dispatch_id(
+            &next.intent,
+            &next.resource_pin_receipt,
+            next.attempt,
+            next.phase,
+        )?;
         next.verify()?;
         Ok(next)
     }
+}
+
+fn agent_stream_publication_dispatch_id(
+    intent: &AgentStreamPublicationIntent,
+    resource_pin_receipt: &ResourcePinReceipt,
+    attempt: u64,
+    phase: AgentStreamPublicationReservationPhase,
+) -> ProtocolResult<String> {
+    content_id(
+        AGENT_STREAM_PUBLICATION_DISPATCH_ID_DOMAIN,
+        &(intent, resource_pin_receipt, attempt, phase),
+    )
+    .map_err(Into::into)
 }
 
 /// Closed provider observation for one idempotent publication intent.
@@ -7744,10 +7793,10 @@ fn workspace_checkpoint_phase(
 /// Closed Agent persistence command generation.
 pub const AGENT_COMMAND_VERSION: &str = "cymule.agent-command/4";
 /// Closed Agent persistence receipt generation.
-pub const AGENT_COMMAND_RECEIPT_VERSION: &str = "cymule.agent-command-receipt/4";
+pub const AGENT_COMMAND_RECEIPT_VERSION: &str = "cymule.agent-command-receipt/5";
 
 const AGENT_COMMAND_ID_DOMAIN: &str = "cymule.agent-command-id/2";
-const AGENT_COMMAND_RECEIPT_ID_DOMAIN: &str = "cymule.agent-command-receipt-id/2";
+const AGENT_COMMAND_RECEIPT_ID_DOMAIN: &str = "cymule.agent-command-receipt-id/3";
 const AGENT_UPDATE_KEY_DOMAIN: &str = "cymule.agent-update-key/1";
 const AGENT_MESSAGE_KEY_DOMAIN: &str = "cymule.agent-message-key/1";
 const AGENT_TOOL_KEY_DOMAIN: &str = "cymule.agent-tool-key/1";
@@ -10797,13 +10846,38 @@ mod tests {
         .expect("NotApplied Abort releases the exact reservation");
         let reused = AgentTargetClaimTransition::new(
             session_id,
-            user,
+            user.clone(),
             Some(&released.current),
             AgentTargetClaimPhase::Materialized,
             &revision('e'),
         )
         .expect("released target admits one later materialization generation");
         assert_eq!(reused.current.generation, released.current.generation + 1);
+
+        let terminal_generation = AgentTargetClaimCurrent::new(
+            session_id,
+            user.clone(),
+            MAX_AGENT_TARGET_CLAIM_GENERATION,
+            Some(&revision('1')),
+            Some(&revision('2')),
+            AgentTargetClaimPhase::Released {
+                stream_id: "stream:target-claim-limit".to_owned(),
+                reservation_id: revision('3'),
+            },
+            &revision('4'),
+        )
+        .expect("the exact target-claim generation ceiling verifies");
+        assert_eq!(terminal_generation.generation, 64);
+        assert!(AgentTargetClaimCurrent::new(
+            session_id,
+            user,
+            MAX_AGENT_TARGET_CLAIM_GENERATION + 1,
+            Some(&terminal_generation.claim_id),
+            Some(&terminal_generation.admitted_by),
+            AgentTargetClaimPhase::Materialized,
+            &revision('5'),
+        )
+        .is_err());
     }
 
     #[test]
@@ -11934,7 +12008,7 @@ mod tests {
         .expect("predecessor receipt identity derives");
         assert_ne!(receipt.receipt_id, predecessor_receipt_id);
         let mut predecessor = receipt;
-        predecessor.receipt_version = "cymule.agent-command-receipt/3".to_owned();
+        predecessor.receipt_version = "cymule.agent-command-receipt/4".to_owned();
         assert!(predecessor.verify_for(&command).is_err());
 
         let mut unrelated = postcondition.clone();

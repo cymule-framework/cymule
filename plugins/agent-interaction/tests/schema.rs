@@ -139,7 +139,7 @@ fn stream_current() -> Value {
 #[test]
 fn schema_accepts_terminal_currents_and_rejects_removed_aggregate_records() {
     let schema = agent_schema();
-    assert_eq!(schema["title"], "Cymule Agent Protocol cymule.agent/8");
+    assert_eq!(schema["title"], "Cymule Agent Protocol cymule.agent/9");
     assert_eq!(
         schema["$id"],
         "https://cymule.dev/schemas/agent-protocol.schema.json"
