@@ -81,7 +81,10 @@
   or operation-specific derivation.
 - Custom transports implement only `exchange(request)` and return the complete
   `{request, response}` success. A bare Clock, Durable, Seal, or Evolution
-  payload is not accepted by the high-level facade.
+  payload is not accepted by the high-level facade. After `exchange` returns,
+  shape, echo, payload, request binding, and unboxing validation catch every
+  ordinary `Exception` and turn it into request-aware response loss; never
+  catch `BaseException` at this boundary.
 - Strict JSON admits at most 128 nesting levels, maps parser `RecursionError` to
   a structured fixed-depth rejection, and retains exact `Decimal` evidence for
   non-integral tokens until echo and typed admission finish. Number tokens are
@@ -95,8 +98,10 @@
 - Optional Engine failure and issue members are omission-only and reject
   explicit `null`. Failure codes use the ASCII-only
   `^[a-z][a-z0-9_]{0,199}$` contract, and category/retry pairs must match the
-  closed Engine recovery matrix. An invalid envelope received after a mutating
-  request begins is an unknown world outcome requiring reconciliation.
+  closed Engine recovery matrix. When `issues` is present it contains 1..=100
+  entries; omit it instead of sending an empty list. An invalid envelope
+  received after a mutating request begins is an unknown world outcome requiring
+  reconciliation.
 - Interruption classification carries an explicit process-start boundary.
   Cancellation observed before `Popen` succeeds is `cancelled/never` even for a
   mutating request. After start, mutating cancellation or timeout is
@@ -104,10 +109,14 @@
   `timed_out/retry_same_request`. An authoritative remote durable timeout may
   instead return `timed_out/refresh_and_retry`; preserve that closed failure
   rather than reclassifying it as local response loss.
-- A cancellation callback failure after process start is response loss: always
-  kill and reap the direct Engine Child and close every local pipe in `finally`;
-  mutations return `unknown_world_outcome/reconcile` without exposing the
-  callback exception.
+- `CliEngine` accepts only the SDK-owned one-way `EngineCancellation`, never an
+  arbitrary cancellation callback. `cancel()` and the sole `Popen` factory use
+  the token's same lock: cancellation linearized first never calls `Popen`,
+  while launch linearized first makes later cancellation post-start. Admitted
+  success and valid remote failure also race cancellation under that lock per
+  invocation; completing one call never marks a shared token complete for its
+  peers. Always kill and reap the direct Engine Child and close every local pipe
+  in `finally`.
 - Engine failure messages/contracts, issue codes/messages, and JSON Pointer
   paths apply their Schema `maxLength` limits in Unicode scalar values while
   rejecting surrogate code points. Do not reuse byte-counted identity/token
@@ -134,6 +143,10 @@
   their exact shapes.
 - Effect dispatches, component occurrences, and Effect-resolution commands all
   require an exact lowercase SHA-256 occurrence-binding content identity.
+- One shared Effect-result validator owns summary, exact Effect dispatch, and
+  Effect-resolution receipt admission. Applied requires a non-null Artifact of
+  exact kind `cymule.effect-result/1`, including when the represented JSON value
+  is null; every other state requires a null result.
 - Durable wait, Effect-resolution, and cancellation successes use their nested
   current receipts. Validate the retained activation or normalized command,
   applied-target subset, requested-versus-actual Effect outcome, nullable result
@@ -164,8 +177,9 @@
 - Migration/restart builders preserve the exact source Run, Plan, and epoch,
   distinct replacement Run, explicit input, and evidence without local
   interpretation. Durable alone derives the authenticated source witness.
-- Reject non-finite or non-positive deadlines before `Popen`. Poll cancellation
-  in one selector-driven nonblocking stdin/stdout/stderr loop; timeout,
+- Reject non-finite or non-positive deadlines before `Popen`. Poll the
+  SDK-owned cancellation token in one selector-driven nonblocking
+  stdin/stdout/stderr loop; timeout,
   cancellation, or overflow kills the direct Child if still live and closes
   every local descriptor without waiting on inherited-pipe threads.
 - Stdout retains the 128 MiB plus 32-byte framing response-envelope bound plus one byte; stderr

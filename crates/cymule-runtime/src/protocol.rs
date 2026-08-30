@@ -874,10 +874,17 @@ fn deserialize_engine_issues<'de, D>(deserializer: D) -> Result<Vec<EngineIssue>
 where
     D: serde::Deserializer<'de>,
 {
-    crate::composition::deserialize_bounded_vec::<D, EngineIssue, { crate::MAX_CONTRACT_ISSUES }>(
-        deserializer,
-        "Engine failure issues",
-    )
+    let issues = crate::composition::deserialize_bounded_vec::<
+        D,
+        EngineIssue,
+        { crate::MAX_CONTRACT_ISSUES },
+    >(deserializer, "Engine failure issues")?;
+    if issues.is_empty() {
+        return Err(serde::de::Error::custom(
+            "Engine failure issues must contain at least one entry when present",
+        ));
+    }
+    Ok(issues)
 }
 
 impl EngineFailure {
@@ -2099,6 +2106,29 @@ mod tests {
             schema_path: None,
         }];
         assert!(control_message.verify().is_err());
+
+        let absent_issues: EngineFailure = serde_json::from_value(serde_json::json!({
+            "category": "validation",
+            "phase": "validate_request",
+            "code": "invalid_request",
+            "message": "issues are optional",
+            "retry_disposition": "correct_and_retry"
+        }))
+        .expect("an omitted issue set remains valid");
+        assert!(absent_issues.issues.is_empty());
+
+        let present_empty_issues = serde_json::json!({
+            "category": "validation",
+            "phase": "validate_request",
+            "code": "invalid_request",
+            "message": "an explicit issue set must not be empty",
+            "issues": [],
+            "retry_disposition": "correct_and_retry"
+        });
+        assert!(
+            serde_json::from_value::<EngineFailure>(present_empty_issues).is_err(),
+            "present-empty Engine failure issues must fail during deserialization"
+        );
     }
 
     #[test]

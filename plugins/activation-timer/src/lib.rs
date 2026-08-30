@@ -1,5 +1,6 @@
 //! Durable logical timer source for Cymule.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -14,6 +15,16 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 const TIMER_SOURCE_SCAN_LIMIT: usize = 256;
+const FRESH_TIMER_SCAN_SQL: &str = "SELECT substr(activation_id, 1, 513),
+                                            length(activation_id),
+                                            due_unix_ms,
+                                            length(value_json)
+     FROM cymule_timers
+     WHERE acknowledged != 1 AND due_unix_ms <= ?1
+       AND selected_wait_ids IS NULL
+       AND (due_unix_ms, activation_id) > (?2, ?3)
+     ORDER BY due_unix_ms, activation_id
+     LIMIT ?4";
 
 /// Exact physical generation accepted by the durable timer source.
 pub const TIMER_STORE_SCHEMA_VERSION: &str = "cymule.activation-timer-store/2";
@@ -75,8 +86,15 @@ struct VerifiedTimer {
     timer_id: String,
     due_unix_ms: u64,
     value: Value,
-    wait_ids: Option<std::collections::BTreeSet<String>>,
+    wait_ids: Option<BTreeSet<String>>,
     acknowledged: bool,
+}
+
+struct TimerScanCandidate {
+    activation_id: String,
+    activation_scalar_count: i64,
+    due_unix_ms: i64,
+    value_bytes: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,7 +183,8 @@ impl<C: Clock> SqliteTimerDriver<C> {
     /// # Errors
     ///
     /// Returns an error for invalid identities or time/value encodings, a
-    /// conflicting replay, `SQLite` contention, or another storage failure.
+    /// canonical value above Core's artifact bound, a conflicting replay,
+    /// `SQLite` contention, or another storage failure.
     pub fn schedule(
         &mut self,
         activation_id: &str,
@@ -178,6 +197,13 @@ impl<C: Clock> SqliteTimerDriver<C> {
         let due = i64::try_from(due_unix_ms)
             .map_err(|error| DurableError::Validation(error.to_string()))?;
         let bytes = cymule_core::canonical_bytes(value)?;
+        if bytes.len() > cymule_core::MAX_ARTIFACT_BYTES {
+            return Err(DurableError::Validation(format!(
+                "timer value has {} canonical bytes; maximum is {}",
+                bytes.len(),
+                cymule_core::MAX_ARTIFACT_BYTES
+            )));
+        }
         let digest = timer_schedule_digest(activation_id, timer_id, due_unix_ms, value)?;
         let transaction = self
             .connection
@@ -220,7 +246,7 @@ impl<C: Clock> SqliteTimerDriver<C> {
         transaction.commit().map_err(contention)
     }
 
-    fn pending_timer_page(&self, now: i64) -> DurableResult<Vec<VerifiedTimer>> {
+    fn pending_timer_page(&self, now: i64) -> DurableResult<Vec<TimerScanCandidate>> {
         let (cursor_due, cursor_activation) =
             self.scan_cursor.as_ref().map_or((i64::MIN, ""), |cursor| {
                 (cursor.due_unix_ms, cursor.activation_id.as_str())
@@ -229,28 +255,44 @@ impl<C: Clock> SqliteTimerDriver<C> {
             .expect("fixed timer scan limit fits SQLite INTEGER");
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT activation_id, timer_id, due_unix_ms, value_json,
-                        schedule_digest, selected_wait_ids, acknowledged
-                 FROM cymule_timers
-                 WHERE acknowledged != 1 AND due_unix_ms <= ?1
-                   AND selected_wait_ids IS NULL
-                   AND (due_unix_ms, activation_id) > (?2, ?3)
-                 ORDER BY due_unix_ms, activation_id
-                 LIMIT ?4",
-            )
+            .prepare(FRESH_TIMER_SCAN_SQL)
             .map_err(contention)?;
         statement
             .query_map(
                 params![now, cursor_due, cursor_activation, scan_limit],
-                stored_timer_from_row,
+                |row| {
+                    Ok(TimerScanCandidate {
+                        activation_id: row.get(0)?,
+                        activation_scalar_count: row.get(1)?,
+                        due_unix_ms: row.get(2)?,
+                        value_bytes: row.get(3)?,
+                    })
+                },
             )
             .map_err(contention)?
             .collect::<Result<Vec<_>, _>>()
+            .map_err(contention)
+    }
+
+    fn load_timer(&self, activation_id: &str) -> DurableResult<VerifiedTimer> {
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT activation_id, timer_id, due_unix_ms, value_json,
+                        schedule_digest, selected_wait_ids, acknowledged
+                 FROM cymule_timers WHERE activation_id = ?1",
+                [activation_id],
+                stored_timer_from_row,
+            )
+            .optional()
             .map_err(contention)?
-            .into_iter()
-            .map(verify_stored_timer)
-            .collect()
+            .ok_or_else(|| {
+                timer_row_integrity(
+                    "timer_scan_candidate_missing",
+                    format!("timer scan candidate {activation_id} disappeared"),
+                )
+            })?;
+        verify_stored_timer(stored)
     }
 
     fn receive_fresh_due(
@@ -267,19 +309,66 @@ impl<C: Clock> SqliteTimerDriver<C> {
         let terminal_page = pending.len() < TIMER_SOURCE_SCAN_LIMIT;
         let now_unix_ms =
             u64::try_from(now).expect("wall Clock u64 converted to nonnegative SQLite INTEGER");
-        for timer in pending {
-            if timer.wait_ids.is_some() || timer.acknowledged || timer.due_unix_ms > now_unix_ms {
+        for candidate in pending {
+            if !(1..=512).contains(&candidate.activation_scalar_count) {
                 return Err(timer_row_integrity(
-                    "timer_fresh_row_mismatch",
-                    "fresh timer query returned a row outside its exact predicate",
+                    "timer_schedule_activation_invalid",
+                    format!(
+                        "timer scan candidate has {} activation identity scalars",
+                        candidate.activation_scalar_count
+                    ),
+                ));
+            }
+            let value_bytes = usize::try_from(candidate.value_bytes).map_err(|error| {
+                timer_row_integrity("timer_schedule_value_size_invalid", error.to_string())
+            })?;
+            if value_bytes > cymule_core::MAX_ARTIFACT_BYTES {
+                return Err(timer_row_integrity(
+                    "timer_schedule_value_too_large",
+                    format!(
+                        "timer activation {} retains {value_bytes} value bytes; maximum is {}",
+                        candidate.activation_id,
+                        cymule_core::MAX_ARTIFACT_BYTES
+                    ),
                 ));
             }
             let cursor = TimerScanCursor {
-                due_unix_ms: i64::try_from(timer.due_unix_ms).map_err(|error| {
-                    timer_row_integrity("timer_schedule_due_invalid", error.to_string())
-                })?,
-                activation_id: timer.activation_id.clone(),
+                due_unix_ms: candidate.due_unix_ms,
+                activation_id: candidate.activation_id.clone(),
             };
+            let timer = self.load_timer(&candidate.activation_id)?;
+            let verified_due = i64::try_from(timer.due_unix_ms).map_err(|error| {
+                timer_row_integrity("timer_schedule_due_invalid", error.to_string())
+            })?;
+            if timer.activation_id != candidate.activation_id
+                || verified_due != candidate.due_unix_ms
+            {
+                return Err(timer_row_integrity(
+                    "timer_scan_candidate_changed",
+                    "timer scan metadata changed before exact-row verification",
+                ));
+            }
+            if timer.acknowledged {
+                self.scan_cursor = Some(cursor);
+                continue;
+            }
+            if let Some(wait_ids) = timer.wait_ids.clone() {
+                self.scan_cursor = Some(cursor);
+                return Ok(Some(WaitSourceDelivery::Retained(WaitDelivery {
+                    activation_id: timer.activation_id,
+                    source: WaitActivationSource::Timer {
+                        timer_id: timer.timer_id,
+                    },
+                    wait_ids,
+                    value: timer.value,
+                })));
+            }
+            if timer.due_unix_ms > now_unix_ms {
+                return Err(timer_row_integrity(
+                    "timer_fresh_row_mismatch",
+                    "fresh timer query returned a row outside its exact due predicate",
+                ));
+            }
             let source = WaitActivationSource::Timer {
                 timer_id: timer.timer_id.clone(),
             };
@@ -305,7 +394,7 @@ impl<C: Clock> SqliteTimerDriver<C> {
         &self,
         timer: &VerifiedTimer,
         source: WaitActivationSource,
-        selected_wait_ids: &std::collections::BTreeSet<String>,
+        selected_wait_ids: &BTreeSet<String>,
     ) -> DurableResult<Option<WaitSourceDelivery>> {
         let target_bytes = cymule_core::canonical_bytes(selected_wait_ids)?;
         let selected_now = self
@@ -483,18 +572,15 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
     }
 }
 
-fn validate_new_targets(
-    wait_ids: &std::collections::BTreeSet<String>,
-    max_targets: usize,
-) -> DurableResult<()> {
-    if wait_ids.is_empty() || wait_ids.len() > max_targets {
+fn validate_new_targets(wait_ids: &BTreeSet<String>, max_targets: usize) -> DurableResult<()> {
+    if wait_ids.len() != 1 || wait_ids.len() > max_targets {
         return Err(DurableError::Validation(format!(
-            "new timer delivery has {} targets outside requested bound {max_targets}",
+            "new timer delivery must have exactly one target within requested bound {max_targets}; observed {}",
             wait_ids.len()
         )));
     }
     for wait_id in wait_ids {
-        validate_identity("wait", wait_id)?;
+        validate_wait_id(wait_id)?;
     }
     Ok(())
 }
@@ -508,21 +594,25 @@ fn validate_receive_bound(max_targets: usize) -> DurableResult<()> {
     Ok(())
 }
 
-fn validate_retained_targets(wait_ids: &std::collections::BTreeSet<String>) -> DurableResult<()> {
-    if wait_ids.is_empty() || wait_ids.len() > MAX_WAIT_DELIVERY_TARGETS {
+fn validate_retained_targets(wait_ids: &BTreeSet<String>) -> DurableResult<()> {
+    if wait_ids.len() != 1 {
         return Err(DurableError::Validation(format!(
-            "retained timer delivery has {} targets outside framework bound {MAX_WAIT_DELIVERY_TARGETS}",
+            "retained timer delivery must have exactly one target; observed {}",
             wait_ids.len()
         )));
     }
     for wait_id in wait_ids {
-        validate_identity("wait", wait_id)?;
+        validate_wait_id(wait_id)?;
     }
     Ok(())
 }
 
 fn validate_identity(kind: &str, identity: &str) -> DurableResult<()> {
     cymule_core::validate_identity(&format!("timer {kind} identity"), identity).map_err(Into::into)
+}
+
+fn validate_wait_id(wait_id: &str) -> DurableResult<()> {
+    cymule_core::validate_content_id("timer wait identity", wait_id).map_err(Into::into)
 }
 
 fn timer_schedule_digest(
@@ -548,6 +638,17 @@ fn verify_stored_timer(stored: StoredTimer) -> DurableResult<VerifiedTimer> {
         .map_err(|error| timer_row_integrity("timer_schedule_timer_invalid", error.to_string()))?;
     let due_unix_ms = u64::try_from(stored.due_unix_ms)
         .map_err(|error| timer_row_integrity("timer_schedule_due_invalid", error.to_string()))?;
+    if stored.value.len() > cymule_core::MAX_ARTIFACT_BYTES {
+        return Err(timer_row_integrity(
+            "timer_schedule_value_too_large",
+            format!(
+                "timer activation {} retains {} value bytes; maximum is {}",
+                stored.activation_id,
+                stored.value.len(),
+                cymule_core::MAX_ARTIFACT_BYTES
+            ),
+        ));
+    }
     let value = decode_canonical_timer_row(&stored.value, "value_json")?;
     let digest =
         timer_schedule_digest(&stored.activation_id, &stored.timer_id, due_unix_ms, &value)
@@ -775,4 +876,30 @@ fn sqlite_error(error: impl std::fmt::Display) -> DurableError {
 
 fn unsupported_generation(detail: &str) -> DurableError {
     DurableError::Validation(format!("{UNSUPPORTED_STORE_GENERATION_CODE}: {detail}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FRESH_TIMER_SCAN_SQL, TIMER_SOURCE_SCAN_LIMIT};
+
+    #[test]
+    fn fresh_scan_projection_contains_only_bounded_metadata() {
+        let projection = FRESH_TIMER_SCAN_SQL
+            .split("FROM")
+            .next()
+            .expect("fresh scan has a projection");
+        assert!(projection.contains("activation_id"));
+        assert!(projection.contains("substr(activation_id, 1, 513)"));
+        assert!(projection.contains("length(activation_id)"));
+        assert!(projection.contains("due_unix_ms"));
+        assert!(projection.contains("length(value_json)"));
+        for payload_column in ["timer_id", "schedule_digest", "selected_wait_ids"] {
+            assert!(
+                !projection.contains(payload_column),
+                "fresh scan projection materialized {payload_column}"
+            );
+        }
+        assert_eq!(TIMER_SOURCE_SCAN_LIMIT, 256);
+        assert!(FRESH_TIMER_SCAN_SQL.contains("LIMIT ?4"));
+    }
 }

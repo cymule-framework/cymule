@@ -3249,26 +3249,39 @@ impl ResourceLifecycleReceiptRef {
         })
     }
 
-    /// Reference one exact Agent stream-finalization pin receipt.
+    /// Reference one exact terminal Agent stream pin or reserved-pin release.
     ///
     /// # Errors
     ///
     /// Returns an error when the Agent receipt is malformed or does not carry
-    /// the exact finalized-stream Resource pin owned by the command.
+    /// exactly one finalized-stream pin or NotApplied-abort release owned by
+    /// the command.
     pub fn from_agent(
         command: &crate::agent::AgentCommand,
         receipt: &crate::agent::AgentCommandReceipt,
     ) -> ResourceResult<Self> {
         let pin = receipt
             .resource_pin_receipt_for(command)
-            .map_err(|error| ResourceError::Validation(error.to_string()))?
-            .ok_or_else(|| {
-                ResourceError::Validation(
-                    "Agent lifecycle reference requires an external stream-finalization pin"
+            .map_err(|error| ResourceError::Validation(error.to_string()))?;
+        let release = receipt
+            .resource_release_receipt_for(command)
+            .map_err(|error| ResourceError::Validation(error.to_string()))?;
+        match (pin, release) {
+            (Some(pin), None) => pin.verify()?,
+            (None, Some(release)) => release.verify()?,
+            (None, None) => {
+                return Err(ResourceError::Validation(
+                    "Agent lifecycle reference requires an external stream pin or reserved-pin release"
                         .to_owned(),
-                )
-            })?;
-        pin.verify()?;
+                ));
+            }
+            (Some(_), Some(_)) => {
+                return Err(ResourceError::Integrity {
+                    code: "resource_agent_lifecycle_outcome_ambiguous".to_owned(),
+                    message: "Agent lifecycle receipt produced both a pin and release".to_owned(),
+                });
+            }
+        }
         Self::new(ResourceLifecycleReceiptLocator::Agent {
             command_id: command.command_id.clone(),
             receipt_id: receipt.receipt_id.clone(),
@@ -3615,6 +3628,68 @@ pub fn reduce_resource_release_receipt(
     )
 }
 
+/// Reduce one provider-proved `NotApplied` Agent publication reservation into
+/// its terminal Resource release.
+///
+/// This is the sole release authority for a `Reserved` Agent-stream pin.
+/// Generic Resource release rejects both the reserved status and the
+/// profile-owned pin, so an application cannot bypass the owning Agent abort.
+///
+/// # Errors
+///
+/// Returns an error unless the exact reserved pin, reservation origin, and
+/// physical family remain current with at least one active obligation.
+pub fn reduce_resource_reserved_pin_release_receipt(
+    command_id: &str,
+    retention: &ResourceRetentionCurrent,
+    current_pin: &ResourcePinCurrent,
+) -> ResourceResult<ResourceReleaseReceipt> {
+    validate_content_id("Agent stream abort command", command_id)?;
+    retention.verify()?;
+    current_pin.verify()?;
+    let reservation_id = match (&current_pin.pin.kind, &current_pin.last_receipt.locator) {
+        (
+            ResourcePinKind::AgentStream {
+                session_id,
+                stream_id,
+            },
+            ResourceLifecycleReceiptLocator::AgentPublicationReservation {
+                session_id: reserved_session,
+                stream_id: reserved_stream,
+                reservation_id,
+                ..
+            },
+        ) if session_id == reserved_session && stream_id == reserved_stream => reservation_id,
+        _ => {
+            return Err(ResourceError::Integrity {
+                code: "resource_reserved_pin_origin_mismatch".to_owned(),
+                message: "Reserved Resource pin lost its exact Agent publication owner".to_owned(),
+            });
+        }
+    };
+    if current_pin.status != ResourcePinStatus::Reserved {
+        return Err(ResourceError::Conflict {
+            code: "resource_pin_not_reserved".to_owned(),
+            message: "Agent publication abort requires an exact reserved Resource pin".to_owned(),
+        });
+    }
+    if retention.family != current_pin.pin.subject.family
+        || retention.disposition != ResourceRetentionDisposition::Active
+        || retention.active_pin_count == 0
+    {
+        return Err(ResourceError::Integrity {
+            code: "resource_reserved_pin_retention_mismatch".to_owned(),
+            message: "Reserved Agent pin does not belong to the active physical family".to_owned(),
+        });
+    }
+    ResourceReleaseReceipt::new(
+        command_id.to_owned(),
+        reservation_id.clone(),
+        current_pin.pin.clone(),
+        retention.active_pin_count - 1,
+    )
+}
+
 /// Materialize the keyed postcondition for one already-reduced pin receipt.
 ///
 /// # Errors
@@ -3789,6 +3864,65 @@ pub fn project_resource_reserved_pin_receipt(
             state_version: RESOURCE_PIN_CURRENT_VERSION.to_owned(),
             pin: current_pin.pin.clone(),
             status: ResourcePinStatus::Active,
+            last_receipt: origin,
+        },
+    };
+    postcondition.retention.verify()?;
+    postcondition.pin.verify()?;
+    Ok(postcondition)
+}
+
+/// Project one exact Agent abort release over a pre-publication reservation.
+///
+/// # Errors
+///
+/// Returns an error unless the receipt is the exact reserved-pin reduction and
+/// the new current origin is the owning Agent abort receipt.
+pub fn project_resource_reserved_pin_release_receipt(
+    receipt: &ResourceReleaseReceipt,
+    origin: ResourceLifecycleReceiptRef,
+    retention: &ResourceRetentionCurrent,
+    current_pin: &ResourcePinCurrent,
+) -> ResourceResult<ResourcePinPostcondition> {
+    receipt.verify()?;
+    origin.verify()?;
+    if origin.command_id() != receipt.command_id
+        || origin.profile() != ResourceLifecycleProfile::Agent
+        || !matches!(
+            &origin.locator,
+            ResourceLifecycleReceiptLocator::Agent { .. }
+        )
+    {
+        return Err(ResourceError::Integrity {
+            code: "resource_reserved_pin_release_owner_mismatch".to_owned(),
+            message: "Reserved Resource release changed its owning Agent abort".to_owned(),
+        });
+    }
+    let expected =
+        reduce_resource_reserved_pin_release_receipt(&receipt.command_id, retention, current_pin)?;
+    if expected != *receipt {
+        return Err(ResourceError::Integrity {
+            code: "resource_reserved_pin_release_source_mismatch".to_owned(),
+            message: "Reserved Resource release changed its exact keyed source".to_owned(),
+        });
+    }
+    let disposition = if receipt.active_pin_count == 0 {
+        ResourceRetentionDisposition::Unretained
+    } else {
+        ResourceRetentionDisposition::Active
+    };
+    let postcondition = ResourcePinPostcondition {
+        retention: ResourceRetentionCurrent {
+            state_version: RESOURCE_RETENTION_CURRENT_VERSION.to_owned(),
+            family: retention.family.clone(),
+            active_pin_count: receipt.active_pin_count,
+            disposition,
+            last_receipt: origin.clone(),
+        },
+        pin: ResourcePinCurrent {
+            state_version: RESOURCE_PIN_CURRENT_VERSION.to_owned(),
+            pin: current_pin.pin.clone(),
+            status: ResourcePinStatus::Released,
             last_receipt: origin,
         },
     };
@@ -4212,16 +4346,23 @@ impl ResourcePinCurrent {
                 }
                 ResourceLifecycleProfile::Agent
             }
-            (ResourcePinKind::AgentStream { .. }, ResourcePinStatus::Active) => {
+            (
+                ResourcePinKind::AgentStream { .. },
+                ResourcePinStatus::Active | ResourcePinStatus::Released,
+            ) => {
+                if !matches!(
+                    &self.last_receipt.locator,
+                    ResourceLifecycleReceiptLocator::Agent { .. }
+                ) {
+                    return Err(ResourceError::Integrity {
+                        code: "resource_agent_stream_terminal_origin_mismatch".to_owned(),
+                        message: "Terminal Agent stream pin requires its typed Agent receipt"
+                            .to_owned(),
+                    });
+                }
                 ResourceLifecycleProfile::Agent
             }
             (ResourcePinKind::VirtualArchive { .. }, _) => ResourceLifecycleProfile::Virtual,
-            (ResourcePinKind::AgentStream { .. }, ResourcePinStatus::Released) => {
-                return Err(ResourceError::Integrity {
-                    code: "resource_agent_stream_pin_released".to_owned(),
-                    message: "Agent stream pins have no owning retirement transition".to_owned(),
-                });
-            }
         };
         if self.last_receipt.profile() != expected_profile {
             return Err(ResourceError::Integrity {
@@ -5006,6 +5147,105 @@ mod tests {
             reduce_resource_pin_receipt(&command_id, &pin, Some(&current), None),
             Err(ResourceError::Conflict { code, .. }) if code == "resource_pin_family_fenced"
         ));
+    }
+
+    #[test]
+    fn reserved_agent_pin_release_uses_current_family_count_not_reservation_count() {
+        let publication = publication(b"reserved-release");
+        let subject = ResourceRetentionSubject::from_publication(&publication)
+            .expect("reserved release subject derives");
+        let pin = ResourcePin::profile(
+            subject.clone(),
+            ResourcePinKind::AgentStream {
+                session_id: "session:reserved-release".to_owned(),
+                stream_id: "stream:reserved-release".to_owned(),
+            },
+        )
+        .expect("Agent profile pin seals");
+        let sibling_origin =
+            ResourceLifecycleReceiptRef::new(ResourceLifecycleReceiptLocator::Resource {
+                command_id: cymule_core::content_id("test.resource-command/1", &"sibling")
+                    .expect("sibling command derives"),
+                receipt_id: cymule_core::content_id("test.resource-receipt/1", &"sibling")
+                    .expect("sibling receipt derives"),
+            })
+            .expect("sibling origin seals");
+        let initial_retention = ResourceRetentionCurrent {
+            state_version: RESOURCE_RETENTION_CURRENT_VERSION.to_owned(),
+            family: subject.family.clone(),
+            active_pin_count: 1,
+            disposition: ResourceRetentionDisposition::Active,
+            last_receipt: sibling_origin.clone(),
+        };
+        let finalize_command =
+            cymule_core::content_id("test.agent-finalize/1", &"reserved-release")
+                .expect("Finalize command derives");
+        let reservation_receipt =
+            reduce_resource_pin_receipt(&finalize_command, &pin, Some(&initial_retention), None)
+                .expect("reservation counts the sibling pin");
+        assert_eq!(reservation_receipt.active_pin_count, 2);
+        let reservation_origin = ResourceLifecycleReceiptRef::from_agent_publication_reservation(
+            finalize_command,
+            "session:reserved-release",
+            "stream:reserved-release",
+            cymule_core::content_id("test.agent-reservation/1", &"reserved-release")
+                .expect("reservation ID derives"),
+        )
+        .expect("reservation origin seals");
+        let reserved = project_resource_pin_reservation_receipt(
+            &reservation_receipt,
+            reservation_origin,
+            Some(&initial_retention),
+            None,
+        )
+        .expect("reservation projects");
+
+        let after_sibling_release = ResourceRetentionCurrent {
+            active_pin_count: 1,
+            last_receipt: sibling_origin,
+            ..reserved.retention
+        };
+        let abort_command = cymule_core::content_id("test.agent-abort/1", &"reserved-release")
+            .expect("Abort command derives");
+        assert!(
+            reduce_resource_release_receipt(
+                &abort_command,
+                "generic-release",
+                &reserved.pin.pin.pin_id,
+                &reserved.pin.pin.owner,
+                &after_sibling_release,
+                &reserved.pin,
+            )
+            .is_err(),
+            "generic Resource release must not consume a reserved Agent pin"
+        );
+        let release = reduce_resource_reserved_pin_release_receipt(
+            &abort_command,
+            &after_sibling_release,
+            &reserved.pin,
+        )
+        .expect("Agent abort releases against the current count");
+        assert_eq!(release.active_pin_count, 0);
+        let abort_origin =
+            ResourceLifecycleReceiptRef::new(ResourceLifecycleReceiptLocator::Agent {
+                command_id: abort_command,
+                receipt_id: cymule_core::content_id("test.agent-receipt/1", &"reserved-release")
+                    .expect("Abort receipt derives"),
+            })
+            .expect("Abort origin seals");
+        let released = project_resource_reserved_pin_release_receipt(
+            &release,
+            abort_origin,
+            &after_sibling_release,
+            &reserved.pin,
+        )
+        .expect("Agent abort projects its terminal release");
+        assert_eq!(released.pin.status, ResourcePinStatus::Released);
+        assert_eq!(released.retention.active_pin_count, 0);
+        assert_eq!(
+            released.retention.disposition,
+            ResourceRetentionDisposition::Unretained
+        );
     }
 
     #[test]

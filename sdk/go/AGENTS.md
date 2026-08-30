@@ -11,21 +11,34 @@
   parse `Error()` text for control flow. Schema `maxLength` constraints on
   failure messages, contracts, issues, and paths count Unicode scalar values,
   not UTF-8 bytes; the failure code remains the closed ASCII identifier.
-  Enforce the complete category-to-retry-disposition matrix. Cancellation or
-  timeout is an unknown world outcome only after a mutating process actually
-  starts; pre-start interruption and read-only requests retain their safe
-  cancelled/timed-out disposition.
+  Enforce the complete category-to-retry-disposition matrix. Cancellation that
+  linearizes before launch is safe; cancellation or timeout after a mutating
+  process starts is an unknown world outcome. Read-only requests retain their
+  safe cancellation/timeout disposition. An emitted `issues` member is
+  non-empty and contains at most 100 closed issues; absence, not `[]`,
+  represents no issues.
 - Engine-process stderr is diagnostic-only and never becomes an
   `EngineFailure.Message`. Drain stdout and stderr concurrently; stdout retains
   the 128 MiB plus 32-byte framing response-envelope bound plus one byte, while stderr retains its
-  independent 1 MiB diagnostic bound plus one byte. Overflow is response loss;
-  a mutating request requires reconciliation.
+  independent 1 MiB diagnostic bound plus one byte. The first overflow wakes
+  the single process owner, which kills and reaps the direct Child immediately.
+  Overflow is response loss; a mutating request requires reconciliation.
 - Every started Engine has one SDK-owned direct Child handle. Cancellation and
   deadlines immediately kill that Child, close stdin/stdout/stderr parent
   endpoints, and call `Cmd.Wait`; no grace extends the absolute deadline.
   Natural exit is observed with `waitid(WNOWAIT)` and reaped only after local
-  stdout/stderr EOF. The Engine/executor watchdog owns descendants; the SDK
-  never signals a raw PID or PGID after reaping.
+  request writing and stdout/stderr EOF finish. Leader exit closes the local
+  stdin endpoint so an inherited but unread pipe cannot strand the writer.
+  A non-EINTR wait-authority error kills and synchronously reaps the still-owned
+  Child; it never delegates `Cmd.Wait` to an unbounded goroutine. The
+  Engine/executor watchdog owns descendants; the SDK never signals a raw PID or
+  PGID after reaping.
+- `EngineCancellation` is a one-shot SDK launch/completion authority. `Cancel`
+  and `Cmd.Start` linearize under the same lock: cancellation-first means no
+  process creation and a safe `cancelled` failure; launch-first means the
+  request began and follows the read/mutation interruption classification.
+  `CliEngine` exposes no `context.Context`; this token is the only cancellation
+  authority, and its finite SDK-owned `Timeout` is the only deadline authority.
 - Every process-backed request carries a complete `EngineProcessConfig` inside
   `EnginePluginTarget`: absolute executable, ordered arguments, ambient-cleared
   environment, required nullable working directory, non-empty runtime closure,
@@ -65,6 +78,9 @@
   Serde IR shape and registry-owned name/reference relations, not full sealed
   Plan admission. Nested draft site and binding identifiers may remain empty
   until Rust links and seals a parent Plan.
+- Applied Effect summaries, full leaves, exact Run items, and resolution
+  receipts all use the same result gate: the result is non-null and has kind
+  `cymule.effect-result/1`. Every non-applied state carries JSON `null`.
 - Keep Resource Candidate, Handle, Integrity, Location, and Handoff wire structs
   explicit. Recursively validate the returned Handle and compare its complete
   candidate portion with the sent candidate; the Rust Engine remains the only
@@ -116,8 +132,10 @@
   safe-point and caller-authored source-Continuation fields do not exist.
 - Run `gofmt` and `go test ./...` for every change.
 - A zero-value `CliEngine.Timeout` installs the finite 30-second default;
-  positive values override it, while an earlier caller Context deadline or
-  cancellation remains authoritative.
+  positive values override it. `CliEngine` accepts no caller Context deadline
+  or second cancellation route. The timeout clock begins only after
+  `Cmd.Start` succeeds, so pre-launch validation and launch ordering remain
+  exclusively owned by the cancellation gate.
 - Validate every nested `json.RawMessage` in durable and live-evolution success
   payloads before returning it.
 - Durable Run views enforce canonical collection order, pending-wait equality,

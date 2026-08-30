@@ -223,6 +223,9 @@
   process launch, cancellation, and admitted completion linearize under its one
   launch state; the removed public `Arc<AtomicBool>` entry cannot close the
   launch race.
+- An explicit `CliEngine` timeout override must be positive. Zero is local
+  `validation/correct_and_retry` and fails before cancellation-call admission or
+  process spawn; it never creates an immediately timed-out request.
 - CLI cancellation terminates and reaps only the direct Engine child. The
   official Engine/executor watchdog owns descendant closure; SDKs never signal
   a raw PID or PGID after reaping.

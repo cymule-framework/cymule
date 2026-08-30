@@ -1373,7 +1373,7 @@
         "contract_side": { "enum": ["schema", "input", "output"] },
         "path": { "type": "string", "pattern": "^(|/[^\\u0000-\\u001f\\u007f-\\u009f]*)$", "maxLength": 1000 },
         "issues": {
-          "type": "array", "maxItems": 100,
+          "type": "array", "minItems": 1, "maxItems": 100,
           "items": {
             "type": "object", "additionalProperties": false, "required": ["code", "message"],
             "properties": {

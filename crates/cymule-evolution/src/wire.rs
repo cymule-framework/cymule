@@ -454,7 +454,7 @@ where
         .map_err(|error| EvolutionError::Validation(error.to_string()))?;
     let normalized = serde_json::to_value(&message)
         .map_err(|error| EvolutionError::Validation(error.to_string()))?;
-    cymule_runtime::validate_json_typed_roundtrip(&raw, &normalized)
+    cymule_runtime::validate_json_typed_roundtrip_bytes(input, &raw, &normalized)
         .map_err(EvolutionError::Validation)?;
     Ok(message)
 }
@@ -849,6 +849,17 @@ mod tests {
         decode_evolution_plugin_response(&exact).expect("exact raw response bound is accepted");
         exact.push(b' ');
         assert!(decode_evolution_plugin_response(&exact).is_err());
+    }
+
+    #[test]
+    fn closed_decoder_rejects_fractional_decimal_collisions() {
+        let input = br#"{"value":0.100000000000000005}"#;
+        let error = decode_closed_message::<serde_json::Value>(input)
+            .expect_err("fraction collision must fail the shared evolution wire decoder");
+        assert!(matches!(
+            error,
+            EvolutionError::Validation(message) if message.ends_with("/value")
+        ));
     }
 
     #[test]

@@ -52,9 +52,15 @@ child pages, exact `RunItem`, `Resume`, `Takeover`, `Signal`, `Release`,
 `ResolveEffect`, `Cancel`, and `Evolve` operations over a configured
 durable store and immutable process plugin. No separate generic control-submit
 interface is provided. `Finish` returns a deep-frozen
-candidate: later builder changes cannot mutate it. Context cancellation and
-deadlines preserve structured Engine
-failures, including `unknown_world_outcome` for a lost mutating response.
+candidate: later builder changes cannot mutate it. `CliEngine` intentionally
+has no `context.Context`: its finite `Timeout` is the only deadline authority,
+and a one-shot `EngineCancellation` is the only cancellation authority. Bind
+`NewEngineCancellation()` through `CliEngine.Cancellation` and call `Cancel()`.
+Cancellation-first never starts the CLI and returns the safe `cancelled`
+failure; launch-first terminates the owned direct Child and preserves the
+read-versus-mutation interruption classification. Deadline loss preserves the
+same structured classification, including `unknown_world_outcome` for a lost
+mutating response.
 Every query carries explicit revision/cursor and item/byte bounds and returns
 one revision/StateRoot-pinned response; there is no query ID or full
 Run/domain mirror.
@@ -62,13 +68,21 @@ Interruption immediately kills the official direct Child, closes all three
 parent pipe endpoints, and reaps that child. The Engine/executor watchdog owns
 descendant closure; the SDK never signals a raw PID or PGID after reaping.
 Natural Engine exit is observed with `waitid(WNOWAIT)` and `Cmd.Wait` is the
-single reaper after local stdout/stderr EOF.
+single reaper after the bounded request writer and local stdout/stderr EOF.
+Leader exit closes local stdin, so a descendant that inherited but never reads
+the pipe cannot strand the SDK. The first stdout/stderr overflow wakes the same
+owner, which kills and reaps the direct Child before returning the exact stream
+limit failure. A wait-authority failure follows that same synchronous
+kill/close/reap path; no request leaves `Cmd.Wait` in a background goroutine.
 Compact Engine stdout is bounded to the 128 MiB plus 32-byte framing response envelope while
 diagnostic stderr has its independent 1 MiB bound. A complete valid failure is
 decoded before nonzero exit status; success still requires a complete request
 write and zero status.
 Cancellation and effect reconciliation return request-bound typed receipts;
 the SDK validates Rust-issued Artifact references without recomputing them.
+Applied Effect summaries, full leaves, exact Run items, and resolution receipts
+require one non-null `cymule.effect-result/1` Artifact; every non-applied state
+uses JSON `null` for that result.
 Effect-resolution receipts do not duplicate Run world settlement, and a
 provider `NotApplied` result is exposed as the closed `effect_not_applied`
 boundary with its exact content-addressed intent. A dual-configured evolution
@@ -82,8 +96,10 @@ Store targets keep provider, location, and optional domain as an open transport
 boundary. `DirectoryStore` and `SQLiteStore` select the current official
 generations, while Engine ingress decides provider support. Queries omit the
 executor. Migration and shadow commands accept exact-revision process targets.
-The zero-value CLI transport installs a 30-second deadline; a positive Timeout
-overrides it and an earlier caller Context deadline remains authoritative.
+The zero-value CLI transport installs a 30-second SDK deadline; a positive
+Timeout overrides it. There is no caller Context deadline or second
+cancellation route. The process/I/O timeout begins only after `Cmd.Start`
+succeeds; pre-launch validation does not create another deadline race.
 Every process target carries the complete ambient-cleared realization shown
 above; there is no path-only `Run` or location-only plugin target. Use
 `PinnedProcessPlugin` for migration and shadow providers.

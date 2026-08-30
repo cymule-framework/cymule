@@ -1097,6 +1097,7 @@ fn resolve_stream_source(
             stream: stream.ok_or_else(|| {
                 AgentError::NotFound(format!("Agent stream {stream_id} does not exist"))
             })?,
+            resource: None,
         },
         AgentStreamCommand::Finalize { .. } => {
             let stream = stream.ok_or_else(|| {
@@ -1238,7 +1239,8 @@ fn apply_outcome(state: &mut EphemeralAgentState, outcome: AgentCommandOutcome) 
             let session_id = postcondition.stream.session_id.clone();
             let stream_id = postcondition.stream.stream_id.clone();
             match postcondition.effect {
-                AgentStreamEffect::Opened { session } | AgentStreamEffect::Aborted { session } => {
+                AgentStreamEffect::Opened { session }
+                | AgentStreamEffect::Aborted { session, .. } => {
                     state.sessions.insert(session.session_id.clone(), session);
                 }
                 AgentStreamEffect::Chunk { current } => {

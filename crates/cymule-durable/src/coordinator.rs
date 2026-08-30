@@ -9368,6 +9368,11 @@ fn load_verified_agent_origin<R: crate::StateRootResolver + ?Sized>(
         ) => {
             verify_agent_stream_finalization_graph(manifest, resolver, &command, &receipt)?;
         }
+        agent_protocol::AgentCommandAction::Stream(agent_protocol::AgentStreamCommand::Abort {
+            ..
+        }) => {
+            verify_agent_stream_abort_graph(manifest, resolver, &command, &receipt)?;
+        }
         agent_protocol::AgentCommandAction::SessionUpdate { .. }
         | agent_protocol::AgentCommandAction::Occurrence { .. }
         | agent_protocol::AgentCommandAction::Stream(_)
@@ -9404,7 +9409,7 @@ fn verify_agent_session_origin<R: crate::StateRootResolver + ?Sized>(
         agent_protocol::AgentCommandOutcome::Stream(postcondition) => {
             let session = match &postcondition.effect {
                 agent_protocol::AgentStreamEffect::Opened { session }
-                | agent_protocol::AgentStreamEffect::Aborted { session } => session,
+                | agent_protocol::AgentStreamEffect::Aborted { session, .. } => session,
                 agent_protocol::AgentStreamEffect::Finalized { session, .. } => &session.session,
                 agent_protocol::AgentStreamEffect::Chunk { .. } => {
                     return Err(DurableError::Integrity {
@@ -9642,6 +9647,7 @@ fn prepare_agent_local_transition<R: crate::StateRootResolver + ?Sized>(
         }
     };
     let receipt = agent_protocol::AgentCommandReceipt::new(command, source, outcome)?;
+    append_agent_abort_resource_postcondition(&mut operations, command, &receipt)?;
     operations.push(DurableOperation::PutAgentCommand {
         value: command.clone(),
     });
@@ -9825,10 +9831,27 @@ fn prepare_agent_stream<R: crate::StateRootResolver + ?Sized>(
             session_id,
             stream_id,
             ..
-        } => agent_protocol::AgentStreamSource::Abort {
-            session: require_agent_session(manifest, resolver, session_id)?,
-            stream: require_agent_stream(manifest, resolver, session_id, stream_id)?,
-        },
+        } => {
+            let stream = require_agent_stream(manifest, resolver, session_id, stream_id)?;
+            let resource = if let Some(reservation) = &stream.publication_reservation {
+                reservation.verify()?;
+                let profile_pin = resource_protocol::ResourceProfilePin::new(
+                    reservation.resource_pin_receipt.pin.clone(),
+                )?;
+                Some(Box::new(load_agent_stream_resource_source(
+                    manifest,
+                    resolver,
+                    &profile_pin,
+                )?))
+            } else {
+                None
+            };
+            agent_protocol::AgentStreamSource::Abort {
+                session: require_agent_session(manifest, resolver, session_id)?,
+                stream,
+                resource,
+            }
+        }
         agent_protocol::AgentStreamCommand::Finalize { .. } => {
             return Err(DurableError::RuntimeDefect {
                 code: "agent_finalize_reached_local_stream_reducer".to_owned(),
@@ -9842,7 +9865,7 @@ fn prepare_agent_stream<R: crate::StateRootResolver + ?Sized>(
     }];
     match &postcondition.effect {
         agent_protocol::AgentStreamEffect::Opened { session }
-        | agent_protocol::AgentStreamEffect::Aborted { session } => {
+        | agent_protocol::AgentStreamEffect::Aborted { session, .. } => {
             operations.push(DurableOperation::PutAgentSessionCurrent {
                 value: session.clone(),
             });
@@ -9864,6 +9887,71 @@ fn prepare_agent_stream<R: crate::StateRootResolver + ?Sized>(
         agent_protocol::AgentCommandOutcome::Stream(postcondition),
         operations,
     ))
+}
+
+fn append_agent_abort_resource_postcondition(
+    operations: &mut Vec<DurableOperation>,
+    command: &agent_protocol::AgentCommand,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> DurableResult<()> {
+    let (
+        agent_protocol::AgentCommandAction::Stream(agent_protocol::AgentStreamCommand::Abort {
+            ..
+        }),
+        agent_protocol::AgentCommandSource::Stream(source),
+        agent_protocol::AgentCommandOutcome::Stream(postcondition),
+    ) = (&command.action, &receipt.source, &receipt.outcome)
+    else {
+        return Ok(());
+    };
+    let agent_protocol::AgentStreamSource::Abort { resource, .. } = source.as_ref() else {
+        return Err(DurableError::RuntimeDefect {
+            code: "agent_abort_source_shape_mismatch".to_owned(),
+            message: "Agent abort receipt retained another stream source".to_owned(),
+        });
+    };
+    let agent_protocol::AgentStreamEffect::Aborted {
+        resource_release_receipt,
+        ..
+    } = &postcondition.effect
+    else {
+        return Err(DurableError::RuntimeDefect {
+            code: "agent_abort_outcome_shape_mismatch".to_owned(),
+            message: "Agent abort receipt retained another stream outcome".to_owned(),
+        });
+    };
+    match (resource.as_deref(), resource_release_receipt.as_ref()) {
+        (None, None) => Ok(()),
+        (Some(source), Some(release)) => {
+            let retention = source
+                .retention
+                .as_ref()
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_abort_resource_retention_missing".to_owned(),
+                    message: "Agent abort lost its reserved Resource family".to_owned(),
+                })?;
+            let pin = source.pin.as_ref().ok_or_else(|| DurableError::Integrity {
+                code: "agent_abort_resource_pin_missing".to_owned(),
+                message: "Agent abort lost its reserved Resource pin".to_owned(),
+            })?;
+            let origin =
+                resource_protocol::ResourceLifecycleReceiptRef::from_agent(command, receipt)?;
+            let resource_post = resource_protocol::project_resource_reserved_pin_release_receipt(
+                release, origin, retention, pin,
+            )?;
+            operations.push(DurableOperation::PutResourceRetentionCurrent {
+                value: resource_post.retention,
+            });
+            operations.push(DurableOperation::PutResourcePinCurrent {
+                value: resource_post.pin,
+            });
+            Ok(())
+        }
+        _ => Err(DurableError::Integrity {
+            code: "agent_abort_resource_graph_partial".to_owned(),
+            message: "Agent abort retained a partial reserved Resource release".to_owned(),
+        }),
+    }
 }
 
 fn load_agent_stream_finalization_source<R: crate::StateRootResolver + ?Sized>(
@@ -10057,6 +10145,83 @@ fn verify_agent_stream_finalization_graph<R: crate::StateRootResolver + ?Sized>(
     Ok(())
 }
 
+fn verify_agent_stream_abort_graph<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    command: &agent_protocol::AgentCommand,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> DurableResult<()> {
+    receipt.verify_for(command)?;
+    let (
+        agent_protocol::AgentCommandSource::Stream(source),
+        agent_protocol::AgentCommandOutcome::Stream(postcondition),
+    ) = (&receipt.source, &receipt.outcome)
+    else {
+        return Err(DurableError::Integrity {
+            code: "agent_abort_receipt_shape_mismatch".to_owned(),
+            message: "Agent abort receipt retained another command shape".to_owned(),
+        });
+    };
+    let agent_protocol::AgentStreamSource::Abort { resource, .. } = source.as_ref() else {
+        return Err(DurableError::Integrity {
+            code: "agent_abort_source_shape_mismatch".to_owned(),
+            message: "Agent abort receipt retained another stream source".to_owned(),
+        });
+    };
+    let agent_protocol::AgentStreamEffect::Aborted {
+        resource_release_receipt,
+        ..
+    } = &postcondition.effect
+    else {
+        return Err(DurableError::Integrity {
+            code: "agent_abort_outcome_shape_mismatch".to_owned(),
+            message: "Agent abort receipt retained another stream outcome".to_owned(),
+        });
+    };
+    match (resource.as_deref(), resource_release_receipt.as_ref()) {
+        (None, None) => Ok(()),
+        (Some(_), Some(release)) => {
+            let expected =
+                resource_protocol::ResourceLifecycleReceiptRef::from_agent(command, receipt)?;
+            let origin = resource_lifecycle_origin(manifest, resolver, &expected)?;
+            if !matches!(
+                origin,
+                ResolvedResourceLifecycleOrigin::Release(ref retained) if retained == release
+            ) {
+                return Err(DurableError::Integrity {
+                    code: "agent_abort_resource_origin_mismatch".to_owned(),
+                    message: "Agent abort did not retain its exact Resource release origin"
+                        .to_owned(),
+                });
+            }
+            let current = crate::state_root::load_resource_pin_current(
+                manifest,
+                resolver,
+                &release.pin.pin_id,
+            )?
+            .ok_or_else(|| DurableError::Integrity {
+                code: "agent_abort_resource_pin_current_missing".to_owned(),
+                message: "Agent abort lost its terminal Resource pin current".to_owned(),
+            })?;
+            verify_resource_pin_origin(manifest, resolver, &current)?;
+            if current.pin != release.pin
+                || current.status != resource_protocol::ResourcePinStatus::Released
+                || current.last_receipt != expected
+            {
+                return Err(DurableError::Integrity {
+                    code: "agent_abort_resource_pin_current_mismatch".to_owned(),
+                    message: "Agent abort Resource pin current changed after release".to_owned(),
+                });
+            }
+            Ok(())
+        }
+        _ => Err(DurableError::Integrity {
+            code: "agent_abort_resource_graph_partial".to_owned(),
+            message: "Agent abort retained a partial reserved Resource graph".to_owned(),
+        }),
+    }
+}
+
 fn load_agent_stream_target<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
@@ -10207,14 +10372,21 @@ fn resource_lifecycle_origin<R: crate::StateRootResolver + ?Sized>(
             let expected =
                 resource_protocol::ResourceLifecycleReceiptRef::from_agent(&command, &receipt)?;
             ensure_lifecycle_reference(reference, &expected)?;
-            let pin = receipt.resource_pin_receipt_for(&command)?.ok_or_else(|| {
-                DurableError::Integrity {
-                    code: "resource_lifecycle_agent_pin_missing".to_owned(),
-                    message: "Agent lifecycle origin did not produce its exact Resource pin"
-                        .to_owned(),
+            match (
+                receipt.resource_pin_receipt_for(&command)?,
+                receipt.resource_release_receipt_for(&command)?,
+            ) {
+                (Some(pin), None) => Ok(ResolvedResourceLifecycleOrigin::Pin(pin.clone())),
+                (None, Some(release)) => {
+                    Ok(ResolvedResourceLifecycleOrigin::Release(release.clone()))
                 }
-            })?;
-            Ok(ResolvedResourceLifecycleOrigin::Pin(pin.clone()))
+                _ => Err(DurableError::Integrity {
+                    code: "resource_lifecycle_agent_outcome_mismatch".to_owned(),
+                    message:
+                        "Agent lifecycle origin did not produce exactly one Resource pin or release"
+                            .to_owned(),
+                }),
+            }
         }
         resource_protocol::ResourceLifecycleProfile::Virtual => {
             virtual_resource_lifecycle_origin(manifest, resolver, reference)
@@ -13108,6 +13280,202 @@ mod agent_stream_publication_reservation_tests {
         assert_eq!(retention.active_pin_count, 2);
         assert_eq!(providers.publish_calls, 1);
         assert_eq!(providers.observe_calls, 1);
+    }
+
+    #[test]
+    fn sibling_pin_release_after_reservation_does_not_block_promotion() {
+        let mut coordinator = initialized_with_open_stream();
+        let (_, target) = family_and_target();
+        let sibling = ResourcePin::explicit(
+            "pin:sibling-before-reservation",
+            target.subject.clone(),
+            "owner:sibling-before-reservation",
+        )
+        .expect("sibling pin seals");
+        let pin_command = ResourceCommand::new(ResourceOperation::Pin {
+            pin: sibling.clone(),
+        })
+        .expect("sibling pin command seals");
+        coordinator
+            .commit_resource(&pin_command)
+            .expect("sibling pin commits before reservation");
+
+        let command = finalize_command(&coordinator);
+        let mut providers = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([ProviderOutcome::Unknown]),
+            observe_outcome: ProviderOutcome::Published,
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        let unknown = coordinator
+            .finalize_agent_stream(&command, &mut providers)
+            .expect("reservation publishes one ambiguous attempt");
+        let AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { intent } = unknown else {
+            panic!("publication remains unknown")
+        };
+        let release = ResourceCommand::new(ResourceOperation::Release {
+            release_id: "release:sibling-after-reservation".to_owned(),
+            pin_id: sibling.pin_id.clone(),
+            owner: sibling.owner.clone(),
+        })
+        .expect("sibling release command seals");
+        coordinator
+            .commit_resource(&release)
+            .expect("sibling pin releases after reservation");
+
+        let finalized = coordinator
+            .reconcile_agent_stream(&command, &intent, &mut providers)
+            .expect("Published reconciliation promotes the exact remaining reservation");
+        let AgentStreamFinalizeOutcome::Committed { commit } = finalized else {
+            panic!("Published reconciliation commits")
+        };
+        let agent_pin = commit
+            .receipt
+            .resource_pin_receipt_for(&command)
+            .expect("Agent pin receipt resolves")
+            .expect("external finalization owns its pin");
+        let (family, _) = family_and_target();
+        let retention = coordinator
+            .resource_retention_current(&family.retention_key)
+            .expect("retention reads")
+            .expect("retention exists");
+        assert_eq!(retention.active_pin_count, 1);
+        let current = coordinator
+            .resource_pin_current(&agent_pin.pin.pin_id)
+            .expect("Agent pin reads")
+            .expect("Agent pin exists");
+        assert_eq!(current.status, ResourcePinStatus::Active);
+        let sibling = coordinator
+            .resource_pin_current(&sibling.pin_id)
+            .expect("sibling pin reads")
+            .expect("sibling pin exists");
+        assert_eq!(sibling.status, ResourcePinStatus::Released);
+        assert_eq!(providers.publish_calls, 1);
+        assert_eq!(providers.observe_calls, 1);
+    }
+
+    #[test]
+    fn abort_rejects_unknown_publication_attempt() {
+        let mut unknown_coordinator = initialized_with_open_stream();
+        let finalize = finalize_command(&unknown_coordinator);
+        let mut unknown_provider = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([ProviderOutcome::Unknown]),
+            observe_outcome: ProviderOutcome::Unknown,
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        unknown_coordinator
+            .finalize_agent_stream(&finalize, &mut unknown_provider)
+            .expect("unknown provider outcome retains its claimed reservation");
+        let abort_unknown = AgentCommand::new(
+            unknown_coordinator
+                .current_revision()
+                .expect("revision exists")
+                .to_owned(),
+            AgentCommandAction::Stream(AgentStreamCommand::Abort {
+                session_id: SESSION_ID.to_owned(),
+                stream_id: STREAM_ID.to_owned(),
+                reason: "caller:abort-unknown".to_owned(),
+            }),
+        )
+        .expect("unknown Abort command seals");
+        assert!(matches!(
+            unknown_coordinator.commit_agent_local(&abort_unknown),
+            Err(DurableError::HistoryConflict { ref code, .. })
+                if code == "agent_stream_publication_abort_unresolved"
+        ));
+        let unknown_stream = unknown_coordinator
+            .read_current_state_root(|manifest, resolver| {
+                require_agent_stream(manifest, resolver, SESSION_ID, STREAM_ID)
+            })
+            .expect("unknown stream rereads");
+        assert_eq!(unknown_stream.state, agent_protocol::AgentStreamState::Open);
+        assert!(unknown_stream.publication_reservation.is_some());
+    }
+
+    #[test]
+    fn abort_releases_not_applied_reservation_atomically() {
+        let mut coordinator = initialized_with_open_stream();
+        let finalize = finalize_command(&coordinator);
+        let mut provider = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([ProviderOutcome::NotApplied]),
+            observe_outcome: ProviderOutcome::NotApplied,
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        let not_applied = coordinator
+            .finalize_agent_stream(&finalize, &mut provider)
+            .expect("provider NotApplied becomes durable");
+        assert!(matches!(
+            not_applied,
+            AgentStreamFinalizeOutcome::PublicationNotApplied { .. }
+        ));
+        let abort = AgentCommand::new(
+            coordinator
+                .current_revision()
+                .expect("revision exists")
+                .to_owned(),
+            AgentCommandAction::Stream(AgentStreamCommand::Abort {
+                session_id: SESSION_ID.to_owned(),
+                stream_id: STREAM_ID.to_owned(),
+                reason: "caller:abort-not-applied".to_owned(),
+            }),
+        )
+        .expect("NotApplied Abort command seals");
+        let commit = coordinator
+            .commit_agent_local(&abort)
+            .expect("NotApplied reservation aborts atomically");
+        let release = commit
+            .receipt
+            .resource_release_receipt_for(&abort)
+            .expect("Abort release resolves")
+            .expect("NotApplied Abort owns one release");
+        assert_eq!(release.active_pin_count, 0);
+        let stream = coordinator
+            .read_current_state_root(|manifest, resolver| {
+                require_agent_stream(manifest, resolver, SESSION_ID, STREAM_ID)
+            })
+            .expect("aborted stream reads");
+        assert_eq!(stream.state, agent_protocol::AgentStreamState::Aborted);
+        assert!(stream.publication_reservation.is_none());
+        let session = coordinator
+            .read_current_state_root(|manifest, resolver| {
+                require_agent_session(manifest, resolver, SESSION_ID)
+            })
+            .expect("aborted Session reads");
+        assert_eq!(session.open_stream_count, 0);
+        let pin = coordinator
+            .resource_pin_current(&release.pin.pin_id)
+            .expect("released Agent pin reads")
+            .expect("released Agent pin exists");
+        assert_eq!(pin.status, ResourcePinStatus::Released);
+        let (family, _) = family_and_target();
+        let retention = coordinator
+            .resource_retention_current(&family.retention_key)
+            .expect("released retention reads")
+            .expect("released retention exists");
+        assert_eq!(retention.active_pin_count, 0);
+        assert_eq!(
+            retention.disposition,
+            ResourceRetentionDisposition::Unretained
+        );
+        let replay = coordinator
+            .commit_agent_local(&abort)
+            .expect("NotApplied Abort replays through its terminal graph");
+        assert_eq!(replay.committed_revision, None);
+        assert_eq!(replay.receipt, commit.receipt);
     }
 }
 

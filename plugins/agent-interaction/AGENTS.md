@@ -71,7 +71,18 @@
   rearm after durable NotApplied evidence, authorizes one publish call. Reopen
   observes a claimed attempt without redispatch. Published reconciliation then
   commits Agent current/receipt, catalog record, and promotion of that exact pin
-  to `Active` in one CAS; it never increments the obligation twice.
+  to `Active` in one CAS; it never increments the obligation twice. Promotion
+  uses the physical family's current active count and does not retain the
+  reservation-time aggregate as a lower bound, so unrelated sibling pin
+  releases cannot strand the exact reserved pin.
+- Public stream Abort may consume an external publication reservation only
+  after its latest provider observation is durably `NotApplied`. One typed
+  Agent receipt atomically clears the reservation, closes stream and Session,
+  releases the exact `Reserved` pin, and decrements the current family count.
+  `DispatchClaimed` and Unknown publication outcomes remain reconcilable and
+  reject Abort. Its persisted Abort source and effect each retain a
+  required-nullable Resource member, so omission cannot erase the owning
+  release edge. Generic Resource release cannot consume an Agent reservation.
 - Stream Open, Append, and Abort return the exact Agent commit. Finalize and
   observe-only reconciliation return the closed finalization outcome, which
   may retain an Unknown publication intent instead of claiming a commit.
@@ -81,7 +92,9 @@
   stream current, and uses the reserved currents as the final receipt source.
   Provider products remain non-Serde throughout.
 - External delivery pins expected media type, content digest, and byte size at
-  Open. Finalize derives one closed intent binding source revision/digest,
+  Open. Media type uses Resource `/4`'s sole 255-byte lowercase ASCII
+  type/subtype token grammar; parameters are invalid. Finalize derives one
+  closed intent binding source revision/digest,
   Session, stream, command, resolver, target, and content. The intent is the
   only serializable recovery authority; provider products remain non-Serde.
   Providers accept only that intent, publish idempotently, and return a closed

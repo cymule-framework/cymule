@@ -2314,6 +2314,7 @@ export interface EngineTransportSuccess {
 const CLI_ENGINE_WIRE_EXCHANGE = Symbol("cymule.cli-engine-wire-exchange");
 
 const DEFAULT_ENGINE_TIMEOUT_MS = 30_000;
+const MAX_ENGINE_TIMEOUT_MS = 2_147_483_647;
 const ENGINE_REQUEST_LIMIT = 64 * 1024 * 1024;
 const ENGINE_REQUEST_FRAMING_BYTES = 48;
 const ENGINE_RESPONSE_PAYLOAD_LIMIT = ENGINE_REQUEST_LIMIT;
@@ -2525,11 +2526,15 @@ export class CliEngine {
       throw interruptedError(request, "cancelled", false);
     }
     const timeoutMs = this.options.timeoutMs ?? DEFAULT_ENGINE_TIMEOUT_MS;
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    if (!Number.isSafeInteger(timeoutMs)
+      || timeoutMs <= 0
+      || timeoutMs > MAX_ENGINE_TIMEOUT_MS) {
       throw localValidationError(
         "validate_request",
         "invalid_engine_timeout",
-        new Error("Engine timeout must be a positive safe integer in milliseconds"),
+        new Error(
+          `Engine timeout must be an integer from 1 through ${MAX_ENGINE_TIMEOUT_MS} milliseconds`,
+        ),
       );
     }
     const { encodedRequest, wireRequest } = snapshotEngineRequest(request);
@@ -4868,23 +4873,13 @@ function validateEffectResolutionReceipt(value: unknown): void {
     throw transportError("invalid_engine_response", "Effect resolution receipt is invalid");
   }
   validateEffectResolutionCommand(value.command);
-  if (value.result !== null) {
-    validateArtifactRef(value.result);
-    if (!isRecord(value.result) || value.result.kind !== "cymule.effect-result/1") {
-      throw transportError(
-        "invalid_engine_response",
-        "Effect resolution result kind is invalid",
-      );
-    }
-  }
-  if (value.actual_resolution === "resolved_applied" && value.result === null
-    || value.actual_resolution === "resolved_not_applied"
-      && (value.actual_value !== null || value.result !== null)) {
+  if (value.actual_resolution === "resolved_not_applied" && value.actual_value !== null) {
     throw transportError(
       "invalid_engine_response",
-      "Effect resolution value and result presence disagree",
+      "NotApplied Effect resolution carries a value",
     );
   }
+  validateEffectResult(value.actual_resolution, value.result);
 }
 
 function validateEffectResolutionCommand(value: unknown): asserts value is EffectResolutionCommand {
@@ -5255,10 +5250,7 @@ function validateDurableEffectSummary(value: unknown): void {
       && value.execution_availability !== "available")) {
     throw transportError("invalid_engine_response", "Effect summary lifecycle is inconsistent");
   }
-  if (value.state === "applied") validateArtifactRef(value.result);
-  else if (value.result !== null) {
-    throw transportError("invalid_engine_response", "non-applied Effect summary has a result");
-  }
+  validateEffectResult(value.state, value.result);
 }
 
 function validateDurableOccurrenceSummary(value: unknown): void {
@@ -5572,20 +5564,37 @@ function validateEffectDispatch(value: unknown): void {
     throw transportError("invalid_engine_response", "effect reconciliation state is invalid");
   }
   if (value.claim_owner !== null && !isNonEmptyString(value.claim_owner)) throw transportError("invalid_engine_response", "effect claim owner is invalid");
-  if (value.result !== null) validateArtifactRef(value.result);
   const hasClaim = Number(value.claim_epoch) >= 1 && isNonEmptyString(value.claim_owner);
   const lifecycleMatches = value.state === "pending"
     ? value.execution_availability === "available"
-      && value.claim_epoch === 0 && value.claim_owner === null && value.result === null
+      && value.claim_epoch === 0 && value.claim_owner === null
     : value.state === "claimed"
-    ? value.execution_availability === "available" && hasClaim && value.result === null
+    ? value.execution_availability === "available" && hasClaim
     : value.state === "unknown"
-    ? hasClaim && value.result === null
+    ? hasClaim
     : value.state === "applied" || value.state === "not_applied"
-    ? hasClaim && (value.state !== "not_applied" || value.result === null)
-    : value.claim_epoch === 0 && value.claim_owner === null && value.result === null;
+    ? hasClaim
+    : value.claim_epoch === 0 && value.claim_owner === null;
   if (!lifecycleMatches) {
     throw transportError("invalid_engine_response", "effect dispatch lifecycle is invalid");
+  }
+  validateEffectResult(value.state, value.result);
+}
+
+function validateEffectResult(state: unknown, result: unknown): void {
+  const applied = state === "applied" || state === "resolved_applied";
+  if (!applied) {
+    if (result !== null) {
+      throw transportError("invalid_engine_response", "non-Applied Effect carries a result");
+    }
+    return;
+  }
+  if (result === null) {
+    throw transportError("invalid_engine_response", "Applied Effect is missing its result");
+  }
+  validateArtifactRef(result);
+  if (result.kind !== "cymule.effect-result/1") {
+    throw transportError("invalid_engine_response", "Effect result kind is invalid");
   }
 }
 
@@ -6466,7 +6475,9 @@ function validateEngineFailure(value: unknown): asserts value is EngineFailure {
   }
   validateEnginePath(value.path);
   if (value.issues !== undefined) {
-    if (!Array.isArray(value.issues) || value.issues.length > 100) {
+    if (!Array.isArray(value.issues)
+      || value.issues.length === 0
+      || value.issues.length > 100) {
       throw transportError("invalid_engine_response", "Engine issue set is invalid");
     }
     for (const issue of value.issues) {

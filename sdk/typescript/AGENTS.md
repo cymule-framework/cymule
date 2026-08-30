@@ -60,6 +60,9 @@
   never its logical framework type key.
 - Throw `EngineError` for both remote failures and local transport failure. Its
   `failure` field is authoritative; message text is display-only.
+- `EngineFailure.issues` is omission-or-non-empty with at most 100 closed
+  issues. An explicit empty array is an invalid Engine response, not an
+  alternative spelling of omission.
 - Never copy Engine-process stderr into an `EngineFailure`; response-less
   process errors use bounded SDK-owned status text only.
 - `EnginePluginTarget` contains only the exact process provider, a complete
@@ -106,6 +109,11 @@
   relationship, receipt identity shape, and cancellation boundary before return.
   Effect-resolution receipts do not duplicate Run world settlement, and the
   `effect_not_applied` Run boundary carries one exact content-addressed intent.
+- Use one shared Effect-result validator for query summaries, complete exact
+  Effects, and Effect-resolution receipts. Applied and `resolved_applied`
+  require a non-null Artifact reference of exact kind
+  `cymule.effect-result/1`; every other state or resolution requires literal
+  `null`.
 - Durable Run views preserve strict identity ordering, exact pending-wait set
   equality, and bidirectional component-occurrence/Attempt lifecycle closure.
   Execution boundaries require Rust-shaped digests and strictly ordered unique
@@ -176,6 +184,10 @@
   local pipe endpoints, and rejects immediately. The Engine must close every
   internal provider/process authority before its direct Child exits; the SDK
   never probes or signals a raw PID or PGID.
+- Validate `CliEngineOptions.timeoutMs` before process spawn as an integer in
+  `1..=2_147_483_647`. Every out-of-range value is local
+  `validation/correct_and_retry`; never pass a value that Node would clamp to
+  its one-millisecond timer fallback.
 - Stdout uses the 128 MiB plus 32-byte framing response-envelope bound plus one overflow byte;
   diagnostic stderr uses its independent 1 MiB bound plus one byte. A valid
   failure is admitted before nonzero exit status, while success requires the

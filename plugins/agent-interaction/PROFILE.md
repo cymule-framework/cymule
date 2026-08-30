@@ -203,7 +203,10 @@ an open stream.
 Staged delivery admits contiguous immutable chunks and finalizes their exact
 ordered content into one message or tool update. External delivery admits no
 chunks. Open pins the resolver binding plus exact media type, digest, and byte
-size. Its serialized Finalize command carries only Session/stream identity;
+size. Media type is the same at-most-255-byte lowercase ASCII type/subtype token
+wire admitted by `cymule.resource/4`; parameters, controls, whitespace,
+uppercase, empty tokens, and additional slashes fail before Open. Its serialized
+Finalize command carries only Session/stream identity;
 framework preflight derives a closed serializable intent binding source
 revision/digest, Session, stream, command, target, resolver, and content. The
 provider product remains non-Serde. The provider accepts only that intent,
@@ -226,6 +229,19 @@ only an ambiguous final Store acknowledgement becomes
 `PublicationOutcomeUnknown`, while known source/reducer/CAS conflicts remain
 their typed errors.
 
+A public Abort can retire an external reservation only after the provider's
+latest `NotApplied` observation is durable. That Agent command carries the
+exact reservation Resource currents in its bounded source and one typed
+reserved-pin release in its outcome. Its single CAS clears the reservation,
+marks the stream Aborted, decrements the Session open-stream index, changes the
+pin from `Reserved` to `Released`, and decrements the family's current count.
+`DispatchClaimed`—including a provider result still reported as Unknown—rejects
+Abort and preserves reconciliation authority. Generic Resource release cannot
+consume this profile-owned reservation.
+Both Abort Resource members are required-nullable on the persisted source and
+effect wires: ordinary/staged Abort carries explicit null, while NotApplied
+reservation retirement carries the complete source and release receipt.
+
 External terminal finalization is one later StateRoot CAS over:
 
 - command and semantic receipt;
@@ -234,6 +250,11 @@ External terminal finalization is one later StateRoot CAS over:
 - the already content-derived `ResourcePinKind::AgentStream`; and
 - promotion of the exact `Reserved` Resource pin to `Active` without changing
   the family obligation count.
+
+Promotion binds the exact reserved pin, status, reservation origin, physical
+family, and current active count. The count captured when the reservation was
+created is historical receipt evidence, not a lower bound: a sibling pin may be
+released before Published reconciliation without blocking promotion.
 
 The shared Resource reducer rejects deleted/fenced families, duplicate pins,
 wrong physical families, and released pins. Resource GC resolves the retained
@@ -370,4 +391,6 @@ external finalization survives reopen/GC with its Agent-stream pin while a
 delete-fenced family rejects a later finalization. Publication Unknown must
 reopen through observe-only reconciliation with zero additional publish calls;
 repeated recovery evidence must perform zero writes while new evidence remains
-append-only and reopenable.
+append-only and reopenable. Tests also release a sibling pin between reservation
+and promotion, and prove NotApplied Abort releases its reserved pin while
+DispatchClaimed/Unknown Abort writes nothing.

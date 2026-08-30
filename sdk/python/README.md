@@ -28,13 +28,18 @@ uv run --project sdk/python --frozen python your_program.py
 from cymule import (
     CliEngine,
     DurableEngine,
+    EngineCancellation,
     ResourceBuilder,
     process_plugin,
     sqlite_clock,
     sqlite_store,
 )
 
-engine = CliEngine("./target/debug/cymule")
+cancellation = EngineCancellation()
+engine = CliEngine(
+    "./target/debug/cymule",
+    cancellation=cancellation,
+)
 resource = engine.seal_resource(
     ResourceBuilder.text("input for another Run")
 )
@@ -67,11 +72,21 @@ receipts while Rust remains the sole Artifact identity authority. Stdout and
 stderr are drained by one nonblocking selector with independent 128 MiB plus 32-byte framing
 response-envelope and 1 MiB diagnostic limits. A custom transport implements
 only `exchange(request)` and returns the complete accepted request plus
-response. Strict JSON retains exact fractional decimal evidence through echo
-admission and rejects nesting beyond 128 levels. A finite positive deadline or
-cancellation kills only the official direct Child when still live, closes local
-descriptors, and reaps it. The Engine/executor watchdog owns descendant closure;
-the SDK never signals a raw PID or PGID after reaping.
+response. Every ordinary exception raised while validating that returned
+success becomes request-aware response loss; process-control `BaseException`
+signals are not swallowed. Strict JSON retains exact fractional decimal
+evidence through echo admission and rejects nesting beyond 128 levels. A finite
+positive deadline or SDK-owned `EngineCancellation` kills only the official
+direct Child when still live, closes local descriptors, and reaps it. Arbitrary
+cancellation callbacks are unsupported: `cancel()` and the sole subprocess
+launch share one lock, so cancellation that wins the launch gate never calls
+`Popen`, while cancellation after launch uses the post-start outcome rules.
+Admitted success and valid remote failure use the same lock for a per-call
+completion election: completion that wins is returned unchanged, while
+cancellation that wins uses the started-request classification. One completed
+call does not complete a token shared by concurrent calls. The Engine/executor
+watchdog owns descendant closure; the SDK never signals a raw PID or PGID after
+reaping.
 Run IDs, execution owners, and Clock source/scope identities accept 1..512
 printable Unicode scalar values. Queries carry required-null revision/cursor
 members plus explicit item and canonical-byte budgets; there is no query ID or
@@ -118,7 +133,11 @@ receipt retains the complete admitted activation or normalized command, while
 requested Effect resolution remains distinct from the provider's actual
 terminal resolution and does not duplicate Run world settlement. A provider
 `NotApplied` result is the closed `effect_not_applied` boundary with its exact
-content-addressed intent.
+content-addressed intent. Applied Effect summaries, exact Effect records, and
+resolution receipts all require a non-null result Artifact of exact kind
+`cymule.effect-result/1`; every non-applied state carries null. An explicitly
+present Engine failure `issues` list has 1..100 entries, while no issues is
+represented by omitting the member.
 Effect dispatches, component occurrences, and reconciliation commands all bind
 the provider occurrence with an exact lowercase SHA-256 content ID.
 Store targets keep provider, location, and optional domain as an open transport

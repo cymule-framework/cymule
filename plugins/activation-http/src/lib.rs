@@ -792,7 +792,7 @@ fn validate_new_targets(wait_ids: &BTreeSet<String>, max_targets: usize) -> Dura
         )));
     }
     for wait_id in wait_ids {
-        validate_identity("wait", wait_id)?;
+        validate_wait_id(wait_id)?;
     }
     Ok(())
 }
@@ -814,9 +814,13 @@ fn validate_retained_targets(wait_ids: &BTreeSet<String>) -> DurableResult<()> {
         )));
     }
     for wait_id in wait_ids {
-        validate_identity("wait", wait_id)?;
+        validate_wait_id(wait_id)?;
     }
     Ok(())
+}
+
+fn validate_wait_id(wait_id: &str) -> DurableResult<()> {
+    cymule_core::validate_content_id("HTTP wait identity", wait_id).map_err(Into::into)
 }
 
 fn open_spool(path: &Path, allow_initialize: bool) -> DurableResult<Connection> {
@@ -1060,6 +1064,10 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
+    fn test_wait_id(label: &str) -> String {
+        cymule_core::content_id("cymule.test.http-wait/1", &label).expect("wait ID derives")
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn acknowledged_before_waiter_registration_completes_from_durable_readback() {
         let directory = tempfile::tempdir().expect("temporary directory creates");
@@ -1081,7 +1089,7 @@ mod tests {
         ));
 
         barrier.persisted.wait().await;
-        let targets = BTreeSet::from(["wait:test".to_owned()]);
+        let targets = BTreeSet::from([test_wait_id("lost-wakeup")]);
         driver
             .connection
             .execute(
@@ -1176,7 +1184,7 @@ mod tests {
                 .expect("initial durable acknowledgement reads")
         );
 
-        let targets = BTreeSet::from(["wait:cross-instance".to_owned()]);
+        let targets = BTreeSet::from([test_wait_id("cross-instance")]);
         second
             .connection
             .execute(

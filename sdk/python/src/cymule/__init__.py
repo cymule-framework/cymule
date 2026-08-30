@@ -15,6 +15,7 @@ import re
 import signal
 import subprocess
 import selectors
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, TypedDict, cast
@@ -437,6 +438,45 @@ class EngineTransport(Protocol):
     def exchange(self, request: dict[str, Any]) -> EngineTransportSuccess:
         """Exchange one complete strict request snapshot."""
         ...
+
+
+class EngineCancellation:
+    """One-way cancellation token with launch and completion gates.
+
+    ``cancel()`` and the CLI Engine's process launch share one lock.  If
+    cancellation acquires that lock first, the subprocess factory is never
+    called.  Once launch acquires it first, later cancellation is necessarily
+    classified against an already-started Engine process.  Each invocation
+    independently races its admitted result against cancellation, so completing
+    one call never completes a shared token for another call.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Permanently cancel this token."""
+        with self._lock:
+            self._cancelled = True
+
+    def is_cancelled(self) -> bool:
+        """Return whether cancellation has been linearized."""
+        with self._lock:
+            return self._cancelled
+
+    def _launch(
+        self, factory: Callable[[], subprocess.Popen[bytes]]
+    ) -> subprocess.Popen[bytes] | None:
+        with self._lock:
+            if self._cancelled:
+                return None
+            return factory()
+
+    def _complete_call(self) -> bool:
+        """Elect this invocation's completed result against cancellation."""
+        with self._lock:
+            return not self._cancelled
 
 
 class ExecutionResult(TypedDict):
@@ -2190,16 +2230,19 @@ def _exchange_engine(
         success = transport.exchange(transport_request)
     except Exception as error:
         raise _transport_invocation_error(wire_request, error) from error
-    if (
-        not isinstance(success, dict)
-        or set(success) != {"request", "response"}
-        or not isinstance(success.get("request"), dict)
-        or not isinstance(success.get("response"), dict)
-        or not _wire_json_equal(success["request"], correlation_request)
-    ):
-        raise _response_loss_error(wire_request, "invalid_engine_response")
-    response = success["response"]
     try:
+        if (
+            not isinstance(success, dict)
+            or set(success) != {"request", "response"}
+            or not isinstance(success.get("request"), dict)
+            or not isinstance(success.get("response"), dict)
+            or not _wire_json_equal(success["request"], correlation_request)
+        ):
+            raise _transport_error(
+                "invalid_engine_response",
+                "custom Engine success did not echo the complete accepted request",
+            )
+        response = success["response"]
         _validate_engine_response_payload_bound(correlation_request, response)
         _validate_success_response(response)
         expected_type = {
@@ -2230,9 +2273,12 @@ def _exchange_engine(
                 response["commit"],
                 expected_patch_plan_id=expected_patch_plan_id,
             )
-    except (EngineError, KeyError, TypeError) as error:
+        validated_response = cast(
+            dict[str, Any], _unbox_exact_fractions(response)
+        )
+    except Exception as error:
         raise _response_loss_error(wire_request, "invalid_engine_response") from error
-    return cast(dict[str, Any], _unbox_exact_fractions(response))
+    return validated_response
 
 
 class CliEngine:
@@ -2243,11 +2289,15 @@ class CliEngine:
         executable: str | Path = "cymule",
         *,
         timeout_seconds: float = 30,
-        cancelled: Callable[[], bool] | None = None,
+        cancellation: EngineCancellation | None = None,
     ) -> None:
+        if cancellation is not None and not isinstance(
+            cancellation, EngineCancellation
+        ):
+            raise TypeError("cancellation must be an EngineCancellation")
         self.executable = str(executable)
         self.timeout_seconds = timeout_seconds
-        self.cancelled = cancelled
+        self.cancellation = cancellation
 
     def seal(self, candidate: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -2471,19 +2521,6 @@ class CliEngine:
         return response["execution"]
 
     def _exchange_wire(self, request: dict[str, Any]) -> EngineTransportSuccess:
-        try:
-            cancelled_before_start = (
-                self.cancelled is not None and self.cancelled()
-            )
-        except BaseException:
-            raise _transport_error(
-                "engine_cancellation_callback_failed",
-                "the Engine cancellation callback failed before process start",
-            ) from None
-        if cancelled_before_start:
-            raise _interrupted_error(
-                request, "cancelled", request_began=False
-            )
         if (
             not isinstance(self.timeout_seconds, (int, float))
             or isinstance(self.timeout_seconds, bool)
@@ -2500,17 +2537,30 @@ class CliEngine:
                 "engine_rpc_platform_unsupported",
                 "CLI Engine process-tree containment requires Unix",
             )
-        try:
-            process = subprocess.Popen(
+
+        def launch_process() -> subprocess.Popen[bytes]:
+            return subprocess.Popen(
                 [self.executable, "rpc"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
+
+        try:
+            process = (
+                launch_process()
+                if self.cancellation is None
+                else self.cancellation._launch(launch_process)
+            )
         except OSError as error:
             raise _transport_error(
                 "engine_start_failed", "the Engine process could not be started"
             ) from error
+        if process is None:
+            raise _interrupted_error(
+                wire_request, "cancelled", request_began=False
+            )
+
         def signal_process(selected_signal: int) -> None:
             try:
                 process.send_signal(selected_signal)
@@ -2534,7 +2584,6 @@ class CliEngine:
         overflow_code: str | None = None
         deadline = time.monotonic() + self.timeout_seconds
         interruption: Literal["cancelled", "timed_out"] | None = None
-        cancellation_callback_failed = False
         transport_completed = False
         child_exited = False
 
@@ -2555,14 +2604,12 @@ class CliEngine:
 
         try:
             while True:
-                if self.cancelled is not None:
-                    try:
-                        if self.cancelled():
-                            interruption = "cancelled"
-                            break
-                    except BaseException:
-                        cancellation_callback_failed = True
-                        break
+                if (
+                    self.cancellation is not None
+                    and self.cancellation.is_cancelled()
+                ):
+                    interruption = "cancelled"
+                    break
                 if time.monotonic() >= deadline:
                     interruption = "timed_out"
                     break
@@ -2626,7 +2673,6 @@ class CliEngine:
                 not transport_completed
                 or interruption is not None
                 or overflow_code is not None
-                or cancellation_callback_failed
             ):
                 signal_process(signal.SIGKILL)
             for name in tuple(open_streams):
@@ -2637,10 +2683,6 @@ class CliEngine:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-        if cancellation_callback_failed:
-            raise _response_loss_error(
-                wire_request, "engine_cancellation_callback_failed"
-            )
         if overflow_code is not None:
             raise _response_loss_error(wire_request, overflow_code)
         if interruption is not None:
@@ -2678,7 +2720,17 @@ class CliEngine:
                 raise _response_loss_error(
                     wire_request, "invalid_engine_response"
                 ) from error
-            raise EngineError(cast(EngineFailure, _unbox_exact_fractions(envelope["error"])))
+            failure = cast(
+                EngineFailure, _unbox_exact_fractions(envelope["error"])
+            )
+            if (
+                self.cancellation is not None
+                and not self.cancellation._complete_call()
+            ):
+                raise _interrupted_error(
+                    wire_request, "cancelled", request_began=True
+                )
+            raise EngineError(failure)
         if input_failed:
             raise _response_loss_error(wire_request, "engine_request_incomplete")
         if process.returncode not in {0, None}:
@@ -2693,6 +2745,13 @@ class CliEngine:
             raise _response_loss_error(
                 wire_request, "invalid_engine_response"
             ) from error
+        if (
+            self.cancellation is not None
+            and not self.cancellation._complete_call()
+        ):
+            raise _interrupted_error(
+                wire_request, "cancelled", request_began=True
+            )
         return {
             "request": envelope["request"],
             "response": response,
@@ -4895,6 +4954,27 @@ def _validate_cancellation_command(value: object) -> None:
     _validate_core_identity(command["run_id"], "cancelled Run")
 
 
+def _validate_effect_result(
+    value: object, *, applied: bool, label: str
+) -> None:
+    """Validate the one terminal Effect-result relationship shared by all DTOs."""
+    if not applied:
+        if value is not None:
+            raise _transport_error(
+                "invalid_engine_response", f"non-applied {label} has a result"
+            )
+        return
+    if value is None:
+        raise _transport_error(
+            "invalid_engine_response", f"applied {label} has no result"
+        )
+    _validate_artifact_ref(value)
+    if not isinstance(value, dict) or value.get("kind") != "cymule.effect-result/1":
+        raise _transport_error(
+            "invalid_engine_response", f"{label} result kind is invalid"
+        )
+
+
 def _validate_effect_resolution_receipt(value: object) -> None:
     receipt = _require_closed_record(
         value,
@@ -4917,15 +4997,14 @@ def _validate_effect_resolution_receipt(value: object) -> None:
         raise _transport_error(
             "invalid_engine_response", "effect resolution receipt is invalid"
         )
-    if receipt["result"] is not None:
-        _validate_artifact_ref(receipt["result"])
-        if receipt["result"]["kind"] != "cymule.effect-result/1":
-            raise _transport_error(
-                "invalid_engine_response", "effect resolution result kind is invalid"
-            )
-    if (receipt["actual_resolution"] == "resolved_applied" and receipt["result"] is None) or (
+    _validate_effect_result(
+        receipt["result"],
+        applied=receipt["actual_resolution"] == "resolved_applied",
+        label="Effect resolution",
+    )
+    if (
         receipt["actual_resolution"] == "resolved_not_applied"
-        and (receipt["actual_value"] is not None or receipt["result"] is not None)
+        and receipt["actual_value"] is not None
     ):
         raise _transport_error(
             "invalid_engine_response",
@@ -5314,12 +5393,11 @@ def _validate_effect_summary(value: object) -> None:
         raise _transport_error(
             "invalid_engine_response", "Effect summary lifecycle is inconsistent"
         )
-    if summary["state"] == "applied":
-        _validate_artifact_ref(summary["result"])
-    elif summary["result"] is not None:
-        raise _transport_error(
-            "invalid_engine_response", "non-applied Effect summary has a result"
-        )
+    _validate_effect_result(
+        summary["result"],
+        applied=summary["state"] == "applied",
+        label="Effect summary",
+    )
 
 
 def _validate_occurrence_summary(value: object) -> None:
@@ -5526,30 +5604,28 @@ def _validate_effect_dispatch(value: object) -> None:
         and effect["execution_availability"] == "available"
         and effect["claim_epoch"] == 0
         and effect["claim_owner"] is None
-        and effect["result"] is None
         or effect["state"] == "claimed"
         and effect["execution_availability"] == "available"
         and claimed
-        and effect["result"] is None
         or effect["state"] == "unknown"
         and claimed
-        and effect["result"] is None
         or effect["state"] == "applied"
         and claimed
         or effect["state"] == "not_applied"
         and claimed
-        and effect["result"] is None
         or effect["state"] == "cancelled_before_release"
         and effect["claim_epoch"] == 0
         and effect["claim_owner"] is None
-        and effect["result"] is None
     )
     if not lifecycle_matches:
         raise _transport_error(
             "invalid_engine_response", "Effect dispatch lifecycle is invalid"
         )
-    if effect["result"] is not None:
-        _validate_artifact_ref(effect["result"])
+    _validate_effect_result(
+        effect["result"],
+        applied=effect["state"] == "applied",
+        label="Effect dispatch",
+    )
 
 
 def _validate_component_occurrence(value: object) -> None:
@@ -7494,7 +7570,10 @@ def _validate_engine_failure(value: object) -> None:
         raise _transport_error("invalid_engine_response", "contract side is unknown")
     _validate_engine_path(value.get("path"), "failure path")
     issues = value.get("issues", [])
-    if not isinstance(issues, list) or len(issues) > 100:
+    if (
+        not isinstance(issues, list)
+        or "issues" in value and not 1 <= len(issues) <= 100
+    ):
         raise _transport_error("invalid_engine_response", "Engine issue set is invalid")
     for issue in issues:
         if not isinstance(issue, dict) or not {"code", "message"} <= set(issue) or not set(issue) <= {"code", "message", "path", "schema_path"}:
@@ -7548,6 +7627,7 @@ __all__ = [
     "ENGINE_PROTOCOL_VERSION",
     "DurableCommand",
     "DurableControlBuilder",
+    "EngineCancellation",
     "EngineClockTarget",
     "EngineDurableTarget",
     "EvolutionCommand",

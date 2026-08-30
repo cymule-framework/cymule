@@ -7,9 +7,17 @@ four fields. Fresh selection, retained redelivery, exact schedule replay, and
 acknowledgement load the complete row, require strict canonical value/target
 bytes, and recompute that digest before a delivery can reach M1. A timer is
 acknowledged only after Cymule commits its activation CAS;
-the first exact wait targets are persisted before delivery, so lost
-acknowledgement redelivers the same activation and targets even after those
-waits leave the rebuilt parked index.
+the exact wait target is persisted before delivery, so lost acknowledgement
+redelivers the same activation and target even after that wait leaves the
+rebuilt parked index.
+
+The canonical timer value is bounded by Core `MAX_ARTIFACT_BYTES`. Scheduling
+rejects an oversized value before any SQLite transaction or write, while the
+exact limit remains valid. Every timer delivery targets exactly one wait whose
+identity is a lowercase SHA-256 content ID; malformed, empty, or multi-target
+retained selections are durable row corruption and surface as `Integrity`. An
+empty fresh selection remains the normal no-matching-wait result and is never
+persisted as a target set.
 
 Retained target selections always redeliver first and remain independent of a
 later caller's target limit; fresh selections are checked against their own
@@ -18,7 +26,10 @@ scan budget and an exclusive `(due_unix_ms,
 activation_id)` continuation between polls. Large prefixes of due timers with
 no matching parked wait therefore cannot make one poll unbounded or starve a
 later matching timer; the cursor resets after reaching the current end so newly
-inserted earlier rows remain visible.
+inserted earlier rows remain visible. The scan page contains only capped
+activation identity, due-time, and value-length metadata. The driver loads and
+authenticates one complete row at a time, so a 256-row page never accumulates
+256 timer payloads in memory.
 
 Activation and timer identities share Cymule's cross-language boundary: 1..=512
 Unicode scalar values with no control character. Multi-byte identities are not

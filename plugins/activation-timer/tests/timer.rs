@@ -34,7 +34,7 @@ fn index() -> ParkedWaitIndex {
 }
 
 fn index_for_timer(timer_id: &str) -> ParkedWaitIndex {
-    let wait_id = "wait:timer";
+    let wait_id = test_wait_id(timer_id);
     let mut state = DurableState::new(Machine::new().snapshot());
     state.continuations.insert(
         "run:timer".to_owned(),
@@ -58,7 +58,7 @@ fn index_for_timer(timer_id: &str) -> ParkedWaitIndex {
                 locals: BTreeMap::new(),
             }],
             state: None,
-            wait_set: BTreeSet::from([wait_id.to_owned()]),
+            wait_set: BTreeSet::from([wait_id.clone()]),
             scope_stack: vec![ROOT_SCOPE_ID.to_owned()],
             epoch: 0,
             execution_fence: 0,
@@ -67,9 +67,9 @@ fn index_for_timer(timer_id: &str) -> ParkedWaitIndex {
         },
     );
     state.waits.insert(
-        wait_id.to_owned(),
+        wait_id.clone(),
         WaitCondition {
-            wait_id: wait_id.to_owned(),
+            wait_id,
             run_id: "run:timer".to_owned(),
             kind: WaitKind::Timer {
                 timer_id: timer_id.to_owned(),
@@ -90,10 +90,15 @@ fn index_for_timer(timer_id: &str) -> ParkedWaitIndex {
     ParkedWaitIndex::rebuild(&state).expect("index rebuilds")
 }
 
+fn test_wait_id(label: &str) -> String {
+    cymule_core::content_id("cymule.test.timer-wait/1", &label).expect("wait ID derives")
+}
+
 #[derive(Default)]
 struct ObservedTimerView {
     waits: ParkedWaitIndex,
     selection_error: Option<DurableError>,
+    selection_override: Option<WaitSelection>,
     selections: Vec<(WaitActivationSource, usize)>,
 }
 
@@ -106,6 +111,9 @@ impl ParkedWaitView for ObservedTimerView {
         self.selections.push((source.clone(), max_targets));
         if let Some(error) = self.selection_error.take() {
             return Err(error);
+        }
+        if let Some(selection) = self.selection_override.take() {
+            return Ok(selection);
         }
         self.waits.select(source, max_targets)
     }
@@ -374,6 +382,130 @@ fn timer_identities_use_the_shared_unicode_scalar_boundary() {
             driver.schedule(activation_id, timer_id, 100, &json!(null)),
             Err(cymule_durable::DurableError::Validation(_))
         ));
+    }
+}
+
+#[test]
+fn schedule_enforces_the_canonical_value_limit_before_write_without_blocking_due_work() {
+    let (directory, mut driver) = timer_driver(ManualClock(100));
+    let exact = serde_json::Value::String("x".repeat(cymule_core::MAX_ARTIFACT_BYTES - 2));
+    driver
+        .schedule("activation:exact", "timer:exact", 200, &exact)
+        .expect("exact-limit value schedules");
+
+    let oversized = serde_json::Value::String("x".repeat(cymule_core::MAX_ARTIFACT_BYTES - 1));
+    assert!(matches!(
+        driver.schedule("activation:oversized", "timer:oversized", 100, &oversized),
+        Err(DurableError::Validation(message))
+            if message == format!(
+                "timer value has {} canonical bytes; maximum is {}",
+                cymule_core::MAX_ARTIFACT_BYTES + 1,
+                cymule_core::MAX_ARTIFACT_BYTES
+            )
+    ));
+
+    driver
+        .schedule("activation:due", "timer:one", 100, &json!({"due": true}))
+        .expect("later valid timer schedules");
+    let connection = rusqlite::Connection::open(directory.path().join("timer.sqlite"))
+        .expect("timer store opens for readback");
+    let oversized_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM cymule_timers WHERE activation_id = 'activation:oversized'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("oversized row absence reads");
+    assert_eq!(oversized_rows, 0);
+    let exact_bytes: i64 = connection
+        .query_row(
+            "SELECT length(value_json) FROM cymule_timers WHERE activation_id = 'activation:exact'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("exact-limit bytes read");
+    assert_eq!(
+        usize::try_from(exact_bytes).expect("SQLite length fits usize"),
+        cymule_core::MAX_ARTIFACT_BYTES
+    );
+
+    assert_eq!(
+        driver
+            .receive(&mut index(), 1)
+            .expect("valid due timer is not blocked")
+            .expect("valid due timer selects")
+            .activation_id,
+        "activation:due"
+    );
+}
+
+#[test]
+fn timer_selection_requires_one_content_addressed_wait() {
+    for (wait_ids, expected) in [
+        (
+            BTreeSet::from([format!("sha256:{}", "A".repeat(64))]),
+            "lowercase SHA-256 content ID",
+        ),
+        (
+            BTreeSet::from([test_wait_id("first"), test_wait_id("second")]),
+            "exactly one target",
+        ),
+    ] {
+        let (directory, mut driver) = timer_driver(ManualClock(100));
+        driver
+            .schedule("activation:targets", "timer:one", 100, &json!(null))
+            .expect("timer schedules");
+        let mut view = ObservedTimerView {
+            waits: index(),
+            selection_override: Some(WaitSelection {
+                wait_ids,
+                remaining: 0,
+            }),
+            ..ObservedTimerView::default()
+        };
+        let error = driver
+            .receive(&mut view, 2)
+            .expect_err("invalid target set fails");
+        assert!(
+            matches!(&error, DurableError::Validation(message) if message.contains(expected)),
+            "unexpected target validation error: {error:?}"
+        );
+        let selected: bool = rusqlite::Connection::open(directory.path().join("timer.sqlite"))
+            .expect("timer store opens")
+            .query_row(
+                "SELECT selected_wait_ids IS NOT NULL FROM cymule_timers",
+                [],
+                |row| row.get(0),
+            )
+            .expect("selection state reads");
+        assert!(!selected, "invalid target set cannot become durable");
+    }
+}
+
+#[test]
+fn retained_timer_target_corruption_is_integrity() {
+    for wait_ids in [
+        BTreeSet::<String>::new(),
+        BTreeSet::from([format!("sha256:{}", "A".repeat(64))]),
+        BTreeSet::from([test_wait_id("first"), test_wait_id("second")]),
+    ] {
+        let (directory, mut driver) = timer_driver(ManualClock(100));
+        driver
+            .schedule("activation:retained", "timer:one", 100, &json!(null))
+            .expect("timer schedules");
+        rusqlite::Connection::open(directory.path().join("timer.sqlite"))
+            .expect("timer store opens")
+            .execute(
+                "UPDATE cymule_timers SET selected_wait_ids = ?1",
+                [cymule_core::canonical_bytes(&wait_ids).expect("targets encode")],
+            )
+            .expect("corrupt targets install");
+        let mut view = ObservedTimerView::default();
+        assert!(matches!(
+            driver.receive(&mut view, 2),
+            Err(DurableError::Integrity { .. })
+        ));
+        assert!(view.selections.is_empty());
     }
 }
 

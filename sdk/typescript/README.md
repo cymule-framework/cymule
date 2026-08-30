@@ -60,7 +60,8 @@ semantics. It exposes real
 The complete accepted request echo is checked before the response, including
 for custom transports. Compact stdout is bounded to the 128 MiB plus 32-byte framing Engine response
 envelope and diagnostic stderr independently to 1 MiB; a valid failure remains
-authoritative over nonzero process status.
+authoritative over nonzero process status. A failure omits `issues` or carries
+between one and 100 closed issues; explicit `issues: []` is rejected.
 Cancellation and claimed-Effect resolution return complete
 Rust-issued receipts; the client checks exact request identity/fence evidence
 and accepts the provider's actual terminal outcome without hashing reason or
@@ -106,6 +107,9 @@ bounded byte streams, decodes stdout as fatal UTF-8, and on interruption kills
 that Child only if its exit gate has not fired. It destroys all local pipe
 endpoints and rejects immediately. The Engine/executor watchdog owns every
 internal provider/process; the SDK never probes or signals a raw PID or PGID.
+`timeoutMs` is validated before spawn and must be an integer from 1 through
+2,147,483,647 milliseconds. Invalid values fail locally as
+`validation/correct_and_retry` instead of reaching Node's timer coercion.
 
 The SDK never seals or hashes a future Clock receipt locally. A deadline or
 cancellation after a mutating request begins returns a structured
@@ -124,6 +128,10 @@ or normalized command; requested Effect resolution remains separate from the
 provider's actual terminal resolution and does not duplicate the Run's world
 settlement. A provider `NotApplied` result is exposed as the closed
 `effect_not_applied` boundary with its exact content-addressed intent.
+Effect query summaries, complete exact Effects, and resolution receipts share
+one result invariant: Applied requires a non-null Artifact of exact kind
+`cymule.effect-result/1`, including when the provider value is JSON `null`;
+every other state requires a literal `null` result.
 Effect dispatches, component occurrences, and reconciliation commands all bind
 the provider occurrence with an exact lowercase SHA-256 content ID.
 Migration and restart authorization carry exact source Run, Plan, and epoch

@@ -18,6 +18,10 @@
   complete row, require strict canonical JSON bytes, and recompute that digest.
   Any direct field mismatch is stable `Integrity` before parked-wait selection
   or an M1 delivery; `/1` has no reader, importer, or fallback.
+- `schedule` canonicalizes the value and rejects more than Core
+  `MAX_ARTIFACT_BYTES` before opening a SQLite transaction or performing any
+  write. Exact-limit values remain valid. Reopen treats an oversized retained
+  value as stable `Integrity` rather than allocating it into a delivery.
 - Activation and timer identities use the shared 1..=512 Unicode-scalar,
   no-control-character contract. Never substitute UTF-8 byte length.
 - `receive` may return only a currently due timer with an exact target selected
@@ -27,6 +31,16 @@
   `(due_unix_ms, activation_id)` rows per call and retains an exclusive cursor
   for the next poll. Reaching the end resets the cursor so new earlier rows also
   make progress; never restart at the first unmatched timer on every poll.
+- Fresh due paging materializes only bounded activation/due/value-length
+  metadata. It caps the activation identity projection, rejects oversized
+  value metadata, then loads and authenticates exactly one complete row by
+  activation ID before each parked-wait lookup. Never collect a page of timer
+  payloads or schedule rows.
+- Every newly selected or retained wait ID is an exact lowercase SHA-256
+  content ID. An empty fresh selection means that source has no parked match
+  and is not retained; every nonempty fresh selection and every retained timer
+  delivery has exactly one target. Multiple fresh targets fail before
+  retention, and an invalid retained set is adapter `Integrity`.
 - Acknowledgement occurs only after the activation CAS. Lost acknowledgement
   must redeliver the identical activation ID, timer ID, target, and value.
 - Redeliver retained due selections before selecting new timer sources. An

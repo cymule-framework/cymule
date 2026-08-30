@@ -1060,6 +1060,57 @@ fn publication_intent_wire_requires_source_and_content_authority() {
 }
 
 #[test]
+fn publication_content_uses_the_resource_media_type_grammar() {
+    let resource_schema: Value =
+        decode_json(include_bytes!("../../../schemas/resource.schema.json"))
+            .expect("Resource schema parses");
+    assert_eq!(
+        agent_schema()["$defs"]["resourceMediaType"],
+        resource_schema["$defs"]["mediaType"],
+        "Agent publication content must reuse the exact Resource media-type schema"
+    );
+    let validator = schema_validator("agentStreamPublicationContent");
+    for media_type in [
+        "application/vnd.cymule.resource+json".to_owned(),
+        format!("a/{}", "b".repeat(253)),
+    ] {
+        let content = AgentStreamPublicationContent {
+            media_type,
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size: 1,
+        };
+        content
+            .verify()
+            .expect("valid Resource media type verifies in Agent protocol");
+        validator
+            .validate(&serde_json::to_value(&content).expect("content encodes"))
+            .expect("valid Resource media type verifies in Agent schema");
+    }
+    for media_type in [
+        "text/\0plain".to_owned(),
+        "text/".to_owned(),
+        "/plain".to_owned(),
+        "a/b/c".to_owned(),
+        "Text/plain".to_owned(),
+        "text/Plain".to_owned(),
+        "text/plain;charset=utf-8".to_owned(),
+        "text/ plain".to_owned(),
+        format!("a/{}", "b".repeat(254)),
+    ] {
+        let content = AgentStreamPublicationContent {
+            media_type,
+            digest: format!("sha256:{}", "a".repeat(64)),
+            size: 1,
+        };
+        assert!(content.verify().is_err());
+        assert!(
+            !validator
+                .is_valid(&serde_json::to_value(&content).expect("invalid content still encodes"))
+        );
+    }
+}
+
+#[test]
 fn publication_reservation_is_required_closed_and_schema_valid() {
     let open = AgentStreamCommand::Open {
         session_id: "session:reservation-schema".to_owned(),

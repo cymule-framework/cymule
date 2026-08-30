@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::resource::{
     ResourceCatalogRecord, ResourceHandle, ResourcePin, ResourcePinCurrent, ResourcePinKind,
-    ResourcePinReceipt, ResourceProfilePin, ResourcePublication, ResourceRetentionCurrent,
-    ResourceRetentionSubject, reduce_resource_pin_receipt,
+    ResourcePinReceipt, ResourceProfilePin, ResourcePublication, ResourceReleaseReceipt,
+    ResourceRetentionCurrent, ResourceRetentionSubject, reduce_resource_pin_receipt,
+    reduce_resource_reserved_pin_release_receipt,
 };
 use cymule_core::{
     ArtifactRef, EXECUTION_BINDING_ARTIFACT_KIND, MAX_EXACT_INTEGER, canonical_digest, content_id,
@@ -4180,7 +4181,8 @@ impl AgentStreamPublicationContent {
     /// Returns an error when the media type, digest, size, or bounded encoding
     /// is invalid.
     pub fn verify(&self) -> ProtocolResult<()> {
-        validate_content_token("stream publication media type", &self.media_type, 512)?;
+        crate::resource::validate_resource_media_type(&self.media_type)
+            .map_err(resource_protocol_error)?;
         validate_sha256("Agent stream publication content", &self.digest)?;
         if self.size > MAX_EXACT_INTEGER {
             return Err(ProtocolError::Validation(
@@ -4699,6 +4701,10 @@ pub enum AgentStreamSource {
         session: AgentSessionCurrent,
         /// Exact open stream current.
         stream: AgentStreamCurrent,
+        /// Exact Resource lifecycle source when abort releases a provider-proved
+        /// `NotApplied` publication reservation.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        resource: Option<Box<AgentStreamResourceSource>>,
     },
     /// Before witness for finalization.
     Finalize {
@@ -5444,6 +5450,10 @@ pub enum AgentStreamEffect {
     Aborted {
         /// Session metadata with the exact open-stream index decrement.
         session: AgentSessionCurrent,
+        /// Exact reserved-pin release, present only for an external publication
+        /// whose latest provider observation is durably `NotApplied`.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        resource_release_receipt: Option<ResourceReleaseReceipt>,
     },
     /// Stream, Session, and optional Resource publication were finalized atomically.
     Finalized {
@@ -7644,7 +7654,12 @@ impl AgentStreamSource {
         stream_id: &str,
         reason: &str,
     ) -> ProtocolResult<AgentStreamPostcondition> {
-        let Self::Abort { session, stream } = self else {
+        let Self::Abort {
+            session,
+            stream,
+            resource,
+        } = self
+        else {
             return Err(stream_source_shape_error());
         };
         session.verify()?;
@@ -7658,14 +7673,78 @@ impl AgentStreamSource {
                 "Agent stream abort requires its exact open current".to_owned(),
             ));
         }
+        let resource_release_receipt = match (
+            stream.publication_reservation.as_deref(),
+            resource.as_deref(),
+        ) {
+            (None, None) => None,
+            (Some(reservation), Some(resource)) => {
+                reservation.verify()?;
+                if reservation.phase != AgentStreamPublicationReservationPhase::NotApplied {
+                    return Err(ProtocolError::Conflict {
+                        code: "agent_stream_publication_abort_unresolved".to_owned(),
+                        message: "Agent stream publication must be durably NotApplied before abort"
+                            .to_owned(),
+                    });
+                }
+                let retention = resource.retention.as_ref().ok_or_else(|| {
+                    ProtocolError::IllegalTransition(
+                        "Agent stream abort lost its reserved Resource family".to_owned(),
+                    )
+                })?;
+                let pin = resource.pin.as_ref().ok_or_else(|| {
+                    ProtocolError::IllegalTransition(
+                        "Agent stream abort lost its reserved Resource pin".to_owned(),
+                    )
+                })?;
+                let reservation_origin =
+                    crate::resource::ResourceLifecycleReceiptRef::from_agent_publication_reservation(
+                        reservation.intent.command_id().to_owned(),
+                        reservation.intent.session_id().to_owned(),
+                        reservation.intent.stream_id().to_owned(),
+                        reservation.reservation_id.clone(),
+                    )
+                    .map_err(resource_protocol_error)?;
+                if reservation.resource_pin_receipt.pin != pin.pin
+                    || pin.status != crate::resource::ResourcePinStatus::Reserved
+                    || pin.last_receipt != reservation_origin
+                    || retention.family != pin.pin.subject.family
+                {
+                    return Err(ProtocolError::Conflict {
+                        code: "agent_stream_publication_abort_reservation_changed".to_owned(),
+                        message: "Agent stream abort lost its exact publication reservation"
+                            .to_owned(),
+                    });
+                }
+                Some(
+                    reduce_resource_reserved_pin_release_receipt(command_id, retention, pin)
+                        .map_err(resource_protocol_error)?,
+                )
+            }
+            (Some(_), None) => {
+                return Err(ProtocolError::IllegalTransition(
+                    "Agent stream abort requires its exact reserved Resource source".to_owned(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(ProtocolError::Validation(
+                    "Agent stream abort cannot carry Resource state without a reservation"
+                        .to_owned(),
+                ));
+            }
+        };
         let mut next = stream.clone();
         next.state = AgentStreamState::Aborted;
+        next.publication_reservation = None;
         next.abort_reason = Some(reason.to_owned());
         command_id.clone_into(&mut next.admitted_by);
         let session = close_open_stream(session, stream_id, command_id)?;
         Ok(AgentStreamPostcondition {
             stream: next,
-            effect: AgentStreamEffect::Aborted { session },
+            effect: AgentStreamEffect::Aborted {
+                session,
+                resource_release_receipt,
+            },
         })
     }
 
@@ -8072,7 +8151,6 @@ fn stream_finalization_resource(
                 || retained_pin.status != crate::resource::ResourcePinStatus::Reserved
                 || retained_pin.last_receipt != reservation_origin
                 || retained.family != pin.subject.family
-                || retained.active_pin_count < reservation.resource_pin_receipt.active_pin_count
             {
                 return Err(ProtocolError::Conflict {
                     code: "agent_stream_publication_reservation_changed".to_owned(),
@@ -8554,11 +8632,36 @@ impl AgentStreamPostcondition {
             {
                 current.verify()
             }
-            (AgentStreamCommand::Abort { reason, .. }, AgentStreamEffect::Aborted { session })
-                if self.stream.state == AgentStreamState::Aborted
-                    && self.stream.abort_reason.as_deref() == Some(reason) =>
+            (
+                AgentStreamCommand::Abort { reason, .. },
+                AgentStreamEffect::Aborted {
+                    session,
+                    resource_release_receipt,
+                },
+            ) if self.stream.state == AgentStreamState::Aborted
+                && self.stream.abort_reason.as_deref() == Some(reason) =>
             {
-                verify_stream_session_effect(session, &self.stream)
+                verify_stream_session_effect(session, &self.stream)?;
+                if let Some(receipt) = resource_release_receipt {
+                    receipt.verify().map_err(resource_protocol_error)?;
+                    if !matches!(
+                        &receipt.pin.kind,
+                        ResourcePinKind::AgentStream {
+                            session_id,
+                            stream_id,
+                        } if session_id == &self.stream.session_id
+                            && stream_id == &self.stream.stream_id
+                    ) || !matches!(
+                        self.stream.delivery,
+                        AgentStreamDelivery::ExternalResource { .. }
+                    ) {
+                        return Err(ProtocolError::IdentityMismatch(
+                            "Agent stream abort Resource release changed its exact owner"
+                                .to_owned(),
+                        ));
+                    }
+                }
+                Ok(())
             }
             (
                 AgentStreamCommand::Finalize {
@@ -9246,6 +9349,38 @@ impl AgentCommandReceipt {
                 "external Agent stream finalization lost its Resource pin receipt".to_owned(),
             )
         })
+    }
+
+    /// Return the exact Resource release created by aborting one durably
+    /// `NotApplied` external publication reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this receipt is invalid for the command or the
+    /// retained release is malformed.
+    pub fn resource_release_receipt_for(
+        &self,
+        command: &AgentCommand,
+    ) -> ProtocolResult<Option<&ResourceReleaseReceipt>> {
+        self.verify_for(command)?;
+        let (
+            AgentCommandAction::Stream(AgentStreamCommand::Abort { .. }),
+            AgentCommandOutcome::Stream(AgentStreamPostcondition {
+                effect:
+                    AgentStreamEffect::Aborted {
+                        resource_release_receipt,
+                        ..
+                    },
+                ..
+            }),
+        ) = (&command.action, &self.outcome)
+        else {
+            return Ok(None);
+        };
+        if let Some(receipt) = resource_release_receipt {
+            receipt.verify().map_err(resource_protocol_error)?;
+        }
+        Ok(resource_release_receipt.as_ref())
     }
 }
 
@@ -11141,11 +11276,13 @@ mod tests {
         let aborted = AgentStreamSource::Abort {
             session: completed_session,
             stream: fixture.stream,
+            resource: None,
         }
         .reduce(&revision('9'), &abort)
         .expect("stream abort reduces");
         let AgentStreamEffect::Aborted {
             session: ready_to_close,
+            resource_release_receipt: None,
         } = aborted.effect
         else {
             panic!("abort returns Session metadata")
@@ -11941,11 +12078,13 @@ mod tests {
         let aborted = AgentStreamSource::Abort {
             session: open_session.clone(),
             stream: opened.stream,
+            resource: None,
         }
         .reduce(&abort_command.command_id, &abort)
         .expect("stream aborts");
         let AgentStreamEffect::Aborted {
             session: aborted_session,
+            resource_release_receipt: None,
         } = aborted.effect
         else {
             panic!("abort outcome shape")
@@ -12685,6 +12824,93 @@ mod tests {
                 .resource_pin_receipt_for(&finalize_command)
                 .expect("Resource pin receipt resolves")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn external_stream_abort_releases_only_a_durably_not_applied_reservation() {
+        let (finalize_command, _, source) = external_stream_finalize_fixture();
+        let (source, _) = reserve_external_stream_source(&finalize_command, source);
+        let AgentStreamSource::Finalize {
+            session,
+            stream,
+            resource: Some(resource),
+            ..
+        } = source
+        else {
+            panic!("reserved external fixture retains its exact Resource source")
+        };
+        let abort = AgentStreamCommand::Abort {
+            session_id: stream.session_id.clone(),
+            stream_id: stream.stream_id.clone(),
+            reason: "caller:no-output".to_owned(),
+        };
+        let abort_command =
+            AgentCommand::new(revision('5'), AgentCommandAction::Stream(abort.clone()))
+                .expect("Abort command seals");
+        let claimed = AgentStreamSource::Abort {
+            session: session.clone(),
+            stream: stream.clone(),
+            resource: Some(resource.clone()),
+        };
+        assert!(matches!(
+            claimed.reduce(&abort_command.command_id, &abort),
+            Err(ProtocolError::Conflict { ref code, .. })
+                if code == "agent_stream_publication_abort_unresolved"
+        ));
+
+        let stream = mark_agent_stream_publication_not_applied(&stream, &finalize_command)
+            .expect("provider-proved NotApplied becomes durable");
+        let source = AgentStreamSource::Abort {
+            session,
+            stream,
+            resource: Some(resource),
+        };
+        let postcondition = source
+            .reduce(&abort_command.command_id, &abort)
+            .expect("NotApplied reservation aborts atomically");
+        assert_eq!(postcondition.stream.state, AgentStreamState::Aborted);
+        assert!(postcondition.stream.publication_reservation.is_none());
+        let AgentStreamEffect::Aborted {
+            session,
+            resource_release_receipt: Some(release),
+        } = &postcondition.effect
+        else {
+            panic!("NotApplied abort retains Session and Resource release")
+        };
+        assert_eq!(session.open_stream_count, 0);
+        assert_eq!(release.active_pin_count, 0);
+        let expected_release = release.clone();
+        let receipt = AgentCommandReceipt::new(
+            &abort_command,
+            AgentCommandSource::Stream(Box::new(source)),
+            AgentCommandOutcome::Stream(postcondition),
+        )
+        .expect("Abort receipt replays its exact reserved release");
+        let wire = serde_json::to_value(&receipt).expect("Abort receipt encodes");
+        let reopened: AgentCommandReceipt = serde_json::from_value(wire.clone())
+            .expect("Abort receipt required-nullable fields reopen");
+        reopened
+            .verify_for(&abort_command)
+            .expect("reopened Abort receipt verifies");
+        for pointer in [
+            "/source/source/resource",
+            "/outcome/receipt/effect/resource_release_receipt",
+        ] {
+            let mut missing = wire.clone();
+            let (parent, field) = pointer.rsplit_once('/').expect("fixture pointer splits");
+            missing
+                .pointer_mut(parent)
+                .and_then(Value::as_object_mut)
+                .expect("fixture parent is an object")
+                .remove(field);
+            assert!(serde_json::from_value::<AgentCommandReceipt>(missing).is_err());
+        }
+        assert_eq!(
+            receipt
+                .resource_release_receipt_for(&abort_command)
+                .expect("Abort Resource release resolves"),
+            Some(&expected_release)
         );
     }
 

@@ -36,6 +36,12 @@
       "minimum": 0,
       "maximum": 9007199254740991
     },
+    "resourceMediaType": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 255,
+      "pattern": "^[a-z0-9!#$%&'*+.^_`|~-]+/[a-z0-9!#$%&'*+.^_`|~-]+$"
+    },
     "artifactRef": {
       "type": "object",
       "additionalProperties": false,
@@ -1343,7 +1349,7 @@
       "additionalProperties": false,
       "required": ["media_type", "digest", "size"],
       "properties": {
-        "media_type": { "$ref": "#/$defs/nonEmpty" },
+        "media_type": { "$ref": "#/$defs/resourceMediaType" },
         "digest": { "$ref": "#/$defs/sha256" },
         "size": { "$ref": "#/$defs/exactInteger" }
       }

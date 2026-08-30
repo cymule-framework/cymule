@@ -57,6 +57,9 @@
   to the framework-wide target maximum, and a concurrent loser of the
   selection update must classify the winning SQLite value as retained rather
   than reinterpret it under its own bound.
+- Every new and retained wait ID is an exact lowercase SHA-256 content ID.
+  Reject a forged new ID before the SQLite selection update; map a forged
+  retained ID to the existing adapter `Integrity` boundary before delivery.
 - Source-view regressions verify one-page reads, continuation beyond the scan
   budget, cursor preservation across actual errors, and retained-delivery
   replay without either source-page or target-selection reads.

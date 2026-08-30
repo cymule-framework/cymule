@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -167,6 +168,9 @@ func validateEngineFailureWire(value any) error {
 	issues, ok := issuesValue.([]any)
 	if !ok {
 		return fmt.Errorf("Engine failure issues are not an array")
+	}
+	if len(issues) == 0 || len(issues) > 100 {
+		return fmt.Errorf("Engine failure issues must contain between 1 and 100 members")
 	}
 	for _, issueValue := range issues {
 		issue, ok := issueValue.(map[string]any)
@@ -1926,24 +1930,11 @@ func validateEffectResolutionReceiptRaw(raw json.RawMessage) error {
 		return fmt.Errorf("effect resolution actual value is outside strict JSON")
 	}
 	actualValueIsNull := rawMessageIsNull(receipt.ActualValue)
-	resultIsNull := rawMessageIsNull(receipt.Result)
-	if (receipt.ActualResolution == "resolved_applied" && resultIsNull) ||
-		(receipt.ActualResolution == "resolved_not_applied" && (!actualValueIsNull || !resultIsNull)) {
+	applied := receipt.ActualResolution == "resolved_applied"
+	if !applied && !actualValueIsNull {
 		return fmt.Errorf("effect resolution actual value and result disagree")
 	}
-	if !resultIsNull {
-		var result ArtifactRef
-		if err := validateClosedRaw(receipt.Result, []string{"identity_version", "artifact_id", "kind"}, &result); err != nil {
-			return err
-		}
-		if err := validateArtifactRef(result); err != nil {
-			return err
-		}
-		if result.Kind != "cymule.effect-result/1" {
-			return fmt.Errorf("effect resolution result kind is invalid")
-		}
-	}
-	return nil
+	return validateEffectResultRaw(receipt.Result, applied)
 }
 
 // LiveEvolutionOutcome is one closed durable live-evolution result.
@@ -2915,6 +2906,29 @@ func validateArtifactRefRaw(raw json.RawMessage) error {
 	return validateArtifactRef(reference)
 }
 
+func validateEffectResultRaw(raw json.RawMessage, applied bool) error {
+	if rawMessageIsNull(raw) {
+		if applied {
+			return fmt.Errorf("applied Effect has no result Artifact")
+		}
+		return nil
+	}
+	if !applied {
+		return fmt.Errorf("non-applied Effect has a result Artifact")
+	}
+	var result ArtifactRef
+	if err := validateClosedRaw(raw, []string{"identity_version", "artifact_id", "kind"}, &result); err != nil {
+		return err
+	}
+	if err := validateArtifactRef(result); err != nil {
+		return err
+	}
+	if result.Kind != "cymule.effect-result/1" {
+		return fmt.Errorf("applied Effect result kind is invalid")
+	}
+	return nil
+}
+
 func validateNullableNonEmptyStringRaw(raw json.RawMessage) error {
 	_, _, err := decodeNullableNonEmptyStringRaw(raw)
 	return err
@@ -3479,16 +3493,7 @@ func validateDurableEffectSummaryRaw(raw json.RawMessage) error {
 		slices.Contains([]string{"pending", "claimed"}, summary.State) && summary.ExecutionAvailability != "available" {
 		return fmt.Errorf("Effect summary lifecycle is inconsistent")
 	}
-	if summary.State == "applied" {
-		if rawMessageIsNull(summary.Result) {
-			return fmt.Errorf("applied Effect summary has no result Artifact")
-		}
-		return validateArtifactRefRaw(summary.Result)
-	}
-	if !rawMessageIsNull(summary.Result) {
-		return fmt.Errorf("non-applied Effect summary has a result")
-	}
-	return nil
+	return validateEffectResultRaw(summary.Result, summary.State == "applied")
 }
 
 func validateDurableOccurrenceSummaryRaw(raw json.RawMessage) error {
@@ -3656,14 +3661,12 @@ func validateDurableEffectRaw(raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("Effect dispatch lifecycle is invalid")
 	}
 	claimExpected := !slices.Contains([]string{"pending", "cancelled_before_release"}, effect.State)
-	resultPresent := !rawMessageIsNull(effect.Result)
 	if claimed != claimExpected || (claimed && effect.ClaimEpoch == 0) || (!claimed && effect.ClaimEpoch != 0) ||
-		slices.Contains([]string{"pending", "claimed", "unknown", "not_applied", "cancelled_before_release"}, effect.State) && resultPresent ||
 		slices.Contains([]string{"pending", "claimed"}, effect.State) && effect.ExecutionAvailability != "available" {
 		return "", fmt.Errorf("Effect dispatch claim or result is inconsistent")
 	}
-	if resultPresent && validateArtifactRefRaw(effect.Result) != nil {
-		return "", fmt.Errorf("Effect dispatch result is invalid")
+	if err := validateEffectResultRaw(effect.Result, effect.State == "applied"); err != nil {
+		return "", err
 	}
 	return effect.RunID, nil
 }
@@ -6137,9 +6140,83 @@ func cloneStrings(values map[string]string) map[string]string {
 
 // CliEngine invokes the trusted Rust command-line Engine.
 type CliEngine struct {
-	Executable string
-	Context    context.Context
-	Timeout    time.Duration
+	Executable   string
+	Timeout      time.Duration
+	Cancellation *EngineCancellation
+}
+
+// EngineCancellation is a one-shot launch and completion authority shared by CLI calls.
+type EngineCancellation struct {
+	mu        sync.Mutex
+	cancelled bool
+	done      chan struct{}
+}
+
+// NewEngineCancellation creates an uncancelled one-shot authority.
+func NewEngineCancellation() *EngineCancellation {
+	return &EngineCancellation{done: make(chan struct{})}
+}
+
+// Cancel linearizes cancellation before a pending launch or admitted completion.
+func (cancellation *EngineCancellation) Cancel() {
+	cancellation.mu.Lock()
+	defer cancellation.mu.Unlock()
+	if cancellation.cancelled {
+		return
+	}
+	if cancellation.done == nil {
+		cancellation.done = make(chan struct{})
+	}
+	cancellation.cancelled = true
+	close(cancellation.done)
+}
+
+type engineCall struct {
+	cancellation *EngineCancellation
+	active       bool
+}
+
+func (cancellation *EngineCancellation) begin() (*engineCall, bool) {
+	cancellation.mu.Lock()
+	defer cancellation.mu.Unlock()
+	if cancellation.cancelled {
+		return nil, false
+	}
+	if cancellation.done == nil {
+		cancellation.done = make(chan struct{})
+	}
+	return &engineCall{cancellation: cancellation, active: true}, true
+}
+
+func (call *engineCall) start(command *exec.Cmd) error {
+	call.cancellation.mu.Lock()
+	defer call.cancellation.mu.Unlock()
+	if call.cancellation.cancelled {
+		return context.Canceled
+	}
+	return command.Start()
+}
+
+func (call *engineCall) complete() bool {
+	call.cancellation.mu.Lock()
+	defer call.cancellation.mu.Unlock()
+	if !call.active {
+		return false
+	}
+	call.active = false
+	return !call.cancellation.cancelled
+}
+
+func (call *engineCall) abandon() {
+	call.cancellation.mu.Lock()
+	defer call.cancellation.mu.Unlock()
+	if call.active {
+		call.active = false
+	}
+}
+
+func (call *engineCall) done() <-chan struct{} {
+	return call.cancellation.done
 }
 
 // EngineStoreTarget selects one provider-owned durable domain.
@@ -7381,7 +7458,23 @@ func (engine CliEngine) Run(plan SealedPlan, input any, plugin EnginePluginTarge
 	return response.Execution, err
 }
 
-func (engine CliEngine) request(request any, response any) error {
+func (engine CliEngine) request(request any, response any) (returnError error) {
+	timeout := engine.Timeout
+	if timeout < 0 {
+		return validationFailure("invalid_engine_timeout", "Engine timeout must be a positive duration")
+	}
+	if timeout == 0 {
+		timeout = defaultEngineTimeout
+	}
+	cancellation := engine.Cancellation
+	if cancellation == nil {
+		cancellation = NewEngineCancellation()
+	}
+	call, admitted := cancellation.begin()
+	if !admitted {
+		return interruptedFailure(request, context.Canceled, false)
+	}
+	defer call.abandon()
 	if err := validateGoJSONStrings(reflect.ValueOf(request)); err != nil {
 		return validationFailure("invalid_engine_request", "Engine request contains invalid JSON text")
 	}
@@ -7418,27 +7511,6 @@ func (engine CliEngine) request(request any, response any) error {
 	if executable == "" {
 		executable = "cymule"
 	}
-	ctx := engine.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if ctx.Err() != nil {
-		return interruptedFailure(request, ctx.Err(), false)
-	}
-	timeout := engine.Timeout
-	if timeout < 0 {
-		return validationFailure(
-			"invalid_engine_timeout", "Engine timeout must be a positive duration",
-		)
-	}
-	if timeout == 0 {
-		timeout = defaultEngineTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	if ctx.Err() != nil {
-		return interruptedFailure(request, ctx.Err(), false)
-	}
 	if !engineWaitAuthorityAvailable() {
 		return validationFailure(
 			"engine_rpc_platform_unsupported",
@@ -7450,8 +7522,9 @@ func (engine CliEngine) request(request any, response any) error {
 	if err != nil {
 		return transportFailure("engine_stdin_unavailable", "the Engine stdin pipe is unavailable")
 	}
-	stdout := newBoundedOutput(maxEngineResponseBytes)
-	stderr := newBoundedOutput(maxEngineDiagnosticBytes)
+	overflow := newEngineOutputOverflow()
+	stdout := newBoundedOutput(maxEngineResponseBytes, overflow, "engine_output_limit_exceeded")
+	stderr := newBoundedOutput(maxEngineDiagnosticBytes, overflow, "engine_diagnostic_limit_exceeded")
 	stdoutPipe, err := command.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
@@ -7463,15 +7536,22 @@ func (engine CliEngine) request(request any, response any) error {
 		_ = stdoutPipe.Close()
 		return transportFailure("engine_stderr_unavailable", "the Engine stderr pipe is unavailable")
 	}
-	if startErr := command.Start(); startErr != nil {
+	if startErr := call.start(command); startErr != nil {
 		_ = stdin.Close()
 		_ = stdoutPipe.Close()
 		_ = stderrPipe.Close()
-		if ctx.Err() != nil {
-			return interruptedFailure(request, ctx.Err(), false)
+		if errors.Is(startErr, context.Canceled) {
+			return interruptedFailure(request, context.Canceled, false)
 		}
 		return transportFailure("engine_start_failed", "the Engine process could not be started")
 	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	defer func() {
+		if !call.complete() {
+			returnError = interruptedFailure(request, context.Canceled, true)
+		}
+	}()
 	inputDone := make(chan error, 1)
 	stdoutDone := make(chan error, 1)
 	stderrDone := make(chan error, 1)
@@ -7491,20 +7571,29 @@ func (engine CliEngine) request(request any, response any) error {
 		_, copyErr := io.Copy(&stderr, stderrPipe)
 		stderrDone <- copyErr
 	}()
-	waitErr, stdoutErr, stderrErr, interrupted, terminationErr := awaitEngineProcess(
-		ctx, command, stdin, stdoutPipe, stderrPipe, stdoutDone, stderrDone,
+	processResult := awaitEngineProcess(
+		deadline.C,
+		call.done(),
+		command,
+		stdin,
+		stdoutPipe,
+		stderrPipe,
+		inputDone,
+		stdoutDone,
+		stderrDone,
+		overflow.events,
+		engineProcessExitedWithoutReaping,
 	)
-	// A complete Engine response remains authoritative when the child closed
-	// stdin early; joining the writer prevents a goroutine leak, while its
-	// expected EPIPE cannot replace a decoded success/failure envelope.
-	inputErr := <-inputDone
-	if terminationErr != nil {
+	if processResult.terminationErr != nil {
 		return responseLossFailure(request, "engine_process_termination_failed")
 	}
-	if interrupted {
-		return interruptedFailure(request, ctx.Err(), true)
+	if processResult.interruption != nil {
+		return interruptedFailure(request, processResult.interruption, true)
 	}
-	if stdoutErr != nil || stderrErr != nil {
+	if processResult.overflowCode != "" {
+		return responseLossFailure(request, processResult.overflowCode)
+	}
+	if processResult.stdoutErr != nil || processResult.stderrErr != nil {
 		return responseLossFailure(request, "engine_io_failed")
 	}
 	if stdout.overflowed() || stderr.overflowed() {
@@ -7516,10 +7605,10 @@ func (engine CliEngine) request(request any, response any) error {
 	if failure, valid := decodeValidEngineFailure(stdout.bytes()); valid {
 		return failure
 	}
-	if waitErr != nil {
+	if processResult.waitErr != nil {
 		return responseLossFailure(request, "engine_process_failed")
 	}
-	if inputErr != nil {
+	if processResult.inputErr != nil {
 		value, decodeErr := decodeUniqueJSON(stdout.bytes())
 		object, objectOK := value.(map[string]any)
 		if decodeErr != nil || !objectOK || object["outcome"] != "failure" {
@@ -7529,63 +7618,98 @@ func (engine CliEngine) request(request any, response any) error {
 	return decodeEngineResponseForRequest(stdout.bytes(), response, sentRequest)
 }
 
+type engineProcessResult struct {
+	waitErr        error
+	inputErr       error
+	stdoutErr      error
+	stderrErr      error
+	interruption   error
+	overflowCode   string
+	terminationErr error
+}
+
 func awaitEngineProcess(
-	ctx context.Context,
+	deadline <-chan time.Time,
+	cancellationDone <-chan struct{},
 	command *exec.Cmd,
 	stdinPipe io.Closer,
 	stdoutPipe io.Closer,
 	stderrPipe io.Closer,
+	inputDone <-chan error,
 	stdoutDone <-chan error,
 	stderrDone <-chan error,
-) (waitErr, stdoutErr, stderrErr error, interrupted bool, terminationErr error) {
+	overflow <-chan string,
+	processExited func(int) (bool, error),
+) engineProcessResult {
+	var result engineProcessResult
 	processID := command.Process.Pid
+	inputComplete := false
 	stdoutComplete := false
 	stderrComplete := false
+	childExited := false
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	terminate := func() (error, error) {
+		return terminateEngineProcess(command, stdinPipe, stdoutPipe, stderrPipe)
+	}
 	for {
+		if !inputComplete {
+			select {
+			case result.inputErr = <-inputDone:
+				inputComplete = true
+			default:
+			}
+		}
 		if !stdoutComplete {
 			select {
-			case stdoutErr = <-stdoutDone:
+			case result.stdoutErr = <-stdoutDone:
 				stdoutComplete = true
 			default:
 			}
 		}
 		if !stderrComplete {
 			select {
-			case stderrErr = <-stderrDone:
+			case result.stderrErr = <-stderrDone:
 				stderrComplete = true
 			default:
 			}
 		}
-		exited, err := engineProcessExitedWithoutReaping(processID)
-		if err != nil {
-			_ = stdinPipe.Close()
-			_ = stdoutPipe.Close()
-			_ = stderrPipe.Close()
-			if !stdoutComplete {
-				stdoutErr = <-stdoutDone
+		if !childExited {
+			exited, err := processExited(processID)
+			if err != nil {
+				result.waitErr, result.terminationErr = terminate()
+				result.terminationErr = errors.Join(err, result.terminationErr)
+				return result
 			}
-			if !stderrComplete {
-				stderrErr = <-stderrDone
+			childExited = exited
+			if childExited {
+				_ = stdinPipe.Close()
 			}
-			go func() { _ = command.Wait() }()
-			return nil, stdoutErr, stderrErr, false, err
 		}
-		if exited && stdoutComplete && stderrComplete {
-			return command.Wait(), stdoutErr, stderrErr, false, nil
+		if childExited && inputComplete && stdoutComplete && stderrComplete {
+			result.waitErr = command.Wait()
+			return result
 		}
 		select {
-		case <-ctx.Done():
-			waitErr, terminationErr = terminateEngineProcess(
-				command, stdinPipe, stdoutPipe, stderrPipe,
-			)
-			if !stdoutComplete {
-				stdoutErr = <-stdoutDone
-			}
-			if !stderrComplete {
-				stderrErr = <-stderrDone
-			}
-			return waitErr, stdoutErr, stderrErr, true, terminationErr
-		case <-time.After(5 * time.Millisecond):
+		case <-deadline:
+			result.waitErr, result.terminationErr = terminate()
+			result.interruption = context.DeadlineExceeded
+			return result
+		case <-cancellationDone:
+			result.waitErr, result.terminationErr = terminate()
+			result.interruption = context.Canceled
+			return result
+		case result.overflowCode = <-overflow:
+			result.waitErr, result.terminationErr = terminate()
+			return result
+		case result.inputErr = <-inputDone:
+			inputComplete = true
+		case result.stdoutErr = <-stdoutDone:
+			stdoutComplete = true
+		case result.stderrErr = <-stderrDone:
+			stderrComplete = true
+		case <-ticker.C:
 		}
 	}
 }
@@ -7607,12 +7731,23 @@ func terminateEngineProcess(
 }
 
 type boundedOutput struct {
-	limit int
-	data  []byte
+	limit        int
+	data         []byte
+	overflow     *engineOutputOverflow
+	overflowCode string
 }
 
-func newBoundedOutput(limit int) boundedOutput {
-	return boundedOutput{limit: limit}
+type engineOutputOverflow struct {
+	once   sync.Once
+	events chan string
+}
+
+func newEngineOutputOverflow() *engineOutputOverflow {
+	return &engineOutputOverflow{events: make(chan string, 1)}
+}
+
+func newBoundedOutput(limit int, overflow *engineOutputOverflow, overflowCode string) boundedOutput {
+	return boundedOutput{limit: limit, overflow: overflow, overflowCode: overflowCode}
 }
 
 func (output *boundedOutput) Write(value []byte) (int, error) {
@@ -7623,6 +7758,9 @@ func (output *boundedOutput) Write(value []byte) (int, error) {
 			retained = remaining
 		}
 		output.data = append(output.data, value[:retained]...)
+		if len(output.data) > output.limit {
+			output.overflow.once.Do(func() { output.overflow.events <- output.overflowCode })
+		}
 	}
 	return len(value), nil
 }

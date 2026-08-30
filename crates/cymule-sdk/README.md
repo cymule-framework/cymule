@@ -94,7 +94,8 @@ process targets.
 `CliEngine` owns one direct Child handle and keeps one absolute deadline across
 process exit plus bounded stdin/stdout/stderr completion. Timeout or
 cancellation closes local pipes and kills the direct child if it is still
-unreaped. The official Engine/executor watchdog owns descendant closure. Stdout uses the
+unreaped. An explicit timeout override must be positive; zero fails as local
+validation before process spawn. The official Engine/executor watchdog owns descendant closure. Stdout uses the
 Runtime-owned 128 MiB plus 32-byte framing response-envelope bound and stderr its independent 1 MiB
 diagnostic bound. `EngineCancellation` linearizes preflight, launch,
 cancellation and admitted completion; there is no public atomic-flag launch

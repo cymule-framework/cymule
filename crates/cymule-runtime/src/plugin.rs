@@ -575,7 +575,7 @@ where
             code: code.to_owned(),
             message: error.to_string(),
         })?;
-    crate::validate_json_typed_roundtrip(&raw, &normalized).map_err(|message| {
+    crate::validate_json_typed_roundtrip_bytes(input, &raw, &normalized).map_err(|message| {
         RuntimeError::PluginDefect {
             code: code.to_owned(),
             message,
@@ -1208,6 +1208,35 @@ mod tests {
                 effects: BTreeMap::new(),
             };
             assert!(manifest.verify().is_err());
+        }
+    }
+
+    #[test]
+    fn plugin_wire_rejects_fractional_decimal_collisions() {
+        for (input, expected_code, expected_path) in [
+            (
+                br#"{"type":"call","component":"test.echo","input":0.100000000000000005}"#
+                    .as_slice(),
+                "invalid_plugin_request",
+                "/input",
+            ),
+            (
+                br#"{"type":"call_result","value":0.100000000000000005}"#.as_slice(),
+                "invalid_plugin_response",
+                "/value",
+            ),
+        ] {
+            let error = if expected_code == "invalid_plugin_request" {
+                decode_plugin_request(input).expect_err("fraction collision must fail request wire")
+            } else {
+                decode_plugin_response(input)
+                    .expect_err("fraction collision must fail response wire")
+            };
+            assert!(matches!(
+                error,
+                RuntimeError::PluginDefect { code, message }
+                    if code == expected_code && message.ends_with(expected_path)
+            ));
         }
     }
 

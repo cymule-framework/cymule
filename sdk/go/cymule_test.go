@@ -1,7 +1,6 @@
 package cymule
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -549,14 +548,14 @@ func engineWithOversizedOutput(t *testing.T, stream string) CliEngine {
 	return CliEngine{Executable: executable}
 }
 
-func blockingEngine(t *testing.T, ctx context.Context) (CliEngine, string) {
+func blockingEngine(t *testing.T) (CliEngine, string) {
 	t.Helper()
 	executable := filepath.Join(t.TempDir(), "engine")
 	script := []byte("#!/bin/sh\n/bin/cat >/dev/null\n: > \"$0.started\"\n/bin/sleep 10\n")
 	if err := os.WriteFile(executable, script, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return CliEngine{Executable: executable, Context: ctx}, executable + ".started"
+	return CliEngine{Executable: executable}, executable + ".started"
 }
 
 func waitForEngineStart(t *testing.T, marker string) {
@@ -572,22 +571,6 @@ func waitForEngineStart(t *testing.T, marker string) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
-
-type controlledDeadlineContext struct {
-	done <-chan struct{}
-}
-
-func (ctx controlledDeadlineContext) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (ctx controlledDeadlineContext) Done() <-chan struct{}       { return ctx.done }
-func (ctx controlledDeadlineContext) Err() error {
-	select {
-	case <-ctx.done:
-		return context.DeadlineExceeded
-	default:
-		return nil
-	}
-}
-func (ctx controlledDeadlineContext) Value(any) any { return nil }
 
 func requireFailure(t *testing.T, err error, category, code, retry string) {
 	t.Helper()
@@ -933,36 +916,43 @@ func TestContinuationIdentityIsContentAddressedNotRunIDConcatenation(t *testing.
 	}
 }
 
-func TestCliEnginePreservesPreCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := (CliEngine{Context: ctx}).Seal(NewFlow("cancel", map[string]any{}, map[string]any{}).
-		Finish(Expression{"kind": "input"}))
+func TestEngineCancellationLinearizesBeforeLaunch(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "engine")
+	marker := executable + ".started"
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n: > \"$0.started\"\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cancellation := NewEngineCancellation()
+	cancellation.Cancel()
+	_, err := (CliEngine{Executable: executable, Cancellation: cancellation}).Seal(fixedCandidate())
 	requireFailure(t, err, "cancelled", "engine_response_cancelled", "never")
-
-	_, err = (CliEngine{Context: ctx}).ObserveClock(
-		SQLiteClock("unused", "clock:pre-cancel", fixedContentID("1")), "run:pre-cancel",
-	)
-	requireFailure(t, err, "cancelled", "engine_response_cancelled", "never")
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("cancellation that linearized first still launched the Engine: %v", statErr)
+	}
 }
 
-func TestCliEngineTimeoutSelectionIsFiniteAndContextBound(t *testing.T) {
-	t.Run("zero value keeps the caller Context deadline authoritative", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		defer cancel()
-		engine, _ := blockingEngine(t, ctx)
-		startedAt := time.Now()
+func TestEngineCancellationAfterLaunchInterruptsTheOwnedChild(t *testing.T) {
+	cancellation := NewEngineCancellation()
+	engine, marker := blockingEngine(t)
+	engine.Cancellation = cancellation
+	result := make(chan error, 1)
+	go func() {
 		_, err := engine.Seal(fixedCandidate())
-		requireFailure(t, err, "timed_out", "engine_response_timed_out", "retry_same_request")
-		if time.Since(startedAt) > 2*time.Second {
-			t.Fatal("zero-value Engine ignored the caller Context deadline")
-		}
-	})
+		result <- err
+	}()
+	waitForEngineStart(t, marker)
+	cancellation.Cancel()
+	select {
+	case err := <-result:
+		requireFailure(t, err, "cancelled", "engine_response_cancelled", "never")
+	case <-time.After(3 * time.Second):
+		t.Fatal("SDK cancellation did not terminate the launched Engine")
+	}
+}
 
+func TestCliEngineTimeoutSelectionIsFinite(t *testing.T) {
 	t.Run("positive transport timeout overrides the default", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		engine, _ := blockingEngine(t, ctx)
+		engine, _ := blockingEngine(t)
 		engine.Timeout = 200 * time.Millisecond
 		startedAt := time.Now()
 		_, err := engine.Seal(fixedCandidate())
@@ -1021,22 +1011,20 @@ func TestCliEngineClassifiesPostStartInterruptionByMutation(t *testing.T) {
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			interrupted := make(chan struct{})
-			var ctx context.Context
-			var interrupt func()
+			engine, marker := blockingEngine(t)
+			var cancellation *EngineCancellation
 			if testCase.deadline {
-				ctx = controlledDeadlineContext{done: interrupted}
-				interrupt = func() { close(interrupted) }
+				engine.Timeout = 300 * time.Millisecond
 			} else {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(context.Background())
-				interrupt = cancel
+				cancellation = NewEngineCancellation()
+				engine.Cancellation = cancellation
 			}
-			engine, marker := blockingEngine(t, ctx)
 			result := make(chan error, 1)
 			go func() { result <- testCase.invoke(engine) }()
-			waitForEngineStart(t, marker)
-			interrupt()
+			if cancellation != nil {
+				waitForEngineStart(t, marker)
+				cancellation.Cancel()
+			}
 			select {
 			case err := <-result:
 				requireFailure(t, err, testCase.category, testCase.code, testCase.disposition)
@@ -1066,6 +1054,8 @@ func TestAwaitEngineProcessPrefersAnAlreadyCompletedNaturalExit(t *testing.T) {
 	}
 	stdoutDone := make(chan error, 1)
 	stderrDone := make(chan error, 1)
+	inputDone := make(chan error, 1)
+	inputDone <- stdinPipe.Close()
 	go func() { _, err := io.Copy(io.Discard, stdoutPipe); stdoutDone <- err }()
 	go func() { _, err := io.Copy(io.Discard, stderrPipe); stderrDone <- err }()
 	for {
@@ -1078,16 +1068,181 @@ func TestAwaitEngineProcessPrefersAnAlreadyCompletedNaturalExit(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	waitErr, stdoutErr, stderrErr, interrupted, terminationErr := awaitEngineProcess(
-		ctx, command, stdinPipe, stdoutPipe, stderrPipe, stdoutDone, stderrDone,
+	deadline := make(chan time.Time, 1)
+	deadline <- time.Now()
+	result := awaitEngineProcess(
+		deadline,
+		make(chan struct{}),
+		command,
+		stdinPipe,
+		stdoutPipe,
+		stderrPipe,
+		inputDone,
+		stdoutDone,
+		stderrDone,
+		make(chan string),
+		engineProcessExitedWithoutReaping,
 	)
-	if waitErr != nil || stdoutErr != nil || stderrErr != nil || interrupted || terminationErr != nil {
+	if result.waitErr != nil || result.inputErr != nil || result.stdoutErr != nil ||
+		result.stderrErr != nil || result.interruption != nil || result.terminationErr != nil {
 		t.Fatalf(
-			"completed Engine process was reclassified: wait=%v interrupted=%t termination=%v",
-			waitErr, interrupted, terminationErr,
+			"completed Engine process was reclassified: wait=%v interruption=%v termination=%v",
+			result.waitErr, result.interruption, result.terminationErr,
 		)
+	}
+}
+
+func TestAwaitEngineProcessKillsAndReapsOnOverflow(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "engine")
+	marker := executable + ".late"
+	script := "#!/bin/sh\nprintf 'xx'\n/bin/sleep 1\n: > \"$0.late\"\n"
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(executable, "rpc")
+	stdinPipe, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutPipe, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderrPipe, err := command.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	inputDone := make(chan error, 1)
+	stdoutDone := make(chan error, 1)
+	stderrDone := make(chan error, 1)
+	overflow := newEngineOutputOverflow()
+	stdout := newBoundedOutput(1, overflow, "engine_output_limit_exceeded")
+	stderr := newBoundedOutput(1, overflow, "engine_diagnostic_limit_exceeded")
+	go func() { inputDone <- stdinPipe.Close() }()
+	go func() { _, err := io.Copy(&stdout, stdoutPipe); stdoutDone <- err }()
+	go func() { _, err := io.Copy(&stderr, stderrPipe); stderrDone <- err }()
+	result := awaitEngineProcess(
+		make(chan time.Time),
+		make(chan struct{}),
+		command,
+		stdinPipe,
+		stdoutPipe,
+		stderrPipe,
+		inputDone,
+		stdoutDone,
+		stderrDone,
+		overflow.events,
+		engineProcessExitedWithoutReaping,
+	)
+	if result.overflowCode != "engine_output_limit_exceeded" || result.terminationErr != nil {
+		t.Fatalf("stdout overflow did not terminate with the exact code: %#v", result)
+	}
+	if command.ProcessState == nil {
+		t.Fatal("overflowed Engine was not synchronously reaped")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("overflowed live Engine continued to its late effect: %v", err)
+	}
+}
+
+func TestAwaitEngineProcessTerminatesAndReapsOnWaitAuthorityError(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "engine")
+	marker := executable + ".late"
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n/bin/sleep 1\n: > \"$0.late\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(executable, "rpc")
+	stdinPipe, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutPipe, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderrPipe, err := command.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	inputDone := make(chan error, 1)
+	stdoutDone := make(chan error, 1)
+	stderrDone := make(chan error, 1)
+	go func() { inputDone <- stdinPipe.Close() }()
+	go func() { _, err := io.Copy(io.Discard, stdoutPipe); stdoutDone <- err }()
+	go func() { _, err := io.Copy(io.Discard, stderrPipe); stderrDone <- err }()
+	waitAuthorityErr := errors.New("injected wait authority failure")
+	result := awaitEngineProcess(
+		make(chan time.Time),
+		make(chan struct{}),
+		command,
+		stdinPipe,
+		stdoutPipe,
+		stderrPipe,
+		inputDone,
+		stdoutDone,
+		stderrDone,
+		make(chan string),
+		func(int) (bool, error) { return false, waitAuthorityErr },
+	)
+	if !errors.Is(result.terminationErr, waitAuthorityErr) {
+		t.Fatalf("wait authority error was not retained as termination loss: %#v", result)
+	}
+	if command.ProcessState == nil {
+		t.Fatal("Engine with failed wait authority was not synchronously reaped")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Engine survived wait authority failure: %v", err)
+	}
+}
+
+func TestCliEngineClosesBlockedInputWhenLeaderExits(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "engine")
+	release := executable + ".release"
+	script := "#!/bin/sh\n( while [ ! -e \"$0.release\" ]; do /bin/sleep 0.05; done ) <&0 >/dev/null 2>&1 &\nexit 0\n"
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.WriteFile(release, nil, 0o600) }()
+	request := map[string]any{
+		"type":      "seal",
+		"candidate": map[string]any{"payload": strings.Repeat("x", 8*1024*1024)},
+	}
+	result := make(chan error, 1)
+	go func() {
+		var response map[string]any
+		result <- (CliEngine{Executable: executable, Timeout: 3 * time.Second}).request(request, &response)
+	}()
+	var err error
+	select {
+	case err = <-result:
+	case <-time.After(time.Second):
+		if writeErr := os.WriteFile(release, nil, 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		select {
+		case <-result:
+		case <-time.After(3 * time.Second):
+			t.Fatal("blocked request writer did not stop after its inherited reader closed")
+		}
+		t.Fatal("leader exit did not close the blocked request writer")
+	}
+	if writeErr := os.WriteFile(release, nil, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if err == nil {
+		t.Fatal("empty Engine response was accepted")
+	}
+	var failure EngineFailure
+	if !errors.As(err, &failure) || failure.Category == "timed_out" {
+		t.Fatalf("escaped stdin holder was misclassified: %v", err)
 	}
 }
 
@@ -1136,6 +1291,57 @@ func TestDurableEffectDispatchValidationIsTyped(t *testing.T) {
 			mutate(changed)
 			if _, err := validateDurableEffectRaw(mustRawJSON(t, changed)); err == nil {
 				t.Fatal("inconsistent Effect lifecycle was accepted")
+			}
+		})
+	}
+}
+
+func TestAppliedEffectViewsRequireTheEffectResultArtifactKind(t *testing.T) {
+	result := fixedArtifact("6", "cymule.effect-result/1")
+	effect := map[string]any{
+		"intent_id": fixedContentID("4"), "run_id": "run:effect-result",
+		"origin_plan_id": fixedContentID("3"), "operation": "publish",
+		"input":              fixedArtifact("1", "test/value"),
+		"execution_binding":  fixedArtifact("2", "cymule.execution-binding/2"),
+		"occurrence_binding": fixedContentID("5"), "execution_availability": "available",
+		"reconciliation": "not_required", "state": "applied",
+		"claim_epoch": 1, "claim_owner": "driver:effect-result", "result": result,
+	}
+	summary := map[string]any{
+		"intent_id": effect["intent_id"], "run_id": effect["run_id"], "state": "applied",
+		"execution_availability": "available", "reconciliation": "not_required", "result": result,
+	}
+	validators := map[string]func(any) error{
+		"summary": func(candidate any) error {
+			value := cloneWireMap(t, summary)
+			value["result"] = candidate
+			return validateDurableEffectSummaryRaw(mustRawJSON(t, value))
+		},
+		"full": func(candidate any) error {
+			value := cloneWireMap(t, effect)
+			value["result"] = candidate
+			_, err := validateDurableEffectRaw(mustRawJSON(t, value))
+			return err
+		},
+		"exact": func(candidate any) error {
+			value := cloneWireMap(t, effect)
+			value["result"] = candidate
+			_, err := validateDurableRunItemRaw(mustRawJSON(t, map[string]any{
+				"kind": "effect", "effect": value,
+			}))
+			return err
+		},
+	}
+	for name, validate := range validators {
+		t.Run(name, func(t *testing.T) {
+			if err := validate(result); err != nil {
+				t.Fatalf("canonical applied Effect result was rejected: %v", err)
+			}
+			if err := validate(nil); err == nil {
+				t.Fatal("null applied Effect result was accepted")
+			}
+			if err := validate(fixedArtifact("6", "test/wrong-effect-result")); err == nil {
+				t.Fatal("wrong-kind applied Effect result was accepted")
 			}
 		})
 	}
@@ -1473,6 +1679,9 @@ func TestDurableReceiptsBindCancellationAndEffectResolutionCommands(t *testing.T
 	if _, err := engineWithSuccess(t, appliedNull).ExecuteDurable(resolutionTarget, resolution); err != nil {
 		t.Fatalf("Applied JSON null with a result Artifact was rejected: %v", err)
 	}
+	appliedReceipt["result"] = fixedArtifact("e", "test/wrong-effect-result")
+	_, err = engineWithSuccess(t, appliedNull).ExecuteDurable(resolutionTarget, resolution)
+	requireFailure(t, err, "unknown_world_outcome", "invalid_engine_response", "reconcile")
 	appliedReceipt["result"] = nil
 	_, err = engineWithSuccess(t, appliedNull).ExecuteDurable(resolutionTarget, resolution)
 	requireFailure(t, err, "unknown_world_outcome", "invalid_engine_response", "reconcile")
@@ -3718,8 +3927,16 @@ func TestEngineFailureRejectsExplicitNullOptionalMembers(t *testing.T) {
 		"empty contract side": func(failure map[string]any) {
 			failure["contract_side"] = ""
 		},
-		"path":              func(failure map[string]any) { failure["path"] = nil },
-		"issues":            func(failure map[string]any) { failure["issues"] = nil },
+		"path":         func(failure map[string]any) { failure["path"] = nil },
+		"issues":       func(failure map[string]any) { failure["issues"] = nil },
+		"empty issues": func(failure map[string]any) { failure["issues"] = []any{} },
+		"too many issues": func(failure map[string]any) {
+			issues := make([]any, 101)
+			for index := range issues {
+				issues[index] = map[string]any{"code": "invalid", "message": "invalid"}
+			}
+			failure["issues"] = issues
+		},
 		"retry disposition": func(failure map[string]any) { failure["retry_disposition"] = nil },
 		"empty retry disposition": func(failure map[string]any) {
 			failure["retry_disposition"] = ""

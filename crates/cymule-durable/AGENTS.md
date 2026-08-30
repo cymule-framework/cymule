@@ -292,6 +292,12 @@
   before I/O. The reservation CAS is the sole fresh publish authority; reopen
   observes `DispatchClaimed`, durable NotApplied may be rearmed by one later CAS,
   and published reconciliation promotes the reserved pin in the final Agent CAS.
+  Promotion uses the exact current family count, so a sibling release after
+  reservation cannot become a false lower-bound conflict. Public Abort loads
+  required-nullable reservation Resource source, accepts only durable
+  NotApplied, and commits stream/Session closure plus `Reserved -> Released`
+  and family count decrement in that same Agent CAS. DispatchClaimed/Unknown
+  remains reconciliation-only, and generic Resource release cannot bypass it.
   Known post-publication conflicts remain typed conflicts rather than world
   Unknown. Agent publication reconciliation retains its expected original intent and
   rechecks semantic touched keys. Unknown evidence is append-only; identical

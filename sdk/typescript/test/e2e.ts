@@ -726,6 +726,40 @@ process.stdin.on("end", () => {
   }
 });
 
+test("TypeScript validates CLI timeout bounds before process spawn", async () => {
+  const candidate = new FlowBuilder("timeout-bounds", {}, {}).finish({ kind: "input" });
+  const planId = `sha256:${"a".repeat(64)}`;
+  await withSuccessEngine(
+    {},
+    async (engine) => {
+      assert.equal(
+        (await new CliEngine(engine.executable, { timeoutMs: 2_147_483_647 })
+          .seal(candidate)).plan_id,
+        planId,
+      );
+    },
+    planId,
+  );
+
+  const directory = mkdtempSync(join(tmpdir(), "cymule-timeout-bounds-"));
+  const missingExecutable = join(directory, "must-not-spawn");
+  try {
+    for (const timeoutMs of [0, -1, 1.5, 2_147_483_648, Number.MAX_SAFE_INTEGER]) {
+      await assert.rejects(
+        () => new CliEngine(missingExecutable, { timeoutMs }).seal(candidate),
+        (error: unknown) => error instanceof EngineError
+          && error.failure.category === "validation"
+          && error.failure.phase === "validate_request"
+          && error.failure.code === "invalid_engine_timeout"
+          && error.failure.retry_disposition === "correct_and_retry",
+        `timeout ${timeoutMs} reached process spawn`,
+      );
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("TypeScript timeout closes local pipes held by a setsid descendant", async (context) => {
   if (process.platform === "win32") {
     context.skip("POSIX process-group conformance is unavailable on Windows");
@@ -4534,6 +4568,171 @@ test("TypeScript Applied Effect summaries require canonical result Artifacts", a
   }
 });
 
+test("TypeScript enforces one Effect result invariant at every durable boundary", async () => {
+  const contentId = (digit: string) => `sha256:${digit.repeat(64)}`;
+  const runId = "run:effect-result";
+  const intentId = contentId("1");
+  const occurrenceBinding = contentId("2");
+  const result = {
+    identity_version: "cymule.artifact/2" as const,
+    artifact_id: contentId("3"),
+    kind: "cymule.effect-result/1",
+  };
+  const wrongKindResult = { ...result, kind: "cymule.component-output/1" };
+  const variants = [
+    ["Applied result", "applied", "resolved_applied", result, true],
+    ["Applied missing result", "applied", "resolved_applied", null, false],
+    ["Applied wrong result kind", "applied", "resolved_applied", wrongKindResult, false],
+    ["NotApplied null result", "not_applied", "resolved_not_applied", null, true],
+    ["NotApplied unexpected result", "not_applied", "resolved_not_applied", result, false],
+  ] as const;
+  const assertAdmission = async (
+    label: string,
+    operation: () => Promise<unknown>,
+    accepted: boolean,
+  ): Promise<void> => {
+    if (accepted) {
+      await assert.doesNotReject(operation, label);
+      return;
+    }
+    await assert.rejects(
+      operation,
+      (error: unknown) => error instanceof EngineError
+        && error.failure.code === "invalid_engine_response",
+      label,
+    );
+  };
+
+  const summaryCommand = DurableControlBuilder.runEffectPage(runId, {
+    expected_revision: null,
+    cursor: null,
+    limit: 1,
+    max_canonical_bytes: 1024 * 1024,
+  });
+  const invokeSummary = (state: string, effectResult: unknown) => withSuccessEngine(
+    {
+      type: "durable_executed",
+      response: {
+        type: "run_effect_page",
+        run_id: runId,
+        page: {
+          observed_revision: contentId("4"),
+          source_root: "5".repeat(64),
+          items: [{
+            intent_id: intentId,
+            run_id: runId,
+            state,
+            execution_availability: "available",
+            reconciliation: "resolved",
+            result: effectResult,
+          }],
+          next_cursor: null,
+        },
+      },
+    },
+    (engine) => engine.executeDurable({ store: directoryStore("unused") }, summaryCommand),
+  );
+
+  const executionBinding = {
+    identity_version: "cymule.artifact/2" as const,
+    artifact_id: contentId("6"),
+    kind: "cymule.execution-binding/2",
+  };
+  const effect = {
+    intent_id: intentId,
+    run_id: runId,
+    origin_plan_id: contentId("7"),
+    operation: "effect:test",
+    input: {
+      identity_version: "cymule.artifact/2" as const,
+      artifact_id: contentId("8"),
+      kind: "cymule.effect-input/1",
+    },
+    execution_binding: executionBinding,
+    occurrence_binding: occurrenceBinding,
+    execution_availability: "available",
+    reconciliation: "resolved",
+    claim_epoch: 1,
+    claim_owner: "driver:effect-result",
+  };
+  const itemCommand = DurableControlBuilder.runItem({
+    run_id: runId,
+    expected_revision: null,
+    selector: { kind: "effect", intent_id: intentId },
+    max_canonical_bytes: 13 * 1024 * 1024,
+  });
+  const invokeExactEffect = (state: string, effectResult: unknown) => withSuccessEngine(
+    {
+      type: "durable_executed",
+      response: {
+        type: "run_item",
+        run_id: runId,
+        observed_revision: contentId("4"),
+        source_root: "5".repeat(64),
+        item: { kind: "effect", effect: { ...effect, state, result: effectResult } },
+      },
+    },
+    (engine) => engine.executeDurable({ store: directoryStore("unused") }, itemCommand),
+  );
+
+  const resolution = DurableControlBuilder.resolveEffect(
+    "resolution:effect-result",
+    runId,
+    intentId,
+    executionBinding,
+    occurrenceBinding,
+    "driver:effect-result",
+    1,
+    "resolved_applied",
+    null,
+  );
+  if (resolution.type !== "resolve_effect") {
+    throw new Error("Effect resolution builder returned the wrong command variant");
+  }
+  const receiptCommand = {
+    resolution_id: resolution.resolution_id,
+    run_id: resolution.run_id,
+    intent_id: resolution.intent_id,
+    execution_binding: resolution.execution_binding,
+    occurrence_binding: resolution.occurrence_binding,
+    claim_owner: resolution.claim_owner,
+    claim_epoch: resolution.claim_epoch,
+    resolution: resolution.resolution,
+    value: resolution.value,
+  };
+  const invokeReceipt = (actualResolution: string, effectResult: unknown) => withSuccessEngine(
+    {
+      type: "durable_executed",
+      response: {
+        type: "effect_resolved",
+        receipt: {
+          receipt_version: "cymule.effect-resolution-receipt/1",
+          command: receiptCommand,
+          actual_resolution: actualResolution,
+          actual_value: null,
+          result: effectResult,
+          receipt_id: "9".repeat(64),
+        },
+      },
+    },
+    (engine) => engine.executeDurable(durableTargetFor(resolution), resolution),
+  );
+
+  for (const [label, state, actualResolution, effectResult, accepted] of variants) {
+    await assertAdmission(`summary: ${label}`, () => invokeSummary(state, effectResult), accepted);
+    await assertAdmission(
+      `exact Effect: ${label}`,
+      () => invokeExactEffect(state, effectResult),
+      accepted,
+    );
+    await assertAdmission(
+      `resolution receipt: ${label}`,
+      () => invokeReceipt(actualResolution, effectResult),
+      accepted,
+    );
+  }
+});
+
 test("TypeScript closes every durable-control/4 query shape", async () => {
   const contentId = (digit: string) => "sha256:" + digit.repeat(64);
   const pageKeyHash = (key: string) => {
@@ -5461,6 +5660,50 @@ test("TypeScript applies JSON Schema scalar lengths to Engine failures", async (
       && error.failure.category === "transport_failure"
       && error.failure.code === "invalid_engine_response",
   );
+});
+
+test("TypeScript requires Engine failure issues to contain one through one hundred items", async () => {
+  const candidate = new FlowBuilder("failure-issue-count", {}, {}).finish({ kind: "input" });
+  const failure = {
+    category: "validation",
+    phase: "validate_request",
+    code: "issue_count_boundary",
+    message: "the request has contract issues",
+    retry_disposition: "correct_and_retry",
+  };
+  const issue = {
+    code: "invalid_value",
+    message: "the value is invalid",
+    path: "/value",
+    schema_path: "/properties/value",
+  };
+  for (const acceptedFailure of [
+    failure,
+    { ...failure, issues: [issue] },
+    { ...failure, issues: Array.from({ length: 100 }, () => issue) },
+  ]) {
+    await assert.rejects(
+      () => withFailureEngine(acceptedFailure, (engine) => engine.seal(candidate)),
+      (error: unknown) => error instanceof EngineError
+        && error.failure.category === "validation"
+        && error.failure.code === "issue_count_boundary"
+        && error.failure.retry_disposition === "correct_and_retry",
+    );
+  }
+  for (const rejectedIssues of [
+    [],
+    Array.from({ length: 101 }, () => issue),
+  ]) {
+    await assert.rejects(
+      () => withFailureEngine(
+        { ...failure, issues: rejectedIssues },
+        (engine) => engine.seal(candidate),
+      ),
+      (error: unknown) => error instanceof EngineError
+        && error.failure.category === "transport_failure"
+        && error.failure.code === "invalid_engine_response",
+    );
+  }
 });
 
 test("TypeScript preserves structured Rust Engine failures", async (context) => {

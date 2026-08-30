@@ -54,7 +54,11 @@ Use this precedence order when guidance conflicts:
   Agent streams first persist one physical-family publication reservation and
   reserved profile pin before provider I/O; only a freshly acknowledged
   reservation or rearm may publish. Finalization atomically promotes that exact
-  reservation to the permanent pin, catalog, and terminal stream state.
+  reservation to the permanent pin, catalog, and terminal stream state. After
+  a provider-proved durable `NotApplied`, stream Abort is the sole reservation
+  abandonment authority and atomically closes the stream/Session while moving
+  that exact pin from `Reserved` to `Released`; an unresolved attempt cannot be
+  aborted.
 - Every Run-to-Run Resource transfer has one exact keyed current authority, one
   target-Run slot map, and one payload-free entry in that target owner's
   persistent-log index. Exact lookup addresses the keyed authority directly;
@@ -300,7 +304,10 @@ Use this precedence order when guidance conflicts:
   and typed admission; two distinct mathematical fractions must never compare
   equal merely because a host binary float rounds them to the same value.
   Every number token is at most 256 bytes and its exponent at most six digits;
-  this bounded raw scan precedes host parsing or big-integer allocation.
+  this bounded raw scan precedes host parsing or big-integer allocation. Every
+  typed boundary that owns raw JSON bytes, including direct CLI, ordinary
+  plugin, and Evolution-plugin ingress, compares that evidence with typed
+  reserialization before admitting an identity or effect.
 - `cymule.plugin/3` is the only process-plugin protocol. Every dispatch and
   reconciliation carries one exact `cymule.effect-provider-attempt/1` derived
   from the semantic intent plus retained claim owner/fence, and the provider
@@ -316,6 +323,11 @@ Use this precedence order when guidance conflicts:
   they never probe or signal a raw PID/PGID. Deadline handling kills the direct
   Child if still live and closes local transport descriptors. The official
   Engine/executor watchdog remains the sole descendant-closure authority.
+- Rust, Python, and Go process clients use SDK-owned cancellation gates that
+  linearize launch and admitted completion; Go exposes no caller Context as a
+  second cancellation authority. Engine failures omit `issues` or carry 1..=100
+  entries, and every SDK admits an Effect result if and only if the state is
+  `Applied`, with exact kind `cymule.effect-result/1`.
 - `cymule.ir/3` reusable definition calls resolve inside one immutable Plan.
   Logical latest-compatible references are linked by M4 into a new parent Plan;
   a sealed Plan never dereferences a mutable `latest` alias at runtime.

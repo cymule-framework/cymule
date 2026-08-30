@@ -46,6 +46,11 @@ and uses the SQLite `(acknowledged, signal_key, activation_id)` index, so an
 arbitrary prefix of unrelated pending requests cannot starve a later matching
 activation.
 
+Every selected wait identity is an exact lowercase SHA-256 content ID. A
+forged new identity fails before SQLite retains the target set; a malformed
+retained identity is row corruption and returns `Integrity` before an M1
+delivery.
+
 The spool has one physical generation,
 `cymule.activation-http-spool/1`. A completely empty database is initialized
 atomically; every router, ingress, and acknowledgement connection otherwise

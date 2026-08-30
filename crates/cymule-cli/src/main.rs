@@ -39,8 +39,8 @@ use cymule_runtime::{
     EngineResponseEnvelope, EngineRetryDisposition, ExecutionBinding, ExecutionBindingAdmission,
     ExecutionOutcome, MAX_ENGINE_REQUEST_BYTES, MAX_ENGINE_REQUEST_ECHO_BYTES,
     MAX_ENGINE_RESPONSE_BYTES, MAX_ENGINE_RESPONSE_PAYLOAD_BYTES, PluginHost,
-    decode_strict_json_value, validate_json_typed_roundtrip, validate_json_typed_roundtrip_bytes,
-    verify_execution_request, verify_plan,
+    decode_strict_json_value, validate_json_typed_roundtrip_bytes, verify_execution_request,
+    verify_plan,
 };
 use cymule_store_sqlite::SqliteStore;
 use serde::{Deserialize, Serialize};
@@ -2452,7 +2452,7 @@ where
     let retained = decode_strict_json_value(&bytes)?;
     let value: T = serde_json::from_value(retained.clone())?;
     let normalized = serde_json::to_value(&value)?;
-    validate_json_typed_roundtrip(&retained, &normalized)?;
+    validate_json_typed_roundtrip_bytes(&bytes, &retained, &normalized)?;
     Ok(value)
 }
 

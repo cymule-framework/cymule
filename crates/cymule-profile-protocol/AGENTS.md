@@ -88,7 +88,13 @@
   pin in the same physical retention family. Only a fresh reservation or
   NotApplied rearm acknowledgement owns one publish call; reopen observes a
   claimed attempt. Terminal finalization promotes that exact reservation without
-  changing the family obligation count. The staged-chunk byte limit is unchanged.
+  changing the family obligation count. Promotion binds the family's current
+  count, not the reservation-time aggregate as a lower bound. A public Abort
+  carries required-nullable Resource source/effect members: only durable
+  NotApplied may atomically clear the reservation, release `Reserved` to
+  `Released`, decrement the current family count, and close stream/Session.
+  DispatchClaimed or Unknown rejects Abort. Generic Resource release cannot
+  consume that profile pin. The staged-chunk byte limit is unchanged.
 - Agent Session close is the sole reducer authority for terminal Session state.
   Session metadata retains one bounded non-terminal Tool capacity directory;
   close exact-reads that complete directory and atomically writes every Tool's

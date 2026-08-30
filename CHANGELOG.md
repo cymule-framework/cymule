@@ -36,7 +36,11 @@ domains described in `docs/specification.md`.
   Generic release is explicit-pin-only; Virtual retirement and Agent
   finalization own profile pins atomically. Deletion fences a normalized
   provider target, and only Durable may commit completion after binding-exact
-  absence readback.
+  absence readback. A provider-proved `NotApplied` Agent publication may now be
+  aborted through one typed CAS that clears its reservation, closes the stream
+  and Session, releases the exact reserved pin, and decrements the current
+  physical-family count; unresolved publication attempts remain reconciliation
+  authority.
 - Advance the internal Plan authority from `cymule.ir/2` to `cymule.ir/3`
   without a legacy reader. The new generation removes the non-semantic
   pre-release `scope.mode` field from Rust and all four SDK builders; scoped
@@ -70,7 +74,8 @@ domains described in `docs/specification.md`.
   retain and cross-check the complete Wait authority.
 - Require every persisted Effect dispatch and query summary to carry an exact
   `cymule.effect-result/1` Artifact if and only if its state is `Applied`,
-  including StateRoot leaf reopen, exact lookup, schema, and full audit.
+  including StateRoot leaf reopen, exact lookup, schema, full audit, and every
+  TypeScript, Python, and Go summary/exact-item/receipt validator.
 - Resolve exact hot/cold Start replay before Clock admission. Retained replay
   verifies its singleton batch and exact Plan/binding/input material; a fresh
   Start no longer constructs and discards a duplicate Machine stage.
@@ -103,7 +108,10 @@ domains described in `docs/specification.md`.
   extended shape as `unsupported_store_generation`; neither repairs or imports
   in place. HTTP revalidates complete canonical rows against the original
   request digest before selection or replay. Timer `/2` adds one complete
-  schedule digest; `/1` has no reader or fallback.
+  schedule digest; `/1` has no reader or fallback. Timer values now fail before
+  SQLite mutation above the Core Artifact bound, fresh scans retain only bounded
+  metadata and load one exact payload at a time, and HTTP/timer targets require
+  lowercase content IDs with timers selecting exactly one wait.
 - Rename the misleading public `AuthorityLease` type to `CoordinationLease`
   without a wire-shape alias; coordination ownership and fencing do not grant
   capability authorization.
@@ -260,8 +268,12 @@ domains described in `docs/specification.md`.
   envelope at 134,217,760 bytes. Four SDKs now share complete custom exchanges,
   exact fractional-decimal echo evidence, bounded number complexity, and one
   direct-Engine-child lifecycle; the Engine/executor watchdog remains the sole
-  descendant-process closure authority. Empty Resource annotations have only
-  the omitted wire.
+  descendant-process closure authority. Direct CLI plus ordinary and Evolution
+  plugin raw ingress use the same exact-decimal byte gate. Rust, Python, and Go
+  cancellation now linearize launch and admitted completion under SDK-owned
+  tokens; Go removes caller Context as a competing authority. Engine failure
+  `issues` is omission-or-1..=100 across Schema and all SDKs. Empty Resource
+  annotations have only the omitted wire.
 - Separate coupled M3 claim execution into the typed
   `DurableVirtualControl::claim` facade. It is not an M4 control command,
   accepts no caller-authored M4 selector, and commits the occurrence selection,
@@ -291,7 +303,10 @@ domains described in `docs/specification.md`.
   provider attempt before publication. The reserved pin competes with deletion
   in one CAS, reopen never republishes a claimed attempt, `NotApplied` rearm is
   explicit, and finalization atomically promotes the exact reservation to the
-  permanent pin without changing its family obligation count.
+  permanent pin without changing its family obligation count. Promotion binds
+  the exact reserved pin rather than a stale aggregate count, so unrelated pin
+  release cannot strand a published stream; durably `NotApplied` reservations
+  may instead terminate through the typed Abort release above.
 - Make the macOS process executor use one fork-only watchdog and suspended raw
   `posix_spawn` provider launch with exact inherited-FD closure. Retain reaped
   child status to prevent PID-reuse signals, require exclusive default

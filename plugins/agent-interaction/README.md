@@ -37,6 +37,13 @@ and reconciliation results use the same
 specialized authority boundary. Ordinary `commit_agent` rejects both
 authority-requiring paths.
 
+External media types use Resource `/4`'s lowercase ASCII type/subtype token
+grammar without parameters. A durably `NotApplied` publication may be aborted
+in one Agent/Resource CAS that closes the stream and releases its reserved pin;
+claimed or Unknown publication attempts remain reconciliation-only. Promotion
+uses the family's current pin count, so unrelated sibling releases do not block
+the exact reservation.
+
 Production writers use the provider- and Clock-bound
 `cymule_durable::DurableAgentControl` borrowed from the owning Durable runtime;
 Store control exposes Agent reads only. This crate implements

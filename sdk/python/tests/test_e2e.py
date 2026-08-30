@@ -17,6 +17,7 @@ from cymule import (
     CliEngine,
     DurableEngine,
     DurableControlBuilder,
+    EngineCancellation,
     EngineError,
     EvolutionControlBuilder,
     FlowBuilder,
@@ -1672,6 +1673,19 @@ class EndToEndTest(unittest.TestCase):
                 )["type"],
                 "effect_resolved",
             )
+        unexpected_not_applied_result = copy.deepcopy(resolution_response)
+        unexpected_not_applied_result["response"]["receipt"]["result"] = _artifact(
+            "e", "cymule.effect-result/1"
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="cymule-python-not-applied-unexpected-result-"
+        ) as directory, self.assertRaises(EngineError) as rejected:
+            _engine_with_success(
+                directory, unexpected_not_applied_result
+            ).execute_durable(resolution_target, resolution)
+        self.assertEqual(
+            rejected.exception.failure["category"], "unknown_world_outcome"
+        )
         forged_resolution = copy.deepcopy(resolution_response)
         applied_null = copy.deepcopy(resolution_response)
         applied_null["response"]["receipt"]["actual_resolution"] = "resolved_applied"
@@ -1683,6 +1697,19 @@ class EndToEndTest(unittest.TestCase):
                 )["type"],
                 "effect_resolved",
             )
+        wrong_result_kind = copy.deepcopy(applied_null)
+        wrong_result_kind["response"]["receipt"]["result"]["kind"] = (
+            "cymule.component-output/1"
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="cymule-python-applied-wrong-result-kind-"
+        ) as directory, self.assertRaises(EngineError) as rejected:
+            _engine_with_success(directory, wrong_result_kind).execute_durable(
+                resolution_target, resolution
+            )
+        self.assertEqual(
+            rejected.exception.failure["category"], "unknown_world_outcome"
+        )
         applied_null["response"]["receipt"]["result"] = None
         with tempfile.TemporaryDirectory(prefix="cymule-python-applied-null-missing-") as directory:
             with self.assertRaises(EngineError) as rejected:
@@ -2080,6 +2107,33 @@ class EndToEndTest(unittest.TestCase):
         incompatible_retry["category"] = "unknown_world_outcome"
         incompatible_retry["retry_disposition"] = "retry_same_request"
         malformed_failures.append(("incompatible retry", incompatible_retry))
+        empty_issues = copy.deepcopy(failure)
+        empty_issues["issues"] = []
+        malformed_failures.append(("explicit empty issues", empty_issues))
+        omitted_issues = copy.deepcopy(failure)
+        del omitted_issues["issues"]
+        for accepted in (omitted_issues, failure):
+            _validate_engine_envelope(
+                {
+                    "engine_protocol": "cymule.engine/5",
+                    "outcome": "failure",
+                    "error": accepted,
+                }
+            )
+        maximum_issues = copy.deepcopy(failure)
+        maximum_issues["issues"] = [
+            copy.deepcopy(failure["issues"][0]) for _ in range(100)
+        ]
+        _validate_engine_envelope(
+            {
+                "engine_protocol": "cymule.engine/5",
+                "outcome": "failure",
+                "error": maximum_issues,
+            }
+        )
+        excessive_issues = copy.deepcopy(maximum_issues)
+        excessive_issues["issues"].append(copy.deepcopy(failure["issues"][0]))
+        malformed_failures.append(("too many issues", excessive_issues))
 
         for label, malformed in malformed_failures:
             with self.subTest(label=label), self.assertRaises(EngineError):
@@ -2953,6 +3007,8 @@ class EndToEndTest(unittest.TestCase):
             self.skipTest("Applied Effect summary conformance is not configured")
         with open(fixture_path, encoding="utf-8") as source:
             fixture = json.load(source)
+        wrong_kind = copy.deepcopy(fixture["result"])
+        wrong_kind["kind"] = "cymule.component-output/1"
         command = DurableControlBuilder.run_effect_page(fixture["run_id"], {
             "expected_revision": None, "cursor": None,
             "limit": 1, "max_canonical_bytes": 1024 * 1024,
@@ -2960,6 +3016,7 @@ class EndToEndTest(unittest.TestCase):
         for label, state, result, accepted in (
             ("applied canonical null Artifact", "applied", fixture["result"], True),
             ("applied missing Artifact", "applied", None, False),
+            ("applied wrong Artifact kind", "applied", wrong_kind, False),
             ("not applied absence", "not_applied", None, True),
             ("not applied unexpected Artifact", "not_applied", fixture["result"], False),
         ):
@@ -2987,6 +3044,92 @@ class EndToEndTest(unittest.TestCase):
                     with self.assertRaises(EngineError) as failure:
                         engine.execute_durable({"store": directory_store("unused")}, command)
                     self.assertEqual(failure.exception.failure["code"], "invalid_engine_response")
+
+    def test_python_exact_effect_uses_the_terminal_result_contract(self) -> None:
+        result = _artifact("3", "cymule.effect-result/1")
+        effect = {
+            "intent_id": _content_id("4"),
+            "run_id": "run:exact-effect",
+            "origin_plan_id": _content_id("5"),
+            "operation": "effect:publish",
+            "input": _artifact("1", "cymule.input/1"),
+            "execution_binding": _artifact(
+                "2", "cymule.execution-binding/2"
+            ),
+            "occurrence_binding": _content_id("6"),
+            "execution_availability": "available",
+            "reconciliation": "resolved",
+            "state": "applied",
+            "claim_epoch": 1,
+            "claim_owner": "driver:exact-effect",
+            "result": result,
+        }
+
+        def validate(candidate: dict[str, object]) -> None:
+            _validate_durable_response(
+                {
+                    "type": "run_item",
+                    "run_id": candidate["run_id"],
+                    "observed_revision": _content_id("7"),
+                    "source_root": "8" * 64,
+                    "item": {"kind": "effect", "effect": candidate},
+                }
+            )
+
+        validate(effect)
+        for label, replacement in (
+            ("missing", None),
+            ("wrong kind", _artifact("3", "cymule.component-output/1")),
+        ):
+            malformed = copy.deepcopy(effect)
+            malformed["result"] = replacement
+            with self.subTest(applied=label), self.assertRaises(EngineError):
+                validate(malformed)
+
+        non_applied_states = {
+            "pending": {
+                "execution_availability": "available",
+                "reconciliation": "not_required",
+                "claim_epoch": 0,
+                "claim_owner": None,
+            },
+            "claimed": {
+                "execution_availability": "available",
+                "reconciliation": "not_required",
+                "claim_epoch": 1,
+                "claim_owner": "driver:exact-effect",
+            },
+            "not_applied": {
+                "execution_availability": "unavailable",
+                "reconciliation": "resolved",
+                "claim_epoch": 1,
+                "claim_owner": "driver:exact-effect",
+            },
+            "unknown": {
+                "execution_availability": "unavailable",
+                "reconciliation": "pending",
+                "claim_epoch": 1,
+                "claim_owner": "driver:exact-effect",
+            },
+            "cancelled_before_release": {
+                "execution_availability": "unavailable",
+                "reconciliation": "resolved",
+                "claim_epoch": 0,
+                "claim_owner": None,
+            },
+        }
+        for state, lifecycle in non_applied_states.items():
+            candidate = copy.deepcopy(effect)
+            candidate.update(lifecycle)
+            candidate["state"] = state
+            candidate["result"] = None
+            with self.subTest(state=state, result="null"):
+                validate(candidate)
+            candidate["result"] = result
+            with self.subTest(state=state, result="unexpected"), self.assertRaises(
+                EngineError
+            ):
+                validate(candidate)
 
     def test_python_closes_every_durable_control_4_query_shape(self) -> None:
         revision = _content_id("5")
@@ -3461,6 +3604,94 @@ class EndToEndTest(unittest.TestCase):
             wrong_echo.exception.failure["code"], "invalid_engine_response"
         )
 
+        class ExplodingSuccess(dict[str, object]):
+            def __iter__(self):
+                raise RuntimeError("private custom response validation failure")
+
+        class ExplodingSuccessTransport:
+            def exchange(self, request: dict[str, object]) -> dict[str, object]:
+                return ExplodingSuccess(
+                    {
+                        "request": request,
+                        "response": {
+                            "type": "durable_executed",
+                            "response": {"type": "forged"},
+                        },
+                    }
+                )
+
+        validation_exception_cases = (
+            (
+                "read",
+                DurableEngine(
+                    store,
+                    None,
+                    None,
+                    ExplodingSuccessTransport(),  # type: ignore[arg-type]
+                ),
+                lambda engine: engine.run_current(
+                    "run:custom-validation-exception", None
+                ),
+                "transport_failure",
+                None,
+            ),
+            (
+                "mutation",
+                DurableEngine(
+                    store,
+                    plugin,
+                    clock,
+                    ExplodingSuccessTransport(),  # type: ignore[arg-type]
+                ),
+                lambda engine: engine.resume(
+                    "run:custom-validation-exception", fixture_execution()
+                ),
+                "unknown_world_outcome",
+                "reconcile",
+            ),
+        )
+        for label, engine, invoke, category, retry in validation_exception_cases:
+            with self.subTest(custom_validation_exception=label), self.assertRaises(
+                EngineError
+            ) as rejected:
+                invoke(engine)
+            self.assertEqual(rejected.exception.failure["category"], category)
+            self.assertEqual(
+                rejected.exception.failure["code"], "invalid_engine_response"
+            )
+            if retry is None:
+                self.assertNotIn(
+                    "retry_disposition", rejected.exception.failure
+                )
+            else:
+                self.assertEqual(
+                    rejected.exception.failure["retry_disposition"], retry
+                )
+            self.assertNotIn(
+                "private custom response validation failure", str(rejected.exception)
+            )
+
+        class ValidationAbort(BaseException):
+            pass
+
+        class AbortingSuccess(dict[str, object]):
+            def __iter__(self):
+                raise ValidationAbort("validation abort must escape")
+
+        class AbortingSuccessTransport:
+            def exchange(self, request: dict[str, object]) -> dict[str, object]:
+                return AbortingSuccess(
+                    {"request": request, "response": {"type": "forged"}}
+                )
+
+        with self.assertRaises(ValidationAbort):
+            DurableEngine(
+                store,
+                None,
+                None,
+                AbortingSuccessTransport(),  # type: ignore[arg-type]
+            ).run_current("run:custom-validation-base-exception", None)
+
         class FractionTransport:
             def exchange(self, request: dict[str, object]) -> dict[str, object]:
                 json.dumps(request, allow_nan=False)
@@ -3831,11 +4062,11 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(clock_failure.exception.failure["category"], "unknown_world_outcome")
         self.assertEqual(clock_failure.exception.failure["retry_disposition"], "reconcile")
 
-    def test_python_cancellation_callback_failure_reaps_the_direct_engine(self) -> None:
+    def test_python_cancellation_gate_prevents_process_launch(self) -> None:
         with tempfile.TemporaryDirectory(
-            prefix="cymule-python-cancellation-callback-"
+            prefix="cymule-python-cancellation-launch-gate-"
         ) as directory:
-            executable = os.path.join(directory, "callback-engine")
+            executable = os.path.join(directory, "gated-engine")
             started = os.path.join(directory, "started")
             with open(executable, "w", encoding="utf-8") as script:
                 script.write(
@@ -3845,36 +4076,240 @@ class EndToEndTest(unittest.TestCase):
                 )
             os.chmod(executable, 0o700)
 
-            def failed_callback() -> bool:
-                if os.path.exists(started):
-                    raise RuntimeError("private callback failure")
-                return False
+            class PausedCancellation(EngineCancellation):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.reached_launch = threading.Event()
+                    self.release_launch = threading.Event()
 
+                def _launch(self, factory):  # type: ignore[no-untyped-def]
+                    self.reached_launch.set()
+                    if not self.release_launch.wait(timeout=1):
+                        raise AssertionError("launch gate was not released")
+                    return super()._launch(factory)
+
+            cancellation = PausedCancellation()
             engine = CliEngine(
                 executable,
                 timeout_seconds=5,
-                cancelled=failed_callback,
+                cancellation=cancellation,
             )
-            with self.assertRaises(EngineError) as rejected:
-                engine.observe_clock(
-                    sqlite_clock(
-                        os.path.join(directory, "clock.sqlite"),
-                        "clock:callback-failure",
-                        _content_id("4"),
-                    ),
-                    "run:callback-failure",
+            failures: list[BaseException] = []
+
+            def invoke() -> None:
+                try:
+                    engine.observe_clock(
+                        sqlite_clock(
+                            os.path.join(directory, "clock.sqlite"),
+                            "clock:launch-gate",
+                            _content_id("4"),
+                        ),
+                        "run:cancel-before-launch",
+                    )
+                except BaseException as error:
+                    failures.append(error)
+
+            request = threading.Thread(target=invoke)
+            request.start()
+            self.assertTrue(cancellation.reached_launch.wait(timeout=1))
+            cancellation.cancel()
+            cancellation.release_launch.set()
+            request.join(timeout=1)
+            self.assertFalse(request.is_alive())
+            self.assertEqual(len(failures), 1)
+            rejected = failures[0]
+            self.assertIsInstance(rejected, EngineError)
+            assert isinstance(rejected, EngineError)
+            self.assertEqual(
+                rejected.failure["category"], "cancelled"
+            )
+            self.assertEqual(
+                rejected.failure["retry_disposition"], "never"
+            )
+            self.assertFalse(os.path.exists(started))
+            with self.assertRaises(TypeError):
+                CliEngine(cancelled=lambda: True)  # type: ignore[call-arg]
+            with self.assertRaises(TypeError):
+                CliEngine(
+                    cancellation=lambda: True  # type: ignore[arg-type]
                 )
+
+    def test_python_cancellation_completion_gate_is_per_invocation(self) -> None:
+        run_id = "run:completion-gate"
+        clock = sqlite_clock(
+            "/tmp/cymule-python-completion-gate.sqlite",
+            "clock:completion-gate",
+            _content_id("1"),
+        )
+        success = {
+            "type": "clock_observed",
+            "result": {
+                "run_id": run_id,
+                "observation": {
+                    "clock_version": "cymule.clock-observation/2",
+                    "observation_id": _content_id("2"),
+                    "source_id": clock["source_id"],
+                    "source_generation": clock["source_generation"],
+                    "scope": _content_id("3"),
+                },
+            },
+        }
+        failure = {
+            "engine_protocol": "cymule.engine/5",
+            "outcome": "failure",
+            "error": {
+                "category": "validation",
+                "phase": "observe_clock",
+                "code": "completion_gate_remote_failure",
+                "message": "the remote Clock request was rejected",
+                "retry_disposition": "correct_and_retry",
+            },
+        }
+
+        class PausedCompletion(EngineCancellation):
+            def __init__(self, *, completion_first: bool) -> None:
+                super().__init__()
+                self.completion_first = completion_first
+                self.reached = threading.Event()
+                self.release = threading.Event()
+
+            def _complete_call(self) -> bool:
+                if self.completion_first:
+                    admitted = super()._complete_call()
+                    self.reached.set()
+                    if not self.release.wait(timeout=2):
+                        raise AssertionError("completion gate was not released")
+                    return admitted
+                self.reached.set()
+                if not self.release.wait(timeout=2):
+                    raise AssertionError("completion gate was not released")
+                return super()._complete_call()
+
+        def race(
+            engine: CliEngine,
+            cancellation: PausedCompletion,
+        ) -> object:
+            terminal: list[object] = []
+
+            def invoke() -> None:
+                try:
+                    terminal.append(engine.observe_clock(clock, run_id))
+                except BaseException as error:
+                    terminal.append(error)
+
+            request = threading.Thread(target=invoke)
+            request.start()
+            self.assertTrue(cancellation.reached.wait(timeout=2))
+            cancellation.cancel()
+            cancellation.release.set()
+            request.join(timeout=2)
+            self.assertFalse(request.is_alive())
+            self.assertEqual(len(terminal), 1)
+            return terminal[0]
+
+        for outcome in ("success", "failure"):
+            for completion_first in (False, True):
+                with self.subTest(
+                    outcome=outcome,
+                    completion_first=completion_first,
+                ), tempfile.TemporaryDirectory(
+                    prefix="cymule-python-completion-gate-"
+                ) as directory:
+                    cancellation = PausedCompletion(
+                        completion_first=completion_first
+                    )
+                    if outcome == "success":
+                        fixture = _engine_with_success(directory, success)
+                    else:
+                        fixture = _engine_with_envelope(directory, failure)
+                    terminal = race(
+                        CliEngine(
+                            fixture.executable,
+                            cancellation=cancellation,
+                        ),
+                        cancellation,
+                    )
+                    if not completion_first:
+                        self.assertIsInstance(terminal, EngineError)
+                        assert isinstance(terminal, EngineError)
+                        self.assertEqual(
+                            terminal.failure["category"],
+                            "unknown_world_outcome",
+                        )
+                        self.assertEqual(
+                            terminal.failure["retry_disposition"], "reconcile"
+                        )
+                    elif outcome == "success":
+                        self.assertIsInstance(terminal, dict)
+                        self.assertEqual(terminal, success["result"])
+                    else:
+                        self.assertIsInstance(terminal, EngineError)
+                        assert isinstance(terminal, EngineError)
+                        self.assertEqual(
+                            terminal.failure["code"],
+                            "completion_gate_remote_failure",
+                        )
+
+        class SharedCompletion(EngineCancellation):
+            def __init__(self) -> None:
+                super().__init__()
+                self._count_lock = threading.Lock()
+                self._count = 0
+                self.first_completed = threading.Event()
+                self.second_waiting = threading.Event()
+                self.release_second = threading.Event()
+
+            def _complete_call(self) -> bool:
+                with self._count_lock:
+                    self._count += 1
+                    ordinal = self._count
+                if ordinal == 1:
+                    admitted = super()._complete_call()
+                    self.first_completed.set()
+                    return admitted
+                self.second_waiting.set()
+                if not self.release_second.wait(timeout=2):
+                    raise AssertionError("shared completion gate was not released")
+                return super()._complete_call()
+
+        with tempfile.TemporaryDirectory(
+            prefix="cymule-python-shared-completion-gate-"
+        ) as directory:
+            fixture = _engine_with_success(directory, success)
+            cancellation = SharedCompletion()
+            engine = CliEngine(
+                fixture.executable,
+                cancellation=cancellation,
+            )
+            terminals: list[object] = []
+
+            def invoke_shared() -> None:
+                try:
+                    terminals.append(engine.observe_clock(clock, run_id))
+                except BaseException as error:
+                    terminals.append(error)
+
+            requests = [threading.Thread(target=invoke_shared) for _ in range(2)]
+            for request in requests:
+                request.start()
+            self.assertTrue(cancellation.first_completed.wait(timeout=2))
+            self.assertTrue(cancellation.second_waiting.wait(timeout=2))
+            cancellation.cancel()
+            cancellation.release_second.set()
+            for request in requests:
+                request.join(timeout=2)
+                self.assertFalse(request.is_alive())
+            self.assertEqual(len(terminals), 2)
+            successes = [value for value in terminals if isinstance(value, dict)]
+            failures = [value for value in terminals if isinstance(value, EngineError)]
+            self.assertEqual(successes, [success["result"]])
+            self.assertEqual(len(failures), 1)
             self.assertEqual(
-                rejected.exception.failure["category"], "unknown_world_outcome"
+                failures[0].failure["category"], "unknown_world_outcome"
             )
             self.assertEqual(
-                rejected.exception.failure["code"],
-                "engine_cancellation_callback_failed",
+                failures[0].failure["retry_disposition"], "reconcile"
             )
-            self.assertEqual(
-                rejected.exception.failure["retry_disposition"], "reconcile"
-            )
-            self.assertNotIn("private callback failure", str(rejected.exception))
 
     def test_engine_json_rejects_duplicate_object_members(self) -> None:
         with self.assertRaisesRegex(ValueError, "duplicate JSON object member"):
@@ -4117,15 +4552,19 @@ class EndToEndTest(unittest.TestCase):
 
     def test_python_rejects_unsafe_json_and_preserves_pre_cancellation(self) -> None:
         candidate = FlowBuilder("transport", {}, {}).finish({"kind": "input"})
+        read_cancellation = EngineCancellation()
+        read_cancellation.cancel()
         with self.assertRaises(EngineError) as cancelled:
-            CliEngine(cancelled=lambda: True).seal(candidate)
+            CliEngine(cancellation=read_cancellation).seal(candidate)
         self.assertEqual(cancelled.exception.failure["category"], "cancelled")
         self.assertEqual(
             cancelled.exception.failure["retry_disposition"], "never"
         )
         plan = {"plan_id": _content_id("1"), "candidate": candidate}
+        mutation_cancellation = EngineCancellation()
+        mutation_cancellation.cancel()
         with self.assertRaises(EngineError) as mutating_cancelled:
-            CliEngine(cancelled=lambda: True).run(
+            CliEngine(cancellation=mutation_cancellation).run(
                 plan, None, process_target("/bin/true"), "run:pre-cancelled"
             )
         self.assertEqual(
@@ -4321,27 +4760,35 @@ class EndToEndTest(unittest.TestCase):
             prefix="cymule-python-interruption-"
         ) as directory:
             executable = os.path.join(directory, "engine")
+            started = os.path.join(directory, "started")
             with open(executable, "w", encoding="utf-8") as script:
                 script.write(
-                    """#!/usr/bin/env python3
+                    f"""#!/usr/bin/env python3
 import sys
 import time
 
+with open({started!r}, "w", encoding="utf-8") as marker:
+    marker.write("started")
 sys.stdin.buffer.read()
 time.sleep(10)
 """
                 )
             os.chmod(executable, 0o700)
 
-            cancelled = threading.Event()
-            timer = threading.Timer(0.05, cancelled.set)
-            timer.start()
+            cancellation = EngineCancellation()
+            def cancel_after_start() -> None:
+                while not os.path.exists(started):
+                    time.sleep(0.001)
+                cancellation.cancel()
+
+            canceller = threading.Thread(target=cancel_after_start, daemon=True)
+            canceller.start()
             try:
                 with self.assertRaises(EngineError) as post_start_cancelled:
                     CliEngine(
                         executable,
                         timeout_seconds=5,
-                        cancelled=cancelled.is_set,
+                        cancellation=cancellation,
                     ).run(
                         plan,
                         None,
@@ -4349,7 +4796,7 @@ time.sleep(10)
                         "run:post-start-cancel",
                     )
             finally:
-                timer.cancel()
+                canceller.join(timeout=1)
             self.assertEqual(
                 post_start_cancelled.exception.failure["category"],
                 "unknown_world_outcome",
@@ -5237,12 +5684,14 @@ sys.stdout.write({success!r})
             )
         self.assertEqual(forged.exception.failure["code"], "invalid_engine_response")
         self.assertEqual(forged.exception.failure["category"], "transport_failure")
-        cancelled = threading.Event()
-        timer = threading.Timer(0.05, cancelled.set)
+        cancellation = EngineCancellation()
+        timer = threading.Timer(0.05, cancellation.cancel)
         timer.start()
         try:
             with self.assertRaises(EngineError) as interrupted:
-                CliEngine(slow, timeout_seconds=5, cancelled=cancelled.is_set).seal(
+                CliEngine(
+                    slow, timeout_seconds=5, cancellation=cancellation
+                ).seal(
                     FlowBuilder("cancel-in-flight", {}, {}).finish({"kind": "input"})
                 )
             self.assertEqual(interrupted.exception.failure["category"], "cancelled")

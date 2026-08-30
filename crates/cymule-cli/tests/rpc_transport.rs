@@ -268,6 +268,15 @@ fn direct_cli_uses_the_lossless_strict_typed_json_gate() {
             base.replacen("\"value\":null", "\"value\":9007199254740992", 1),
             "exact cross-language range",
         ),
+        (
+            "fractional decimal collision",
+            base.replacen(
+                "\"value\":null",
+                "\"value\":0.100000000000000005",
+                1,
+            ),
+            "/inline/value",
+        ),
     ] {
         let output = run_direct(
             &["resource", "seal", "--input", "-"],

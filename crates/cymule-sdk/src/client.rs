@@ -7,7 +7,9 @@ use std::process::{Command, Stdio};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use cymule_core::{PlanCandidate, SealedPlan, decode_json};
 use cymule_durable::{
@@ -27,10 +29,11 @@ use cymule_runtime::{
     EngineFailure, EngineFailureCategory, EngineMigrationProviderTarget, EnginePhase,
     EnginePluginTarget, EngineRequestEnvelope, EngineResponseEnvelope, EngineResult,
     EngineRetryDisposition, EngineShadowProviderTarget, EngineStoreTarget, ExecutionOutcome,
-    MAX_ENGINE_DIAGNOSTIC_BYTES, MAX_ENGINE_REQUEST_BYTES, MAX_ENGINE_RESPONSE_BYTES,
-    MAX_ENGINE_RESPONSE_PAYLOAD_BYTES, validate_json_typed_roundtrip,
+    MAX_ENGINE_REQUEST_BYTES, MAX_ENGINE_RESPONSE_PAYLOAD_BYTES, validate_json_typed_roundtrip,
     validate_json_typed_roundtrip_bytes, validate_strict_json,
 };
+#[cfg(unix)]
+use cymule_runtime::{MAX_ENGINE_DIAGNOSTIC_BYTES, MAX_ENGINE_RESPONSE_BYTES};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -500,10 +503,16 @@ impl CliEngine {
         snapshot: &EngineRequestSnapshot,
     ) -> EngineResult<EngineTransportSuccess> {
         let request = &snapshot.typed;
-        let mut call = self.cancellation.begin(request)?;
+        if self.timeout.is_zero() {
+            return Err(local_request_failure(
+                "invalid_timeout",
+                "CLI Engine timeout must be positive",
+            ));
+        }
         let deadline = Instant::now().checked_add(self.timeout).ok_or_else(|| {
             local_request_failure("invalid_timeout", "timeout exceeds the clock range")
         })?;
+        let mut call = self.cancellation.begin(request)?;
         let mut command = Command::new(&self.executable);
         command
             .arg("rpc")
@@ -1006,6 +1015,7 @@ fn decode_cli_transport_outcome(
     }
 }
 
+#[cfg(unix)]
 fn terminate_engine(child: &mut std::process::Child) -> std::io::Result<()> {
     loop {
         match child.try_wait() {
@@ -1021,6 +1031,7 @@ fn terminate_engine(child: &mut std::process::Child) -> std::io::Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn terminate_for_failure(
     child: &mut std::process::Child,
     request: &EngineRequest,
@@ -4206,6 +4217,51 @@ mod tests {
     }
 
     #[test]
+    fn present_empty_failure_issues_follow_request_mutation_authority() {
+        let read = EngineRequest::Seal {
+            candidate: empty_candidate(),
+        };
+        let mutation = EngineRequest::ObserveClock {
+            target: clock_target(),
+            run_id: "run:empty-failure-issues".to_owned(),
+        };
+        let read_inner = serde_json::to_value(&read).expect("read request serializes");
+        let mutation_inner = serde_json::to_value(&mutation).expect("mutation request serializes");
+        let present_empty_issues = serde_json::json!({
+            "engine_protocol": cymule_runtime::ENGINE_PROTOCOL_VERSION,
+            "outcome": "failure",
+            "error": {
+                "category": "validation",
+                "phase": "validate_request",
+                "code": "empty_issues",
+                "message": "an explicit issue set must not be empty",
+                "issues": [],
+                "retry_disposition": "correct_and_retry"
+            }
+        });
+        for (request, inner, expected_category, expected_retry) in [
+            (
+                &read,
+                &read_inner,
+                EngineFailureCategory::TransportFailure,
+                None,
+            ),
+            (
+                &mutation,
+                &mutation_inner,
+                EngineFailureCategory::UnknownWorldOutcome,
+                Some(EngineRetryDisposition::Reconcile),
+            ),
+        ] {
+            let failure = admit_raw_engine_response(request, inner, &present_empty_issues)
+                .expect_err("present-empty issues cannot settle an Engine response");
+            assert_eq!(failure.category, expected_category);
+            assert_eq!(failure.code.as_ref(), "invalid_engine_response");
+            assert_eq!(failure.retry_disposition, expected_retry);
+        }
+    }
+
+    #[test]
     fn seal_success_requires_the_exact_requested_plan_or_resource_semantics() {
         let mut different_plan_candidate = empty_candidate();
         different_plan_candidate.name = "engine_owned_sealed_plan".to_owned();
@@ -5305,6 +5361,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn zero_timeout_is_local_validation_before_engine_spawn() {
+        let directory = tempfile::tempdir().expect("isolated Engine fixture directory");
+        let executable = directory.path().join("zero-timeout-engine");
+        let marker = directory.path().join("spawned");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\n: > {marker:?}\n/bin/cat >/dev/null\n"),
+        )
+        .expect("Engine fixture writes");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("Engine fixture metadata reads")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions)
+            .expect("Engine fixture becomes executable");
+
+        let failure = CliEngine::new(&executable)
+            .with_timeout(Duration::ZERO)
+            .seal(&empty_candidate())
+            .expect_err("zero timeout is rejected before Engine spawn");
+        assert_eq!(failure.category, EngineFailureCategory::Validation);
+        assert_eq!(failure.code.as_ref(), "invalid_timeout");
+        assert_eq!(
+            failure.retry_disposition,
+            Some(EngineRetryDisposition::CorrectAndRetry)
+        );
+        assert!(!marker.exists(), "zero timeout still launched the Engine");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn timeout_closes_local_pipes_even_when_a_descendant_escapes_the_group() {
         let directory = tempfile::tempdir().expect("isolated Engine fixture directory");
         let executable = directory.path().join("escaped-pipe-engine");
@@ -5400,6 +5487,20 @@ mod tests {
         assert_eq!(error.code.as_ref(), "invalid_engine_response");
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_cli_transport_fails_closed_before_process_spawn() {
+        let error = CliEngine::new("must-not-spawn")
+            .seal(&empty_candidate())
+            .expect_err("non-Unix process-tree containment is unsupported");
+        assert_eq!(error.category, EngineFailureCategory::Validation);
+        assert_eq!(error.code.as_ref(), "engine_rpc_platform_unsupported");
+        assert_eq!(
+            error.retry_disposition,
+            Some(EngineRetryDisposition::CorrectAndRetry)
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn valid_success_above_sixteen_mib_and_nonzero_failure_are_admitted() {
@@ -5462,7 +5563,7 @@ mod tests {
         let executable = directory.path().join("engine");
         std::fs::write(
             &executable,
-            format!("#!/bin/sh\n: > {:?}\n/bin/cat >/dev/null\n", marker),
+            format!("#!/bin/sh\n: > {marker:?}\n/bin/cat >/dev/null\n"),
         )
         .expect("Engine fixture writes");
         let mut permissions = std::fs::metadata(&executable)

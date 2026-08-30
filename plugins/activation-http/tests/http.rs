@@ -32,6 +32,10 @@ fn index_for_signal(signal_key: &str) -> ParkedWaitIndex {
 }
 
 fn index_for_signals(signals: &[(&str, &str)]) -> ParkedWaitIndex {
+    let signals = signals
+        .iter()
+        .map(|(wait_label, signal_key)| (test_wait_id(wait_label), (*signal_key).to_owned()))
+        .collect::<Vec<_>>();
     let mut state = DurableState::new(Machine::new().snapshot());
     state.continuations.insert(
         "run:http".to_owned(),
@@ -55,10 +59,7 @@ fn index_for_signals(signals: &[(&str, &str)]) -> ParkedWaitIndex {
                 locals: BTreeMap::new(),
             }],
             state: None,
-            wait_set: signals
-                .iter()
-                .map(|(wait_id, _)| (*wait_id).to_owned())
-                .collect(),
+            wait_set: signals.iter().map(|(wait_id, _)| wait_id.clone()).collect(),
             scope_stack: vec![ROOT_SCOPE_ID.to_owned()],
             epoch: 0,
             execution_fence: 0,
@@ -68,13 +69,11 @@ fn index_for_signals(signals: &[(&str, &str)]) -> ParkedWaitIndex {
     );
     for (wait_id, signal_key) in signals {
         state.waits.insert(
-            (*wait_id).to_owned(),
+            wait_id.clone(),
             WaitCondition {
-                wait_id: (*wait_id).to_owned(),
+                wait_id,
                 run_id: "run:http".to_owned(),
-                kind: WaitKind::Signal {
-                    key: (*signal_key).to_owned(),
-                },
+                kind: WaitKind::Signal { key: signal_key },
                 consume_once: true,
                 owner: WaitOwner {
                     invocation_id: "main".to_owned(),
@@ -90,6 +89,10 @@ fn index_for_signals(signals: &[(&str, &str)]) -> ParkedWaitIndex {
         );
     }
     ParkedWaitIndex::rebuild(&state).expect("index rebuilds")
+}
+
+fn test_wait_id(label: &str) -> String {
+    cymule_core::content_id("cymule.test.http-wait/1", &label).expect("wait ID derives")
 }
 
 #[derive(Default)]
@@ -801,7 +804,7 @@ fn oversized_new_selection_is_rejected_before_it_can_become_retained() {
     let mut view = ObservedWaitView {
         waits: index(),
         selection_override: Some(WaitSelection {
-            wait_ids: BTreeSet::from(["wait:first".to_owned(), "wait:second".to_owned()]),
+            wait_ids: BTreeSet::from([test_wait_id("first"), test_wait_id("second")]),
             remaining: 0,
         }),
         ..ObservedWaitView::default()
@@ -824,13 +827,67 @@ fn oversized_new_selection_is_rejected_before_it_can_become_retained() {
 }
 
 #[test]
+fn forged_new_wait_id_is_rejected_before_selection_is_retained() {
+    let (directory, _router, mut driver) = durable_router(1);
+    let connection = Connection::open(directory.path().join("http.sqlite")).expect("spool opens");
+    insert_signal_fixture(&connection, "activation:http", "signal:http");
+    let mut view = ObservedWaitView {
+        waits: index(),
+        selection_override: Some(WaitSelection {
+            wait_ids: BTreeSet::from([format!("sha256:{}", "A".repeat(64))]),
+            remaining: 0,
+        }),
+        ..ObservedWaitView::default()
+    };
+
+    assert!(matches!(
+        driver.receive(&mut view, 1),
+        Err(DurableError::Validation(message))
+            if message.contains("lowercase SHA-256 content ID")
+    ));
+    let selected: bool = connection
+        .query_row(
+            "SELECT selected_wait_ids IS NOT NULL FROM cymule_http_signals",
+            [],
+            |row| row.get(0),
+        )
+        .expect("selection state reads");
+    assert!(!selected);
+}
+
+#[test]
+fn forged_retained_wait_id_is_integrity() {
+    let (directory, _router, mut driver) = durable_router(1);
+    let connection = Connection::open(directory.path().join("http.sqlite")).expect("spool opens");
+    insert_signal_fixture(&connection, "activation:http", "signal:http");
+    connection
+        .execute(
+            "UPDATE cymule_http_signals SET selected_wait_ids = ?1",
+            [
+                cymule_core::canonical_bytes(&BTreeSet::from([format!(
+                    "sha256:{}",
+                    "A".repeat(64)
+                )]))
+                .expect("forged target encodes"),
+            ],
+        )
+        .expect("forged target installs");
+    let mut view = ObservedWaitView::default();
+    assert!(matches!(
+        driver.receive(&mut view, 1),
+        Err(DurableError::Integrity { .. })
+    ));
+    assert!(view.selection_requests.is_empty());
+}
+
+#[test]
 fn retained_selected_value_rejects_nested_duplicate_members() {
     let directory = tempdir().expect("temporary directory creates");
     let database = directory.path().join("http.sqlite");
     let (_router, mut driver) =
         durable_signal_router(&database, 4, AllowAll).expect("durable router builds");
     let connection = Connection::open(&database).expect("spool opens for fixture insertion");
-    let selected = cymule_core::canonical_bytes(&BTreeSet::from(["wait:http".to_owned()]))
+    let selected = cymule_core::canonical_bytes(&BTreeSet::from([test_wait_id("retained")]))
         .expect("selected targets encode");
     connection
         .execute(
@@ -912,9 +969,10 @@ fn fresh_and_retained_signal_row_tamper_fails_before_target_selection() {
             let connection = Connection::open(&database).expect("spool opens for tamper");
             insert_signal_fixture(&connection, "activation:http", "signal:http");
             if retained {
-                let selected =
-                    cymule_core::canonical_bytes(&BTreeSet::from(["wait:http".to_owned()]))
-                        .expect("selected targets encode");
+                let selected = cymule_core::canonical_bytes(&BTreeSet::from([test_wait_id(
+                    "retained-tamper",
+                )]))
+                .expect("selected targets encode");
                 connection
                     .execute(
                         "UPDATE cymule_http_signals SET selected_wait_ids = ?1",

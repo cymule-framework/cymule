@@ -4,7 +4,7 @@
     "generation": "source-0.2.0-unreleased-generation-3",
     "workspace_version": "0.2.0",
     "state": "source",
-    "source_snapshot_digest": "sha256:fc9dfed2ff1c06e61f46a3ba125dc2776320fb1a4e4f94237dd86d48f4f3e0fa",
+    "source_snapshot_digest": "sha256:9d1ebfe0a42104f160e0ebda9096fa0c657ca338dc640de1069d56f048e9c08e",
     "baseline_source_snapshot_digest": "sha256:e3783a1ae7e61f331d90f7d456f60eb132712ba1f70e1b7f2363078a3c31540a",
     "predecessor_registry_digest": null,
     "predecessor_source_snapshot_digest": null,
@@ -412,7 +412,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:7e0d6134e8a95bf094735c4e081572728f4bc7bca2ef7dcf2ff51b7682a37cf2",
+          "canonical_digest": "sha256:362ba2651a335237491267765a3f6d80a0593b66c30dc3848e9bf15f611048cd",
           "fragment": "#/$defs/agentHostBinding",
           "root": false
         }
@@ -945,7 +945,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:7e0d6134e8a95bf094735c4e081572728f4bc7bca2ef7dcf2ff51b7682a37cf2",
+          "canonical_digest": "sha256:362ba2651a335237491267765a3f6d80a0593b66c30dc3848e9bf15f611048cd",
           "root": false,
           "fragment": "#/$defs/recoveryObservation"
         }
@@ -1006,7 +1006,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:7e0d6134e8a95bf094735c4e081572728f4bc7bca2ef7dcf2ff51b7682a37cf2",
+          "canonical_digest": "sha256:362ba2651a335237491267765a3f6d80a0593b66c30dc3848e9bf15f611048cd",
           "fragment": "#/$defs/agentSessionCurrent",
           "root": false
         }
@@ -1306,7 +1306,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:7e0d6134e8a95bf094735c4e081572728f4bc7bca2ef7dcf2ff51b7682a37cf2",
+          "canonical_digest": "sha256:362ba2651a335237491267765a3f6d80a0593b66c30dc3848e9bf15f611048cd",
           "root": false,
           "fragment": "#/$defs/agentStreamPublicationIntent"
         }
@@ -1380,7 +1380,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:7e0d6134e8a95bf094735c4e081572728f4bc7bca2ef7dcf2ff51b7682a37cf2",
+          "canonical_digest": "sha256:362ba2651a335237491267765a3f6d80a0593b66c30dc3848e9bf15f611048cd",
           "root": false,
           "fragment": "#/$defs/agentStreamPublicationReservation"
         }
@@ -1800,7 +1800,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:7e0d6134e8a95bf094735c4e081572728f4bc7bca2ef7dcf2ff51b7682a37cf2",
+          "canonical_digest": "sha256:362ba2651a335237491267765a3f6d80a0593b66c30dc3848e9bf15f611048cd",
           "root": true
         }
       ],
@@ -2219,7 +2219,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/artifactRef",
           "root": false
         }
@@ -2769,7 +2769,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/cancellationReasonRef",
           "root": false
         }
@@ -2865,7 +2865,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/clockObservationRef",
           "root": false
         }
@@ -3954,7 +3954,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/componentOccurrence",
           "root": false
         }
@@ -4144,7 +4144,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/executionClaim",
           "root": false
         }
@@ -4225,7 +4225,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/continuation",
           "root": false
         },
@@ -5675,7 +5675,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/effectDispatch",
           "root": false
         }
@@ -5875,7 +5875,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/effectResolutionReceipt",
           "root": false
         }
@@ -5950,7 +5950,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/effectResultRef",
           "root": false
         }
@@ -6253,7 +6253,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "root": true
         }
       ],
@@ -6862,7 +6862,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/evolutionPersistenceCommand",
           "root": false
         }
@@ -6952,7 +6952,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/evolutionPersistenceReceipt",
           "root": false
         }
@@ -10125,7 +10125,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/operationAttempt",
           "root": false
         }
@@ -14244,7 +14244,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/cancellationReceipt",
           "root": false
         }
@@ -14889,7 +14889,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/subflowRevision",
           "root": false
         }
@@ -18576,7 +18576,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
+          "canonical_digest": "sha256:4ea641c676e1299154d56433cf0eb775ac29962dd0eba651bf1574dfb36fc5af",
           "fragment": "#/$defs/waitCondition",
           "root": false
         },
