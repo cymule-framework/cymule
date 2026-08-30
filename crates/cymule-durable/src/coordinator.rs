@@ -2999,16 +2999,17 @@ impl<S: DurableStore> DurableCoordinator<S> {
         result: agent_protocol::AgentStreamPublicationResult,
     ) -> DurableResult<agent_protocol::AgentStreamFinalizeOutcome> {
         match result {
-            agent_protocol::AgentStreamPublicationResult::NotApplied { intent } => {
-                self.mark_agent_stream_publication_not_applied(command, &intent)?;
+            agent_protocol::AgentStreamPublicationResult::NotApplied { dispatch, intent } => {
+                self.mark_agent_stream_publication_not_applied(command, &dispatch, &intent)?;
                 Ok(agent_protocol::AgentStreamFinalizeOutcome::PublicationNotApplied { intent })
             }
-            agent_protocol::AgentStreamPublicationResult::Unknown { intent } => Ok(
+            agent_protocol::AgentStreamPublicationResult::Unknown { intent, .. } => Ok(
                 agent_protocol::AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { intent },
             ),
-            agent_protocol::AgentStreamPublicationResult::Published { product } => {
+            agent_protocol::AgentStreamPublicationResult::Published { dispatch, product } => {
                 let intent = product.intent().clone();
-                let committed = self.finish_reserved_agent_stream_publication(command, &product);
+                let committed =
+                    self.finish_reserved_agent_stream_publication(command, &dispatch, &product);
                 match committed {
                     Ok(commit) => Ok(agent_protocol::AgentStreamFinalizeOutcome::Committed {
                         commit: Box::new(commit),
@@ -3107,6 +3108,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
     fn mark_agent_stream_publication_not_applied(
         &mut self,
         command: &agent_protocol::AgentCommand,
+        dispatch: &agent_protocol::AgentStreamPublicationReservation,
         intent: &agent_protocol::AgentStreamPublicationIntent,
     ) -> DurableResult<()> {
         let agent_protocol::AgentCommandAction::Stream(
@@ -3128,10 +3130,11 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 "Agent publication observation lost its durable reservation".to_owned(),
             )
         })?;
-        if &reservation.intent != intent {
+        if &reservation.intent != intent || reservation.as_ref() != dispatch {
             return Err(DurableError::HistoryConflict {
-                code: "agent_stream_publication_intent_conflict".to_owned(),
-                message: "Agent publication observation changed its reserved intent".to_owned(),
+                code: "agent_stream_publication_dispatch_conflict".to_owned(),
+                message: "Agent publication observation changed its exact dispatch attempt"
+                    .to_owned(),
             });
         }
         if reservation.phase == agent_protocol::AgentStreamPublicationReservationPhase::NotApplied {
@@ -3150,6 +3153,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
     fn finish_reserved_agent_stream_publication(
         &mut self,
         command: &agent_protocol::AgentCommand,
+        dispatch: &agent_protocol::AgentStreamPublicationReservation,
         product: &agent_protocol::AgentStreamPublicationProduct,
     ) -> DurableResult<agent_protocol::AgentCommit> {
         let agent_protocol::AgentCommandAction::Stream(stream_command) = &command.action else {
@@ -3160,6 +3164,15 @@ impl<S: DurableStore> DurableCoordinator<S> {
         let source = self.read_current_state_root(|manifest, resolver| {
             load_agent_stream_finalization_source(manifest, resolver, stream_command)
         })?;
+        let agent_protocol::AgentStreamSource::Finalize { stream, .. } = &source else {
+            unreachable!("Finalize source loader returns Finalize")
+        };
+        if stream.publication_reservation.as_deref() != Some(dispatch) {
+            return Err(DurableError::HistoryConflict {
+                code: "agent_stream_publication_dispatch_conflict".to_owned(),
+                message: "Agent publication result changed its exact dispatch attempt".to_owned(),
+            });
+        }
         let profile_pin = product.resource_profile_pin();
         let resource_source = self.read_current_state_root(|manifest, resolver| {
             load_agent_stream_resource_source(manifest, resolver, profile_pin)
@@ -14781,6 +14794,55 @@ mod agent_stream_publication_reservation_tests {
             &mut first,
             &mut sibling,
             "stream:external-reservation:sibling",
+        );
+    }
+
+    #[test]
+    fn stale_not_applied_result_cannot_settle_a_rearmed_attempt() {
+        let mut coordinator = initialized_with_open_tool_stream();
+        let finalize = finalize_command(&coordinator);
+        let mut provider = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([ProviderOutcome::Unknown]),
+            observe_outcome: ProviderOutcome::Unknown,
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        let unknown = coordinator
+            .finalize_agent_stream(&finalize, &mut provider)
+            .expect("attempt one is reserved and dispatched");
+        let AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { intent } = unknown else {
+            panic!("attempt one remains unknown")
+        };
+        let attempt_one = current_agent_stream(&mut coordinator, STREAM_ID)
+            .publication_reservation
+            .expect("attempt one reservation is retained");
+        coordinator
+            .mark_agent_stream_publication_not_applied(&finalize, &attempt_one, &intent)
+            .expect("attempt one receives exact NotApplied evidence");
+        let not_applied = current_agent_stream(&mut coordinator, STREAM_ID);
+        let attempt_two = coordinator
+            .rearm_agent_stream_publication(&finalize, &not_applied)
+            .expect("attempt two is durably claimed");
+        let stale = agent_protocol::AgentStreamPublicationResult::NotApplied {
+            dispatch: attempt_one,
+            intent,
+        };
+        assert!(matches!(
+            coordinator.finish_agent_stream_publication_result(&finalize, stale),
+            Err(DurableError::HistoryConflict { ref code, .. })
+                if code == "agent_stream_publication_dispatch_conflict"
+        ));
+        let retained = current_agent_stream(&mut coordinator, STREAM_ID)
+            .publication_reservation
+            .expect("attempt two remains current");
+        assert_eq!(*retained, attempt_two);
+        assert_eq!(
+            retained.phase,
+            agent_protocol::AgentStreamPublicationReservationPhase::DispatchClaimed
         );
     }
 

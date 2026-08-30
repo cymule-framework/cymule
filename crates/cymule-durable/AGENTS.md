@@ -336,6 +336,9 @@
   audit. Every retained Agent command is reverse-owned by its receipt, a live
   publication reservation, or the terminal receipt that consumed that
   reservation; orphan commands are invalid at CAS and audit boundaries.
+  Provider results retain and exact-match the complete DispatchClaimed
+  reservation, so a late NotApplied or Published result cannot settle a later
+  rearmed attempt.
   The target claim's exact-key current and monotonic generation are its bounded
   lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
   the retained source, and advances by one. Do not add a predecessor journal or

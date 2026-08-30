@@ -233,7 +233,9 @@ Only a freshly acknowledged reservation or NotApplied rearm owns one publish
 call. Reopen of `DispatchClaimed` performs no publish. Dedicated reconciliation
 requires the restored intent and calls only provider observation. Exact
 NotApplied observation is persisted before a later rearm may claim one new
-attempt. Published readback is reconciled against the retained reservation;
+attempt. Every provider result carries the complete DispatchClaimed reservation
+it observed and can settle only that exact attempt. Published readback is
+reconciled against the retained reservation;
 only an ambiguous final Store acknowledgement becomes
 `PublicationOutcomeUnknown`, while known source/reducer/CAS conflicts remain
 their typed errors.

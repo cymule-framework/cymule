@@ -100,10 +100,13 @@
   persists its content-derived publication reservation, `Reserved` target claim,
   and `Reserved` profile pin in the same physical retention family. Only a
   fresh reservation or NotApplied rearm acknowledgement owns one publish call;
-  reopen observes a claimed attempt. The reservation intent's immutable target must equal the
-  stream current target exactly, in addition to matching Session, stream,
-  resolver, and content. Terminal finalization promotes that exact reservation without
-  changing the family obligation count. Promotion binds the family's current
+  reopen observes a claimed attempt. Every provider publication result retains
+  the complete DispatchClaimed reservation it observed, including attempt; a
+  late result cannot settle a rearmed attempt. The reservation intent's
+  immutable target must equal the stream current target exactly, in addition to
+  matching Session, stream, resolver, and content. Terminal finalization
+  promotes that exact reservation without changing the family obligation count.
+  Promotion binds the family's current
   count, not the reservation-time aggregate as a lower bound. A public Abort
   carries required-nullable Resource source/effect members: only durable
   NotApplied may atomically clear the reservation, advance the claim to

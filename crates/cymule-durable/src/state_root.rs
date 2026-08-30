@@ -6657,27 +6657,47 @@ fn audit_agent_command_closure(materialized: &MaterializedStateRoots) -> Durable
         StateRootFamily::AgentStreams,
         StateRootLeafKind::AgentStreamCurrent,
     )?;
-    for (key, command) in commands {
-        let receipt_owner = receipts.contains_key(&command.command_id);
-        let live_reservation_owner = streams.values().any(|stream| {
+    let mut receipt_owner_ids = BTreeSet::new();
+    for (key, receipt) in &receipts {
+        if *key != cymule_profile_protocol::agent::agent_command_key(&receipt.command_id)? {
+            return Err(DurableError::Integrity {
+                code: "agent_receipt_key_mismatch".to_owned(),
+                message: "Agent receipt changed its exact StateRoot key".to_owned(),
+            });
+        }
+        receipt_owner_ids.insert(receipt.command_id.clone());
+    }
+    let live_reservation_owner_ids = streams
+        .values()
+        .filter_map(|stream| {
             stream
                 .publication_reservation
                 .as_ref()
-                .is_some_and(|reservation| reservation.intent.command_id() == command.command_id)
-        });
-        let terminal_reservation_owner = receipts.values().any(|receipt| {
-            matches!(
-                &receipt.source,
-                AgentCommandSource::Stream(source)
-                    if matches!(source.as_ref(), AgentStreamSource::Abort { stream, .. }
-                        | AgentStreamSource::Finalize { stream, .. }
-                        if stream.publication_reservation.as_ref().is_some_and(|reservation| {
-                            reservation.intent.command_id() == command.command_id
-                        }))
-            )
-        });
+                .map(|reservation| reservation.intent.command_id().to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+    let terminal_reservation_owner_ids = receipts
+        .values()
+        .filter_map(|receipt| match &receipt.source {
+            AgentCommandSource::Stream(source) => match source.as_ref() {
+                AgentStreamSource::Abort { stream, .. }
+                | AgentStreamSource::Finalize { stream, .. } => stream
+                    .publication_reservation
+                    .as_ref()
+                    .map(|reservation| reservation.intent.command_id().to_owned()),
+                AgentStreamSource::Open { .. } | AgentStreamSource::AppendChunk { .. } => None,
+            },
+            AgentCommandSource::Session { .. }
+            | AgentCommandSource::Occurrence(_)
+            | AgentCommandSource::Input(_)
+            | AgentCommandSource::Workspace(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+    for (key, command) in commands {
         if key != command.command_id
-            || !(receipt_owner || live_reservation_owner || terminal_reservation_owner)
+            || !(receipt_owner_ids.contains(&command.command_id)
+                || live_reservation_owner_ids.contains(&command.command_id)
+                || terminal_reservation_owner_ids.contains(&command.command_id))
         {
             return Err(DurableError::Integrity {
                 code: "agent_command_origin_missing".to_owned(),

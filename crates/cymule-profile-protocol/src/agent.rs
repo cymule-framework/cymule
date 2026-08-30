@@ -5783,16 +5783,22 @@ impl AgentStreamPublicationProduct {
 pub enum AgentStreamPublicationResult {
     /// The exact intent is applied and read back under this product.
     Published {
+        /// Exact `DispatchClaimed` reservation observed before provider I/O.
+        dispatch: Box<AgentStreamPublicationReservation>,
         /// Framework-verified non-Serde publication product.
         product: Box<AgentStreamPublicationProduct>,
     },
     /// Exact provider evidence proves the intent did not apply.
     NotApplied {
+        /// Exact `DispatchClaimed` reservation observed before provider I/O.
+        dispatch: Box<AgentStreamPublicationReservation>,
         /// Original immutable intent which remains safe to invoke idempotently.
         intent: AgentStreamPublicationIntent,
     },
     /// The provider or later Durable CAS cannot prove the terminal outcome.
     Unknown {
+        /// Exact `DispatchClaimed` reservation observed before provider I/O.
+        dispatch: Box<AgentStreamPublicationReservation>,
         /// Original immutable intent required for exact reconciliation.
         intent: AgentStreamPublicationIntent,
     },
@@ -5803,8 +5809,18 @@ impl AgentStreamPublicationResult {
     #[must_use]
     pub const fn intent(&self) -> &AgentStreamPublicationIntent {
         match self {
-            Self::Published { product } => product.intent(),
-            Self::NotApplied { intent } | Self::Unknown { intent } => intent,
+            Self::Published { product, .. } => product.intent(),
+            Self::NotApplied { intent, .. } | Self::Unknown { intent, .. } => intent,
+        }
+    }
+
+    /// Borrow the exact reservation generation observed before provider I/O.
+    #[must_use]
+    pub const fn dispatch(&self) -> &AgentStreamPublicationReservation {
+        match self {
+            Self::Published { dispatch, .. }
+            | Self::NotApplied { dispatch, .. }
+            | Self::Unknown { dispatch, .. } => dispatch,
         }
     }
 }
@@ -5995,7 +6011,7 @@ pub fn execute_agent_stream_publication<P: AgentProviders + ?Sized>(
     }
     let intent = reservation.intent.clone();
     let observation = providers.publish_agent_stream(&intent)?;
-    agent_stream_publication_result(intent, observation)
+    agent_stream_publication_result(reservation.clone(), intent, observation)
 }
 
 /// Reconcile one prior external stream publication without redispatch.
@@ -6020,25 +6036,29 @@ pub fn reconcile_agent_stream_publication<P: AgentProviders + ?Sized>(
         });
     }
     let observation = providers.observe_agent_stream_publication(expected_intent)?;
-    agent_stream_publication_result(expected_intent.clone(), observation)
+    agent_stream_publication_result(reservation.clone(), expected_intent.clone(), observation)
 }
 
 fn agent_stream_publication_result(
+    dispatch: AgentStreamPublicationReservation,
     intent: AgentStreamPublicationIntent,
     observation: AgentStreamPublicationObservation,
 ) -> ProtocolResult<AgentStreamPublicationResult> {
     Ok(match observation {
         AgentStreamPublicationObservation::Published { publication } => {
             AgentStreamPublicationResult::Published {
+                dispatch: Box::new(dispatch),
                 product: Box::new(AgentStreamPublicationProduct::new(intent, *publication)?),
             }
         }
-        AgentStreamPublicationObservation::NotApplied => {
-            AgentStreamPublicationResult::NotApplied { intent }
-        }
-        AgentStreamPublicationObservation::Unknown => {
-            AgentStreamPublicationResult::Unknown { intent }
-        }
+        AgentStreamPublicationObservation::NotApplied => AgentStreamPublicationResult::NotApplied {
+            dispatch: Box::new(dispatch),
+            intent,
+        },
+        AgentStreamPublicationObservation::Unknown => AgentStreamPublicationResult::Unknown {
+            dispatch: Box::new(dispatch),
+            intent,
+        },
     })
 }
 
@@ -14015,7 +14035,7 @@ mod tests {
         let (source, reservation) = reserve_external_stream_source(&finalize_command, source);
         let result = execute_agent_stream_publication(&reservation, &mut providers)
             .expect("registered external publication resolves");
-        let AgentStreamPublicationResult::Published { product } = result else {
+        let AgentStreamPublicationResult::Published { product, .. } = result else {
             panic!("test provider must return a read-back publication")
         };
         assert_eq!(providers.publication_calls, 1);
@@ -14235,7 +14255,7 @@ mod tests {
         };
         let first = execute_agent_stream_publication(&reservation, &mut providers)
             .expect("ambiguous publication returns a typed result");
-        let AgentStreamPublicationResult::Unknown { intent } = first else {
+        let AgentStreamPublicationResult::Unknown { intent, .. } = first else {
             panic!("ambiguous provider result must retain its exact intent")
         };
         let intent_bytes = cymule_core::canonical_bytes(&intent).expect("Unknown intent encodes");
@@ -14247,7 +14267,7 @@ mod tests {
         let reconciled =
             reconcile_agent_stream_publication(&reservation, &restored, &mut providers)
                 .expect("read-only publication observation resolves");
-        let AgentStreamPublicationResult::Published { product } = reconciled else {
+        let AgentStreamPublicationResult::Published { product, .. } = reconciled else {
             panic!("exact readback must return the verified publication product")
         };
         assert_eq!(product.intent(), &intent);
@@ -14342,7 +14362,7 @@ mod tests {
         let (_, first_reservation) = reserve_external_stream_source(&first_command, first_source);
         let result = execute_agent_stream_publication(&first_reservation, &mut providers)
             .expect("first stream resolves its pinned publication");
-        let AgentStreamPublicationResult::Published { product } = result else {
+        let AgentStreamPublicationResult::Published { product, .. } = result else {
             panic!("test provider must return a read-back publication")
         };
 
