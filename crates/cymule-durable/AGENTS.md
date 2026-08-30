@@ -314,6 +314,9 @@
   A Materialized claim authenticates the complete Message or Tool projection
   from its admitting receipt, not only the target key, terminal phase, or
   `admitted_by` field.
+  Every non-pristine `AgentSessionCurrent` likewise exact-matches its admitting
+  receipt in the CAS and full audit. The only receipt-free Session current is
+  the exact pristine constructor value.
   The target claim's exact-key current and monotonic generation are its bounded
   lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
   the retained source, and advances by one. Do not add a predecessor journal or

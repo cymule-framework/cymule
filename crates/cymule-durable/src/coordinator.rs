@@ -9403,7 +9403,7 @@ fn load_verified_agent_origin<R: crate::StateRootResolver + ?Sized>(
     Ok((command, receipt))
 }
 
-fn verify_agent_session_origin<R: crate::StateRootResolver + ?Sized>(
+pub(crate) fn verify_agent_session_origin<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     current: &agent_protocol::AgentSessionCurrent,
@@ -9419,38 +9419,11 @@ fn verify_agent_session_origin<R: crate::StateRootResolver + ?Sized>(
             ),
         })?;
     let (_, receipt) = load_verified_agent_origin(manifest, resolver, &witness.command_id)?;
-    let (kind, retained) = match &receipt.outcome {
-        agent_protocol::AgentCommandOutcome::Session(postcondition) => (
-            agent_protocol::AgentSessionTransitionKind::SessionUpdate,
-            &postcondition.session,
-        ),
-        agent_protocol::AgentCommandOutcome::Occurrence(postcondition) => (
-            agent_protocol::AgentSessionTransitionKind::Occurrence,
-            &postcondition.session,
-        ),
-        agent_protocol::AgentCommandOutcome::Stream(postcondition) => {
-            let session = match &postcondition.effect {
-                agent_protocol::AgentStreamEffect::Opened { session }
-                | agent_protocol::AgentStreamEffect::Aborted { session, .. } => session,
-                agent_protocol::AgentStreamEffect::Finalized { session, .. } => &session.session,
-                agent_protocol::AgentStreamEffect::Chunk { .. } => {
-                    return Err(DurableError::Integrity {
-                        code: "agent_session_origin_stream_chunk".to_owned(),
-                        message: "Agent Session cannot cite a chunk-only stream transition"
-                            .to_owned(),
-                    });
-                }
-            };
-            (agent_protocol::AgentSessionTransitionKind::Stream, session)
-        }
-        agent_protocol::AgentCommandOutcome::Input(checkpoint) => (
-            agent_protocol::AgentSessionTransitionKind::Input,
-            &checkpoint.session,
-        ),
-        agent_protocol::AgentCommandOutcome::Workspace(checkpoint) => (
-            agent_protocol::AgentSessionTransitionKind::Workspace,
-            &checkpoint.occurrence.session,
-        ),
+    let Some((kind, retained)) = agent_receipt_session_current(&receipt) else {
+        return Err(DurableError::Integrity {
+            code: "agent_session_origin_receipt_mismatch".to_owned(),
+            message: "Agent Session cites a receipt without a Session projection".to_owned(),
+        });
     };
     if witness.kind != kind || retained != current {
         return Err(DurableError::Integrity {
@@ -9459,6 +9432,41 @@ fn verify_agent_session_origin<R: crate::StateRootResolver + ?Sized>(
         });
     }
     Ok(())
+}
+
+pub(crate) fn agent_receipt_session_current(
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> Option<(
+    agent_protocol::AgentSessionTransitionKind,
+    &agent_protocol::AgentSessionCurrent,
+)> {
+    match &receipt.outcome {
+        agent_protocol::AgentCommandOutcome::Session(postcondition) => Some((
+            agent_protocol::AgentSessionTransitionKind::SessionUpdate,
+            &postcondition.session,
+        )),
+        agent_protocol::AgentCommandOutcome::Occurrence(postcondition) => Some((
+            agent_protocol::AgentSessionTransitionKind::Occurrence,
+            &postcondition.session,
+        )),
+        agent_protocol::AgentCommandOutcome::Stream(postcondition) => {
+            let session = match &postcondition.effect {
+                agent_protocol::AgentStreamEffect::Opened { session }
+                | agent_protocol::AgentStreamEffect::Aborted { session, .. } => session,
+                agent_protocol::AgentStreamEffect::Finalized { session, .. } => &session.session,
+                agent_protocol::AgentStreamEffect::Chunk { .. } => return None,
+            };
+            Some((agent_protocol::AgentSessionTransitionKind::Stream, session))
+        }
+        agent_protocol::AgentCommandOutcome::Input(checkpoint) => Some((
+            agent_protocol::AgentSessionTransitionKind::Input,
+            &checkpoint.session,
+        )),
+        agent_protocol::AgentCommandOutcome::Workspace(checkpoint) => Some((
+            agent_protocol::AgentSessionTransitionKind::Workspace,
+            &checkpoint.occurrence.session,
+        )),
+    }
 }
 
 fn verify_agent_message_origin<R: crate::StateRootResolver + ?Sized>(
@@ -9476,7 +9484,7 @@ fn verify_agent_message_origin<R: crate::StateRootResolver + ?Sized>(
     Ok(())
 }
 
-fn agent_receipt_message_current(
+pub(crate) fn agent_receipt_message_current(
     receipt: &agent_protocol::AgentCommandReceipt,
 ) -> Option<&agent_protocol::AgentMessageCurrent> {
     match &receipt.outcome {
@@ -9520,7 +9528,7 @@ fn verify_agent_tool_origin<R: crate::StateRootResolver + ?Sized>(
     Ok(())
 }
 
-fn agent_receipt_tool_current<'a>(
+pub(crate) fn agent_receipt_tool_current<'a>(
     receipt: &'a agent_protocol::AgentCommandReceipt,
     tool_call_id: &str,
 ) -> Option<&'a agent_protocol::AgentToolCurrent> {

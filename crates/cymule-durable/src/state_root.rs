@@ -6580,6 +6580,7 @@ pub fn reachable_state_root_objects<R: StateRootResolver + ?Sized>(
     audit_run_current_memberships(manifest, resolver)?;
     audit_component_attempt_frontiers(manifest, resolver)?;
     audit_pending_wait_sources(manifest, resolver)?;
+    audit_agent_session_closure(manifest, resolver, &materialized)?;
     audit_agent_update_closure(manifest, resolver, &materialized)?;
     audit_agent_target_claim_closure(manifest, resolver, &materialized)?;
 
@@ -6618,6 +6619,37 @@ fn agent_tool_is_terminal(tool: &cymule_profile_protocol::agent::AgentToolCurren
             | cymule_profile_protocol::agent::ToolCallStatus::Failed
             | cymule_profile_protocol::agent::ToolCallStatus::Cancelled
     )
+}
+
+fn audit_agent_session_closure<R: StateRootResolver + ?Sized>(
+    manifest: &StateRootManifest,
+    resolver: &mut R,
+    materialized: &MaterializedStateRoots,
+) -> DurableResult<()> {
+    use cymule_profile_protocol::agent::{AgentSessionCurrent, agent_session_key};
+
+    let sessions: BTreeMap<String, AgentSessionCurrent> = decode_family_map(
+        &materialized.collections,
+        StateRootFamily::AgentSessions,
+        StateRootLeafKind::AgentSessionCurrent,
+    )?;
+    for (key, current) in sessions {
+        if key != agent_session_key(&current.session_id)? {
+            return Err(DurableError::Integrity {
+                code: "agent_session_key_mismatch".to_owned(),
+                message: "Agent Session current changed its exact StateRoot key".to_owned(),
+            });
+        }
+        if current.last_transition.is_some() {
+            crate::coordinator::verify_agent_session_origin(manifest, resolver, &current)?;
+        } else if current != AgentSessionCurrent::new(&current.session_id)? {
+            return Err(DurableError::Integrity {
+                code: "agent_session_pristine_origin_mismatch".to_owned(),
+                message: "Agent Session without a receipt is not pristine".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn audit_agent_update_closure<R: StateRootResolver + ?Sized>(
@@ -8924,6 +8956,7 @@ fn validate_state_root_sidecars<R: StateRootResolver + ?Sized>(
         staged_machine_root_delta,
         overlay,
     )?;
+    validate_agent_session_operation_set(operations, roots, overlay)?;
     validate_agent_update_operation_set(operations, roots, overlay)?;
     validate_agent_target_claim_operation_set(operations, roots, overlay)?;
     for operation in operations {
@@ -9043,6 +9076,53 @@ fn validate_agent_update_operation_set<R: StateRootResolver + ?Sized>(
     Ok(())
 }
 
+fn validate_agent_session_operation_set<R: StateRootResolver + ?Sized>(
+    operations: &[crate::DurableOperation],
+    roots: &StateRoots,
+    overlay: &mut ObjectOverlay<'_, R>,
+) -> DurableResult<()> {
+    use cymule_profile_protocol::agent::{AgentCommand, AgentSessionCurrent};
+
+    let mut expected = Vec::new();
+    for operation in operations {
+        if let crate::DurableOperation::PutAgentCommandReceipt { value: receipt } = operation {
+            let key = cymule_profile_protocol::agent::agent_command_key(&receipt.command_id)?;
+            let command: AgentCommand = map_get(&roots.agent_commands, &key, overlay)?
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_session_operation_command_missing".to_owned(),
+                    message: "Agent Session receipt lost its exact command".to_owned(),
+                })?
+                .decode(StateRootLeafKind::AgentCommand)?;
+            receipt.verify_for(&command)?;
+            if let Some((_, current)) = crate::coordinator::agent_receipt_session_current(receipt) {
+                expected.push(current.clone());
+            }
+        }
+    }
+    for operation in operations {
+        let crate::DurableOperation::PutAgentSessionCurrent { value } = operation else {
+            continue;
+        };
+        if let Some(position) = expected.iter().position(|expected| expected == value) {
+            expected.remove(position);
+        } else if value.last_transition.is_some()
+            || *value != AgentSessionCurrent::new(&value.session_id)?
+        {
+            return Err(DurableError::Integrity {
+                code: "agent_session_operation_unowned".to_owned(),
+                message: "Agent Session current has no exact owning receipt".to_owned(),
+            });
+        }
+    }
+    if !expected.is_empty() {
+        return Err(DurableError::Integrity {
+            code: "agent_session_operation_missing".to_owned(),
+            message: "Agent receipt did not atomically write its Session current".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_agent_target_claim_operation_set<R: StateRootResolver + ?Sized>(
     operations: &[crate::DurableOperation],
     roots: &StateRoots,
@@ -9139,6 +9219,7 @@ fn validate_agent_target_write_operations(
     let valid = match transition.current.phase {
         cymule_profile_protocol::agent::AgentTargetClaimPhase::Materialized => {
             matches!(writes.as_slice(), [(_, _, admitted_by, true)] if *admitted_by == transition.current.admitted_by)
+                && materialized_agent_target_write_matches_receipt(operations, transition)
         }
         cymule_profile_protocol::agent::AgentTargetClaimPhase::Reserved { .. }
         | cymule_profile_protocol::agent::AgentTargetClaimPhase::Released { .. } => {
@@ -9153,6 +9234,55 @@ fn validate_agent_target_write_operations(
         });
     }
     Ok(())
+}
+
+fn materialized_agent_target_write_matches_receipt(
+    operations: &[crate::DurableOperation],
+    transition: &cymule_profile_protocol::agent::AgentTargetClaimTransition,
+) -> bool {
+    let receipt = operations.iter().find_map(|operation| match operation {
+        crate::DurableOperation::PutAgentCommandReceipt { value }
+            if value.command_id == transition.current.admitted_by =>
+        {
+            Some(value.as_ref())
+        }
+        _ => None,
+    });
+    let Some(receipt) = receipt else {
+        return false;
+    };
+    match &transition.current.target {
+        cymule_profile_protocol::agent::AgentTargetClaimTarget::Message { message_id } => {
+            let writes = operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    crate::DurableOperation::PutAgentMessageCurrent { value }
+                        if value.session_id == transition.current.session_id
+                            && value.message.message_id == *message_id =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            matches!(writes.as_slice(), [current] if crate::coordinator::agent_receipt_message_current(receipt) == Some(*current))
+        }
+        cymule_profile_protocol::agent::AgentTargetClaimTarget::Tool { tool_call_id } => {
+            let writes = operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    crate::DurableOperation::PutAgentToolCurrent { value }
+                        if value.session_id == transition.current.session_id
+                            && value.tool.tool_call_id == *tool_call_id =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            matches!(writes.as_slice(), [current] if crate::coordinator::agent_receipt_tool_current(receipt, tool_call_id) == Some(*current))
+        }
+    }
 }
 
 fn validate_agent_target_write_reverse_closure(
@@ -15736,7 +15866,7 @@ mod tests {
                 },
             ];
             if index == 0 {
-                assert_agent_update_operation_closure(
+                assert_agent_receipt_operation_closure(
                     &manifest,
                     &mut resolver,
                     &operations,
@@ -15781,7 +15911,7 @@ mod tests {
         (manifest, resolver, session)
     }
 
-    fn assert_agent_update_operation_closure(
+    fn assert_agent_receipt_operation_closure(
         manifest: &StateRootManifest,
         resolver: &mut TestResolver,
         operations: &[crate::DurableOperation],
@@ -15821,6 +15951,66 @@ mod tests {
         assert!(matches!(
             error,
             DurableError::Integrity { ref code, .. } if code == "agent_update_operation_unowned"
+        ));
+
+        let mut wrong_session = operations.to_vec();
+        let session = wrong_session
+            .iter_mut()
+            .find_map(|operation| match operation {
+                crate::DurableOperation::PutAgentSessionCurrent { value } => Some(value),
+                _ => None,
+            })
+            .expect("message delta owns one Session write");
+        session.plan = Some(cymule_profile_protocol::agent::AgentPlan {
+            plan_id: "plan:receipt-operation-mismatch".to_owned(),
+            entries: Vec::new(),
+        });
+        let error = manifest
+            .apply(
+                &crate::DurableDelta::new(wrong_session).expect("wrong-Session delta seals"),
+                resolver,
+            )
+            .expect_err("Session write differing from its receipt is rejected before commit");
+        assert!(matches!(
+            error,
+            DurableError::Integrity { ref code, .. }
+                if code == "agent_session_operation_unowned"
+        ));
+
+        let mut wrong_target = operations.to_vec();
+        let message = wrong_target
+            .iter_mut()
+            .find_map(|operation| match operation {
+                crate::DurableOperation::PutAgentMessageCurrent { value } => Some(value),
+                _ => None,
+            })
+            .expect("message delta owns one target write");
+        message.message.role = cymule_profile_protocol::agent::MessageRole::User;
+        message.order.message_digest =
+            cymule_core::content_id("cymule.agent-message-current/1", &message.message)
+                .expect("tampered message digest reseals");
+        message.order.head = cymule_core::content_id(
+            "cymule.agent-message-order-head/1",
+            &(
+                message.order.session_id.as_str(),
+                message.order.index,
+                message.order.message_id.as_str(),
+                message.order.message_digest.as_str(),
+                message.order.previous_head.as_deref(),
+                message.order.admitted_by.as_str(),
+            ),
+        )
+        .expect("tampered message order reseals");
+        let error = manifest
+            .apply(
+                &crate::DurableDelta::new(wrong_target).expect("wrong-target delta seals"),
+                resolver,
+            )
+            .expect_err("target write differing from its receipt is rejected before commit");
+        assert!(matches!(
+            error,
+            DurableError::Integrity { ref code, .. }
+                if code == "agent_target_claim_write_operation_mismatch"
         ));
     }
 
