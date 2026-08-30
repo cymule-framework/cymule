@@ -2908,25 +2908,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             ));
         }
         if let Some(commit) = self.replay_agent_stream_finalization(command)? {
-            let agent_protocol::AgentCommandSource::Stream(source) = &commit.receipt.source else {
-                unreachable!("Finalize receipt retains a Stream source")
-            };
-            let agent_protocol::AgentStreamSource::Finalize { stream, .. } = source.as_ref() else {
-                unreachable!("Finalize receipt retains a Finalize source")
-            };
-            if !matches!(
-                stream.delivery,
-                agent_protocol::AgentStreamDelivery::ExternalResource { .. }
-            ) || stream
-                .publication_reservation
-                .as_ref()
-                .is_none_or(|reservation| reservation.intent != *expected_intent)
-            {
-                return Err(DurableError::Validation(
-                    "Agent stream reconciliation cannot replay a staged or foreign publication"
-                        .to_owned(),
-                ));
-            }
+            verify_agent_stream_reconciliation_replay(&commit, expected_intent)?;
             return Ok(agent_protocol::AgentStreamFinalizeOutcome::Committed {
                 commit: Box::new(commit),
             });
@@ -2964,6 +2946,13 @@ impl<S: DurableStore> DurableCoordinator<S> {
             return Err(DurableError::HistoryConflict {
                 code: "agent_stream_publication_command_conflict".to_owned(),
                 message: "Agent stream is reserved by another Finalize command".to_owned(),
+            });
+        }
+        if reservation.intent != *expected_intent {
+            return Err(DurableError::HistoryConflict {
+                code: "agent_stream_publication_intent_changed".to_owned(),
+                message: "Agent stream reconciliation changed its exact publication intent"
+                    .to_owned(),
             });
         }
         if reservation.phase == agent_protocol::AgentStreamPublicationReservationPhase::NotApplied {
@@ -7156,6 +7145,31 @@ impl<S: DurableStore> DurableCoordinator<S> {
         self.store
             .with_state_root_resolver(&manifest, |resolver| read(&manifest, resolver))
     }
+}
+
+fn verify_agent_stream_reconciliation_replay(
+    commit: &agent_protocol::AgentCommit,
+    expected_intent: &agent_protocol::AgentStreamPublicationIntent,
+) -> DurableResult<()> {
+    let agent_protocol::AgentCommandSource::Stream(source) = &commit.receipt.source else {
+        unreachable!("Finalize receipt retains a Stream source")
+    };
+    let agent_protocol::AgentStreamSource::Finalize { stream, .. } = source.as_ref() else {
+        unreachable!("Finalize receipt retains a Finalize source")
+    };
+    if !matches!(
+        stream.delivery,
+        agent_protocol::AgentStreamDelivery::ExternalResource { .. }
+    ) || stream
+        .publication_reservation
+        .as_ref()
+        .is_none_or(|reservation| reservation.intent != *expected_intent)
+    {
+        return Err(DurableError::Validation(
+            "Agent stream reconciliation cannot replay a staged or foreign publication".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn load_executor_run_at_manifest(

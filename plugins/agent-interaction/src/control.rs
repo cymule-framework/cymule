@@ -622,27 +622,10 @@ impl AgentPersistence for EphemeralAgentPersistence {
                 message: "Agent stream reconciliation intent does not match its command".to_owned(),
             });
         }
-        let state = self.state()?;
-        let receipt = state
-            .receipts
-            .get(&command.command_id)
-            .cloned()
-            .ok_or_else(|| {
-                AgentError::NotFound(format!(
-                    "ephemeral Agent persistence has no retained finalization {} to reconcile",
-                    command.command_id
-                ))
-            })?;
-        receipt.verify_for(command)?;
-        let commit = AgentCommit {
-            observed_revision: state.revision.clone(),
-            committed_revision: None,
-            receipt,
-        };
-        commit.verify_for(command)?;
-        Ok(AgentStreamFinalizeOutcome::Committed {
-            commit: Box::new(commit),
-        })
+        Err(AgentError::persistence(
+            "ephemeral_agent_publication_authority_unavailable",
+            "ephemeral Agent persistence has no external publication authority",
+        ))
     }
 
     fn commit_agent_workspace(

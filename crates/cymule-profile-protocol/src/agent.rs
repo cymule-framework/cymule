@@ -10020,6 +10020,90 @@ impl AgentStreamFinalizeOutcome {
             Self::PublicationOutcomeUnknown { intent } => Some(intent),
         }
     }
+
+    /// Verify this outcome against the exact Finalize command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the commit or publication intent belongs to
+    /// another command, Session, stream, or source revision.
+    pub fn verify_for(&self, command: &AgentCommand) -> ProtocolResult<()> {
+        command.verify()?;
+        let AgentCommandAction::Stream(AgentStreamCommand::Finalize {
+            session_id,
+            stream_id,
+        }) = &command.action
+        else {
+            return Err(ProtocolError::Validation(
+                "Agent stream outcome requires a Finalize command".to_owned(),
+            ));
+        };
+        match self {
+            Self::Committed { commit } => commit.verify_for(command),
+            Self::PublicationNotApplied { intent } | Self::PublicationOutcomeUnknown { intent } => {
+                intent.verify()?;
+                if intent.source_revision() != command.source_revision
+                    || intent.command_id() != command.command_id
+                    || intent.session_id() != session_id
+                    || intent.stream_id() != stream_id
+                {
+                    return Err(ProtocolError::IdentityMismatch(
+                        "Agent stream outcome changed its exact Finalize owner".to_owned(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Verify this reconciliation result against the exact restored intent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the result is staged, foreign, malformed, or
+    /// belongs to another publication authority.
+    pub fn verify_reconciliation_for(
+        &self,
+        command: &AgentCommand,
+        expected_intent: &AgentStreamPublicationIntent,
+    ) -> ProtocolResult<()> {
+        self.verify_for(command)?;
+        expected_intent.verify()?;
+        match self {
+            Self::PublicationNotApplied { intent } | Self::PublicationOutcomeUnknown { intent } => {
+                if intent != expected_intent {
+                    return Err(ProtocolError::IdentityMismatch(
+                        "Agent stream reconciliation changed its exact intent".to_owned(),
+                    ));
+                }
+            }
+            Self::Committed { commit } => {
+                let AgentCommandSource::Stream(source) = &commit.receipt.source else {
+                    return Err(ProtocolError::IdentityMismatch(
+                        "Agent stream reconciliation retained another source profile".to_owned(),
+                    ));
+                };
+                let AgentStreamSource::Finalize { stream, .. } = source.as_ref() else {
+                    return Err(ProtocolError::IdentityMismatch(
+                        "Agent stream reconciliation retained another stream source".to_owned(),
+                    ));
+                };
+                if !matches!(
+                    stream.delivery,
+                    AgentStreamDelivery::ExternalResource { .. }
+                ) || stream
+                    .publication_reservation
+                    .as_ref()
+                    .is_none_or(|reservation| reservation.intent != *expected_intent)
+                {
+                    return Err(ProtocolError::IdentityMismatch(
+                        "Agent stream reconciliation has no exact external reservation".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Closed result of one workspace provider/M1 commit attempt.

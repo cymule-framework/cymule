@@ -43,7 +43,8 @@
   inferred from prose or relabeled as corrupt proof bytes.
 - `EphemeralAgentPersistence` is explicitly process-lifetime and never a
   controller default. It must continue rejecting M1 input/workspace and
-  external Resource authority rather than emulating durability.
+  external Resource authority, including reconciliation, rather than emulating
+  durability.
 - The sole production writer adapter is the plugin-owned `AgentPersistence`
   impl for the Clock-carrying, provider-bound Runtime
   `cymule_durable::DurableAgentControl`. Store control exposes Agent reads only
@@ -91,7 +92,10 @@
   release edge. Generic Resource release cannot consume an Agent reservation.
 - Stream Open, Append, and Abort return the exact Agent commit. Finalize and
   observe-only reconciliation return the closed finalization outcome, which
-  may retain an Unknown publication intent instead of claiming a commit.
+  may retain an Unknown publication intent instead of claiming a commit. The
+  public controller verifies every outcome against its Finalize command and,
+  for reconciliation, the exact restored intent; custom persistence cannot
+  return a foreign non-commit outcome.
 - External finalization derives the semantic Resource handle, physical family,
   and profile-pin selectors before provider I/O. Durable exact-reads those
   Resource currents at the command source, persists the reservation on the

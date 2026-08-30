@@ -6638,12 +6638,7 @@ fn audit_control_receipts<R: StateRootResolver + ?Sized>(
                 }
             })?;
         let mut overlay = ObjectOverlay::new(&mut *resolver);
-        validate_coupled_checkpoint_history(
-            &manifest.roots,
-            &manifest.machine_frontier.authority_root,
-            &receipt,
-            &mut overlay,
-        )?;
+        validate_coupled_checkpoint_retained_history(&manifest.roots, &receipt, &mut overlay)?;
     }
     Ok(())
 }
@@ -15346,6 +15341,27 @@ fn validate_coupled_checkpoint_history<R: StateRootResolver + ?Sized>(
     receipt: &crate::CoupledCheckpointReceipt,
     overlay: &mut ObjectOverlay<'_, R>,
 ) -> DurableResult<()> {
+    validate_coupled_checkpoint_retained_history(roots, receipt, overlay)?;
+    let Some(checkpoint) = ResourceHandoffCheckpoint::from_receipt(receipt) else {
+        return Ok(());
+    };
+    if checkpoint.machine_authority_root != machine_authority {
+        return Err(DurableError::HistoryConflict {
+            code: "state_root_resource_activation_machine_mismatch".to_owned(),
+            message: format!(
+                "Resource activation {} does not bind the exact result Machine",
+                checkpoint.activation_id
+            ),
+        });
+    }
+    checkpoint.verify_wait_and_continuation(roots, overlay)
+}
+
+fn validate_coupled_checkpoint_retained_history<R: StateRootResolver + ?Sized>(
+    roots: &StateRoots,
+    receipt: &crate::CoupledCheckpointReceipt,
+    overlay: &mut ObjectOverlay<'_, R>,
+) -> DurableResult<()> {
     for journal in receipt.manifests() {
         for expected in &journal.records {
             let retained = load_application_journal_record_manifest_from_roots(
@@ -15368,16 +15384,6 @@ fn validate_coupled_checkpoint_history<R: StateRootResolver + ?Sized>(
     let Some(checkpoint) = ResourceHandoffCheckpoint::from_receipt(receipt) else {
         return Ok(());
     };
-    if checkpoint.machine_authority_root != machine_authority {
-        return Err(DurableError::HistoryConflict {
-            code: "state_root_resource_activation_machine_mismatch".to_owned(),
-            message: format!(
-                "Resource activation {} does not bind the exact result Machine",
-                checkpoint.activation_id
-            ),
-        });
-    }
-    checkpoint.verify_wait_and_continuation(roots, overlay)?;
     checkpoint.verify_command_receipts(roots, overlay)
 }
 

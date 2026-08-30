@@ -123,9 +123,7 @@ impl AgentStreamController {
             }),
         )?;
         let outcome = persistence.finalize_agent_stream(&command)?;
-        if let AgentStreamFinalizeOutcome::Committed { commit } = &outcome {
-            commit.verify_for(&command)?;
-        }
+        outcome.verify_for(&command)?;
         Ok(outcome)
     }
 
@@ -156,9 +154,7 @@ impl AgentStreamController {
             }),
         )?;
         let outcome = persistence.reconcile_agent_stream(&command, expected_intent)?;
-        if let AgentStreamFinalizeOutcome::Committed { commit } = &outcome {
-            commit.verify_for(&command)?;
-        }
+        outcome.verify_reconciliation_for(&command, expected_intent)?;
         Ok(outcome)
     }
 
