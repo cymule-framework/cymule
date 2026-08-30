@@ -309,7 +309,11 @@
   a valid later sibling Resource-family receipt remains admissible. Every
   Session-update or finalized-stream receipt also authenticates the exact
   immutable `AgentUpdateCurrent` it admitted; full audit enforces both
-  receipt-to-update and update-to-receipt closure.
+  receipt-to-update and update-to-receipt closure, and StateRoot admission
+  requires the same exact one-to-one operation set in the receipt CAS.
+  A Materialized claim authenticates the complete Message or Tool projection
+  from its admitting receipt, not only the target key, terminal phase, or
+  `admitted_by` field.
   The target claim's exact-key current and monotonic generation are its bounded
   lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
   the retained source, and advances by one. Do not add a predecessor journal or

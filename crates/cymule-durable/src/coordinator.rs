@@ -9467,31 +9467,7 @@ fn verify_agent_message_origin<R: crate::StateRootResolver + ?Sized>(
     current: &agent_protocol::AgentMessageCurrent,
 ) -> DurableResult<()> {
     let (_, receipt) = load_verified_agent_origin(manifest, resolver, &current.order.admitted_by)?;
-    let retained = match &receipt.outcome {
-        agent_protocol::AgentCommandOutcome::Session(postcondition) => {
-            match &postcondition.effect {
-                agent_protocol::AgentSessionUpdateEffect::Message { current } => Some(current),
-                agent_protocol::AgentSessionUpdateEffect::Metadata
-                | agent_protocol::AgentSessionUpdateEffect::Closed { .. }
-                | agent_protocol::AgentSessionUpdateEffect::Tool { .. } => None,
-            }
-        }
-        agent_protocol::AgentCommandOutcome::Stream(postcondition) => match &postcondition.effect {
-            agent_protocol::AgentStreamEffect::Finalized { session, .. } => match &session.effect {
-                agent_protocol::AgentSessionUpdateEffect::Message { current } => Some(current),
-                agent_protocol::AgentSessionUpdateEffect::Metadata
-                | agent_protocol::AgentSessionUpdateEffect::Closed { .. }
-                | agent_protocol::AgentSessionUpdateEffect::Tool { .. } => None,
-            },
-            agent_protocol::AgentStreamEffect::Opened { .. }
-            | agent_protocol::AgentStreamEffect::Chunk { .. }
-            | agent_protocol::AgentStreamEffect::Aborted { .. } => None,
-        },
-        agent_protocol::AgentCommandOutcome::Occurrence(_)
-        | agent_protocol::AgentCommandOutcome::Input(_)
-        | agent_protocol::AgentCommandOutcome::Workspace(_) => None,
-    };
-    if retained != Some(current) {
+    if agent_receipt_message_current(&receipt) != Some(current) {
         return Err(DurableError::Integrity {
             code: "agent_message_origin_mismatch".to_owned(),
             message: "Agent message does not equal its admitting receipt outcome".to_owned(),
@@ -9500,19 +9476,61 @@ fn verify_agent_message_origin<R: crate::StateRootResolver + ?Sized>(
     Ok(())
 }
 
+fn agent_receipt_message_current(
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> Option<&agent_protocol::AgentMessageCurrent> {
+    match &receipt.outcome {
+        agent_protocol::AgentCommandOutcome::Session(postcondition) => {
+            match &postcondition.effect {
+                agent_protocol::AgentSessionUpdateEffect::Message { current } => Some(current),
+                agent_protocol::AgentSessionUpdateEffect::Metadata
+                | agent_protocol::AgentSessionUpdateEffect::Closed { .. }
+                | agent_protocol::AgentSessionUpdateEffect::Tool { .. } => None,
+            }
+        }
+        agent_protocol::AgentCommandOutcome::Stream(postcondition) => match &postcondition.effect {
+            agent_protocol::AgentStreamEffect::Finalized { session, .. } => match &session.effect {
+                agent_protocol::AgentSessionUpdateEffect::Message { current } => Some(current),
+                agent_protocol::AgentSessionUpdateEffect::Metadata
+                | agent_protocol::AgentSessionUpdateEffect::Closed { .. }
+                | agent_protocol::AgentSessionUpdateEffect::Tool { .. } => None,
+            },
+            agent_protocol::AgentStreamEffect::Opened { .. }
+            | agent_protocol::AgentStreamEffect::Chunk { .. }
+            | agent_protocol::AgentStreamEffect::Aborted { .. } => None,
+        },
+        agent_protocol::AgentCommandOutcome::Occurrence(_)
+        | agent_protocol::AgentCommandOutcome::Input(_)
+        | agent_protocol::AgentCommandOutcome::Workspace(_) => None,
+    }
+}
+
 fn verify_agent_tool_origin<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     current: &agent_protocol::AgentToolCurrent,
 ) -> DurableResult<()> {
     let (_, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
-    let retained = match &receipt.outcome {
+    if agent_receipt_tool_current(&receipt, &current.tool.tool_call_id) != Some(current) {
+        return Err(DurableError::Integrity {
+            code: "agent_tool_origin_mismatch".to_owned(),
+            message: "Agent tool does not equal its admitting receipt outcome".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn agent_receipt_tool_current<'a>(
+    receipt: &'a agent_protocol::AgentCommandReceipt,
+    tool_call_id: &str,
+) -> Option<&'a agent_protocol::AgentToolCurrent> {
+    match &receipt.outcome {
         agent_protocol::AgentCommandOutcome::Session(postcondition) => {
             match &postcondition.effect {
                 agent_protocol::AgentSessionUpdateEffect::Tool { current } => Some(current),
                 agent_protocol::AgentSessionUpdateEffect::Closed { tools } => tools
                     .iter()
-                    .find(|retained| retained.tool.tool_call_id == current.tool.tool_call_id),
+                    .find(|retained| retained.tool.tool_call_id == tool_call_id),
                 agent_protocol::AgentSessionUpdateEffect::Metadata
                 | agent_protocol::AgentSessionUpdateEffect::Message { .. } => None,
             }
@@ -9531,14 +9549,7 @@ fn verify_agent_tool_origin<R: crate::StateRootResolver + ?Sized>(
         agent_protocol::AgentCommandOutcome::Occurrence(_)
         | agent_protocol::AgentCommandOutcome::Input(_)
         | agent_protocol::AgentCommandOutcome::Workspace(_) => None,
-    };
-    if retained != Some(current) {
-        return Err(DurableError::Integrity {
-            code: "agent_tool_origin_mismatch".to_owned(),
-            message: "Agent tool does not equal its admitting receipt outcome".to_owned(),
-        });
     }
-    Ok(())
 }
 
 fn verify_agent_elicitation_origin<R: crate::StateRootResolver + ?Sized>(
@@ -10538,6 +10549,12 @@ pub(crate) fn verify_agent_target_claim_current_origin<R: crate::StateRootResolv
             code: "agent_target_claim_origin_mismatch".to_owned(),
             message: "Agent target claim is absent from its admitting receipt".to_owned(),
         })?;
+    if matches!(
+        current.phase,
+        agent_protocol::AgentTargetClaimPhase::Materialized
+    ) {
+        verify_materialized_agent_target(manifest, resolver, current, &receipt)?;
+    }
     Ok(transition.source)
 }
 
@@ -10603,7 +10620,12 @@ pub(crate) fn verify_agent_target_claim_receipt_graph<R: crate::StateRootResolve
         let valid = match transition.current.phase {
             agent_protocol::AgentTargetClaimPhase::Materialized => {
                 if current == transition.current {
-                    verify_materialized_agent_target(manifest, resolver, &transition.current)?;
+                    verify_materialized_agent_target(
+                        manifest,
+                        resolver,
+                        &transition.current,
+                        receipt,
+                    )?;
                     true
                 } else {
                     false
@@ -10674,10 +10696,11 @@ fn verify_materialized_agent_target<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     claim: &agent_protocol::AgentTargetClaimCurrent,
+    receipt: &agent_protocol::AgentCommandReceipt,
 ) -> DurableResult<()> {
-    let admitted_by = match &claim.target {
+    match &claim.target {
         agent_protocol::AgentTargetClaimTarget::Message { message_id } => {
-            crate::state_root::load_agent_message_current(
+            let retained = crate::state_root::load_agent_message_current(
                 manifest,
                 resolver,
                 &claim.session_id,
@@ -10686,12 +10709,16 @@ fn verify_materialized_agent_target<R: crate::StateRootResolver + ?Sized>(
             .ok_or_else(|| DurableError::Integrity {
                 code: "agent_target_claim_message_missing".to_owned(),
                 message: "Materialized Agent target claim lost its Message".to_owned(),
-            })?
-            .order
-            .admitted_by
+            })?;
+            if agent_receipt_message_current(receipt) != Some(&retained) {
+                return Err(DurableError::Integrity {
+                    code: "agent_target_claim_message_origin_mismatch".to_owned(),
+                    message: "Materialized Agent Message changed its receipt projection".to_owned(),
+                });
+            }
         }
         agent_protocol::AgentTargetClaimTarget::Tool { tool_call_id } => {
-            let current = crate::state_root::load_agent_tool_current(
+            let retained = crate::state_root::load_agent_tool_current(
                 manifest,
                 resolver,
                 &claim.session_id,
@@ -10702,7 +10729,7 @@ fn verify_materialized_agent_target<R: crate::StateRootResolver + ?Sized>(
                 message: "Materialized Agent target claim lost its Tool".to_owned(),
             })?;
             if !matches!(
-                current.tool.status,
+                retained.tool.status,
                 agent_protocol::ToolCallStatus::Completed
                     | agent_protocol::ToolCallStatus::Failed
                     | agent_protocol::ToolCallStatus::Cancelled
@@ -10713,14 +10740,13 @@ fn verify_materialized_agent_target<R: crate::StateRootResolver + ?Sized>(
                         .to_owned(),
                 });
             }
-            current.admitted_by
+            if agent_receipt_tool_current(receipt, tool_call_id) != Some(&retained) {
+                return Err(DurableError::Integrity {
+                    code: "agent_target_claim_tool_origin_mismatch".to_owned(),
+                    message: "Materialized Agent Tool changed its receipt projection".to_owned(),
+                });
+            }
         }
-    };
-    if admitted_by != claim.admitted_by {
-        return Err(DurableError::Integrity {
-            code: "agent_target_claim_materialized_origin_mismatch".to_owned(),
-            message: "Materialized Agent target changed its admitting command".to_owned(),
-        });
     }
     Ok(())
 }

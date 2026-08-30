@@ -8924,6 +8924,7 @@ fn validate_state_root_sidecars<R: StateRootResolver + ?Sized>(
         staged_machine_root_delta,
         overlay,
     )?;
+    validate_agent_update_operation_set(operations, roots, overlay)?;
     validate_agent_target_claim_operation_set(operations, roots, overlay)?;
     for operation in operations {
         match operation {
@@ -8995,6 +8996,51 @@ fn receipt_target_claim_transitions(
         ),
         _ => Ok(Vec::new()),
     }
+}
+
+fn validate_agent_update_operation_set<R: StateRootResolver + ?Sized>(
+    operations: &[crate::DurableOperation],
+    roots: &StateRoots,
+    overlay: &mut ObjectOverlay<'_, R>,
+) -> DurableResult<()> {
+    use cymule_profile_protocol::agent::AgentCommand;
+
+    let mut expected = Vec::new();
+    for operation in operations {
+        if let crate::DurableOperation::PutAgentCommandReceipt { value: receipt } = operation {
+            let key = cymule_profile_protocol::agent::agent_command_key(&receipt.command_id)?;
+            let command: AgentCommand = map_get(&roots.agent_commands, &key, overlay)?
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_update_operation_command_missing".to_owned(),
+                    message: "Agent update receipt lost its exact command".to_owned(),
+                })?
+                .decode(StateRootLeafKind::AgentCommand)?;
+            receipt.verify_for(&command)?;
+            if let Some(current) = crate::coordinator::agent_receipt_update_current(receipt) {
+                expected.push(current.clone());
+            }
+        }
+    }
+    for operation in operations {
+        let crate::DurableOperation::PutAgentUpdateCurrent { value } = operation else {
+            continue;
+        };
+        if let Some(position) = expected.iter().position(|expected| expected == value) {
+            expected.remove(position);
+        } else {
+            return Err(DurableError::Integrity {
+                code: "agent_update_operation_unowned".to_owned(),
+                message: "Agent update current has no exact owning receipt".to_owned(),
+            });
+        }
+    }
+    if !expected.is_empty() {
+        return Err(DurableError::Integrity {
+            code: "agent_update_operation_missing".to_owned(),
+            message: "Agent receipt did not atomically write every update current".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_agent_target_claim_operation_set<R: StateRootResolver + ?Sized>(
@@ -15617,29 +15663,11 @@ mod tests {
     ) {
         use cymule_profile_protocol::agent::{
             AgentCommand, AgentCommandAction, AgentCommandOutcome, AgentCommandReceipt,
-            AgentCommandSource, AgentMessage, AgentSessionCurrent, AgentSessionEntrySource,
-            AgentSessionUpdateEffect, AgentSessionUpdateSource, AgentUpdate, ContentBlock,
-            MessageRole,
+            AgentCommandSource, AgentMessage, AgentSessionEntrySource, AgentSessionUpdateEffect,
+            AgentSessionUpdateSource, AgentUpdate, ContentBlock, MessageRole,
         };
 
-        let state = crate::DurableState::new(cymule_core::Machine::default().snapshot());
-        let genesis = StateRootManifest::genesis(&state).expect("Agent genesis builds");
-        let mut manifest = genesis.manifest;
-        let mut resolver = TestResolver {
-            pinned: manifest.manifest_id.clone(),
-            ..TestResolver::default()
-        };
-        resolver.insert_all(genesis.objects);
-        let mut session =
-            AgentSessionCurrent::new("session:message-prefix").expect("Agent Session constructs");
-        install_transition(
-            &mut manifest,
-            &mut resolver,
-            &crate::DurableDelta::new(vec![crate::DurableOperation::PutAgentSessionCurrent {
-                value: session.clone(),
-            }])
-            .expect("Agent Session delta seals"),
-        );
+        let (mut manifest, mut resolver, mut session) = agent_message_genesis();
         let mut messages = Vec::new();
         for index in 0..count {
             let update = AgentUpdate::Message {
@@ -15691,31 +15719,109 @@ mod tests {
             let AgentSessionUpdateEffect::Message { current } = post.effect else {
                 panic!("Agent message update returned another effect")
             };
+            let operations = vec![
+                crate::DurableOperation::PutAgentMessageCurrent {
+                    value: current.clone(),
+                },
+                crate::DurableOperation::PutAgentSessionCurrent {
+                    value: post.session.clone(),
+                },
+                crate::DurableOperation::PutAgentUpdateCurrent {
+                    value: post.update.clone(),
+                },
+                crate::DurableOperation::ApplyAgentTargetClaim { value: claim },
+                crate::DurableOperation::PutAgentCommand { value: command },
+                crate::DurableOperation::PutAgentCommandReceipt {
+                    value: Box::new(receipt),
+                },
+            ];
+            if index == 0 {
+                assert_agent_update_operation_closure(
+                    &manifest,
+                    &mut resolver,
+                    &operations,
+                    &post.update,
+                );
+            }
             install_transition(
                 &mut manifest,
                 &mut resolver,
-                &crate::DurableDelta::new(vec![
-                    crate::DurableOperation::PutAgentMessageCurrent {
-                        value: current.clone(),
-                    },
-                    crate::DurableOperation::PutAgentSessionCurrent {
-                        value: post.session.clone(),
-                    },
-                    crate::DurableOperation::PutAgentUpdateCurrent {
-                        value: post.update.clone(),
-                    },
-                    crate::DurableOperation::ApplyAgentTargetClaim { value: claim },
-                    crate::DurableOperation::PutAgentCommand { value: command },
-                    crate::DurableOperation::PutAgentCommandReceipt {
-                        value: Box::new(receipt),
-                    },
-                ])
-                .expect("Agent message delta seals"),
+                &crate::DurableDelta::new(operations).expect("Agent message delta seals"),
             );
             messages.push(current);
             session = post.session;
         }
         (manifest, resolver, session, messages)
+    }
+
+    fn agent_message_genesis() -> (
+        StateRootManifest,
+        TestResolver,
+        cymule_profile_protocol::agent::AgentSessionCurrent,
+    ) {
+        let state = crate::DurableState::new(cymule_core::Machine::default().snapshot());
+        let genesis = StateRootManifest::genesis(&state).expect("Agent genesis builds");
+        let mut manifest = genesis.manifest;
+        let mut resolver = TestResolver {
+            pinned: manifest.manifest_id.clone(),
+            ..TestResolver::default()
+        };
+        resolver.insert_all(genesis.objects);
+        let session =
+            cymule_profile_protocol::agent::AgentSessionCurrent::new("session:message-prefix")
+                .expect("Agent Session constructs");
+        install_transition(
+            &mut manifest,
+            &mut resolver,
+            &crate::DurableDelta::new(vec![crate::DurableOperation::PutAgentSessionCurrent {
+                value: session.clone(),
+            }])
+            .expect("Agent Session delta seals"),
+        );
+        (manifest, resolver, session)
+    }
+
+    fn assert_agent_update_operation_closure(
+        manifest: &StateRootManifest,
+        resolver: &mut TestResolver,
+        operations: &[crate::DurableOperation],
+        update: &cymule_profile_protocol::agent::AgentUpdateCurrent,
+    ) {
+        let missing_update = operations
+            .iter()
+            .filter(|operation| {
+                !matches!(
+                    operation,
+                    crate::DurableOperation::PutAgentUpdateCurrent { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        let error = manifest
+            .apply(
+                &crate::DurableDelta::new(missing_update).expect("missing-update delta seals"),
+                resolver,
+            )
+            .expect_err("receipt without its update current is rejected before commit");
+        assert!(matches!(
+            error,
+            DurableError::Integrity { ref code, .. } if code == "agent_update_operation_missing"
+        ));
+
+        let mut extra_update = operations.to_vec();
+        let mut orphan = update.clone();
+        orphan.update_id = "update:message:orphan".to_owned();
+        extra_update.push(crate::DurableOperation::PutAgentUpdateCurrent { value: orphan });
+        let error = manifest
+            .apply(
+                &crate::DurableDelta::new(extra_update).expect("extra-update delta seals"),
+                resolver,
+            )
+            .expect_err("update current without an exact receipt is rejected before commit");
+        assert!(matches!(
+            error,
+            DurableError::Integrity { ref code, .. } if code == "agent_update_operation_unowned"
+        ));
     }
 
     fn agent_message_query(
