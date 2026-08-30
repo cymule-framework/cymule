@@ -9582,6 +9582,7 @@ fn verify_agent_stream_origin<R: crate::StateRootResolver + ?Sized>(
     resolver: &mut R,
     current: &agent_protocol::AgentStreamCurrent,
 ) -> DurableResult<()> {
+    current.verify()?;
     if let Some(reservation) = current.publication_reservation.as_ref() {
         reservation.verify()?;
         let mut base = current.clone();
@@ -12961,6 +12962,12 @@ mod agent_stream_publication_reservation_tests {
     const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn initialized_with_open_stream() -> DurableCoordinator<crate::MemoryStore> {
+        initialized_with_open_stream_target("message:external-reservation")
+    }
+
+    fn initialized_with_open_stream_target(
+        message_id: &str,
+    ) -> DurableCoordinator<crate::MemoryStore> {
         let mut coordinator = DurableCoordinator::open(crate::MemoryStore::new())
             .expect("reservation coordinator opens")
             .initialize()
@@ -12971,7 +12978,7 @@ mod agent_stream_publication_reservation_tests {
                 session_id: SESSION_ID.to_owned(),
                 stream_id: STREAM_ID.to_owned(),
                 target: AgentStreamTarget::Message {
-                    message_id: "message:external-reservation".to_owned(),
+                    message_id: message_id.to_owned(),
                     role: MessageRole::Agent,
                 },
                 delivery: AgentStreamDelivery::ExternalResource {
@@ -13051,6 +13058,33 @@ mod agent_stream_publication_reservation_tests {
             }),
         )
         .expect("Finalize command seals")
+    }
+
+    fn retain_unknown_publication(
+        coordinator: &mut DurableCoordinator<crate::MemoryStore>,
+    ) -> agent_protocol::AgentStreamCurrent {
+        let command = finalize_command(coordinator);
+        let mut providers = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([ProviderOutcome::Unknown]),
+            observe_outcome: ProviderOutcome::Unknown,
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        assert!(matches!(
+            coordinator
+                .finalize_agent_stream(&command, &mut providers)
+                .expect("unknown publication retains its reservation"),
+            AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { .. }
+        ));
+        coordinator
+            .read_current_state_root(|manifest, resolver| {
+                require_agent_stream(manifest, resolver, SESSION_ID, STREAM_ID)
+            })
+            .expect("reserved stream current reads")
     }
 
     fn gc_and_delete(
@@ -13494,6 +13528,36 @@ mod agent_stream_publication_reservation_tests {
             .expect("unknown stream rereads");
         assert_eq!(unknown_stream.state, agent_protocol::AgentStreamState::Open);
         assert!(unknown_stream.publication_reservation.is_some());
+    }
+
+    #[test]
+    fn foreign_target_reservation_is_integrity_at_durable_origin() {
+        let mut coordinator_a = initialized_with_open_stream_target("message:target-a");
+        let mut current_a = retain_unknown_publication(&mut coordinator_a);
+        let mut coordinator_b = initialized_with_open_stream_target("message:target-b");
+        let current_b = retain_unknown_publication(&mut coordinator_b);
+        let reservation_b = current_b
+            .publication_reservation
+            .expect("target B reservation exists");
+        reservation_b
+            .verify()
+            .expect("target B reservation is self-consistent");
+        assert!(matches!(
+            reservation_b.intent.target(),
+            AgentStreamTarget::Message { message_id, .. } if message_id == "message:target-b"
+        ));
+        assert!(matches!(
+            &current_a.target,
+            AgentStreamTarget::Message { message_id, .. } if message_id == "message:target-a"
+        ));
+        current_a.publication_reservation = Some(reservation_b);
+
+        let error = coordinator_a
+            .read_current_state_root(|manifest, resolver| {
+                verify_agent_stream_origin(manifest, resolver, &current_a)
+            })
+            .expect_err("Durable origin must reject a cross-target reservation");
+        assert!(matches!(error, DurableError::Integrity { .. }));
     }
 
     #[test]

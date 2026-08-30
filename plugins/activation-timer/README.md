@@ -26,6 +26,13 @@ is within Core's artifact limit and the one-target JSON is within its exact
 returns `Integrity` from receive, replay, selection readback, and
 acknowledgement without copying the BLOB into Rust.
 
+The same gate applies to TEXT. Activation and timer IDs are returned only as
+capped 513-scalar projections and must still satisfy the exact
+512-scalar/2,048-byte identity contract; schedule digests are capped at 65
+scalars and must match the exact 64-byte lowercase-hex digest. Oversized
+generation-`/2` TEXT therefore fails before Rust can allocate the complete
+field.
+
 Retained target selections always redeliver first and remain independent of a
 later caller's target limit; fresh selections are checked against their own
 call limit before retention. Fresh due-source discovery uses a fixed 256-row
@@ -37,8 +44,10 @@ inserted earlier rows remain visible. The scan page contains only capped
 activation identity, due-time, and value-length metadata. The driver loads and
 authenticates one complete row at a time, so a 256-row page never accumulates
 256 timer payloads in memory. Fresh and retained queries use
-`acknowledged = 0` and the due composite index; exact replay and acknowledgement
-reads use the activation primary index without a temporary sort.
+`acknowledged = 0` with separate `selected_wait_ids IS NULL` and `IS NOT NULL`
+partial due indexes. Retained replay therefore skips any size unselected
+prefix; exact replay and acknowledgement reads use the activation primary
+index without a temporary sort.
 
 Activation and timer identities share Cymule's cross-language boundary: 1..=512
 Unicode scalar values with no control character. Multi-byte identities are not

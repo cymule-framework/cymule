@@ -213,6 +213,13 @@ provider product remains non-Serde. The provider accepts only that intent,
 publishes idempotently, and may return only Published with exact readback,
 NotApplied, or Unknown.
 
+The retained reservation intent target MUST equal the immutable stream current
+target exactly. A separately self-consistent intent/reservation for another
+message or Tool target is a cross-edge integrity failure even when Session,
+stream, resolver, content, and all content IDs verify. The historical
+`source_digest` is not recomputed through a second authority to enforce this
+edge.
+
 Before provider I/O Durable derives the semantic Resource handle, physical
 retention family, and exact `ResourceProfilePin` from the immutable Open
 content. One StateRoot CAS persists the publication reservation on the stream,

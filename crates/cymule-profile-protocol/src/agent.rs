@@ -4494,10 +4494,11 @@ impl AgentStreamCurrent {
                 if reservation.intent.session_id() != self.session_id
                     || reservation.intent.stream_id() != self.stream_id
                     || reservation.intent.resolver_binding() != resolver_binding
+                    || reservation.intent.target() != &self.target
                     || reservation.intent.content() != content
                 {
                     return Err(ProtocolError::IdentityMismatch(
-                        "Agent stream publication reservation changed its owner or delivery"
+                        "Agent stream publication reservation changed its owner, target, or delivery"
                             .to_owned(),
                     ));
                 }
@@ -12912,6 +12913,43 @@ mod tests {
                 .expect("Abort Resource release resolves"),
             Some(&expected_release)
         );
+    }
+
+    #[test]
+    fn external_stream_current_rejects_a_self_consistent_foreign_target_reservation() {
+        let (command_a, _, source_a) = external_stream_finalize_fixture_for(
+            "session:target-edge",
+            "stream:target-edge",
+            "message:target-a",
+        );
+        let (source_a, _) = reserve_external_stream_source(&command_a, source_a);
+        let (command_b, _, source_b) = external_stream_finalize_fixture_for(
+            "session:target-edge",
+            "stream:target-edge",
+            "message:target-b",
+        );
+        assert_eq!(command_a, command_b);
+        let (_, reservation_b) = reserve_external_stream_source(&command_b, source_b);
+        reservation_b
+            .verify()
+            .expect("target B reservation is independently self-consistent");
+        assert!(matches!(
+            reservation_b.intent.target(),
+            AgentStreamTarget::Message { message_id, .. } if message_id == "message:target-b"
+        ));
+
+        let AgentStreamSource::Finalize { mut stream, .. } = source_a else {
+            panic!("target A fixture is an external Finalize source")
+        };
+        assert!(matches!(
+            &stream.target,
+            AgentStreamTarget::Message { message_id, .. } if message_id == "message:target-a"
+        ));
+        stream.publication_reservation = Some(Box::new(reservation_b));
+        assert!(matches!(
+            stream.verify(),
+            Err(ProtocolError::IdentityMismatch(message)) if message.contains("target")
+        ));
     }
 
     #[test]

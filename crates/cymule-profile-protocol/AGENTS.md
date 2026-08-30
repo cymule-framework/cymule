@@ -87,7 +87,9 @@
   persists its content-derived publication reservation plus a `Reserved` profile
   pin in the same physical retention family. Only a fresh reservation or
   NotApplied rearm acknowledgement owns one publish call; reopen observes a
-  claimed attempt. Terminal finalization promotes that exact reservation without
+  claimed attempt. The reservation intent's immutable target must equal the
+  stream current target exactly, in addition to matching Session, stream,
+  resolver, and content. Terminal finalization promotes that exact reservation without
   changing the family obligation count. Promotion binds the family's current
   count, not the reservation-time aggregate as a lower bound. A public Abort
   carries required-nullable Resource source/effect members: only durable

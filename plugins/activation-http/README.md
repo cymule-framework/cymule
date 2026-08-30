@@ -36,6 +36,14 @@ can call parked-wait selection or return a delivery. Direct row corruption is
 therefore an `Integrity` failure rather than a new signal interpretation or an
 M1 activation candidate.
 
+SQLite length metadata gates every variable column before Rust allocation.
+Activation and signal keys use the 512-scalar/2,048-byte identity ceiling,
+request digests use exactly 64 lowercase hexadecimal bytes, values use the
+2 MiB ingress contract, and selected-target JSON uses the exact framework
+target-count formula. Queries return only capped TEXT projections or in-bound
+BLOBs; oversized corruption remains `Integrity` across hot, replay,
+durable-readback, and acknowledgement paths.
+
 The durable driver redelivers retained selections first. A new target set is
 checked against the bound of the exact call that selected it before SQLite can
 retain it. After that point the complete retained set is the selection
@@ -46,11 +54,12 @@ and uses the SQLite `(acknowledged, signal_key, activation_id)` index, so an
 arbitrary prefix of unrelated pending requests cannot starve a later matching
 activation.
 
-Hot fresh and retained reads use the exact `acknowledged = 0` predicate, which
-keeps their ordering on the pending composite indexes even behind a large
-acknowledged prefix. Duplicate-ingress and acknowledgement point reads use the
-activation primary index; none of these paths permits a full table scan or
-temporary B-tree.
+Hot fresh and retained reads use the exact `acknowledged = 0` predicate and
+separate partial indexes for `selected_wait_ids IS NULL` and `IS NOT NULL`.
+An arbitrarily large unselected prefix therefore cannot delay retained replay,
+and retained rows never pollute fresh matching. Duplicate-ingress and
+acknowledgement point reads use the activation primary index; none of these
+paths permits a full table scan or temporary B-tree.
 
 Every selected wait identity is an exact lowercase SHA-256 content ID. A
 forged new identity fails before SQLite retains the target set; a malformed

@@ -26,6 +26,10 @@ use tokio::sync::oneshot;
 const HTTP_SIGNAL_KEY_SCAN_LIMIT: usize = 1_024;
 const HTTP_SIGNAL_BODY_LIMIT: usize = 2 * 1024 * 1024;
 const HTTP_ACKNOWLEDGEMENT_WAIT_WINDOW: Duration = Duration::from_secs(30);
+const MAX_IDENTITY_SCALARS: usize = 512;
+const MAX_IDENTITY_UTF8_BYTES: usize = MAX_IDENTITY_SCALARS * 4;
+const CANONICAL_DIGEST_BYTES: usize = 64;
+const MAX_HTTP_SELECTED_WAIT_IDS_BYTES: usize = 1 + MAX_WAIT_DELIVERY_TARGETS * 74;
 
 /// Exact physical generation accepted by the durable HTTP signal spool.
 pub const HTTP_SPOOL_SCHEMA_VERSION: &str = "cymule.activation-http-spool/1";
@@ -57,33 +61,65 @@ const HTTP_SPOOL_SCHEMA: [(&str, &str, &str, &str); 4] = [
     ),
     (
         "index",
-        "cymule_http_signals_pending",
+        "cymule_http_signals_retained",
         "cymule_http_signals",
-        "CREATE INDEX cymule_http_signals_pending
-            ON cymule_http_signals(acknowledged, activation_id)",
+        "CREATE INDEX cymule_http_signals_retained
+            ON cymule_http_signals(acknowledged, activation_id)
+            WHERE selected_wait_ids IS NOT NULL",
     ),
     (
         "index",
-        "cymule_http_signals_matching",
+        "cymule_http_signals_fresh",
         "cymule_http_signals",
-        "CREATE INDEX cymule_http_signals_matching
-            ON cymule_http_signals(acknowledged, signal_key, activation_id)",
+        "CREATE INDEX cymule_http_signals_fresh
+            ON cymule_http_signals(acknowledged, signal_key, activation_id)
+            WHERE selected_wait_ids IS NULL",
     ),
 ];
 
-const HTTP_RETAINED_READ_SQL: &str = "SELECT activation_id, signal_key, value_json, request_digest,
-            selected_wait_ids, acknowledged
+const HTTP_RETAINED_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
+            length(activation_id), substr(activation_id, 1, 513),
+            length(CAST(signal_key AS BLOB)),
+            length(signal_key), substr(signal_key, 1, 513),
+            length(value_json),
+            CASE WHEN length(value_json) <= ?1 THEN value_json ELSE NULL END,
+            length(CAST(request_digest AS BLOB)),
+            length(request_digest), substr(request_digest, 1, 65),
+            length(selected_wait_ids),
+            CASE WHEN selected_wait_ids IS NULL THEN NULL
+                 WHEN length(selected_wait_ids) <= ?2 THEN selected_wait_ids ELSE NULL END,
+            acknowledged
      FROM cymule_http_signals
      WHERE acknowledged = 0 AND selected_wait_ids IS NOT NULL
      ORDER BY activation_id LIMIT 1";
-const HTTP_FRESH_READ_SQL: &str = "SELECT activation_id, signal_key, value_json, request_digest,
-            selected_wait_ids, acknowledged
+const HTTP_FRESH_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
+            length(activation_id), substr(activation_id, 1, 513),
+            length(CAST(signal_key AS BLOB)),
+            length(signal_key), substr(signal_key, 1, 513),
+            length(value_json),
+            CASE WHEN length(value_json) <= ?2 THEN value_json ELSE NULL END,
+            length(CAST(request_digest AS BLOB)),
+            length(request_digest), substr(request_digest, 1, 65),
+            length(selected_wait_ids),
+            CASE WHEN selected_wait_ids IS NULL THEN NULL
+                 WHEN length(selected_wait_ids) <= ?3 THEN selected_wait_ids ELSE NULL END,
+            acknowledged
      FROM cymule_http_signals
      WHERE acknowledged = 0 AND selected_wait_ids IS NULL
        AND signal_key = ?1
      ORDER BY activation_id LIMIT 1";
-const HTTP_POINT_READ_SQL: &str = "SELECT activation_id, signal_key, value_json, request_digest,
-            selected_wait_ids, acknowledged
+const HTTP_POINT_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
+            length(activation_id), substr(activation_id, 1, 513),
+            length(CAST(signal_key AS BLOB)),
+            length(signal_key), substr(signal_key, 1, 513),
+            length(value_json),
+            CASE WHEN length(value_json) <= ?2 THEN value_json ELSE NULL END,
+            length(CAST(request_digest AS BLOB)),
+            length(request_digest), substr(request_digest, 1, 65),
+            length(selected_wait_ids),
+            CASE WHEN selected_wait_ids IS NULL THEN NULL
+                 WHEN length(selected_wait_ids) <= ?3 THEN selected_wait_ids ELSE NULL END,
+            acknowledged
      FROM cymule_http_signals WHERE activation_id = ?1";
 
 /// Frozen HTTP signal request.
@@ -144,10 +180,18 @@ struct DurableWaiter {
 }
 
 struct StoredSignal {
+    activation_id_bytes: i64,
+    activation_id_scalars: i64,
     activation_id: String,
+    key_bytes: i64,
+    key_scalars: i64,
     key: String,
-    value: Vec<u8>,
+    value_bytes: i64,
+    value: Option<Vec<u8>>,
+    request_digest_bytes: i64,
+    request_digest_scalars: i64,
     request_digest: String,
+    selected_bytes: Option<i64>,
     selected: Option<Vec<u8>>,
     acknowledged: i64,
 }
@@ -337,7 +381,11 @@ impl SqliteHttpSignalDriver {
     fn retained_delivery(&self) -> DurableResult<Option<WaitSourceDelivery>> {
         let retained: Option<StoredSignal> = self
             .connection
-            .query_row(HTTP_RETAINED_READ_SQL, [], stored_signal_from_row)
+            .query_row(
+                HTTP_RETAINED_READ_SQL,
+                params![http_value_byte_limit(), http_selected_wait_ids_byte_limit()],
+                stored_signal_from_row,
+            )
             .optional()
             .map_err(contention)?;
         let Some(retained) = retained else {
@@ -362,6 +410,12 @@ impl SqliteHttpSignalDriver {
         }
         validate_new_targets(&selection.wait_ids, max_targets)?;
         let bytes = cymule_core::canonical_bytes(&selection.wait_ids)?;
+        if bytes.len() > MAX_HTTP_SELECTED_WAIT_IDS_BYTES {
+            return Err(DurableError::Validation(format!(
+                "HTTP selected wait IDs have {} canonical bytes; maximum is {MAX_HTTP_SELECTED_WAIT_IDS_BYTES}",
+                bytes.len()
+            )));
+        }
         let selected_now = self
             .connection
             .execute(
@@ -373,7 +427,15 @@ impl SqliteHttpSignalDriver {
             .map_err(contention)?;
         let retained: StoredSignal = self
             .connection
-            .query_row(HTTP_POINT_READ_SQL, [activation_id], stored_signal_from_row)
+            .query_row(
+                HTTP_POINT_READ_SQL,
+                params![
+                    activation_id,
+                    http_value_byte_limit(),
+                    http_selected_wait_ids_byte_limit()
+                ],
+                stored_signal_from_row,
+            )
             .map_err(contention)?;
         let retained = verify_stored_signal(retained)?;
         let WaitActivationSource::Signal { key } = source else {
@@ -450,7 +512,15 @@ impl WaitSourceDriver for SqliteHttpSignalDriver {
             };
             let row: Option<StoredSignal> = self
                 .connection
-                .query_row(HTTP_FRESH_READ_SQL, [&key], stored_signal_from_row)
+                .query_row(
+                    HTTP_FRESH_READ_SQL,
+                    params![
+                        &key,
+                        http_value_byte_limit(),
+                        http_selected_wait_ids_byte_limit()
+                    ],
+                    stored_signal_from_row,
+                )
                 .optional()
                 .map_err(contention)?;
             let Some(row) = row else {
@@ -491,7 +561,15 @@ impl WaitSourceDriver for SqliteHttpSignalDriver {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(contention)?;
         let existing: Option<StoredSignal> = transaction
-            .query_row(HTTP_POINT_READ_SQL, [activation_id], stored_signal_from_row)
+            .query_row(
+                HTTP_POINT_READ_SQL,
+                params![
+                    activation_id,
+                    http_value_byte_limit(),
+                    http_selected_wait_ids_byte_limit()
+                ],
+                stored_signal_from_row,
+            )
             .optional()
             .map_err(contention)?;
         let Some(existing) = existing else {
@@ -614,7 +692,15 @@ async fn read_acknowledged_async(
 fn read_acknowledged(path: &Path, activation_id: &str) -> DurableResult<bool> {
     let connection = open_spool(path, false)?;
     let stored = connection
-        .query_row(HTTP_POINT_READ_SQL, [activation_id], stored_signal_from_row)
+        .query_row(
+            HTTP_POINT_READ_SQL,
+            params![
+                activation_id,
+                http_value_byte_limit(),
+                http_selected_wait_ids_byte_limit()
+            ],
+            stored_signal_from_row,
+        )
         .optional()
         .map_err(contention)?
         .ok_or_else(|| {
@@ -663,10 +749,40 @@ fn request_digest(request: &HttpSignalRequest) -> DurableResult<String> {
 }
 
 fn verify_stored_signal(stored: StoredSignal) -> DurableResult<VerifiedSignal> {
-    let value = decode_canonical_http_row(&stored.value, "value_json")?;
+    let activation_id = require_gated_http_text(
+        "activation_id",
+        stored.activation_id_bytes,
+        stored.activation_id_scalars,
+        stored.activation_id,
+        MAX_IDENTITY_UTF8_BYTES,
+        MAX_IDENTITY_SCALARS,
+    )?;
+    let key = require_gated_http_text(
+        "signal_key",
+        stored.key_bytes,
+        stored.key_scalars,
+        stored.key,
+        MAX_IDENTITY_UTF8_BYTES,
+        MAX_IDENTITY_SCALARS,
+    )?;
+    let value_bytes = require_gated_http_blob(
+        "value_json",
+        stored.value_bytes,
+        stored.value,
+        HTTP_SIGNAL_BODY_LIMIT,
+    )?;
+    let value = decode_canonical_http_row(&value_bytes, "value_json")?;
+    let stored_request_digest = require_gated_http_text(
+        "request_digest",
+        stored.request_digest_bytes,
+        stored.request_digest_scalars,
+        stored.request_digest,
+        CANONICAL_DIGEST_BYTES,
+        CANONICAL_DIGEST_BYTES,
+    )?;
     let request = HttpSignalRequest {
-        activation_id: stored.activation_id,
-        key: stored.key,
+        activation_id,
+        key,
         value,
     };
     validate_request(&request)
@@ -674,7 +790,7 @@ fn verify_stored_signal(stored: StoredSignal) -> DurableResult<VerifiedSignal> {
     let digest = request_digest(&request).map_err(|error| {
         http_row_integrity("http_signal_request_digest_invalid", error.to_string())
     })?;
-    if stored.request_digest != digest {
+    if stored_request_digest != digest {
         return Err(http_row_integrity(
             "http_signal_request_digest_mismatch",
             format!(
@@ -683,16 +799,28 @@ fn verify_stored_signal(stored: StoredSignal) -> DurableResult<VerifiedSignal> {
             ),
         ));
     }
-    let selected = stored
-        .selected
-        .map(|bytes| -> DurableResult<BTreeSet<String>> {
+    let selected = match (stored.selected_bytes, stored.selected) {
+        (None, None) => None,
+        (Some(length), bytes) => {
+            let bytes = require_gated_http_blob(
+                "selected_wait_ids",
+                length,
+                bytes,
+                MAX_HTTP_SELECTED_WAIT_IDS_BYTES,
+            )?;
             let wait_ids = decode_canonical_http_row(&bytes, "selected_wait_ids")?;
             validate_retained_targets(&wait_ids).map_err(|error| {
                 http_row_integrity("http_signal_selected_targets_invalid", error.to_string())
             })?;
-            Ok(wait_ids)
-        })
-        .transpose()?;
+            Some(wait_ids)
+        }
+        (None, Some(_)) => {
+            return Err(http_row_integrity(
+                "http_signal_selected_targets_length_missing",
+                "HTTP selected_wait_ids has bytes without SQLite length metadata",
+            ));
+        }
+    };
     let acknowledged = match stored.acknowledged {
         0 => false,
         1 => true,
@@ -718,12 +846,20 @@ fn verify_stored_signal(stored: StoredSignal) -> DurableResult<VerifiedSignal> {
 
 fn stored_signal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSignal> {
     Ok(StoredSignal {
-        activation_id: row.get(0)?,
-        key: row.get(1)?,
-        value: row.get(2)?,
-        request_digest: row.get(3)?,
-        selected: row.get(4)?,
-        acknowledged: row.get(5)?,
+        activation_id_bytes: row.get(0)?,
+        activation_id_scalars: row.get(1)?,
+        activation_id: row.get(2)?,
+        key_bytes: row.get(3)?,
+        key_scalars: row.get(4)?,
+        key: row.get(5)?,
+        value_bytes: row.get(6)?,
+        value: row.get(7)?,
+        request_digest_bytes: row.get(8)?,
+        request_digest_scalars: row.get(9)?,
+        request_digest: row.get(10)?,
+        selected_bytes: row.get(11)?,
+        selected: row.get(12)?,
+        acknowledged: row.get(13)?,
     })
 }
 
@@ -800,6 +936,88 @@ fn validate_retained_targets(wait_ids: &BTreeSet<String>) -> DurableResult<()> {
 
 fn validate_wait_id(wait_id: &str) -> DurableResult<()> {
     cymule_core::validate_content_id("HTTP wait identity", wait_id).map_err(Into::into)
+}
+
+fn http_value_byte_limit() -> i64 {
+    i64::try_from(HTTP_SIGNAL_BODY_LIMIT).expect("HTTP value byte limit fits SQLite INTEGER")
+}
+
+fn http_selected_wait_ids_byte_limit() -> i64 {
+    i64::try_from(MAX_HTTP_SELECTED_WAIT_IDS_BYTES)
+        .expect("HTTP selected wait-ID byte limit fits SQLite INTEGER")
+}
+
+fn require_gated_http_text(
+    field: &'static str,
+    sqlite_bytes: i64,
+    sqlite_scalars: i64,
+    value: String,
+    maximum_bytes: usize,
+    maximum_scalars: usize,
+) -> DurableResult<String> {
+    let bytes = usize::try_from(sqlite_bytes).map_err(|error| {
+        http_row_integrity(
+            "http_signal_text_length_invalid",
+            format!("HTTP {field} has invalid byte-length metadata: {error}"),
+        )
+    })?;
+    let scalars = usize::try_from(sqlite_scalars).map_err(|error| {
+        http_row_integrity(
+            "http_signal_text_length_invalid",
+            format!("HTTP {field} has invalid scalar-length metadata: {error}"),
+        )
+    })?;
+    if bytes > maximum_bytes || scalars > maximum_scalars {
+        return Err(http_row_integrity(
+            "http_signal_text_too_large",
+            format!(
+                "HTTP {field} has {bytes} bytes and {scalars} scalars; maxima are {maximum_bytes} bytes and {maximum_scalars} scalars"
+            ),
+        ));
+    }
+    if value.len() != bytes || value.chars().count() != scalars {
+        return Err(http_row_integrity(
+            "http_signal_text_projection_mismatch",
+            format!("HTTP {field} does not match its SQLite length metadata"),
+        ));
+    }
+    Ok(value)
+}
+
+fn require_gated_http_blob(
+    field: &'static str,
+    sqlite_length: i64,
+    value: Option<Vec<u8>>,
+    maximum: usize,
+) -> DurableResult<Vec<u8>> {
+    let length = usize::try_from(sqlite_length).map_err(|error| {
+        http_row_integrity(
+            "http_signal_blob_length_invalid",
+            format!("HTTP {field} has invalid SQLite length metadata: {error}"),
+        )
+    })?;
+    if length > maximum {
+        return Err(http_row_integrity(
+            "http_signal_blob_too_large",
+            format!("HTTP {field} has {length} bytes; maximum is {maximum}"),
+        ));
+    }
+    let value = value.ok_or_else(|| {
+        http_row_integrity(
+            "http_signal_blob_gate_missing",
+            format!("HTTP {field} passed its length bound but SQLite returned no bytes"),
+        )
+    })?;
+    if value.len() != length {
+        return Err(http_row_integrity(
+            "http_signal_blob_length_mismatch",
+            format!(
+                "HTTP {field} materialized {} bytes but SQLite declared {length}",
+                value.len()
+            ),
+        ));
+    }
+    Ok(value)
 }
 
 fn open_spool(path: &Path, allow_initialize: bool) -> DurableResult<Connection> {
@@ -969,13 +1187,23 @@ fn persist_request(
     let mut connection = open_spool(path, false)?;
     let digest = request_digest(request)?;
     let value = cymule_core::canonical_bytes(&request.value)?;
+    if value.len() > HTTP_SIGNAL_BODY_LIMIT {
+        return Err(DurableError::Validation(format!(
+            "HTTP signal value has {} canonical bytes; maximum is {HTTP_SIGNAL_BODY_LIMIT}",
+            value.len()
+        )));
+    }
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(contention)?;
     let existing: Option<StoredSignal> = transaction
         .query_row(
             HTTP_POINT_READ_SQL,
-            [&request.activation_id],
+            params![
+                &request.activation_id,
+                http_value_byte_limit(),
+                http_selected_wait_ids_byte_limit()
+            ],
             stored_signal_from_row,
         )
         .optional()
@@ -1078,12 +1306,126 @@ mod tests {
         let (_router, driver) =
             durable_signal_router(directory.path().join("http.sqlite"), 1, AllowAll)
                 .expect("HTTP spool opens");
-        let retained = query_plan(&driver.connection, HTTP_RETAINED_READ_SQL, []);
-        assert_indexed(&retained, "cymule_http_signals_pending");
-        let fresh = query_plan(&driver.connection, HTTP_FRESH_READ_SQL, ["signal:test"]);
-        assert_indexed(&fresh, "cymule_http_signals_matching");
-        let point = query_plan(&driver.connection, HTTP_POINT_READ_SQL, ["activation:test"]);
+        let retained = query_plan(
+            &driver.connection,
+            HTTP_RETAINED_READ_SQL,
+            params![http_value_byte_limit(), http_selected_wait_ids_byte_limit()],
+        );
+        assert_indexed(&retained, "cymule_http_signals_retained");
+        let fresh = query_plan(
+            &driver.connection,
+            HTTP_FRESH_READ_SQL,
+            params![
+                "signal:test",
+                http_value_byte_limit(),
+                http_selected_wait_ids_byte_limit()
+            ],
+        );
+        assert_indexed(&fresh, "cymule_http_signals_fresh");
+        let point = query_plan(
+            &driver.connection,
+            HTTP_POINT_READ_SQL,
+            params![
+                "activation:test",
+                http_value_byte_limit(),
+                http_selected_wait_ids_byte_limit()
+            ],
+        );
         assert_indexed(&point, "sqlite_autoindex_cymule_http_signals_1");
+        let digest = request_digest(&HttpSignalRequest {
+            activation_id: "activation:digest".to_owned(),
+            key: "signal:digest".to_owned(),
+            value: serde_json::json!(true),
+        })
+        .expect("request digest derives");
+        assert_eq!(digest.len(), CANONICAL_DIGEST_BYTES);
+        assert!(
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+        assert!(HTTP_POINT_READ_SQL.contains("substr(request_digest, 1, 65)"));
+    }
+
+    #[test]
+    fn oversized_http_point_rows_reject_replay_readback_and_acknowledgement() {
+        for (field, mutation, length, expected_code) in [
+            (
+                "signal_key",
+                "signal_key = printf('%.*c', ?1, 'x')",
+                2_049_i64,
+                "http_signal_text_too_large",
+            ),
+            (
+                "request_digest",
+                "request_digest = printf('%.*c', ?1, 'x')",
+                65_i64,
+                "http_signal_text_too_large",
+            ),
+            (
+                "value_json",
+                "value_json = zeroblob(?1)",
+                2_097_153_i64,
+                "http_signal_blob_too_large",
+            ),
+            (
+                "selected_wait_ids",
+                "selected_wait_ids = zeroblob(?1)",
+                i64::try_from(MAX_HTTP_SELECTED_WAIT_IDS_BYTES + 1)
+                    .expect("selected target bound fits SQLite INTEGER"),
+                "http_signal_blob_too_large",
+            ),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary directory creates");
+            let database = directory.path().join(format!("point-{field}.sqlite"));
+            let (_router, mut driver) =
+                durable_signal_router(&database, 1, AllowAll).expect("HTTP spool opens");
+            let request = HttpSignalRequest {
+                activation_id: "activation:point".to_owned(),
+                key: "signal:point".to_owned(),
+                value: serde_json::json!(true),
+            };
+            assert_eq!(
+                persist_request(&database, &request).expect("request persists"),
+                PersistRequestOutcome::Pending
+            );
+            driver
+                .connection
+                .execute(
+                    "UPDATE cymule_http_signals SET selected_wait_ids = ?1",
+                    [
+                        cymule_core::canonical_bytes(&BTreeSet::from([test_wait_id("point")]))
+                            .expect("selected target encodes"),
+                    ],
+                )
+                .expect("selected target installs");
+            driver
+                .connection
+                .execute(
+                    &format!("UPDATE cymule_http_signals SET {mutation}"),
+                    [length],
+                )
+                .expect("oversized point field installs");
+
+            let errors = [
+                persist_request(&database, &request)
+                    .expect_err("duplicate ingress rejects oversized point row"),
+                read_acknowledged(&database, &request.activation_id)
+                    .expect_err("acknowledgement readback rejects oversized point row"),
+                driver
+                    .acknowledge(&request.activation_id)
+                    .expect_err("acknowledgement rejects oversized point row"),
+            ];
+            for error in errors {
+                assert!(
+                    matches!(
+                        error,
+                        DurableError::Integrity { ref code, .. } if code == expected_code
+                    ),
+                    "{field} produced {error:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

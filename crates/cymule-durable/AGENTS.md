@@ -302,7 +302,9 @@
   physical-family current; missing or tampered sidecars are Integrity. A
   reservation-phase stream read authenticates its original Open receipt plus
   exact retained unterminated Finalize command, not equality with the old Open
-  projection alone.
+  projection alone. It also rejects a self-consistent reservation whose intent
+  target differs from the immutable stream target; no replacement source hash
+  or compatibility derivation substitutes for that direct edge.
   Known post-publication conflicts remain typed conflicts rather than world
   Unknown. Agent publication reconciliation retains its expected original intent and
   rechecks semantic touched keys. Unknown evidence is append-only; identical

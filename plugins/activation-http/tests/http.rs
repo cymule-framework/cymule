@@ -470,6 +470,35 @@ fn malformed_http_generation_is_rejected_without_mutation() {
     assert_eq!(meta_count, 0, "rejection must not heal the generation");
 }
 
+#[test]
+fn nonpartial_http_indexes_are_not_the_current_exact_generation() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("nonpartial-http.sqlite");
+    drop(durable_signal_router(&database, 1, AllowAll).expect("current HTTP spool initializes"));
+    let connection = Connection::open(&database).expect("HTTP spool opens for index tamper");
+    connection
+        .execute_batch(
+            "DROP INDEX cymule_http_signals_retained;
+             DROP INDEX cymule_http_signals_fresh;
+             CREATE INDEX cymule_http_signals_pending
+                ON cymule_http_signals(acknowledged, activation_id);
+             CREATE INDEX cymule_http_signals_matching
+                ON cymule_http_signals(acknowledged, signal_key, activation_id);",
+        )
+        .expect("nonpartial predecessor indexes install");
+    drop(connection);
+    let before = fs::read(&database).expect("tampered spool bytes read");
+    let Err(error) = durable_signal_router(&database, 1, AllowAll) else {
+        panic!("nonpartial indexes must not open as the current generation");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(UNSUPPORTED_STORE_GENERATION_CODE)
+    );
+    assert_eq!(fs::read(&database).expect("spool bytes reread"), before);
+}
+
 #[tokio::test]
 async fn every_http_handler_connection_revalidates_the_generation() {
     let directory = tempdir().expect("temporary directory creates");
@@ -877,6 +906,136 @@ fn forged_retained_wait_id_is_integrity() {
         driver.receive(&mut view, 1),
         Err(DurableError::Integrity { .. })
     ));
+    assert!(view.selection_requests.is_empty());
+}
+
+#[test]
+fn oversized_http_columns_are_gated_before_fresh_retained_and_ack_reads() {
+    let selected_limit =
+        i64::try_from(1 + cymule_durable_protocol::MAX_WAIT_DELIVERY_TARGETS * 74 + 1)
+            .expect("selected target bound fits SQLite INTEGER");
+    for retained in [false, true] {
+        for (field, mutation, length, expected_code) in [
+            (
+                "activation_id",
+                "activation_id = printf('%.*c', ?1, 'x')",
+                2_049,
+                "http_signal_text_too_large",
+            ),
+            (
+                "signal_key",
+                "signal_key = printf('%.*c', ?1, 'x')",
+                2_049,
+                "http_signal_text_too_large",
+            ),
+            (
+                "request_digest",
+                "request_digest = printf('%.*c', ?1, 'x')",
+                65,
+                "http_signal_text_too_large",
+            ),
+            (
+                "value_json",
+                "value_json = zeroblob(?1)",
+                2_097_153,
+                "http_signal_blob_too_large",
+            ),
+            (
+                "selected_wait_ids",
+                "selected_wait_ids = zeroblob(?1)",
+                selected_limit,
+                "http_signal_blob_too_large",
+            ),
+        ] {
+            if !retained && matches!(field, "signal_key" | "selected_wait_ids") {
+                continue;
+            }
+            let (directory, _router, mut driver) = durable_router(1);
+            let connection =
+                Connection::open(directory.path().join("http.sqlite")).expect("HTTP spool opens");
+            insert_signal_fixture(&connection, "activation:oversized", "signal:http");
+            if retained {
+                connection
+                    .execute(
+                        "UPDATE cymule_http_signals SET selected_wait_ids = ?1",
+                        [cymule_core::canonical_bytes(&BTreeSet::from([test_wait_id(
+                            "oversized",
+                        )]))
+                        .expect("selected target encodes")],
+                    )
+                    .expect("retained target installs");
+            }
+            connection
+                .execute(
+                    &format!("UPDATE cymule_http_signals SET {mutation}"),
+                    [length],
+                )
+                .expect("oversized HTTP field installs");
+
+            let mut view = ObservedWaitView {
+                waits: index(),
+                ..ObservedWaitView::default()
+            };
+            let receive_error = driver
+                .receive(&mut view, 1)
+                .expect_err("oversized HTTP field cannot become a delivery");
+            assert!(
+                matches!(
+                    receive_error,
+                    DurableError::Integrity { ref code, .. } if code == expected_code
+                ),
+                "{field} retained={retained} produced {receive_error:?}"
+            );
+            assert!(view.selection_requests.is_empty());
+
+            if field != "activation_id" {
+                let acknowledge_error = driver
+                    .acknowledge("activation:oversized")
+                    .expect_err("oversized HTTP field cannot be acknowledged");
+                assert!(matches!(
+                    acknowledge_error,
+                    DurableError::Integrity { ref code, .. } if code == expected_code
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn retained_http_signal_skips_a_large_unselected_prefix_via_partial_index() {
+    let (directory, _router, mut driver) = durable_router(1);
+    let connection =
+        Connection::open(directory.path().join("http.sqlite")).expect("HTTP spool opens");
+    let transaction = connection
+        .unchecked_transaction()
+        .expect("prefix transaction begins");
+    for index in 0..4_096 {
+        insert_signal_fixture(
+            &transaction,
+            &format!("activation:prefix:{index:04}"),
+            "signal:unmatched",
+        );
+    }
+    insert_signal_fixture(&transaction, "activation:zzzz-retained", "signal:retained");
+    transaction
+        .execute(
+            "UPDATE cymule_http_signals SET selected_wait_ids = ?1
+             WHERE activation_id = 'activation:zzzz-retained'",
+            [
+                cymule_core::canonical_bytes(&BTreeSet::from([test_wait_id("retained")]))
+                    .expect("retained target encodes"),
+            ],
+        )
+        .expect("retained target installs");
+    transaction.commit().expect("prefix transaction commits");
+
+    let mut view = ObservedWaitView::default();
+    let delivery = driver
+        .receive(&mut view, 1)
+        .expect("retained lookup remains bounded")
+        .expect("retained delivery exists");
+    assert_eq!(delivery.activation_id, "activation:zzzz-retained");
+    assert!(view.page_requests.is_empty());
     assert!(view.selection_requests.is_empty());
 }
 

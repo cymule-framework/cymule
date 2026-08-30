@@ -557,6 +557,11 @@ Agent terminal `Finalize` transaction without incrementing the obligation
 count. Promotion MUST bind the physical family's current active count; the
 reservation-time aggregate is historical evidence and MUST NOT act as a lower
 bound after an unrelated sibling pin release.
+The reservation intent target MUST equal the immutable Agent stream target.
+A self-authenticating reservation for another target is invalid even when its
+Session, stream, resolver, content and derived identities are internally
+consistent; implementations MUST close this direct edge without inventing a
+replacement source digest authority.
 
 A public Agent stream `Abort` MAY retire an external publication reservation
 only when the latest claimed attempt is durably `NotApplied`.

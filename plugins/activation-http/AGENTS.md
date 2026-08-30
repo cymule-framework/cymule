@@ -32,6 +32,13 @@
   recompute `request_digest` before target selection or delivery. A malformed,
   noncanonical, invalid, or mismatched retained field is stable `Integrity`;
   it must not call parked-wait selection or expose a delivery to M1.
+- Every row query projects SQLite byte/scalar lengths before Rust receives a
+  variable-length value. Activation and signal identities are capped at 512
+  scalars and 2,048 UTF-8 bytes through `substr(..., 513)`; request digests use
+  the exact 64-byte canonical-digest contract and `substr(..., 65)`; value JSON
+  uses the 2 MiB body contract; selected-target JSON uses the exact
+  `1 + MAX_WAIT_DELIVERY_TARGETS * 74` bound. Oversized TEXT/BLOB corruption is
+  adapter `Integrity` without materializing the complete value in Rust.
 - Duplicate IDs with identical source/value replay the original acceptance.
   Reuse with different semantics returns conflict and never reaches M1.
 - Persist/classify one activation ID inside an immediate SQLite transaction.
@@ -50,8 +57,10 @@
   scan a fixed activation-ID prefix; unrelated ingress cannot starve a later
   active source. Reset the cursor only for the view's typed `Stale` outcome;
   every actual view error remains an error.
-- Every hot unacknowledged query uses `acknowledged = 0`, never `!= 1`, so the
-  pending or matching composite index owns retained and fresh ordering. Exact
+- Every hot unacknowledged query uses `acknowledged = 0`, never `!= 1`.
+  Retained and fresh selection states use distinct partial indexes whose
+  predicates are respectively `selected_wait_ids IS NOT NULL` and `IS NULL`,
+  so neither path scans the other state's prefix. Exact
   acknowledgement, duplicate-ingress, and selection readbacks use the
   activation primary index; query-plan tests reject full scans and temp
   B-trees.

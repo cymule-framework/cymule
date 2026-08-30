@@ -28,6 +28,12 @@
   Value bytes use Core's artifact bound; the exactly-one content-ID target has
   a 75-byte canonical upper bound. An oversized generation-`/2` BLOB is stable
   `Integrity` and remains unacknowledged.
+- The same preallocation gate owns every variable TEXT field. Activation and
+  timer IDs use capped 513-scalar projections plus exact 512-scalar/2,048-byte
+  verification; `schedule_digest` uses a capped 65-scalar projection and the
+  exact 64-byte lowercase-hex digest contract. Fresh metadata also carries the
+  activation byte/scalar lengths. Oversized TEXT corruption is `Integrity`
+  before a full String reaches Rust.
 - Activation and timer identities use the shared 1..=512 Unicode-scalar,
   no-control-character contract. Never substitute UTF-8 byte length.
 - `receive` may return only a currently due timer with an exact target selected
@@ -42,10 +48,11 @@
   value metadata, then loads and authenticates exactly one complete row by
   activation ID before each parked-wait lookup. Never collect a page of timer
   payloads or schedule rows.
-- Hot unacknowledged queries use the exact `acknowledged = 0` predicate so the
-  due composite index owns fresh and retained ordering. Exact point reads use
-  the activation primary index; query-plan tests reject a table scan or temp
-  B-tree for each path.
+- Hot unacknowledged queries use the exact `acknowledged = 0` predicate. Fresh
+  and retained timers use distinct due-order partial indexes for
+  `selected_wait_ids IS NULL` and `IS NOT NULL`, so retained replay cannot scan
+  an unselected due prefix. Exact point reads use the activation primary index;
+  query-plan tests reject a table scan or temp B-tree for each path.
 - Every newly selected or retained wait ID is an exact lowercase SHA-256
   content ID. An empty fresh selection means that source has no parked match
   and is not retained; every nonempty fresh selection and every retained timer

@@ -586,6 +586,108 @@ fn oversized_generation_two_blobs_are_gated_before_receive_and_acknowledgement()
 }
 
 #[test]
+fn oversized_timer_text_is_gated_on_fresh_retained_replay_and_ack_paths() {
+    for retained in [false, true] {
+        for (field, length) in [
+            ("activation_id", 2_049_i64),
+            ("timer_id", 2_049_i64),
+            ("schedule_digest", 65_i64),
+        ] {
+            let (directory, mut driver) = timer_driver(ManualClock(100));
+            driver
+                .schedule("activation:text", "timer:one", 100, &json!(null))
+                .expect("timer schedules");
+            if retained {
+                driver
+                    .receive(&mut index(), 1)
+                    .expect("timer selects")
+                    .expect("delivery exists");
+            }
+            let connection = rusqlite::Connection::open(directory.path().join("timer.sqlite"))
+                .expect("timer store opens");
+            connection
+                .execute(
+                    &format!("UPDATE cymule_timers SET {field} = printf('%.*c', ?1, 'x')"),
+                    [length],
+                )
+                .expect("oversized timer text installs");
+
+            let mut view = ObservedTimerView {
+                waits: index(),
+                ..ObservedTimerView::default()
+            };
+            let receive_error = driver
+                .receive(&mut view, 1)
+                .expect_err("oversized timer text cannot become a delivery");
+            assert!(
+                matches!(
+                    receive_error,
+                    DurableError::Integrity { ref code, .. }
+                        if code == "timer_row_text_too_large"
+                ),
+                "{field} retained={retained} produced {receive_error:?}"
+            );
+            assert!(view.selections.is_empty());
+
+            if field != "activation_id" {
+                for error in [
+                    driver
+                        .schedule("activation:text", "timer:one", 100, &json!(null))
+                        .expect_err("oversized timer text cannot replay a schedule"),
+                    driver
+                        .acknowledge("activation:text")
+                        .expect_err("oversized timer text cannot be acknowledged"),
+                ] {
+                    assert!(matches!(
+                        error,
+                        DurableError::Integrity { ref code, .. }
+                            if code == "timer_row_text_too_large"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn retained_timer_skips_a_large_unselected_prefix_via_its_partial_index() {
+    let (_directory, mut driver) = timer_driver(ManualClock(100));
+    driver
+        .schedule(
+            "activation:zzzz-retained",
+            "timer:retained",
+            100,
+            &json!({"retained": true}),
+        )
+        .expect("retained timer schedules");
+    let retained = driver
+        .receive(&mut index_for_timer("timer:retained"), 1)
+        .expect("retained timer selects")
+        .expect("retained timer exists")
+        .into_delivery();
+    for index in 0..1_024 {
+        driver
+            .schedule(
+                &format!("activation:prefix:{index:04}"),
+                &format!("timer:prefix:{index:04}"),
+                99,
+                &json!(null),
+            )
+            .expect("unselected prefix timer schedules");
+    }
+
+    let mut view = ObservedTimerView::default();
+    assert_eq!(
+        driver
+            .receive(&mut view, 1)
+            .expect("retained lookup remains bounded")
+            .map(cymule_durable::WaitSourceDelivery::into_delivery),
+        Some(retained)
+    );
+    assert!(view.selections.is_empty());
+}
+
+#[test]
 fn timer_store_rejects_process_local_sqlite_backends() {
     for path in [std::path::Path::new(":memory:"), std::path::Path::new("")] {
         assert!(matches!(
@@ -594,6 +696,37 @@ fn timer_store_rejects_process_local_sqlite_backends() {
                 if message == "timer SQLite store must be file-backed"
         ));
     }
+}
+
+#[test]
+fn nonpartial_timer_index_is_not_the_current_exact_generation() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("nonpartial-timer.sqlite");
+    drop(
+        SqliteTimerDriver::open_with_clock(&database, ManualClock(100))
+            .expect("current timer store initializes"),
+    );
+    let connection =
+        rusqlite::Connection::open(&database).expect("timer store opens for index tamper");
+    connection
+        .execute_batch(
+            "DROP INDEX cymule_timers_due_fresh;
+             DROP INDEX cymule_timers_due_retained;
+             CREATE INDEX cymule_timers_due
+                ON cymule_timers(acknowledged, due_unix_ms, activation_id);",
+        )
+        .expect("nonpartial predecessor index installs");
+    drop(connection);
+    let before = fs::read(&database).expect("tampered timer bytes read");
+    let Err(error) = SqliteTimerDriver::open_with_clock(&database, ManualClock(100)) else {
+        panic!("nonpartial index must not open as current generation");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(UNSUPPORTED_STORE_GENERATION_CODE)
+    );
+    assert_eq!(fs::read(&database).expect("timer bytes reread"), before);
 }
 
 #[test]

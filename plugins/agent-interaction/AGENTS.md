@@ -69,7 +69,9 @@
   reservation, `Reserved` Agent-stream Resource pin, and physical retention
   current before provider I/O. Only that fresh CAS acknowledgement, or a fresh
   rearm after durable NotApplied evidence, authorizes one publish call. Reopen
-  observes a claimed attempt without redispatch. Published reconciliation then
+  observes a claimed attempt without redispatch. Reservation intent and stream
+  current must retain the same exact immutable target; an independently valid
+  foreign-target intent is not a stream authority. Published reconciliation then
   commits Agent current/receipt, catalog record, and promotion of that exact pin
   to `Active` in one CAS; it never increments the obligation twice. Promotion
   uses the physical family's current active count and does not retain the

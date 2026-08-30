@@ -16,8 +16,12 @@ use serde_json::Value;
 
 const TIMER_SOURCE_SCAN_LIMIT: usize = 256;
 const MAX_SELECTED_WAIT_IDS_BYTES: usize = 75;
-const FRESH_TIMER_SCAN_SQL: &str = "SELECT substr(activation_id, 1, 513),
+const MAX_IDENTITY_SCALARS: usize = 512;
+const MAX_IDENTITY_UTF8_BYTES: usize = MAX_IDENTITY_SCALARS * 4;
+const CANONICAL_DIGEST_BYTES: usize = 64;
+const FRESH_TIMER_SCAN_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
                                             length(activation_id),
+                                            substr(activation_id, 1, 513),
                                             due_unix_ms,
                                             length(value_json)
      FROM cymule_timers
@@ -26,8 +30,14 @@ const FRESH_TIMER_SCAN_SQL: &str = "SELECT substr(activation_id, 1, 513),
        AND (due_unix_ms, activation_id) > (?2, ?3)
      ORDER BY due_unix_ms, activation_id
      LIMIT ?4";
-const TIMER_POINT_READ_SQL: &str = "SELECT activation_id, timer_id, due_unix_ms,
-                                           schedule_digest, acknowledged,
+const TIMER_POINT_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
+                                           length(activation_id), substr(activation_id, 1, 513),
+                                           length(CAST(timer_id AS BLOB)),
+                                           length(timer_id), substr(timer_id, 1, 513),
+                                           due_unix_ms,
+                                           length(CAST(schedule_digest AS BLOB)),
+                                           length(schedule_digest), substr(schedule_digest, 1, 65),
+                                           acknowledged,
                                            length(value_json),
                                            CASE WHEN length(value_json) <= ?2
                                                 THEN value_json ELSE NULL END,
@@ -36,8 +46,14 @@ const TIMER_POINT_READ_SQL: &str = "SELECT activation_id, timer_id, due_unix_ms,
                                                 WHEN length(selected_wait_ids) <= ?3
                                                 THEN selected_wait_ids ELSE NULL END
                                     FROM cymule_timers WHERE activation_id = ?1";
-const RETAINED_TIMER_READ_SQL: &str = "SELECT activation_id, timer_id, due_unix_ms,
-                                              schedule_digest, acknowledged,
+const RETAINED_TIMER_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
+                                              length(activation_id), substr(activation_id, 1, 513),
+                                              length(CAST(timer_id AS BLOB)),
+                                              length(timer_id), substr(timer_id, 1, 513),
+                                              due_unix_ms,
+                                              length(CAST(schedule_digest AS BLOB)),
+                                              length(schedule_digest), substr(schedule_digest, 1, 65),
+                                              acknowledged,
                                               length(value_json),
                                               CASE WHEN length(value_json) <= ?1
                                                    THEN value_json ELSE NULL END,
@@ -55,7 +71,7 @@ pub const TIMER_STORE_SCHEMA_VERSION: &str = "cymule.activation-timer-store/2";
 /// Stable code returned before mutation for every unsupported timer generation.
 pub const UNSUPPORTED_STORE_GENERATION_CODE: &str = "unsupported_store_generation";
 
-const TIMER_SCHEMA: [(&str, &str, &str, &str); 3] = [
+const TIMER_SCHEMA: [(&str, &str, &str, &str); 4] = [
     (
         "table",
         "cymule_timer_meta",
@@ -81,10 +97,19 @@ const TIMER_SCHEMA: [(&str, &str, &str, &str); 3] = [
     ),
     (
         "index",
-        "cymule_timers_due",
+        "cymule_timers_due_fresh",
         "cymule_timers",
-        "CREATE INDEX cymule_timers_due
-            ON cymule_timers(acknowledged, due_unix_ms, activation_id)",
+        "CREATE INDEX cymule_timers_due_fresh
+            ON cymule_timers(acknowledged, due_unix_ms, activation_id)
+            WHERE selected_wait_ids IS NULL",
+    ),
+    (
+        "index",
+        "cymule_timers_due_retained",
+        "cymule_timers",
+        "CREATE INDEX cymule_timers_due_retained
+            ON cymule_timers(acknowledged, due_unix_ms, activation_id)
+            WHERE selected_wait_ids IS NOT NULL",
     ),
 ];
 
@@ -96,9 +121,15 @@ pub struct SqliteTimerDriver<C = SystemClock> {
 }
 
 struct StoredTimer {
+    activation_id_bytes: i64,
+    activation_id_scalars: i64,
     activation_id: String,
+    timer_id_bytes: i64,
+    timer_id_scalars: i64,
     timer_id: String,
     due_unix_ms: i64,
+    schedule_digest_bytes: i64,
+    schedule_digest_scalars: i64,
     schedule_digest: String,
     acknowledged: i64,
     value_bytes: i64,
@@ -117,8 +148,9 @@ struct VerifiedTimer {
 }
 
 struct TimerScanCandidate {
-    activation_id: String,
+    activation_bytes: i64,
     activation_scalar_count: i64,
+    activation_id: String,
     due_unix_ms: i64,
     value_bytes: i64,
 }
@@ -290,10 +322,11 @@ impl<C: Clock> SqliteTimerDriver<C> {
                 params![now, cursor_due, cursor_activation, scan_limit],
                 |row| {
                     Ok(TimerScanCandidate {
-                        activation_id: row.get(0)?,
+                        activation_bytes: row.get(0)?,
                         activation_scalar_count: row.get(1)?,
-                        due_unix_ms: row.get(2)?,
-                        value_bytes: row.get(3)?,
+                        activation_id: row.get(2)?,
+                        due_unix_ms: row.get(3)?,
+                        value_bytes: row.get(4)?,
                     })
                 },
             )
@@ -340,15 +373,17 @@ impl<C: Clock> SqliteTimerDriver<C> {
         let now_unix_ms =
             u64::try_from(now).expect("wall Clock u64 converted to nonnegative SQLite INTEGER");
         for candidate in pending {
-            if !(1..=512).contains(&candidate.activation_scalar_count) {
-                return Err(timer_row_integrity(
-                    "timer_schedule_activation_invalid",
-                    format!(
-                        "timer scan candidate has {} activation identity scalars",
-                        candidate.activation_scalar_count
-                    ),
-                ));
-            }
+            let activation_id = require_gated_timer_text(
+                "activation_id",
+                candidate.activation_bytes,
+                candidate.activation_scalar_count,
+                candidate.activation_id,
+                MAX_IDENTITY_UTF8_BYTES,
+                MAX_IDENTITY_SCALARS,
+            )?;
+            validate_identity("activation", &activation_id).map_err(|error| {
+                timer_row_integrity("timer_schedule_activation_invalid", error.to_string())
+            })?;
             let value_bytes = usize::try_from(candidate.value_bytes).map_err(|error| {
                 timer_row_integrity("timer_schedule_value_size_invalid", error.to_string())
             })?;
@@ -357,22 +392,20 @@ impl<C: Clock> SqliteTimerDriver<C> {
                     "timer_schedule_value_too_large",
                     format!(
                         "timer activation {} retains {value_bytes} value bytes; maximum is {}",
-                        candidate.activation_id,
+                        activation_id,
                         cymule_core::MAX_ARTIFACT_BYTES
                     ),
                 ));
             }
             let cursor = TimerScanCursor {
                 due_unix_ms: candidate.due_unix_ms,
-                activation_id: candidate.activation_id.clone(),
+                activation_id: activation_id.clone(),
             };
-            let timer = self.load_timer(&candidate.activation_id)?;
+            let timer = self.load_timer(&activation_id)?;
             let verified_due = i64::try_from(timer.due_unix_ms).map_err(|error| {
                 timer_row_integrity("timer_schedule_due_invalid", error.to_string())
             })?;
-            if timer.activation_id != candidate.activation_id
-                || verified_due != candidate.due_unix_ms
-            {
+            if timer.activation_id != activation_id || verified_due != candidate.due_unix_ms {
                 return Err(timer_row_integrity(
                     "timer_scan_candidate_changed",
                     "timer scan metadata changed before exact-row verification",
@@ -657,6 +690,43 @@ fn selected_wait_ids_byte_limit() -> i64 {
         .expect("selected wait-ID byte limit fits SQLite INTEGER")
 }
 
+fn require_gated_timer_text(
+    field: &'static str,
+    sqlite_bytes: i64,
+    sqlite_scalars: i64,
+    value: String,
+    maximum_bytes: usize,
+    maximum_scalars: usize,
+) -> DurableResult<String> {
+    let bytes = usize::try_from(sqlite_bytes).map_err(|error| {
+        timer_row_integrity(
+            "timer_row_text_length_invalid",
+            format!("timer {field} has invalid byte-length metadata: {error}"),
+        )
+    })?;
+    let scalars = usize::try_from(sqlite_scalars).map_err(|error| {
+        timer_row_integrity(
+            "timer_row_text_length_invalid",
+            format!("timer {field} has invalid scalar-length metadata: {error}"),
+        )
+    })?;
+    if bytes > maximum_bytes || scalars > maximum_scalars {
+        return Err(timer_row_integrity(
+            "timer_row_text_too_large",
+            format!(
+                "timer {field} has {bytes} bytes and {scalars} scalars; maxima are {maximum_bytes} bytes and {maximum_scalars} scalars"
+            ),
+        ));
+    }
+    if value.len() != bytes || value.chars().count() != scalars {
+        return Err(timer_row_integrity(
+            "timer_row_text_projection_mismatch",
+            format!("timer {field} does not match its SQLite length metadata"),
+        ));
+    }
+    Ok(value)
+}
+
 fn require_gated_timer_blob(
     activation_id: &str,
     field: &'static str,
@@ -712,40 +782,58 @@ fn timer_schedule_digest(
 }
 
 fn verify_stored_timer(stored: StoredTimer) -> DurableResult<VerifiedTimer> {
-    validate_identity("activation", &stored.activation_id).map_err(|error| {
+    let activation_id = require_gated_timer_text(
+        "activation_id",
+        stored.activation_id_bytes,
+        stored.activation_id_scalars,
+        stored.activation_id,
+        MAX_IDENTITY_UTF8_BYTES,
+        MAX_IDENTITY_SCALARS,
+    )?;
+    validate_identity("activation", &activation_id).map_err(|error| {
         timer_row_integrity("timer_schedule_activation_invalid", error.to_string())
     })?;
-    validate_identity("timer", &stored.timer_id)
+    let timer_id = require_gated_timer_text(
+        "timer_id",
+        stored.timer_id_bytes,
+        stored.timer_id_scalars,
+        stored.timer_id,
+        MAX_IDENTITY_UTF8_BYTES,
+        MAX_IDENTITY_SCALARS,
+    )?;
+    validate_identity("timer", &timer_id)
         .map_err(|error| timer_row_integrity("timer_schedule_timer_invalid", error.to_string()))?;
+    let schedule_digest = require_gated_timer_text(
+        "schedule_digest",
+        stored.schedule_digest_bytes,
+        stored.schedule_digest_scalars,
+        stored.schedule_digest,
+        CANONICAL_DIGEST_BYTES,
+        CANONICAL_DIGEST_BYTES,
+    )?;
     let due_unix_ms = u64::try_from(stored.due_unix_ms)
         .map_err(|error| timer_row_integrity("timer_schedule_due_invalid", error.to_string()))?;
     let value_bytes = require_gated_timer_blob(
-        &stored.activation_id,
+        &activation_id,
         "value_json",
         stored.value_bytes,
         stored.value,
         cymule_core::MAX_ARTIFACT_BYTES,
     )?;
     let value = decode_canonical_timer_row(&value_bytes, "value_json")?;
-    let digest =
-        timer_schedule_digest(&stored.activation_id, &stored.timer_id, due_unix_ms, &value)
-            .map_err(|error| {
-                timer_row_integrity("timer_schedule_digest_invalid", error.to_string())
-            })?;
-    if stored.schedule_digest != digest {
+    let digest = timer_schedule_digest(&activation_id, &timer_id, due_unix_ms, &value)
+        .map_err(|error| timer_row_integrity("timer_schedule_digest_invalid", error.to_string()))?;
+    if schedule_digest != digest {
         return Err(timer_row_integrity(
             "timer_schedule_digest_mismatch",
-            format!(
-                "timer activation {} does not match its retained schedule digest",
-                stored.activation_id
-            ),
+            format!("timer activation {activation_id} does not match its retained schedule digest"),
         ));
     }
     let wait_ids = match (stored.wait_ids_bytes, stored.wait_ids) {
         (None, None) => None,
         (Some(length), bytes) => {
             let bytes = require_gated_timer_blob(
-                &stored.activation_id,
+                &activation_id,
                 "selected_wait_ids",
                 length,
                 bytes,
@@ -781,8 +869,8 @@ fn verify_stored_timer(stored: StoredTimer) -> DurableResult<VerifiedTimer> {
         ));
     }
     Ok(VerifiedTimer {
-        activation_id: stored.activation_id,
-        timer_id: stored.timer_id,
+        activation_id,
+        timer_id,
         due_unix_ms,
         value,
         wait_ids,
@@ -792,15 +880,21 @@ fn verify_stored_timer(stored: StoredTimer) -> DurableResult<VerifiedTimer> {
 
 fn stored_timer_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredTimer> {
     Ok(StoredTimer {
-        activation_id: row.get(0)?,
-        timer_id: row.get(1)?,
-        due_unix_ms: row.get(2)?,
-        schedule_digest: row.get(3)?,
-        acknowledged: row.get(4)?,
-        value_bytes: row.get(5)?,
-        value: row.get(6)?,
-        wait_ids_bytes: row.get(7)?,
-        wait_ids: row.get(8)?,
+        activation_id_bytes: row.get(0)?,
+        activation_id_scalars: row.get(1)?,
+        activation_id: row.get(2)?,
+        timer_id_bytes: row.get(3)?,
+        timer_id_scalars: row.get(4)?,
+        timer_id: row.get(5)?,
+        due_unix_ms: row.get(6)?,
+        schedule_digest_bytes: row.get(7)?,
+        schedule_digest_scalars: row.get(8)?,
+        schedule_digest: row.get(9)?,
+        acknowledged: row.get(10)?,
+        value_bytes: row.get(11)?,
+        value: row.get(12)?,
+        wait_ids_bytes: row.get(13)?,
+        wait_ids: row.get(14)?,
     })
 }
 
@@ -1032,6 +1126,20 @@ mod tests {
                 .len(),
             MAX_SELECTED_WAIT_IDS_BYTES
         );
+        let digest = super::timer_schedule_digest(
+            "activation:digest",
+            "timer:digest",
+            1,
+            &serde_json::json!(true),
+        )
+        .expect("schedule digest derives");
+        assert_eq!(digest.len(), super::CANONICAL_DIGEST_BYTES);
+        assert!(
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+        assert!(super::TIMER_POINT_READ_SQL.contains("substr(schedule_digest, 1, 65)"));
     }
 
     #[test]
@@ -1044,7 +1152,7 @@ mod tests {
             FRESH_TIMER_SCAN_SQL,
             params![100_i64, i64::MIN, "", 256_i64],
         );
-        assert_indexed(&fresh, "cymule_timers_due");
+        assert_indexed(&fresh, "cymule_timers_due_fresh");
         let retained = query_plan(
             &driver.connection,
             RETAINED_TIMER_READ_SQL,
@@ -1054,7 +1162,7 @@ mod tests {
                 100_i64
             ],
         );
-        assert_indexed(&retained, "cymule_timers_due");
+        assert_indexed(&retained, "cymule_timers_due_retained");
         let point = query_plan(
             &driver.connection,
             TIMER_POINT_READ_SQL,
