@@ -4956,12 +4956,17 @@ impl AgentStreamCurrent {
         if let Some(head) = &self.chunk_head {
             validate_sha256("Agent stream chunk head", head)?;
         }
+        self.verify_lifecycle_state()?;
+        validate_canonical_size("Agent stream current", self, MAX_AGENT_CURRENT_BYTES)
+    }
+
+    fn verify_lifecycle_state(&self) -> ProtocolResult<()> {
         match self.state {
             AgentStreamState::Open => self.verify_open_state()?,
             AgentStreamState::Finalized => self.verify_finalized_state()?,
             AgentStreamState::Aborted => self.verify_aborted_state()?,
         }
-        validate_canonical_size("Agent stream current", self, MAX_AGENT_CURRENT_BYTES)
+        Ok(())
     }
 
     fn verify_open_state(&self) -> ProtocolResult<()> {
@@ -13437,6 +13442,131 @@ mod tests {
             panic!("Open returns its exact Session")
         };
         (session, postcondition.stream, target_source)
+    }
+
+    fn finalized_staged_stream_current(tool_target: bool) -> AgentStreamCurrent {
+        let (session, stream, target) = stream_capacity_fixture(tool_target);
+        let (stream, chunk) = append_staged_chunk(
+            stream,
+            vec![ContentBlock::Text {
+                text: "finalized content".to_owned(),
+            }],
+        )
+        .expect("finalized-current fixture appends its content");
+        let finalize = AgentStreamCommand::Finalize {
+            session_id: stream.session_id.clone(),
+            stream_id: stream.stream_id.clone(),
+        };
+        let command =
+            AgentCommand::new(revision('4'), AgentCommandAction::Stream(finalize.clone()))
+                .expect("finalized-current command seals");
+        AgentStreamSource::Finalize {
+            session,
+            stream,
+            chunks: vec![chunk],
+            target,
+            update: None,
+            resource: None,
+            target_claim: None,
+        }
+        .reduce(&command.command_id, &finalize)
+        .expect("finalized-current fixture reduces")
+        .stream
+    }
+
+    #[test]
+    fn finalized_stream_current_authenticates_its_exact_target_and_content() {
+        for tool_target in [false, true] {
+            let current = finalized_staged_stream_current(tool_target);
+            current
+                .verify()
+                .expect("framework-derived finalized current verifies");
+            let update = current
+                .final_update
+                .as_ref()
+                .expect("finalized current retains its update");
+            let content = match update {
+                AgentUpdate::Message { message, .. } => &message.content,
+                AgentUpdate::Tool { tool, .. } => tool
+                    .output
+                    .as_ref()
+                    .expect("completed stream Tool retains its output"),
+                _ => panic!("stream fixture emitted a non-terminal update variant"),
+            };
+            let expected_digest =
+                canonical_digest(content).expect("final content has one canonical digest");
+            validate_canonical_digest("test finalized content", &expected_digest)
+                .expect("derived digest uses the raw canonical grammar");
+            assert_eq!(
+                current.content_digest.as_deref(),
+                Some(expected_digest.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn finalized_stream_current_rejects_target_variant_and_digest_drift() {
+        let message_current = finalized_staged_stream_current(false);
+        let tool_current = finalized_staged_stream_current(true);
+
+        let mut foreign_target = message_current.clone();
+        foreign_target.target = AgentStreamTarget::Message {
+            message_id: "message:other-valid-target".to_owned(),
+            role: MessageRole::Agent,
+        };
+        assert!(matches!(
+            foreign_target.verify(),
+            Err(ProtocolError::IdentityMismatch(message)) if message.contains("target")
+        ));
+
+        let mut foreign_role = message_current.clone();
+        let AgentStreamTarget::Message { role, .. } = &mut foreign_role.target else {
+            panic!("message fixture retains its target")
+        };
+        *role = MessageRole::System;
+        assert!(matches!(
+            foreign_role.verify(),
+            Err(ProtocolError::IdentityMismatch(message)) if message.contains("target")
+        ));
+
+        let mut foreign_tool_target = tool_current.clone();
+        foreign_tool_target.target = AgentStreamTarget::Tool {
+            tool_call_id: "tool:other-valid-target".to_owned(),
+        };
+        assert!(matches!(
+            foreign_tool_target.verify(),
+            Err(ProtocolError::IdentityMismatch(message)) if message.contains("target")
+        ));
+
+        let mut different_variant = message_current.clone();
+        different_variant.final_update = tool_current.final_update.clone();
+        different_variant.final_update_bytes = tool_current.final_update_bytes;
+        different_variant.content_digest = tool_current.content_digest.clone();
+        assert!(matches!(
+            different_variant.verify(),
+            Err(ProtocolError::IdentityMismatch(message)) if message.contains("target")
+        ));
+
+        let mut malformed_digest = message_current.clone();
+        malformed_digest.content_digest = Some(revision('e'));
+        assert!(matches!(
+            malformed_digest.verify(),
+            Err(ProtocolError::Validation(message))
+                if message.contains("64 lowercase hexadecimal")
+        ));
+
+        let mut mismatched_digest = message_current;
+        let different_digest = "f".repeat(64);
+        assert_ne!(
+            mismatched_digest.content_digest.as_deref(),
+            Some(different_digest.as_str())
+        );
+        mismatched_digest.content_digest = Some(different_digest);
+        assert!(matches!(
+            mismatched_digest.verify(),
+            Err(ProtocolError::IdentityMismatch(message))
+                if message.contains("content digest")
+        ));
     }
 
     fn assert_wrapper_capacity_charged_before_append(tool_target: bool) {

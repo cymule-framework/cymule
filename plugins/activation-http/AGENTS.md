@@ -16,16 +16,25 @@
   may end that window early but never authorizes success itself. If the bounded
   readback is still pending, return 503 so the producer retries the same
   activation ID; never start a polling or background-wait loop.
-- The spool accepts only the exact `cymule.activation-http-spool/1` physical
+- The spool accepts only the exact `cymule.activation-http-spool/2` physical
   generation. Initialize only a completely empty SQLite database inside one
-  immediate transaction, then reread the singleton generation row and every
-  fixed table/index DDL before commit. Every later connection revalidates that
-  same generation before PRAGMA, query, or write. A nonempty mismatch returns
-  `unsupported_store_generation` without healing, ALTER, or import behavior.
+  immediate transaction, pin SQLite `UTF-8`, then reread the singleton
+  generation row and every fixed table/index DDL before commit. Every later
+  connection revalidates that encoding and generation before configuration,
+  query, or write. A UTF-16 database or nonempty mismatch returns
+  `unsupported_store_generation` without healing, ALTER, or import behavior;
+  generation 1 has no in-process reader or importer.
+- Generation validation is bounded before rejection. Read at most the expected
+  schema-object count plus one, project `sqlite_master` names and DDL plus the
+  singleton `schema_version` through fixed byte caps, and decode those BLOB
+  projections as UTF-8. Never materialize an arbitrary metadata value, object
+  name, DDL string, or object set merely to reject a foreign generation.
 - Read a bounded raw request body and pass it through the core recursive
   duplicate-rejecting decoder before authorization, digesting, or persistence.
   Reopened values use the same decoder; never let `serde_json::Value` collapse
-  duplicate members first.
+  duplicate members first. If a legal in-bound raw body expands beyond the
+  2 MiB canonical value limit, reject that exact producer input with HTTP 413
+  before persistence; do not classify substrate failures as payload limits.
 - Every retained, fresh, duplicate-ingress, acknowledgement, and selection
   read loads the complete signal row. Decode `value_json` and selected targets
   as strict canonical JSON, reconstruct the exact `HttpSignalRequest`, and
@@ -34,11 +43,13 @@
   it must not call parked-wait selection or expose a delivery to M1.
 - Every row query projects SQLite byte/scalar lengths before Rust receives a
   variable-length value. Activation and signal identities are capped at 512
-  scalars and 2,048 UTF-8 bytes through `substr(..., 513)`; request digests use
-  the exact 64-byte canonical-digest contract and `substr(..., 65)`; value JSON
-  uses the 2 MiB body contract; selected-target JSON uses the exact
-  `1 + MAX_WAIT_DELIVERY_TARGETS * 74` bound. Oversized TEXT/BLOB corruption is
-  adapter `Integrity` without materializing the complete value in Rust.
+  scalars and 2,048 UTF-8 bytes through a 2,049-byte BLOB prefix; request
+  digests use the exact 64-byte canonical-digest contract and a 65-byte BLOB
+  prefix; value JSON uses the 2 MiB body contract; selected-target JSON uses
+  the exact `1 + MAX_WAIT_DELIVERY_TARGETS * 74` bound. Decode every in-bound
+  TEXT projection explicitly as UTF-8. Oversized or invalid UTF-8 TEXT/BLOB
+  corruption is adapter `Integrity` without materializing the complete value
+  in Rust.
 - Duplicate IDs with identical source/value replay the original acceptance.
   Reuse with different semantics returns conflict and never reaches M1.
 - Persist/classify one activation ID inside an immediate SQLite transaction.

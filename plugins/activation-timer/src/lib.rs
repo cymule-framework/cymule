@@ -19,9 +19,10 @@ const MAX_SELECTED_WAIT_IDS_BYTES: usize = 75;
 const MAX_IDENTITY_SCALARS: usize = 512;
 const MAX_IDENTITY_UTF8_BYTES: usize = MAX_IDENTITY_SCALARS * 4;
 const CANONICAL_DIGEST_BYTES: usize = 64;
+const TIMER_STORE_SQLITE_ENCODING: &str = "UTF-8";
 const FRESH_TIMER_SCAN_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
                                             length(activation_id),
-                                            substr(activation_id, 1, 513),
+                                            substr(CAST(activation_id AS BLOB), 1, 2049),
                                             due_unix_ms,
                                             length(value_json)
      FROM cymule_timers
@@ -31,12 +32,15 @@ const FRESH_TIMER_SCAN_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
      ORDER BY due_unix_ms, activation_id
      LIMIT ?4";
 const TIMER_POINT_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
-                                           length(activation_id), substr(activation_id, 1, 513),
+                                           length(activation_id),
+                                           substr(CAST(activation_id AS BLOB), 1, 2049),
                                            length(CAST(timer_id AS BLOB)),
-                                           length(timer_id), substr(timer_id, 1, 513),
+                                           length(timer_id),
+                                           substr(CAST(timer_id AS BLOB), 1, 2049),
                                            due_unix_ms,
                                            length(CAST(schedule_digest AS BLOB)),
-                                           length(schedule_digest), substr(schedule_digest, 1, 65),
+                                           length(schedule_digest),
+                                           substr(CAST(schedule_digest AS BLOB), 1, 65),
                                            acknowledged,
                                            length(value_json),
                                            CASE WHEN length(value_json) <= ?2
@@ -47,12 +51,15 @@ const TIMER_POINT_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
                                                 THEN selected_wait_ids ELSE NULL END
                                     FROM cymule_timers WHERE activation_id = ?1";
 const RETAINED_TIMER_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
-                                              length(activation_id), substr(activation_id, 1, 513),
+                                              length(activation_id),
+                                              substr(CAST(activation_id AS BLOB), 1, 2049),
                                               length(CAST(timer_id AS BLOB)),
-                                              length(timer_id), substr(timer_id, 1, 513),
+                                              length(timer_id),
+                                              substr(CAST(timer_id AS BLOB), 1, 2049),
                                               due_unix_ms,
                                               length(CAST(schedule_digest AS BLOB)),
-                                              length(schedule_digest), substr(schedule_digest, 1, 65),
+                                              length(schedule_digest),
+                                              substr(CAST(schedule_digest AS BLOB), 1, 65),
                                               acknowledged,
                                               length(value_json),
                                               CASE WHEN length(value_json) <= ?1
@@ -65,9 +72,24 @@ const RETAINED_TIMER_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)
                                        WHERE acknowledged = 0 AND due_unix_ms <= ?3
                                          AND selected_wait_ids IS NOT NULL
                                        ORDER BY due_unix_ms, activation_id LIMIT 1";
+const SQLITE_SCHEMA_OBJECTS_SQL: &str = "SELECT length(CAST(type AS BLOB)),
+                    CASE WHEN length(CAST(type AS BLOB)) <= ?1
+                         THEN substr(CAST(type AS BLOB), 1, ?1) ELSE NULL END,
+                    length(CAST(name AS BLOB)),
+                    CASE WHEN length(CAST(name AS BLOB)) <= ?2
+                         THEN substr(CAST(name AS BLOB), 1, ?2) ELSE NULL END,
+                    length(CAST(tbl_name AS BLOB)),
+                    CASE WHEN length(CAST(tbl_name AS BLOB)) <= ?3
+                         THEN substr(CAST(tbl_name AS BLOB), 1, ?3) ELSE NULL END,
+                    length(CAST(sql AS BLOB)),
+                    CASE WHEN length(CAST(sql AS BLOB)) <= ?4
+                         THEN substr(CAST(sql AS BLOB), 1, ?4) ELSE NULL END
+             FROM sqlite_master
+             WHERE sql IS NOT NULL
+             LIMIT ?5";
 
 /// Exact physical generation accepted by the durable timer source.
-pub const TIMER_STORE_SCHEMA_VERSION: &str = "cymule.activation-timer-store/2";
+pub const TIMER_STORE_SCHEMA_VERSION: &str = "cymule.activation-timer-store/3";
 /// Stable code returned before mutation for every unsupported timer generation.
 pub const UNSUPPORTED_STORE_GENERATION_CODE: &str = "unsupported_store_generation";
 
@@ -113,6 +135,17 @@ const TIMER_SCHEMA: [(&str, &str, &str, &str); 4] = [
     ),
 ];
 
+struct SqliteSchemaObjectProjection {
+    kind_bytes: i64,
+    kind: Option<Vec<u8>>,
+    name_bytes: i64,
+    name: Option<Vec<u8>>,
+    table_bytes: i64,
+    table: Option<Vec<u8>>,
+    ddl_bytes: i64,
+    ddl: Option<Vec<u8>>,
+}
+
 /// SQLite-backed durable timer source.
 pub struct SqliteTimerDriver<C = SystemClock> {
     connection: Connection,
@@ -123,14 +156,14 @@ pub struct SqliteTimerDriver<C = SystemClock> {
 struct StoredTimer {
     activation_id_bytes: i64,
     activation_id_scalars: i64,
-    activation_id: String,
+    activation_id: Vec<u8>,
     timer_id_bytes: i64,
     timer_id_scalars: i64,
-    timer_id: String,
+    timer_id: Vec<u8>,
     due_unix_ms: i64,
     schedule_digest_bytes: i64,
     schedule_digest_scalars: i64,
-    schedule_digest: String,
+    schedule_digest: Vec<u8>,
     acknowledged: i64,
     value_bytes: i64,
     value: Option<Vec<u8>>,
@@ -150,7 +183,7 @@ struct VerifiedTimer {
 struct TimerScanCandidate {
     activation_bytes: i64,
     activation_scalar_count: i64,
-    activation_id: String,
+    activation_id: Vec<u8>,
     due_unix_ms: i64,
     value_bytes: i64,
 }
@@ -694,7 +727,7 @@ fn require_gated_timer_text(
     field: &'static str,
     sqlite_bytes: i64,
     sqlite_scalars: i64,
-    value: String,
+    value: Vec<u8>,
     maximum_bytes: usize,
     maximum_scalars: usize,
 ) -> DurableResult<String> {
@@ -718,7 +751,19 @@ fn require_gated_timer_text(
             ),
         ));
     }
-    if value.len() != bytes || value.chars().count() != scalars {
+    if value.len() != bytes {
+        return Err(timer_row_integrity(
+            "timer_row_text_projection_mismatch",
+            format!("timer {field} does not match its SQLite length metadata"),
+        ));
+    }
+    let value = String::from_utf8(value).map_err(|error| {
+        timer_row_integrity(
+            "timer_row_text_utf8_invalid",
+            format!("timer {field} is not valid UTF-8: {error}"),
+        )
+    })?;
+    if value.chars().count() != scalars {
         return Err(timer_row_integrity(
             "timer_row_text_projection_mismatch",
             format!("timer {field} does not match its SQLite length metadata"),
@@ -931,10 +976,11 @@ fn timer_row_integrity(code: &'static str, message: impl Into<String>) -> Durabl
 }
 
 fn initialize_or_require_timer_store(connection: &mut Connection) -> DurableResult<()> {
+    require_utf8_timer_store(connection)?;
     if sqlite_schema_objects(connection)?.is_empty() {
         initialize_empty_timer_store(connection)?;
     } else {
-        require_current_timer_schema(connection)?;
+        require_current_timer_schema_after_encoding(connection)?;
     }
     Ok(())
 }
@@ -943,6 +989,7 @@ fn initialize_empty_timer_store(connection: &mut Connection) -> DurableResult<()
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(contention)?;
+    require_utf8_timer_store(&transaction)?;
     if sqlite_schema_objects(&transaction)?.is_empty() {
         for (_, _, _, ddl) in TIMER_SCHEMA {
             transaction.execute_batch(ddl).map_err(contention)?;
@@ -953,14 +1000,14 @@ fn initialize_empty_timer_store(connection: &mut Connection) -> DurableResult<()
                 [TIMER_STORE_SCHEMA_VERSION],
             )
             .map_err(contention)?;
-        require_current_timer_schema(&transaction)?;
+        require_current_timer_schema_after_encoding(&transaction)?;
     } else {
-        require_current_timer_schema(&transaction)?;
+        require_current_timer_schema_after_encoding(&transaction)?;
     }
     transaction.commit().map_err(contention)
 }
 
-fn require_current_timer_schema(connection: &Connection) -> DurableResult<()> {
+fn require_current_timer_schema_after_encoding(connection: &Connection) -> DurableResult<()> {
     let observed = sqlite_schema_objects(connection)?;
     if observed.len() != TIMER_SCHEMA.len() {
         return Err(unsupported_generation(&format!(
@@ -981,20 +1028,53 @@ fn require_current_timer_schema(connection: &Connection) -> DurableResult<()> {
             )));
         }
     }
+    let singleton_limit = 2_i64;
+    let version_limit = i64::try_from(TIMER_STORE_SCHEMA_VERSION.len() + 1)
+        .expect("timer generation marker bound fits SQLite INTEGER");
     let mut statement = connection
         .prepare(
-            "SELECT COALESCE(CAST(singleton AS TEXT), ''),
-                    COALESCE(CAST(schema_version AS TEXT), '')
-             FROM cymule_timer_meta ORDER BY singleton",
+            "SELECT length(CAST(singleton AS BLOB)),
+                    CASE WHEN length(CAST(singleton AS BLOB)) <= ?1
+                         THEN substr(CAST(singleton AS BLOB), 1, ?1) ELSE NULL END,
+                    length(CAST(schema_version AS BLOB)),
+                    CASE WHEN length(CAST(schema_version AS BLOB)) <= ?2
+                         THEN substr(CAST(schema_version AS BLOB), 1, ?2) ELSE NULL END
+             FROM cymule_timer_meta ORDER BY singleton LIMIT 2",
         )
         .map_err(contention)?;
     let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        .query_map(params![singleton_limit, version_limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<Vec<u8>>>(3)?,
+            ))
         })
         .map_err(contention)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(contention)?;
+    let rows = rows
+        .into_iter()
+        .map(
+            |(singleton_bytes, singleton, version_bytes, version)| -> DurableResult<_> {
+                Ok((
+                    require_bounded_generation_text(
+                        "cymule_timer_meta.singleton",
+                        singleton_bytes,
+                        singleton,
+                        usize::try_from(singleton_limit).expect("positive fixed bound"),
+                    )?,
+                    require_bounded_generation_text(
+                        "cymule_timer_meta.schema_version",
+                        version_bytes,
+                        version,
+                        usize::try_from(version_limit).expect("positive fixed bound"),
+                    )?,
+                ))
+            },
+        )
+        .collect::<DurableResult<Vec<_>>>()?;
     if rows.as_slice() != [("1".to_owned(), TIMER_STORE_SCHEMA_VERSION.to_owned())] {
         return Err(unsupported_generation(&format!(
             "timer SQLite schema authority is not the singleton {TIMER_STORE_SCHEMA_VERSION} generation"
@@ -1006,25 +1086,124 @@ fn require_current_timer_schema(connection: &Connection) -> DurableResult<()> {
 fn sqlite_schema_objects(
     connection: &Connection,
 ) -> DurableResult<Vec<(String, String, String, String)>> {
+    let kind_limit = maximum_timer_schema_field_bytes(|entry| entry.0) + 1;
+    let name_limit = maximum_timer_schema_field_bytes(|entry| entry.1) + 1;
+    let table_limit = maximum_timer_schema_field_bytes(|entry| entry.2) + 1;
+    let ddl_limit = maximum_timer_schema_field_bytes(|entry| entry.3) + 1;
+    let row_limit = TIMER_SCHEMA.len() + 1;
     let mut statement = connection
-        .prepare(
-            "SELECT type, name, tbl_name, sql FROM sqlite_master
-             WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*'
-             ORDER BY type, name",
-        )
+        .prepare(SQLITE_SCHEMA_OBJECTS_SQL)
         .map_err(contention)?;
-    statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })
+    let projections = statement
+        .query_map(
+            params![
+                i64::try_from(kind_limit).expect("schema kind bound fits SQLite INTEGER"),
+                i64::try_from(name_limit).expect("schema name bound fits SQLite INTEGER"),
+                i64::try_from(table_limit).expect("schema table bound fits SQLite INTEGER"),
+                i64::try_from(ddl_limit).expect("schema DDL bound fits SQLite INTEGER"),
+                i64::try_from(row_limit).expect("schema row bound fits SQLite INTEGER")
+            ],
+            |row| {
+                Ok(SqliteSchemaObjectProjection {
+                    kind_bytes: row.get(0)?,
+                    kind: row.get(1)?,
+                    name_bytes: row.get(2)?,
+                    name: row.get(3)?,
+                    table_bytes: row.get(4)?,
+                    table: row.get(5)?,
+                    ddl_bytes: row.get(6)?,
+                    ddl: row.get(7)?,
+                })
+            },
+        )
         .map_err(contention)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(contention)
+        .map_err(contention)?;
+    projections
+        .into_iter()
+        .map(|projection| {
+            Ok((
+                require_bounded_generation_text(
+                    "sqlite_master.type",
+                    projection.kind_bytes,
+                    projection.kind,
+                    kind_limit,
+                )?,
+                require_bounded_generation_text(
+                    "sqlite_master.name",
+                    projection.name_bytes,
+                    projection.name,
+                    name_limit,
+                )?,
+                require_bounded_generation_text(
+                    "sqlite_master.tbl_name",
+                    projection.table_bytes,
+                    projection.table,
+                    table_limit,
+                )?,
+                require_bounded_generation_text(
+                    "sqlite_master.sql",
+                    projection.ddl_bytes,
+                    projection.ddl,
+                    ddl_limit,
+                )?,
+            ))
+        })
+        .collect()
+}
+
+fn maximum_timer_schema_field_bytes(
+    select: fn(&(&'static str, &'static str, &'static str, &'static str)) -> &'static str,
+) -> usize {
+    TIMER_SCHEMA
+        .iter()
+        .map(select)
+        .map(str::len)
+        .max()
+        .expect("timer schema is nonempty")
+}
+
+fn require_bounded_generation_text(
+    field: &str,
+    sqlite_bytes: i64,
+    value: Option<Vec<u8>>,
+    maximum_bytes: usize,
+) -> DurableResult<String> {
+    let bytes = usize::try_from(sqlite_bytes).map_err(|error| {
+        unsupported_generation(&format!(
+            "timer SQLite {field} has invalid byte-length metadata: {error}"
+        ))
+    })?;
+    if bytes > maximum_bytes {
+        return Err(unsupported_generation(&format!(
+            "timer SQLite {field} has {bytes} bytes; bounded generation maximum is {maximum_bytes}"
+        )));
+    }
+    let value = value.ok_or_else(|| {
+        unsupported_generation(&format!(
+            "timer SQLite {field} passed its byte bound but has no bounded projection"
+        ))
+    })?;
+    if value.len() != bytes {
+        return Err(unsupported_generation(&format!(
+            "timer SQLite {field} projection does not match its byte-length metadata"
+        )));
+    }
+    String::from_utf8(value).map_err(|error| {
+        unsupported_generation(&format!("timer SQLite {field} is not valid UTF-8: {error}"))
+    })
+}
+
+fn require_utf8_timer_store(connection: &Connection) -> DurableResult<()> {
+    let encoding: String = connection
+        .pragma_query_value(None, "encoding", |row| row.get(0))
+        .map_err(contention)?;
+    if !encoding.eq_ignore_ascii_case(TIMER_STORE_SQLITE_ENCODING) {
+        return Err(unsupported_generation(&format!(
+            "timer SQLite encoding is {encoding}, expected {TIMER_STORE_SQLITE_ENCODING}"
+        )));
+    }
+    Ok(())
 }
 
 fn normalize_ddl(sql: &str) -> String {
@@ -1068,8 +1247,8 @@ mod tests {
 
     use super::{
         FRESH_TIMER_SCAN_SQL, MAX_SELECTED_WAIT_IDS_BYTES, RETAINED_TIMER_READ_SQL,
-        SqliteTimerDriver, TIMER_POINT_READ_SQL, TIMER_SOURCE_SCAN_LIMIT,
-        selected_wait_ids_byte_limit, timer_value_byte_limit,
+        SQLITE_SCHEMA_OBJECTS_SQL, SqliteTimerDriver, TIMER_POINT_READ_SQL,
+        TIMER_SOURCE_SCAN_LIMIT, selected_wait_ids_byte_limit, timer_value_byte_limit,
     };
     use rusqlite::{Connection, params};
 
@@ -1107,7 +1286,7 @@ mod tests {
             .next()
             .expect("fresh scan has a projection");
         assert!(projection.contains("activation_id"));
-        assert!(projection.contains("substr(activation_id, 1, 513)"));
+        assert!(projection.contains("substr(CAST(activation_id AS BLOB), 1, 2049)"));
         assert!(projection.contains("length(activation_id)"));
         assert!(projection.contains("due_unix_ms"));
         assert!(projection.contains("length(value_json)"));
@@ -1139,7 +1318,9 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         );
-        assert!(super::TIMER_POINT_READ_SQL.contains("substr(schedule_digest, 1, 65)"));
+        assert!(
+            super::TIMER_POINT_READ_SQL.contains("substr(CAST(schedule_digest AS BLOB), 1, 65)")
+        );
     }
 
     #[test]
@@ -1173,5 +1354,23 @@ mod tests {
             ],
         );
         assert_indexed(&point, "sqlite_autoindex_cymule_timers_1");
+    }
+
+    #[test]
+    fn schema_discovery_stops_at_its_row_limit_without_a_global_sort() {
+        let directory = tempfile::tempdir().expect("temporary directory creates");
+        let driver = SqliteTimerDriver::open(directory.path().join("timer.sqlite"))
+            .expect("timer store opens");
+        let plan = query_plan(
+            &driver.connection,
+            SQLITE_SCHEMA_OBJECTS_SQL,
+            params![4_096_i64, 4_096_i64, 4_096_i64, 4_096_i64, 5_i64],
+        );
+        assert!(SQLITE_SCHEMA_OBJECTS_SQL.contains("LIMIT ?5"));
+        assert!(!SQLITE_SCHEMA_OBJECTS_SQL.contains("ORDER BY"));
+        assert!(
+            plan.iter().all(|step| !step.contains("TEMP B-TREE")),
+            "bounded schema discovery unexpectedly sorts the complete schema: {plan:?}"
+        );
     }
 }

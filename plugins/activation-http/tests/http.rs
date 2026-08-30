@@ -286,6 +286,33 @@ async fn raw_signal_body_has_an_explicit_two_mebibyte_limit() {
 }
 
 #[tokio::test]
+async fn canonical_value_expansion_over_the_spool_limit_is_payload_too_large() {
+    let (directory, router, _driver) = durable_router(1);
+    let values = vec!["1e-6"; 240_000].join(",");
+    let body = format!(
+        r#"{{"activation_id":"activation:canonical-large","key":"signal:http","value":[{values}]}}"#
+    );
+    assert!(body.len() < 2 * 1024 * 1024);
+
+    let response = router
+        .oneshot(raw_request(body))
+        .await
+        .expect("router responds");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let signal_count: i64 = Connection::open(directory.path().join("http.sqlite"))
+        .expect("HTTP spool opens")
+        .query_row("SELECT COUNT(*) FROM cymule_http_signals", [], |row| {
+            row.get(0)
+        })
+        .expect("signal count reads");
+    assert_eq!(
+        signal_count, 0,
+        "oversized canonical input is never persisted"
+    );
+}
+
+#[tokio::test]
 async fn acknowledged_identity_replays_and_conflicting_reuse_fails() {
     let (_directory, router, mut driver) = durable_router(4);
     let first = tokio::spawn(router.clone().oneshot(request()));
@@ -468,6 +495,190 @@ fn malformed_http_generation_is_rejected_without_mutation() {
         )
         .expect("schema remains inspectable");
     assert_eq!(meta_count, 0, "rejection must not heal the generation");
+}
+
+#[test]
+fn sqlite_sequence_is_nonempty_foreign_authority_and_is_not_initialized() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("sqlite-sequence-only.sqlite");
+    let connection = Connection::open(&database).expect("foreign store opens");
+    connection
+        .execute_batch(
+            "CREATE TABLE old_state(id INTEGER PRIMARY KEY AUTOINCREMENT);
+             DROP TABLE old_state;",
+        )
+        .expect("sqlite_sequence authority remains");
+    let objects: Vec<String> = connection
+        .prepare("SELECT name FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+        .expect("schema query prepares")
+        .query_map([], |row| row.get(0))
+        .expect("schema query executes")
+        .collect::<Result<_, _>>()
+        .expect("schema names decode");
+    assert_eq!(objects, ["sqlite_sequence"]);
+    drop(connection);
+    let before = std::fs::read(&database).expect("foreign bytes read");
+
+    let error = durable_signal_router(&database, 1, AllowAll)
+        .err()
+        .expect("sqlite_sequence-only spool must not be initialized");
+    assert!(
+        error
+            .to_string()
+            .contains(UNSUPPORTED_STORE_GENERATION_CODE)
+    );
+    assert_eq!(
+        std::fs::read(&database).expect("foreign bytes reread"),
+        before,
+        "foreign SQLite authority rejection must not mutate the database"
+    );
+}
+
+#[test]
+fn generation_one_is_rejected_without_import_or_rewrite() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("generation-one.sqlite");
+    drop(durable_signal_router(&database, 1, AllowAll).expect("generation two initializes"));
+    Connection::open(&database)
+        .expect("HTTP spool opens for predecessor marker")
+        .execute(
+            "UPDATE cymule_http_spool_meta SET schema_version = ?1 WHERE singleton = 1",
+            ["cymule.activation-http-spool/1"],
+        )
+        .expect("generation one marker installs");
+
+    let error = durable_signal_router(&database, 1, AllowAll)
+        .err()
+        .expect("generation one must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains(UNSUPPORTED_STORE_GENERATION_CODE)
+    );
+
+    let retained: String = Connection::open(&database)
+        .expect("predecessor spool reopens")
+        .query_row(
+            "SELECT schema_version FROM cymule_http_spool_meta WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("predecessor marker reads");
+    assert_eq!(retained, "cymule.activation-http-spool/1");
+}
+
+#[test]
+fn utf16_sqlite_is_rejected_before_schema_or_row_interpretation() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("utf16.sqlite");
+    let connection = Connection::open(&database).expect("UTF-16 database opens");
+    connection
+        .pragma_update(None, "encoding", "UTF-16le")
+        .expect("UTF-16 encoding installs");
+    connection
+        .execute_batch("CREATE TABLE foreign_generation(value TEXT)")
+        .expect("UTF-16 schema installs");
+    drop(connection);
+
+    let error = durable_signal_router(&database, 1, AllowAll)
+        .err()
+        .expect("UTF-16 generation must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains(UNSUPPORTED_STORE_GENERATION_CODE)
+    );
+
+    let connection = Connection::open(&database).expect("UTF-16 database reopens");
+    let encoding: String = connection
+        .pragma_query_value(None, "encoding", |row| row.get(0))
+        .expect("encoding reads");
+    assert!(encoding.eq_ignore_ascii_case("UTF-16le"));
+    let foreign_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'foreign_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("foreign schema remains");
+    assert_eq!(foreign_count, 1);
+}
+
+#[test]
+fn generation_metadata_is_bounded_before_rejection() {
+    for (name, mutation) in [
+        (
+            "oversized",
+            "UPDATE cymule_http_spool_meta SET schema_version = printf('%.*c', 1048576, 'x')",
+        ),
+        (
+            "invalid-utf8",
+            "UPDATE cymule_http_spool_meta SET schema_version = CAST(X'80' AS TEXT)",
+        ),
+    ] {
+        let directory = tempdir().expect("temporary directory creates");
+        let database = directory.path().join(format!("meta-{name}.sqlite"));
+        drop(durable_signal_router(&database, 1, AllowAll).expect("current spool initializes"));
+        Connection::open(&database)
+            .expect("HTTP spool opens for metadata tamper")
+            .execute_batch(mutation)
+            .expect("metadata tamper installs");
+
+        let error = durable_signal_router(&database, 1, AllowAll)
+            .err()
+            .expect("tampered metadata must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains(UNSUPPORTED_STORE_GENERATION_CODE),
+            "{name} metadata produced {error:?}"
+        );
+    }
+}
+
+#[test]
+fn sqlite_master_fields_and_object_count_are_bounded_before_rejection() {
+    for name in ["ddl", "object-name", "object-count"] {
+        let directory = tempdir().expect("temporary directory creates");
+        let database = directory.path().join(format!("schema-{name}.sqlite"));
+        drop(durable_signal_router(&database, 1, AllowAll).expect("current spool initializes"));
+        let connection = Connection::open(&database).expect("HTTP spool opens for schema tamper");
+        match name {
+            "ddl" => {
+                let payload = "x".repeat(1_048_576);
+                connection
+                    .execute_batch(&format!(
+                        "CREATE VIEW oversized_ddl AS SELECT '{payload}' AS payload"
+                    ))
+                    .expect("oversized DDL installs");
+            }
+            "object-name" => {
+                let object_name = "x".repeat(65_536);
+                connection
+                    .execute_batch(&format!("CREATE TABLE \"{object_name}\"(value INTEGER)"))
+                    .expect("oversized object name installs");
+            }
+            "object-count" => {
+                for index in 0..64 {
+                    connection
+                        .execute_batch(&format!("CREATE TABLE extra_{index}(value INTEGER)"))
+                        .expect("extra object installs");
+                }
+            }
+            _ => unreachable!(),
+        }
+        drop(connection);
+
+        let error = durable_signal_router(&database, 1, AllowAll)
+            .err()
+            .expect("tampered schema must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains(UNSUPPORTED_STORE_GENERATION_CODE),
+            "{name} schema produced {error:?}"
+        );
+    }
 }
 
 #[test]
@@ -998,6 +1209,50 @@ fn oversized_http_columns_are_gated_before_fresh_retained_and_ack_reads() {
                 ));
             }
         }
+    }
+}
+
+#[test]
+fn invalid_utf8_text_is_integrity_on_fresh_and_retained_reads() {
+    for (retained, field) in [(false, "activation_id"), (true, "signal_key")] {
+        let (directory, _router, mut driver) = durable_router(1);
+        let connection =
+            Connection::open(directory.path().join("http.sqlite")).expect("HTTP spool opens");
+        insert_signal_fixture(&connection, "activation:utf8", "signal:http");
+        if retained {
+            connection
+                .execute(
+                    "UPDATE cymule_http_signals SET selected_wait_ids = ?1",
+                    [cymule_core::canonical_bytes(&BTreeSet::from([test_wait_id(
+                        "utf8-retained",
+                    )]))
+                    .expect("retained target encodes")],
+                )
+                .expect("retained target installs");
+        }
+        connection
+            .execute(
+                &format!("UPDATE cymule_http_signals SET {field} = CAST(X'80' AS TEXT)"),
+                [],
+            )
+            .expect("invalid UTF-8 TEXT installs");
+
+        let mut view = ObservedWaitView {
+            waits: index(),
+            ..ObservedWaitView::default()
+        };
+        let error = driver
+            .receive(&mut view, 1)
+            .expect_err("invalid UTF-8 cannot become a delivery");
+        assert!(
+            matches!(
+                error,
+                DurableError::Integrity { ref code, .. }
+                    if code == "http_signal_text_invalid_utf8"
+            ),
+            "{field} retained={retained} produced {error:?}"
+        );
+        assert!(view.selection_requests.is_empty());
     }
 }
 

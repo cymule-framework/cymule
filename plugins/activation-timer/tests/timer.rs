@@ -524,7 +524,7 @@ fn retained_timer_target_corruption_is_integrity() {
 }
 
 #[test]
-fn oversized_generation_two_blobs_are_gated_before_receive_and_acknowledgement() {
+fn oversized_generation_three_blobs_are_gated_before_receive_and_acknowledgement() {
     for field in ["value_json", "selected_wait_ids"] {
         let (directory, mut driver) = timer_driver(ManualClock(100));
         driver
@@ -549,7 +549,7 @@ fn oversized_generation_two_blobs_are_gated_before_receive_and_acknowledgement()
                 &format!("UPDATE cymule_timers SET {field} = zeroblob(?1)"),
                 [oversized],
             )
-            .expect("oversized generation-two BLOB installs");
+            .expect("oversized generation-three BLOB installs");
 
         for error in [
             driver
@@ -582,6 +582,87 @@ fn oversized_generation_two_blobs_are_gated_before_receive_and_acknowledgement()
             )
             .expect("oversized BLOB state reads");
         assert_eq!(durable, (oversized, false));
+    }
+}
+
+#[test]
+fn invalid_utf8_timer_text_is_integrity_on_fresh_and_retained_reads() {
+    for retained in [false, true] {
+        for field in ["activation_id", "timer_id", "schedule_digest"] {
+            let (directory, mut driver) = timer_driver(ManualClock(100));
+            driver
+                .schedule("activation:utf8", "timer:one", 100, &json!(null))
+                .expect("timer schedules");
+            if retained {
+                driver
+                    .receive(&mut index(), 1)
+                    .expect("timer selects")
+                    .expect("delivery exists");
+            }
+            rusqlite::Connection::open(directory.path().join("timer.sqlite"))
+                .expect("timer store opens")
+                .execute(
+                    &format!("UPDATE cymule_timers SET {field} = CAST(X'80' AS TEXT)"),
+                    [],
+                )
+                .expect("invalid UTF-8 TEXT installs");
+
+            let mut view = ObservedTimerView {
+                waits: index(),
+                ..ObservedTimerView::default()
+            };
+            let error = driver
+                .receive(&mut view, 1)
+                .expect_err("invalid UTF-8 timer text cannot become a delivery");
+            assert!(
+                matches!(
+                    error,
+                    DurableError::Integrity { ref code, .. }
+                        if code == "timer_row_text_utf8_invalid"
+                ),
+                "{field} retained={retained} produced {error:?}"
+            );
+            assert!(view.selections.is_empty());
+        }
+    }
+}
+
+#[test]
+fn invalid_utf8_timer_text_is_integrity_on_exact_replay_and_acknowledgement() {
+    for field in ["timer_id", "schedule_digest"] {
+        let (directory, mut driver) = timer_driver(ManualClock(100));
+        driver
+            .schedule("activation:utf8", "timer:one", 100, &json!(null))
+            .expect("timer schedules");
+        driver
+            .receive(&mut index(), 1)
+            .expect("timer selects")
+            .expect("delivery exists");
+        rusqlite::Connection::open(directory.path().join("timer.sqlite"))
+            .expect("timer store opens")
+            .execute(
+                &format!("UPDATE cymule_timers SET {field} = CAST(X'80' AS TEXT)"),
+                [],
+            )
+            .expect("invalid UTF-8 TEXT installs");
+
+        for error in [
+            driver
+                .schedule("activation:utf8", "timer:one", 100, &json!(null))
+                .expect_err("invalid UTF-8 cannot replay through the exact point read"),
+            driver
+                .acknowledge("activation:utf8")
+                .expect_err("invalid UTF-8 cannot pass acknowledgement point read"),
+        ] {
+            assert!(
+                matches!(
+                    error,
+                    DurableError::Integrity { ref code, .. }
+                        if code == "timer_row_text_utf8_invalid"
+                ),
+                "{field} produced {error:?}"
+            );
+        }
     }
 }
 
@@ -699,6 +780,43 @@ fn timer_store_rejects_process_local_sqlite_backends() {
 }
 
 #[test]
+fn sqlite_sequence_is_nonempty_foreign_authority_and_is_not_initialized() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("sqlite-sequence-only.sqlite");
+    let connection = rusqlite::Connection::open(&database).expect("foreign store opens");
+    connection
+        .execute_batch(
+            "CREATE TABLE old_state(id INTEGER PRIMARY KEY AUTOINCREMENT);
+             DROP TABLE old_state;",
+        )
+        .expect("sqlite_sequence authority remains");
+    let objects: Vec<String> = connection
+        .prepare("SELECT name FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+        .expect("schema query prepares")
+        .query_map([], |row| row.get(0))
+        .expect("schema query executes")
+        .collect::<Result<_, _>>()
+        .expect("schema names decode");
+    assert_eq!(objects, ["sqlite_sequence"]);
+    drop(connection);
+    let before = fs::read(&database).expect("foreign bytes read");
+
+    let Err(error) = SqliteTimerDriver::open_with_clock(&database, ManualClock(100)) else {
+        panic!("sqlite_sequence-only store must not be initialized");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(UNSUPPORTED_STORE_GENERATION_CODE)
+    );
+    assert_eq!(
+        fs::read(&database).expect("foreign bytes reread"),
+        before,
+        "foreign SQLite authority rejection must not mutate the database"
+    );
+}
+
+#[test]
 fn nonpartial_timer_index_is_not_the_current_exact_generation() {
     let directory = tempdir().expect("temporary directory creates");
     let database = directory.path().join("nonpartial-timer.sqlite");
@@ -730,6 +848,147 @@ fn nonpartial_timer_index_is_not_the_current_exact_generation() {
 }
 
 #[test]
+fn timer_store_requires_utf8_database_encoding() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("utf16-timer.sqlite");
+    let connection = rusqlite::Connection::open(&database).expect("UTF-16 store opens");
+    connection
+        .execute_batch(
+            "PRAGMA encoding = 'UTF-16le';
+             CREATE TABLE foreign_timer_state(value TEXT) STRICT;",
+        )
+        .expect("UTF-16 store initializes");
+    let encoding: String = connection
+        .pragma_query_value(None, "encoding", |row| row.get(0))
+        .expect("UTF-16 encoding reads");
+    assert_eq!(encoding, "UTF-16le");
+    drop(connection);
+    let before = fs::read(&database).expect("UTF-16 bytes read");
+
+    let Err(error) = SqliteTimerDriver::open_with_clock(&database, ManualClock(100)) else {
+        panic!("UTF-16 timer store must not open");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(UNSUPPORTED_STORE_GENERATION_CODE)
+    );
+    assert!(error.to_string().contains("expected UTF-8"));
+    assert_eq!(fs::read(&database).expect("UTF-16 bytes reread"), before);
+}
+
+#[test]
+fn oversized_generation_metadata_is_bounded_and_rejected() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("oversized-generation-marker.sqlite");
+    drop(
+        SqliteTimerDriver::open_with_clock(&database, ManualClock(100))
+            .expect("current timer store initializes"),
+    );
+    let connection = rusqlite::Connection::open(&database).expect("timer store opens");
+    connection
+        .execute(
+            "UPDATE cymule_timer_meta
+             SET schema_version = printf('%.*c', ?1, 'x')",
+            [1_048_576_i64],
+        )
+        .expect("oversized generation marker installs");
+    drop(connection);
+
+    let Err(error) = SqliteTimerDriver::open_with_clock(&database, ManualClock(100)) else {
+        panic!("oversized generation marker must not open");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(UNSUPPORTED_STORE_GENERATION_CODE)
+    );
+    assert!(error.to_string().contains("schema_version"));
+    let retained_length: i64 = rusqlite::Connection::open(&database)
+        .expect("timer store reopens")
+        .query_row(
+            "SELECT length(CAST(schema_version AS BLOB)) FROM cymule_timer_meta",
+            [],
+            |row| row.get(0),
+        )
+        .expect("generation marker length reads");
+    assert_eq!(retained_length, 1_048_576);
+}
+
+#[test]
+fn oversized_schema_name_and_ddl_are_bounded_and_rejected() {
+    for oversized_name in [true, false] {
+        let directory = tempdir().expect("temporary directory creates");
+        let database = directory.path().join(if oversized_name {
+            "oversized-schema-name.sqlite"
+        } else {
+            "oversized-schema-ddl.sqlite"
+        });
+        let connection = rusqlite::Connection::open(&database).expect("foreign store opens");
+        let statement = if oversized_name {
+            format!(
+                "CREATE TABLE \"{}\"(value TEXT) STRICT",
+                "x".repeat(1_048_576)
+            )
+        } else {
+            format!(
+                "CREATE TABLE cymule_timers(value TEXT CHECK(value != '{}')) STRICT",
+                "x".repeat(1_048_576)
+            )
+        };
+        connection
+            .execute_batch(&statement)
+            .expect("oversized schema object installs");
+        drop(connection);
+
+        let Err(error) = SqliteTimerDriver::open_with_clock(&database, ManualClock(100)) else {
+            panic!("oversized schema object must not open");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(UNSUPPORTED_STORE_GENERATION_CODE)
+        );
+        let expected_field = if oversized_name {
+            "sqlite_master.name"
+        } else {
+            "sqlite_master.sql"
+        };
+        assert!(
+            error.to_string().contains(expected_field),
+            "unexpected oversized schema rejection: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn additional_schema_objects_are_rejected_with_a_bounded_object_page() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("additional-schema-objects.sqlite");
+    drop(
+        SqliteTimerDriver::open_with_clock(&database, ManualClock(100))
+            .expect("current timer store initializes"),
+    );
+    let connection = rusqlite::Connection::open(&database).expect("timer store opens");
+    for index in 0..32 {
+        connection
+            .execute_batch(&format!("CREATE TABLE x{index:02}(value TEXT) STRICT"))
+            .expect("additional schema object installs");
+    }
+    drop(connection);
+
+    let Err(error) = SqliteTimerDriver::open_with_clock(&database, ManualClock(100)) else {
+        panic!("additional schema objects must not open");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(UNSUPPORTED_STORE_GENERATION_CODE)
+    );
+    assert!(error.to_string().contains("object set"));
+}
+
+#[test]
 fn selected_delivery_survives_reopen_after_the_wait_leaves_the_index() {
     let directory = tempdir().expect("temporary directory creates");
     let database = directory.path().join("timer.sqlite");
@@ -744,6 +1003,11 @@ fn selected_delivery_survives_reopen_after_the_wait_leaves_the_index() {
         )
         .expect("generation reads");
     assert_eq!(generation, TIMER_STORE_SCHEMA_VERSION);
+    let encoding: String = rusqlite::Connection::open(&database)
+        .expect("timer store opens for encoding readback")
+        .pragma_query_value(None, "encoding", |row| row.get(0))
+        .expect("timer encoding reads");
+    assert_eq!(encoding, "UTF-8");
     driver
         .schedule("activation:reopen", "timer:one", 100, &json!({"due": true}))
         .expect("timer schedules");
@@ -926,6 +1190,66 @@ fn predecessor_timer_generation_is_rejected_without_mutation() {
         )
         .expect("predecessor generation remains inspectable");
     assert_eq!(generation, "cymule.activation-timer-store/1");
+}
+
+#[test]
+fn generation_two_timer_store_is_rejected_without_mutation() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("generation-two-timer.sqlite");
+    let connection = rusqlite::Connection::open(&database).expect("generation-two store opens");
+    connection
+        .execute_batch(
+            "CREATE TABLE cymule_timer_meta (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                schema_version TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE cymule_timers (
+                activation_id TEXT PRIMARY KEY NOT NULL,
+                timer_id TEXT NOT NULL,
+                due_unix_ms INTEGER NOT NULL,
+                value_json BLOB NOT NULL,
+                schedule_digest TEXT NOT NULL,
+                selected_wait_ids BLOB,
+                acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged IN (0, 1))
+             ) STRICT;
+             CREATE INDEX cymule_timers_due
+                ON cymule_timers(acknowledged, due_unix_ms, activation_id);
+             INSERT INTO cymule_timer_meta(singleton, schema_version)
+                VALUES (1, 'cymule.activation-timer-store/2');
+             INSERT INTO cymule_timers(
+                activation_id, timer_id, due_unix_ms, value_json,
+                schedule_digest, selected_wait_ids, acknowledged
+             ) VALUES (
+                'activation:generation-two', 'timer:generation-two', 100,
+                X'74727565', printf('%.*c', 64, '0'), NULL, 0
+             );",
+        )
+        .expect("generation-two store writes");
+    drop(connection);
+    let before = fs::read(&database).expect("generation-two bytes read");
+
+    let Err(error) = SqliteTimerDriver::open_with_clock(&database, ManualClock(100)) else {
+        panic!("generation-two store must not open");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(UNSUPPORTED_STORE_GENERATION_CODE)
+    );
+    assert_eq!(
+        fs::read(&database).expect("generation-two bytes reread"),
+        before,
+        "generation-two rejection must not mutate the database"
+    );
+    let generation: String = rusqlite::Connection::open(&database)
+        .expect("generation-two store reopens")
+        .query_row(
+            "SELECT schema_version FROM cymule_timer_meta WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("generation-two marker reads");
+    assert_eq!(generation, "cymule.activation-timer-store/2");
 }
 
 #[test]

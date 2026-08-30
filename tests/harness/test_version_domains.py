@@ -1911,7 +1911,8 @@ fn quotes(bytes: &[u8]) -> bool {
         self.assertIn("cymule.sqlite-store/6", versions)
         self.assertTrue(
             {
-                "cymule.activation-timer-store/2",
+                "cymule.activation-http-spool/2",
+                "cymule.activation-timer-store/3",
                 "cymule.framework-resource-handle/4",
                 "cymule.resource-lifecycle-receipt-ref/3",
                 "cymule.resource-pin-current/2",
@@ -1924,6 +1925,16 @@ fn quotes(bytes: &[u8]) -> bool {
             "edge": None,
             "runbook": "docs/migrations/pre-segmented-store-generations.md",
         }
+        activation_hard_cuts = {
+            "cymule.activation-http-spool/2": "docs/migrations/activation-http-spool-generation-2.md",
+            "cymule.activation-timer-store/3": "docs/migrations/activation-timer-store-generation-3.md",
+        }
+        for version, runbook in activation_hard_cuts.items():
+            self.assertEqual(by_version[version]["compatibility_mode"], "exact-reject")
+            self.assertEqual(
+                by_version[version]["migration"],
+                {"mode": "unsupported", "edge": None, "runbook": runbook},
+            )
         for version in (
             "cymule.agent-command/3",
             "cymule.resource-lifecycle-receipt-ref/3",
@@ -1978,7 +1989,9 @@ fn quotes(bytes: &[u8]) -> bool {
                 "cymule.agent/6",
                 "cymule.agent-command/2",
                 "cymule.agent-command-receipt/2",
+                "cymule.activation-http-spool/1",
                 "cymule.activation-timer-store/1",
+                "cymule.activation-timer-store/2",
                 "cymule.canary/1",
                 "cymule.coupled-checkpoint-receipt/2",
                 "cymule.command/5",

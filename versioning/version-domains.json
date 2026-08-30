@@ -4,7 +4,7 @@
     "generation": "source-0.2.0-unreleased-generation-3",
     "workspace_version": "0.2.0",
     "state": "source",
-    "source_snapshot_digest": "sha256:66f07910bc4791e6c1804233bfe550ff120c0bc615a7530fae5f67834a7d0ae5",
+    "source_snapshot_digest": "sha256:df34c843a4ce77f7bcffa6e83f4a128e343b6dba0cd8177c03c2375ea3516438",
     "baseline_source_snapshot_digest": "sha256:e3783a1ae7e61f331d90f7d456f60eb132712ba1f70e1b7f2363078a3c31540a",
     "predecessor_registry_digest": null,
     "predecessor_source_snapshot_digest": null,
@@ -26,7 +26,7 @@
   "domains": [
     {
       "domain": "cymule.activation-http-spool",
-      "version": "cymule.activation-http-spool/1",
+      "version": "cymule.activation-http-spool/2",
       "kind": "persistence",
       "owner": "cymule-activation-http",
       "writers": [
@@ -58,8 +58,12 @@
       "generator_paths": [
         "plugins/activation-http/src/lib.rs"
       ],
-      "compatibility_mode": null,
-      "migration": null,
+      "compatibility_mode": "exact-reject",
+      "migration": {
+        "mode": "unsupported",
+        "edge": null,
+        "runbook": "docs/migrations/activation-http-spool-generation-2.md"
+      },
       "removal_gate": null,
       "conformance": [
         "rust-activation-http"
@@ -72,7 +76,7 @@
     },
     {
       "domain": "cymule.activation-timer-store",
-      "version": "cymule.activation-timer-store/2",
+      "version": "cymule.activation-timer-store/3",
       "kind": "persistence",
       "owner": "cymule-activation-timer",
       "writers": [
@@ -104,11 +108,11 @@
       "generator_paths": [
         "plugins/activation-timer/src/lib.rs"
       ],
-      "compatibility_mode": null,
+      "compatibility_mode": "exact-reject",
       "migration": {
         "mode": "unsupported",
         "edge": null,
-        "runbook": "docs/migrations/activation-timer-store-generation-2.md"
+        "runbook": "docs/migrations/activation-timer-store-generation-3.md"
       },
       "removal_gate": null,
       "conformance": [

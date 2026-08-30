@@ -32,7 +32,7 @@ const CANONICAL_DIGEST_BYTES: usize = 64;
 const MAX_HTTP_SELECTED_WAIT_IDS_BYTES: usize = 1 + MAX_WAIT_DELIVERY_TARGETS * 74;
 
 /// Exact physical generation accepted by the durable HTTP signal spool.
-pub const HTTP_SPOOL_SCHEMA_VERSION: &str = "cymule.activation-http-spool/1";
+pub const HTTP_SPOOL_SCHEMA_VERSION: &str = "cymule.activation-http-spool/2";
 /// Stable code returned before mutation for every unsupported HTTP spool generation.
 pub const UNSUPPORTED_STORE_GENERATION_CODE: &str = "unsupported_store_generation";
 
@@ -78,13 +78,13 @@ const HTTP_SPOOL_SCHEMA: [(&str, &str, &str, &str); 4] = [
 ];
 
 const HTTP_RETAINED_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
-            length(activation_id), substr(activation_id, 1, 513),
+            length(activation_id), substr(CAST(activation_id AS BLOB), 1, 2049),
             length(CAST(signal_key AS BLOB)),
-            length(signal_key), substr(signal_key, 1, 513),
+            length(signal_key), substr(CAST(signal_key AS BLOB), 1, 2049),
             length(value_json),
             CASE WHEN length(value_json) <= ?1 THEN value_json ELSE NULL END,
             length(CAST(request_digest AS BLOB)),
-            length(request_digest), substr(request_digest, 1, 65),
+            length(request_digest), substr(CAST(request_digest AS BLOB), 1, 65),
             length(selected_wait_ids),
             CASE WHEN selected_wait_ids IS NULL THEN NULL
                  WHEN length(selected_wait_ids) <= ?2 THEN selected_wait_ids ELSE NULL END,
@@ -93,13 +93,13 @@ const HTTP_RETAINED_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB))
      WHERE acknowledged = 0 AND selected_wait_ids IS NOT NULL
      ORDER BY activation_id LIMIT 1";
 const HTTP_FRESH_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
-            length(activation_id), substr(activation_id, 1, 513),
+            length(activation_id), substr(CAST(activation_id AS BLOB), 1, 2049),
             length(CAST(signal_key AS BLOB)),
-            length(signal_key), substr(signal_key, 1, 513),
+            length(signal_key), substr(CAST(signal_key AS BLOB), 1, 2049),
             length(value_json),
             CASE WHEN length(value_json) <= ?2 THEN value_json ELSE NULL END,
             length(CAST(request_digest AS BLOB)),
-            length(request_digest), substr(request_digest, 1, 65),
+            length(request_digest), substr(CAST(request_digest AS BLOB), 1, 65),
             length(selected_wait_ids),
             CASE WHEN selected_wait_ids IS NULL THEN NULL
                  WHEN length(selected_wait_ids) <= ?3 THEN selected_wait_ids ELSE NULL END,
@@ -109,13 +109,13 @@ const HTTP_FRESH_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
        AND signal_key = ?1
      ORDER BY activation_id LIMIT 1";
 const HTTP_POINT_READ_SQL: &str = "SELECT length(CAST(activation_id AS BLOB)),
-            length(activation_id), substr(activation_id, 1, 513),
+            length(activation_id), substr(CAST(activation_id AS BLOB), 1, 2049),
             length(CAST(signal_key AS BLOB)),
-            length(signal_key), substr(signal_key, 1, 513),
+            length(signal_key), substr(CAST(signal_key AS BLOB), 1, 2049),
             length(value_json),
             CASE WHEN length(value_json) <= ?2 THEN value_json ELSE NULL END,
             length(CAST(request_digest AS BLOB)),
-            length(request_digest), substr(request_digest, 1, 65),
+            length(request_digest), substr(CAST(request_digest AS BLOB), 1, 65),
             length(selected_wait_ids),
             CASE WHEN selected_wait_ids IS NULL THEN NULL
                  WHEN length(selected_wait_ids) <= ?3 THEN selected_wait_ids ELSE NULL END,
@@ -182,15 +182,15 @@ struct DurableWaiter {
 struct StoredSignal {
     activation_id_bytes: i64,
     activation_id_scalars: i64,
-    activation_id: String,
+    activation_id: Vec<u8>,
     key_bytes: i64,
     key_scalars: i64,
-    key: String,
+    key: Vec<u8>,
     value_bytes: i64,
     value: Option<Vec<u8>>,
     request_digest_bytes: i64,
     request_digest_scalars: i64,
-    request_digest: String,
+    request_digest: Vec<u8>,
     selected_bytes: Option<i64>,
     selected: Option<Vec<u8>>,
     acknowledged: i64,
@@ -240,6 +240,16 @@ enum PersistRequestOutcome {
     Pending,
     Acknowledged,
     IdentityConflict,
+}
+
+struct PreparedSignal {
+    value: Vec<u8>,
+    request_digest: String,
+}
+
+enum PrepareSignalError {
+    Invalid,
+    PayloadTooLarge,
 }
 
 /// SQLite-backed HTTP signal source whose ingress and selected targets survive
@@ -322,10 +332,17 @@ async fn receive_durable_signal(
     if !state.authorizer.authorize(&headers, &request) {
         return StatusCode::UNAUTHORIZED;
     }
+    let prepared = match prepare_signal(&request) {
+        Ok(prepared) => prepared,
+        Err(PrepareSignalError::PayloadTooLarge) => return StatusCode::PAYLOAD_TOO_LARGE,
+        Err(PrepareSignalError::Invalid) => return StatusCode::BAD_REQUEST,
+    };
     let database = Arc::clone(&state.database);
     let persisted_request = request.clone();
-    let Ok(Ok(persisted)) =
-        tokio::task::spawn_blocking(move || persist_request(&database, &persisted_request)).await
+    let Ok(Ok(persisted)) = tokio::task::spawn_blocking(move || {
+        persist_prepared_request(&database, &persisted_request, &prepared)
+    })
+    .await
     else {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
@@ -748,6 +765,19 @@ fn request_digest(request: &HttpSignalRequest) -> DurableResult<String> {
     cymule_core::canonical_digest(request).map_err(DurableError::from)
 }
 
+fn prepare_signal(request: &HttpSignalRequest) -> Result<PreparedSignal, PrepareSignalError> {
+    let value =
+        cymule_core::canonical_bytes(&request.value).map_err(|_| PrepareSignalError::Invalid)?;
+    if value.len() > HTTP_SIGNAL_BODY_LIMIT {
+        return Err(PrepareSignalError::PayloadTooLarge);
+    }
+    let request_digest = request_digest(request).map_err(|_| PrepareSignalError::Invalid)?;
+    Ok(PreparedSignal {
+        value,
+        request_digest,
+    })
+}
+
 fn verify_stored_signal(stored: StoredSignal) -> DurableResult<VerifiedSignal> {
     let activation_id = require_gated_http_text(
         "activation_id",
@@ -951,7 +981,7 @@ fn require_gated_http_text(
     field: &'static str,
     sqlite_bytes: i64,
     sqlite_scalars: i64,
-    value: String,
+    value: Vec<u8>,
     maximum_bytes: usize,
     maximum_scalars: usize,
 ) -> DurableResult<String> {
@@ -975,10 +1005,22 @@ fn require_gated_http_text(
             ),
         ));
     }
-    if value.len() != bytes || value.chars().count() != scalars {
+    if value.len() != bytes {
         return Err(http_row_integrity(
             "http_signal_text_projection_mismatch",
             format!("HTTP {field} does not match its SQLite length metadata"),
+        ));
+    }
+    let value = String::from_utf8(value).map_err(|error| {
+        http_row_integrity(
+            "http_signal_text_invalid_utf8",
+            format!("HTTP {field} is not valid UTF-8: {error}"),
+        )
+    })?;
+    if value.chars().count() != scalars {
+        return Err(http_row_integrity(
+            "http_signal_text_projection_mismatch",
+            format!("HTTP {field} does not match its SQLite scalar-length metadata"),
         ));
     }
     Ok(value)
@@ -1049,10 +1091,11 @@ fn require_file_backed_http_spool(connection: &Connection) -> DurableResult<()> 
 }
 
 fn initialize_or_require_http_spool(connection: &mut Connection) -> DurableResult<()> {
+    require_utf8_http_spool(connection)?;
     if sqlite_schema_objects(connection)?.is_empty() {
         initialize_empty_http_spool(connection)?;
     } else {
-        require_current_http_spool(connection)?;
+        require_current_http_spool_after_encoding(connection)?;
     }
     Ok(())
 }
@@ -1061,6 +1104,7 @@ fn initialize_empty_http_spool(connection: &mut Connection) -> DurableResult<()>
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(contention)?;
+    require_utf8_http_spool(&transaction)?;
     if sqlite_schema_objects(&transaction)?.is_empty() {
         for (_, _, _, ddl) in HTTP_SPOOL_SCHEMA {
             transaction.execute_batch(ddl).map_err(contention)?;
@@ -1071,14 +1115,19 @@ fn initialize_empty_http_spool(connection: &mut Connection) -> DurableResult<()>
                 [HTTP_SPOOL_SCHEMA_VERSION],
             )
             .map_err(contention)?;
-        require_current_http_spool(&transaction)?;
+        require_current_http_spool_after_encoding(&transaction)?;
     } else {
-        require_current_http_spool(&transaction)?;
+        require_current_http_spool_after_encoding(&transaction)?;
     }
     transaction.commit().map_err(contention)
 }
 
 fn require_current_http_spool(connection: &Connection) -> DurableResult<()> {
+    require_utf8_http_spool(connection)?;
+    require_current_http_spool_after_encoding(connection)
+}
+
+fn require_current_http_spool_after_encoding(connection: &Connection) -> DurableResult<()> {
     let observed = sqlite_schema_objects(connection)?;
     if observed.len() != HTTP_SPOOL_SCHEMA.len() {
         return Err(unsupported_generation(&format!(
@@ -1099,21 +1148,48 @@ fn require_current_http_spool(connection: &Connection) -> DurableResult<()> {
             )));
         }
     }
+    let version_byte_limit = HTTP_SPOOL_SCHEMA_VERSION.len();
+    let version_scalar_limit = HTTP_SPOOL_SCHEMA_VERSION.chars().count();
     let mut statement = connection
         .prepare(
-            "SELECT COALESCE(CAST(singleton AS TEXT), ''),
-                    COALESCE(CAST(schema_version AS TEXT), '')
-             FROM cymule_http_spool_meta ORDER BY singleton",
+            "SELECT singleton,
+                    length(CAST(schema_version AS BLOB)), length(schema_version),
+                    substr(CAST(schema_version AS BLOB), 1, ?1)
+             FROM cymule_http_spool_meta LIMIT 2",
         )
         .map_err(contention)?;
     let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
+        .query_map(
+            [sqlite_limit(
+                version_byte_limit + 1,
+                "HTTP generation version projection",
+            )?],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    GatedSqliteText {
+                        bytes: row.get(1)?,
+                        scalars: row.get(2)?,
+                        prefix: row.get(3)?,
+                    },
+                ))
+            },
+        )
         .map_err(contention)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(contention)?;
-    if rows.as_slice() != [("1".to_owned(), HTTP_SPOOL_SCHEMA_VERSION.to_owned())] {
+    if rows.len() != 1 || rows[0].0 != 1 {
+        return Err(unsupported_generation(&format!(
+            "HTTP SQLite schema authority is not the singleton {HTTP_SPOOL_SCHEMA_VERSION} generation"
+        )));
+    }
+    let version = require_bounded_generation_text(
+        "schema_version",
+        &rows[0].1,
+        version_byte_limit,
+        version_scalar_limit,
+    )?;
+    if version != HTTP_SPOOL_SCHEMA_VERSION {
         return Err(unsupported_generation(&format!(
             "HTTP SQLite schema authority is not the singleton {HTTP_SPOOL_SCHEMA_VERSION} generation"
         )));
@@ -1121,28 +1197,167 @@ fn require_current_http_spool(connection: &Connection) -> DurableResult<()> {
     Ok(())
 }
 
+struct GatedSqliteText {
+    bytes: i64,
+    scalars: i64,
+    prefix: Vec<u8>,
+}
+
+struct GatedSchemaObject {
+    kind: GatedSqliteText,
+    name: GatedSqliteText,
+    table: GatedSqliteText,
+    ddl: GatedSqliteText,
+}
+
 fn sqlite_schema_objects(
     connection: &Connection,
 ) -> DurableResult<Vec<(String, String, String, String)>> {
+    let kind_limit = generation_text_limit(HTTP_SPOOL_SCHEMA.iter().map(|entry| entry.0));
+    let name_limit = generation_text_limit(HTTP_SPOOL_SCHEMA.iter().map(|entry| entry.1));
+    let table_limit = generation_text_limit(HTTP_SPOOL_SCHEMA.iter().map(|entry| entry.2));
+    let ddl_limit = generation_text_limit(HTTP_SPOOL_SCHEMA.iter().map(|entry| entry.3));
     let mut statement = connection
         .prepare(
-            "SELECT type, name, tbl_name, sql FROM sqlite_master
-             WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*'
-             ORDER BY type, name",
+            "SELECT length(CAST(type AS BLOB)), length(type),
+                    substr(CAST(type AS BLOB), 1, ?1),
+                    length(CAST(name AS BLOB)), length(name),
+                    substr(CAST(name AS BLOB), 1, ?2),
+                    length(CAST(tbl_name AS BLOB)), length(tbl_name),
+                    substr(CAST(tbl_name AS BLOB), 1, ?3),
+                    length(CAST(sql AS BLOB)), length(sql),
+                    substr(CAST(sql AS BLOB), 1, ?4)
+             FROM sqlite_master
+             WHERE sql IS NOT NULL
+             LIMIT ?5",
         )
         .map_err(contention)?;
-    statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })
+    let raw = statement
+        .query_map(
+            params![
+                sqlite_limit(kind_limit.0 + 1, "HTTP schema kind projection")?,
+                sqlite_limit(name_limit.0 + 1, "HTTP schema name projection")?,
+                sqlite_limit(table_limit.0 + 1, "HTTP schema table projection")?,
+                sqlite_limit(ddl_limit.0 + 1, "HTTP schema DDL projection")?,
+                sqlite_limit(HTTP_SPOOL_SCHEMA.len() + 1, "HTTP schema object limit")?,
+            ],
+            |row| {
+                Ok(GatedSchemaObject {
+                    kind: GatedSqliteText {
+                        bytes: row.get(0)?,
+                        scalars: row.get(1)?,
+                        prefix: row.get(2)?,
+                    },
+                    name: GatedSqliteText {
+                        bytes: row.get(3)?,
+                        scalars: row.get(4)?,
+                        prefix: row.get(5)?,
+                    },
+                    table: GatedSqliteText {
+                        bytes: row.get(6)?,
+                        scalars: row.get(7)?,
+                        prefix: row.get(8)?,
+                    },
+                    ddl: GatedSqliteText {
+                        bytes: row.get(9)?,
+                        scalars: row.get(10)?,
+                        prefix: row.get(11)?,
+                    },
+                })
+            },
+        )
         .map_err(contention)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(contention)
+        .map_err(contention)?;
+    raw.into_iter()
+        .map(|object| {
+            Ok((
+                require_bounded_generation_text(
+                    "sqlite_master.type",
+                    &object.kind,
+                    kind_limit.0,
+                    kind_limit.1,
+                )?,
+                require_bounded_generation_text(
+                    "sqlite_master.name",
+                    &object.name,
+                    name_limit.0,
+                    name_limit.1,
+                )?,
+                require_bounded_generation_text(
+                    "sqlite_master.tbl_name",
+                    &object.table,
+                    table_limit.0,
+                    table_limit.1,
+                )?,
+                require_bounded_generation_text(
+                    "sqlite_master.sql",
+                    &object.ddl,
+                    ddl_limit.0,
+                    ddl_limit.1,
+                )?,
+            ))
+        })
+        .collect()
+}
+
+fn generation_text_limit<'a>(values: impl Iterator<Item = &'a str>) -> (usize, usize) {
+    values.fold((0, 0), |(bytes, scalars), value| {
+        (bytes.max(value.len()), scalars.max(value.chars().count()))
+    })
+}
+
+fn require_bounded_generation_text(
+    field: &str,
+    value: &GatedSqliteText,
+    maximum_bytes: usize,
+    maximum_scalars: usize,
+) -> DurableResult<String> {
+    let bytes = usize::try_from(value.bytes).map_err(|_| {
+        unsupported_generation(&format!(
+            "HTTP SQLite {field} has invalid byte-length metadata"
+        ))
+    })?;
+    let scalars = usize::try_from(value.scalars).map_err(|_| {
+        unsupported_generation(&format!(
+            "HTTP SQLite {field} has invalid scalar-length metadata"
+        ))
+    })?;
+    if bytes > maximum_bytes || scalars > maximum_scalars {
+        return Err(unsupported_generation(&format!(
+            "HTTP SQLite {field} exceeds the exact {HTTP_SPOOL_SCHEMA_VERSION} bound"
+        )));
+    }
+    if value.prefix.len() != bytes {
+        return Err(unsupported_generation(&format!(
+            "HTTP SQLite {field} does not match its bounded byte projection"
+        )));
+    }
+    let decoded = std::str::from_utf8(&value.prefix)
+        .map_err(|_| unsupported_generation(&format!("HTTP SQLite {field} is not valid UTF-8")))?;
+    if decoded.chars().count() != scalars {
+        return Err(unsupported_generation(&format!(
+            "HTTP SQLite {field} does not match its scalar-length metadata"
+        )));
+    }
+    Ok(decoded.to_owned())
+}
+
+fn sqlite_limit(value: usize, field: &str) -> DurableResult<i64> {
+    i64::try_from(value)
+        .map_err(|_| unsupported_generation(&format!("{field} does not fit SQLite INTEGER")))
+}
+
+fn require_utf8_http_spool(connection: &Connection) -> DurableResult<()> {
+    let encoding: String = connection
+        .pragma_query_value(None, "encoding", |row| row.get(0))
+        .map_err(contention)?;
+    if !encoding.eq_ignore_ascii_case("UTF-8") {
+        return Err(unsupported_generation(&format!(
+            "HTTP SQLite encoding {encoding} is not the required UTF-8 physical contract"
+        )));
+    }
+    Ok(())
 }
 
 fn normalize_ddl(sql: &str) -> String {
@@ -1180,19 +1395,28 @@ fn configure_http_spool_connection(connection: &Connection) -> DurableResult<()>
     Ok(())
 }
 
+#[cfg(test)]
 fn persist_request(
     path: &Path,
     request: &HttpSignalRequest,
 ) -> DurableResult<PersistRequestOutcome> {
+    let prepared = prepare_signal(request).map_err(|error| match error {
+        PrepareSignalError::Invalid => {
+            DurableError::Validation("HTTP signal request cannot be canonicalized".to_owned())
+        }
+        PrepareSignalError::PayloadTooLarge => DurableError::Validation(format!(
+            "HTTP signal value exceeds the {HTTP_SIGNAL_BODY_LIMIT}-byte canonical limit"
+        )),
+    })?;
+    persist_prepared_request(path, request, &prepared)
+}
+
+fn persist_prepared_request(
+    path: &Path,
+    request: &HttpSignalRequest,
+    prepared: &PreparedSignal,
+) -> DurableResult<PersistRequestOutcome> {
     let mut connection = open_spool(path, false)?;
-    let digest = request_digest(request)?;
-    let value = cymule_core::canonical_bytes(&request.value)?;
-    if value.len() > HTTP_SIGNAL_BODY_LIMIT {
-        return Err(DurableError::Validation(format!(
-            "HTTP signal value has {} canonical bytes; maximum is {HTTP_SIGNAL_BODY_LIMIT}",
-            value.len()
-        )));
-    }
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(contention)?;
@@ -1226,7 +1450,12 @@ fn persist_request(
                 activation_id, signal_key, value_json, request_digest,
                 selected_wait_ids, acknowledged
              ) VALUES (?1, ?2, ?3, ?4, NULL, 0)",
-            params![request.activation_id, request.key, value, digest],
+            params![
+                request.activation_id,
+                request.key,
+                prepared.value,
+                prepared.request_digest
+            ],
         )
         .map_err(contention)?;
     transaction.commit().map_err(contention)?;
@@ -1344,7 +1573,7 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         );
-        assert!(HTTP_POINT_READ_SQL.contains("substr(request_digest, 1, 65)"));
+        assert!(HTTP_POINT_READ_SQL.contains("substr(CAST(request_digest AS BLOB), 1, 65)"));
     }
 
     #[test]
@@ -1425,6 +1654,52 @@ mod tests {
                     "{field} produced {error:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_point_row_rejects_retry_readback_and_acknowledgement_as_integrity() {
+        let directory = tempfile::tempdir().expect("temporary directory creates");
+        let database = directory.path().join("point-invalid-utf8.sqlite");
+        let (_router, mut driver) =
+            durable_signal_router(&database, 1, AllowAll).expect("HTTP spool opens");
+        let request = HttpSignalRequest {
+            activation_id: "activation:point-utf8".to_owned(),
+            key: "signal:point-utf8".to_owned(),
+            value: serde_json::json!(true),
+        };
+        assert_eq!(
+            persist_request(&database, &request).expect("request persists"),
+            PersistRequestOutcome::Pending
+        );
+        driver
+            .connection
+            .execute(
+                "UPDATE cymule_http_signals
+                 SET request_digest = CAST(X'80' AS TEXT)
+                 WHERE activation_id = ?1",
+                [&request.activation_id],
+            )
+            .expect("invalid UTF-8 digest installs");
+
+        let errors = [
+            persist_request(&database, &request)
+                .expect_err("duplicate ingress rejects invalid UTF-8"),
+            read_acknowledged(&database, &request.activation_id)
+                .expect_err("acknowledgement readback rejects invalid UTF-8"),
+            driver
+                .acknowledge(&request.activation_id)
+                .expect_err("acknowledgement rejects invalid UTF-8"),
+        ];
+        for error in errors {
+            assert!(
+                matches!(
+                    error,
+                    DurableError::Integrity { ref code, .. }
+                        if code == "http_signal_text_invalid_utf8"
+                ),
+                "point path produced {error:?}"
+            );
         }
     }
 

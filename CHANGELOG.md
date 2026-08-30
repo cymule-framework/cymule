@@ -101,17 +101,22 @@ domains described in `docs/specification.md`.
   newly applied subset, and original ready-Run set;
   completed/cancelled nonwinners no longer poison broadcast delivery or wake
   M3 work.
-- Freeze HTTP and timer persistence as
-  `cymule.activation-http-spool/1` and
-  `cymule.activation-timer-store/2`. Both initialize only an atomically
+- Advance HTTP and timer persistence to
+  `cymule.activation-http-spool/2` and
+  `cymule.activation-timer-store/3`. Both initialize only an atomically
   rechecked empty database and reject every nonempty predecessor, partial, or
   extended shape as `unsupported_store_generation`; neither repairs or imports
-  in place. HTTP revalidates complete canonical rows against the original
-  request digest before selection or replay. Timer `/2` adds one complete
-  schedule digest; `/1` has no reader or fallback. Timer values now fail before
-  SQLite mutation above the Core Artifact bound, fresh scans retain only bounded
-  metadata and load one exact payload at a time, and HTTP/timer targets require
-  lowercase content IDs with timers selecting exactly one wait.
+  in place. The new generations make selection-aware partial indexes part of
+  exact DDL authority and bound all variable SQLite row material before typed
+  decoding. HTTP revalidates complete canonical rows against the original
+  request digest before selection or replay. Timer retains one complete schedule
+  digest introduced by historical `/2`; `/1` and `/2` have no reader or
+  fallback in `/3`. Timer values fail before SQLite mutation above the Core
+  Artifact bound, fresh scans retain only bounded metadata and load one exact
+  payload at a time, and HTTP/timer targets require lowercase content IDs with
+  timers selecting exactly one wait. Retained internal-test predecessors require
+  operator-owned drain and API-level recreation under the registered hard-cut
+  runbooks.
 - Rename the misleading public `AuthorityLease` type to `CoordinationLease`
   without a wire-shape alias; coordination ownership and fencing do not grant
   capability authorization.

@@ -2,7 +2,7 @@
 
 `cymule-activation-timer` is a durable logical timer source backed by SQLite.
 Schedules retain a stable activation ID, timer ID, due observation and typed
-value. Generation `/2` also retains one canonical `schedule_digest` over all
+value. Generation `/3` also retains one canonical `schedule_digest` over all
 four fields. Fresh selection, retained redelivery, exact schedule replay, and
 acknowledgement load the complete row, require strict canonical value/target
 bytes, and recompute that digest before a delivery can reach M1. A timer is
@@ -22,16 +22,17 @@ persisted as a target set.
 Every row read obtains SQLite byte lengths before the engine can materialize
 the value or selected-target BLOB. SQL returns those bytes only when the value
 is within Core's artifact limit and the one-target JSON is within its exact
-75-byte canonical ceiling. Oversized generation-`/2` corruption therefore
+75-byte canonical ceiling. Oversized generation-`/3` corruption therefore
 returns `Integrity` from receive, replay, selection readback, and
 acknowledgement without copying the BLOB into Rust.
 
 The same gate applies to TEXT. Activation and timer IDs are returned only as
-capped 513-scalar projections and must still satisfy the exact
+capped 2,049-byte BLOB projections and must still satisfy the exact
 512-scalar/2,048-byte identity contract; schedule digests are capped at 65
-scalars and must match the exact 64-byte lowercase-hex digest. Oversized
-generation-`/2` TEXT therefore fails before Rust can allocate the complete
-field.
+bytes and must match the exact 64-byte lowercase-hex digest. Rust performs the
+sole UTF-8 decode after the SQLite byte gate, so invalid UTF-8 and oversized
+generation-`/3` TEXT return `Integrity` instead of becoming a substrate decode
+failure.
 
 Retained target selections always redeliver first and remain independent of a
 later caller's target limit; fresh selections are checked against their own
@@ -54,14 +55,17 @@ Unicode scalar values with no control character. Multi-byte identities are not
 measured by their UTF-8 byte length.
 
 The SQLite store has one physical generation,
-`cymule.activation-timer-store/2`. A completely empty database is initialized
-atomically; every nonempty database must already contain the exact singleton
-generation and fixed table/index DDL before configuration or data access.
+`cymule.activation-timer-store/3`. A completely empty UTF-8 database is
+initialized atomically; every nonempty database must already contain the exact
+singleton generation, UTF-8 encoding, and fixed table/index DDL before
+configuration or data access. Generation validation reads at most the expected
+schema object count plus one and byte-caps the generation marker, object names,
+table names, and DDL before UTF-8 decode.
 Older, partial, foreign, or modified databases fail with
 `unsupported_store_generation` and are not altered. This crate has no in-place
 upgrade, importer, or process-local alternate authority. The predecessor `/1`
-shape has no reader or decode fallback; retained internal-test state must be
-drained and reseeded under the current schedule authority.
+and `/2` shapes have no reader or decode fallback; retained internal-test state
+must be drained and reseeded under the current schedule authority.
 
 ```sh
 cargo add cymule-activation-timer

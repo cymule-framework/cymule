@@ -914,14 +914,19 @@ bound MUST NOT reject, truncate, reselect, or otherwise reinterpret it. The
 driver acknowledges transport delivery only after the activation CAS succeeds.
 Lost acknowledgement MUST redeliver the identical activation ID, source,
 targets, and value; admission then returns the retained decision.
-The official HTTP `/1` and timer `/2` SQLite sources MUST load each complete
+The official HTTP `/2` and timer `/3` SQLite sources MUST load each complete
 persisted row before fresh selection, retained replay, schedule/request replay,
-or acknowledgement. Stored JSON MUST duplicate-reject, decode, and reproduce
-its exact canonical bytes. HTTP MUST rebuild the complete signal request and
-match its request digest. Timer `/2` MUST rebuild the complete activation ID,
-timer ID, due observation, and value schedule and match its schedule digest;
-timer `/1` has no reader or fallback. Any mismatch is retained-authority
-`Integrity` and MUST expose neither parked-wait selection nor an M1 delivery.
+or acknowledgement. Every variable SQLite text or blob field MUST be bounded
+as bytes before typed decoding; invalid UTF-8, oversize data, missing bounded
+material, and length disagreement are retained-authority `Integrity`, not a
+substrate failure. Stored JSON MUST duplicate-reject, decode, and reproduce its
+exact canonical bytes. HTTP MUST rebuild the complete signal request and match
+its request digest. Timer `/3` MUST rebuild the complete activation ID, timer
+ID, due observation, and value schedule and match its schedule digest. HTTP
+`/1` and timer `/1` or `/2` have no reader, importer, alias, or fallback. The
+fresh and retained selection-aware partial indexes are part of each exact fixed
+DDL generation. Any mismatch is retained-authority `Integrity` and MUST expose
+neither parked-wait selection nor an M1 delivery.
 Open MUST NOT rebuild or enumerate the complete parked-wait index. A fresh
 selection resolves only its bounded source page and exact target membership;
 committed transitions update only touched paths. A stale authenticated page

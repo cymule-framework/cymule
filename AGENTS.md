@@ -168,6 +168,12 @@ Use this precedence order when guidance conflicts:
   the newly applied wait subset, and the original ready-Run set. Targets already
   completed or cancelled are terminal nonwinners, never a broadcast HOL block
   or an M3 wake authority.
+- The official activation adapters admit only the exact physical generations
+  `cymule.activation-http-spool/2` and `cymule.activation-timer-store/3`.
+  Their selection-aware partial indexes are part of the fixed DDL authority;
+  `/1` HTTP and `/1` or `/2` timer databases have no reader, importer, alias,
+  or in-place repair path. Retained internal-test state must be drained and
+  recreated through the current public APIs under the registered runbooks.
 - Virtual-work cursors and bounded scheduler frontiers live in normalized
   keyed StateRoot families. Each typed transition has a hard read/write and
   encoded-size bound; never reconstruct a whole scheduler or repeat a complete

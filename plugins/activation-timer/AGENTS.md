@@ -6,13 +6,16 @@
 - The file-backed SQLite generation is the only timer authority. Do not expose
   an in-memory constructor or another process-local schedule/acknowledgement
   store, including for tests.
-- The timer store accepts only the exact `cymule.activation-timer-store/2`
+- The timer store accepts only the exact `cymule.activation-timer-store/3`
   physical generation. Initialize only a completely empty SQLite database
   inside one immediate transaction and verify the singleton generation row plus
-  every fixed table/index DDL before commit. Reject every nonempty mismatch with
-  `unsupported_store_generation` before PRAGMA or mutation; never ALTER, heal,
-  or import it.
-- Generation `/2` retains one `schedule_digest` over the complete activation
+  every fixed table/index DDL and UTF-8 database encoding before commit. Schema
+  discovery reads at most the expected object count plus one, and every
+  generation marker, object name, table name, and DDL projection is byte-capped
+  before UTF-8 decode. Reject every nonempty mismatch with
+  `unsupported_store_generation` before mutable PRAGMA or mutation; never
+  ALTER, heal, or import it.
+- Generation `/3` retains one `schedule_digest` over the complete activation
   ID, timer ID, due observation, and typed value. Fresh selection, retained
   delivery, schedule replay, and acknowledgement all load and validate the
   complete row, require strict canonical JSON bytes, and recompute that digest.
@@ -26,14 +29,16 @@
   and acknowledgement point read projects SQLite `length(...)` first and uses
   a `CASE` gate before Rust may receive `value_json` or `selected_wait_ids`.
   Value bytes use Core's artifact bound; the exactly-one content-ID target has
-  a 75-byte canonical upper bound. An oversized generation-`/2` BLOB is stable
+  a 75-byte canonical upper bound. An oversized generation-`/3` BLOB is stable
   `Integrity` and remains unacknowledged.
 - The same preallocation gate owns every variable TEXT field. Activation and
-  timer IDs use capped 513-scalar projections plus exact 512-scalar/2,048-byte
-  verification; `schedule_digest` uses a capped 65-scalar projection and the
-  exact 64-byte lowercase-hex digest contract. Fresh metadata also carries the
-  activation byte/scalar lengths. Oversized TEXT corruption is `Integrity`
-  before a full String reaches Rust.
+  timer IDs use capped 2,049-byte BLOB projections plus exact
+  512-scalar/2,048-byte verification; `schedule_digest` uses a capped 65-byte
+  BLOB projection and the exact 64-byte lowercase-hex digest contract. SQL
+  projects each field as a
+  byte-capped BLOB and Rust performs the sole UTF-8 decode; invalid UTF-8 and
+  oversized TEXT are `Integrity` before a full String reaches Rust. Fresh
+  metadata also carries the activation byte/scalar lengths.
 - Activation and timer identities use the shared 1..=512 Unicode-scalar,
   no-control-character contract. Never substitute UTF-8 byte length.
 - `receive` may return only a currently due timer with an exact target selected
