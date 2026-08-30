@@ -10178,10 +10178,10 @@ fn verify_agent_input_receipt_parent<R: crate::StateRootResolver + ?Sized>(
         resolver,
         &expected_session.session_id,
     )?
-    .map_or_else(
-        || agent_protocol::AgentSessionCurrent::new(&expected_session.session_id),
-        Ok,
-    )?;
+    .ok_or_else(|| DurableError::Integrity {
+        code: "agent_input_receipt_parent_session_missing".to_owned(),
+        message: "Agent Input receipt has no parent Session".to_owned(),
+    })?;
     let actual_elicitation = crate::state_root::load_agent_elicitation_current(
         manifest,
         resolver,
@@ -10225,10 +10225,10 @@ fn verify_agent_workspace_receipt_parent<R: crate::StateRootResolver + ?Sized>(
         resolver,
         &expected_session.session_id,
     )?
-    .map_or_else(
-        || agent_protocol::AgentSessionCurrent::new(&expected_session.session_id),
-        Ok,
-    )?;
+    .ok_or_else(|| DurableError::Integrity {
+        code: "agent_workspace_receipt_parent_session_missing".to_owned(),
+        message: "Agent Workspace receipt has no parent Session".to_owned(),
+    })?;
     let occurrence_id = expected_occurrence
         .map(|current| current.occurrence.occurrence_id.as_str())
         .or_else(|| receipt_workspace_occurrence_id(receipt))
@@ -10284,6 +10284,15 @@ fn verify_agent_finalize_receipt_parent<R: crate::StateRootResolver + ?Sized>(
             message: "Agent Finalize receipt retained another stream source".to_owned(),
         });
     };
+    let agent_protocol::AgentStreamSource::Finalize { stream, .. } = &actual else {
+        unreachable!("Finalize source loader returns Finalize")
+    };
+    if stream.publication_reservation.is_none() && command.source_revision != manifest.revision {
+        return Err(DurableError::Integrity {
+            code: "agent_receipt_parent_revision_mismatch".to_owned(),
+            message: "Staged Agent Finalize changed its parent StateRoot revision".to_owned(),
+        });
+    }
     if let Some(expected_resource) = expected_resource {
         let expected_pin =
             expected_resource
@@ -14273,6 +14282,18 @@ mod agent_stream_publication_reservation_tests {
             ]),
             Err(DurableError::Integrity { ref code, .. })
                 if code == "agent_current_operation_unowned"
+        ));
+        let mut missing_reservation = reserved_stream.clone();
+        missing_reservation.publication_reservation = None;
+        assert!(matches!(
+            coordinator.commit_profile_operations(vec![
+                DurableOperation::ApplyAgentStreamPublicationTransition {
+                    source: reserved_stream.clone(),
+                    current: missing_reservation,
+                },
+            ]),
+            Err(DurableError::Integrity { ref code, .. })
+                if code == "agent_stream_reservation_current_missing"
         ));
     }
 

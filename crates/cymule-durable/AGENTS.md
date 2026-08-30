@@ -327,7 +327,11 @@
   semantic receipt.
   External publication reserve, NotApplied observation, and rearm use only the
   typed `ApplyAgentStreamPublicationTransition { source, current }`; generic
-  stream writes cannot mutate reservation attempt or phase authority.
+  stream writes cannot mutate reservation attempt or phase authority. The
+  initial transition reverse-requires its unique Reserved claim, Resource pin,
+  retention family, Finalize command, and exact parent revision in that CAS.
+  Full audit walks terminal receipts back to terminal Session, Elicitation,
+  target, occurrence, stream, and immutable chunk currents.
   The target claim's exact-key current and monotonic generation are its bounded
   lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
   the retained source, and advances by one. Do not add a predecessor journal or

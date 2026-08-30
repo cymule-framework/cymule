@@ -6822,6 +6822,33 @@ fn verify_agent_receipt_terminal_currents<R: StateRootResolver + ?Sized>(
     resolver: &mut R,
     receipt: &cymule_profile_protocol::agent::AgentCommandReceipt,
 ) -> DurableResult<()> {
+    if let Some((_, expected)) = crate::coordinator::agent_receipt_session_current(receipt)
+        && expected.state == cymule_profile_protocol::agent::AgentState::Closed
+    {
+        let retained = load_agent_session_current(manifest, resolver, &expected.session_id)?;
+        if retained.as_ref() != Some(expected) {
+            return Err(DurableError::Integrity {
+                code: "agent_receipt_session_current_mismatch".to_owned(),
+                message: "Agent receipt lost its terminal Session current".to_owned(),
+            });
+        }
+    }
+    if let Some(expected) = crate::coordinator::agent_receipt_elicitation_current(receipt)
+        && expected.elicitation.response.is_some()
+    {
+        let retained = load_agent_elicitation_current(
+            manifest,
+            resolver,
+            &expected.session_id,
+            &expected.elicitation.request.request_id,
+        )?;
+        if retained.as_ref() != Some(expected) {
+            return Err(DurableError::Integrity {
+                code: "agent_receipt_elicitation_current_mismatch".to_owned(),
+                message: "Agent receipt lost its terminal Elicitation current".to_owned(),
+            });
+        }
+    }
     if let Some(expected) = crate::coordinator::agent_receipt_message_current(receipt) {
         let retained = load_agent_message_current(
             manifest,
@@ -9453,10 +9480,14 @@ fn validate_agent_stream_reservation_operation_set<R: StateRootResolver + ?Sized
         }
         _ => None,
     }) {
-        let reservation = value
-            .publication_reservation
-            .as_ref()
-            .expect("caller selected reservation-bearing streams");
+        let reservation =
+            value
+                .publication_reservation
+                .as_ref()
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_stream_reservation_current_missing".to_owned(),
+                    message: "Agent publication transition produced no reservation".to_owned(),
+                })?;
         let stream_key = agent_stream_key(&source.session_id, &source.stream_id)?;
         let parent: AgentStreamCurrent =
             map_get(&current.roots.agent_streams, &stream_key, overlay)?
@@ -9478,10 +9509,14 @@ fn validate_agent_stream_reservation_operation_set<R: StateRootResolver + ?Sized
                 message: "Agent publication reservation lost its Finalize command".to_owned(),
             })?
             .decode(StateRootLeafKind::AgentCommand)?;
+        if source.publication_reservation.is_none() {
+            validate_initial_agent_stream_reservation_sidecars(operations, roots, overlay, value)?;
+        }
         let valid = if source.publication_reservation.is_none() {
             let mut base = value.clone();
             base.publication_reservation = None;
             *source == base
+                && command.source_revision == current.revision
                 && reservation.attempt == 1
                 && reservation.phase == AgentStreamPublicationReservationPhase::DispatchClaimed
         } else {
@@ -9501,6 +9536,50 @@ fn validate_agent_stream_reservation_operation_set<R: StateRootResolver + ?Sized
         }
     }
     Ok(())
+}
+
+fn validate_initial_agent_stream_reservation_sidecars<R: StateRootResolver + ?Sized>(
+    operations: &[crate::DurableOperation],
+    roots: &StateRoots,
+    overlay: &mut ObjectOverlay<'_, R>,
+    stream: &cymule_profile_protocol::agent::AgentStreamCurrent,
+) -> DurableResult<()> {
+    let reservation =
+        stream
+            .publication_reservation
+            .as_ref()
+            .ok_or_else(|| DurableError::Integrity {
+                code: "agent_stream_reservation_current_missing".to_owned(),
+                message: "Initial Agent publication transition produced no reservation".to_owned(),
+            })?;
+    let target =
+        cymule_profile_protocol::agent::AgentTargetClaimTarget::from_stream_target(&stream.target);
+    let matching = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            crate::DurableOperation::ApplyAgentTargetClaim { value }
+                if value.current.session_id == stream.session_id
+                    && value.current.target == target
+                    && value.current.admitted_by == reservation.intent.command_id()
+                    && value.current.phase
+                        == (cymule_profile_protocol::agent::AgentTargetClaimPhase::Reserved {
+                            stream_id: stream.stream_id.clone(),
+                            reservation_id: reservation.reservation_id.clone(),
+                        }) =>
+            {
+                Some(value)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [transition] = matching.as_slice() else {
+        return Err(DurableError::Integrity {
+            code: "agent_stream_reservation_sidecar_missing".to_owned(),
+            message: "Initial Agent publication reservation lacks one exact target claim"
+                .to_owned(),
+        });
+    };
+    validate_reserved_agent_target_claim_operation(operations, roots, overlay, transition)
 }
 
 fn validate_agent_target_claim_operation_set<R: StateRootResolver + ?Sized>(
