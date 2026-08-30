@@ -1,6 +1,7 @@
 package cymule
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1082,6 +1083,7 @@ func TestAwaitEngineProcessPrefersAnAlreadyCompletedNaturalExit(t *testing.T) {
 		stderrDone,
 		make(chan string),
 		engineProcessExitedWithoutReaping,
+		terminateEngineProcess,
 	)
 	if result.waitErr != nil || result.inputErr != nil || result.stdoutErr != nil ||
 		result.stderrErr != nil || result.interruption != nil || result.terminationErr != nil {
@@ -1136,6 +1138,7 @@ func TestAwaitEngineProcessKillsAndReapsOnOverflow(t *testing.T) {
 		stderrDone,
 		overflow.events,
 		engineProcessExitedWithoutReaping,
+		terminateEngineProcess,
 	)
 	if result.overflowCode != "engine_output_limit_exceeded" || result.terminationErr != nil {
 		t.Fatalf("stdout overflow did not terminate with the exact code: %#v", result)
@@ -1190,6 +1193,7 @@ func TestAwaitEngineProcessTerminatesAndReapsOnWaitAuthorityError(t *testing.T) 
 		stderrDone,
 		make(chan string),
 		func(int) (bool, error) { return false, waitAuthorityErr },
+		terminateEngineProcess,
 	)
 	if !errors.Is(result.terminationErr, waitAuthorityErr) {
 		t.Fatalf("wait authority error was not retained as termination loss: %#v", result)
@@ -1203,27 +1207,91 @@ func TestAwaitEngineProcessTerminatesAndReapsOnWaitAuthorityError(t *testing.T) 
 	}
 }
 
+func TestCancellationDoesNotOverrideTerminationFailure(t *testing.T) {
+	command := exec.Command("/bin/sleep", "10")
+	stdinPipe, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutPipe, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderrPipe, err := command.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	inputDone := make(chan error, 1)
+	stdoutDone := make(chan error, 1)
+	stderrDone := make(chan error, 1)
+	go func() { inputDone <- stdinPipe.Close() }()
+	go func() { _, err := io.Copy(io.Discard, stdoutPipe); stdoutDone <- err }()
+	go func() { _, err := io.Copy(io.Discard, stderrPipe); stderrDone <- err }()
+	cancellation := NewEngineCancellation()
+	cancellation.Cancel()
+	injectedTerminationErr := errors.New("injected termination failure")
+	result := awaitEngineProcess(
+		make(chan time.Time),
+		cancellation.done,
+		command,
+		stdinPipe,
+		stdoutPipe,
+		stderrPipe,
+		inputDone,
+		stdoutDone,
+		stderrDone,
+		make(chan string),
+		engineProcessExitedWithoutReaping,
+		func(
+			command *exec.Cmd,
+			stdinPipe io.Closer,
+			stdoutPipe io.Closer,
+			stderrPipe io.Closer,
+		) (error, error) {
+			waitErr, terminationErr := terminateEngineProcess(command, stdinPipe, stdoutPipe, stderrPipe)
+			if terminationErr != nil {
+				return waitErr, terminationErr
+			}
+			return waitErr, injectedTerminationErr
+		},
+	)
+	if !errors.Is(result.interruption, context.Canceled) ||
+		!errors.Is(result.terminationErr, injectedTerminationErr) {
+		t.Fatalf("cancel/termination race did not retain both observations: %#v", result)
+	}
+	failure := classifyEngineProcessResult(map[string]any{"type": "seal"}, result)
+	requireFailure(t, failure, "transport_failure", "engine_process_termination_failed", "")
+	if command.ProcessState == nil {
+		t.Fatal("Engine with injected termination failure was not reaped")
+	}
+}
+
 func TestCliEngineClosesBlockedInputWhenLeaderExits(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "engine")
 	release := executable + ".release"
-	script := "#!/bin/sh\n( while [ ! -e \"$0.release\" ]; do /bin/sleep 0.05; done ) <&0 >/dev/null 2>&1 &\nexit 0\n"
+	marker := executable + ".started"
+	script := "#!/bin/sh\n: > \"$0.started\"\n( while [ ! -e \"$0.release\" ]; do /bin/sleep 0.05; done ) <&0 >/dev/null 2>&1 &\nexit 0\n"
 	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = os.WriteFile(release, nil, 0o600) }()
 	request := map[string]any{
 		"type":      "seal",
-		"candidate": map[string]any{"payload": strings.Repeat("x", 8*1024*1024)},
+		"candidate": map[string]any{"payload": strings.Repeat("x", 256*1024)},
 	}
 	result := make(chan error, 1)
 	go func() {
 		var response map[string]any
 		result <- (CliEngine{Executable: executable, Timeout: 3 * time.Second}).request(request, &response)
 	}()
+	waitForEngineStart(t, marker)
 	var err error
 	select {
 	case err = <-result:
-	case <-time.After(time.Second):
+	case <-time.After(2 * time.Second):
 		if writeErr := os.WriteFile(release, nil, 0o600); writeErr != nil {
 			t.Fatal(writeErr)
 		}

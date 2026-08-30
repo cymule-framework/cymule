@@ -437,6 +437,20 @@ fn schedule_enforces_the_canonical_value_limit_before_write_without_blocking_due
             .activation_id,
         "activation:due"
     );
+    driver
+        .acknowledge("activation:due")
+        .expect("valid due timer acknowledges");
+    drop(connection);
+    drop(driver);
+    let mut reopened =
+        SqliteTimerDriver::open_with_clock(directory.path().join("timer.sqlite"), ManualClock(200))
+            .expect("timer store reopens at the exact timer due time");
+    let exact_delivery = reopened
+        .receive(&mut index_for_timer("timer:exact"), 1)
+        .expect("exact-limit timer loads")
+        .expect("exact-limit timer delivers")
+        .into_delivery();
+    assert_eq!(exact_delivery.value, exact);
 }
 
 #[test]
@@ -506,6 +520,68 @@ fn retained_timer_target_corruption_is_integrity() {
             Err(DurableError::Integrity { .. })
         ));
         assert!(view.selections.is_empty());
+    }
+}
+
+#[test]
+fn oversized_generation_two_blobs_are_gated_before_receive_and_acknowledgement() {
+    for field in ["value_json", "selected_wait_ids"] {
+        let (directory, mut driver) = timer_driver(ManualClock(100));
+        driver
+            .schedule("activation:oversized-row", "timer:one", 100, &json!(null))
+            .expect("timer schedules");
+        if field == "value_json" {
+            driver
+                .receive(&mut index(), 1)
+                .expect("timer selects")
+                .expect("delivery exists");
+        }
+        let connection = rusqlite::Connection::open(directory.path().join("timer.sqlite"))
+            .expect("timer store opens");
+        let oversized = if field == "value_json" {
+            i64::try_from(cymule_core::MAX_ARTIFACT_BYTES + 1)
+                .expect("artifact bound fits SQLite INTEGER")
+        } else {
+            76
+        };
+        connection
+            .execute(
+                &format!("UPDATE cymule_timers SET {field} = zeroblob(?1)"),
+                [oversized],
+            )
+            .expect("oversized generation-two BLOB installs");
+
+        for error in [
+            driver
+                .schedule("activation:oversized-row", "timer:one", 100, &json!(null))
+                .expect_err("oversized BLOB cannot replay a schedule"),
+            driver
+                .receive(&mut ObservedTimerView::default(), 1)
+                .expect_err("oversized BLOB cannot become a delivery"),
+            driver
+                .acknowledge("activation:oversized-row")
+                .expect_err("oversized BLOB cannot be acknowledged"),
+        ] {
+            assert!(
+                matches!(
+                    error,
+                    DurableError::Integrity { ref code, .. }
+                        if code == "timer_row_blob_too_large"
+                ),
+                "{field} produced {error:?}"
+            );
+        }
+        let durable: (i64, bool) = connection
+            .query_row(
+                &format!(
+                    "SELECT length({field}), acknowledged FROM cymule_timers
+                     WHERE activation_id = 'activation:oversized-row'"
+                ),
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("oversized BLOB state reads");
+        assert_eq!(durable, (oversized, false));
     }
 }
 
@@ -784,9 +860,21 @@ fn fresh_and_retained_timer_row_tamper_fails_before_target_selection() {
                 waits: index_for_timer("timer:tampered"),
                 ..ObservedTimerView::default()
             };
-            let error = driver
-                .receive(&mut view, 1)
-                .expect_err("tampered schedule cannot become a delivery");
+            let error = if name == "acknowledgement" {
+                assert!(
+                    driver
+                        .receive(&mut view, 1)
+                        .expect("invalid acknowledgement is not legal pending work")
+                        .is_none()
+                );
+                driver
+                    .acknowledge("activation:one")
+                    .expect_err("exact acknowledgement read rejects the invalid flag")
+            } else {
+                driver
+                    .receive(&mut view, 1)
+                    .expect_err("tampered schedule cannot become a delivery")
+            };
             assert!(
                 matches!(error, DurableError::Integrity { .. }),
                 "{name} {retained:?} produced {error:?}"

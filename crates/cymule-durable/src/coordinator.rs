@@ -2743,6 +2743,16 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 });
             }
             receipt.verify_for(command)?;
+            if matches!(
+                &command.action,
+                agent_protocol::AgentCommandAction::Stream(
+                    agent_protocol::AgentStreamCommand::Abort { .. }
+                )
+            ) {
+                self.read_current_state_root(|manifest, resolver| {
+                    verify_agent_stream_abort_graph(manifest, resolver, command, &receipt)
+                })?;
+            }
             let commit = agent_protocol::AgentCommit {
                 observed_revision: self.current_revision()?.to_owned(),
                 committed_revision: None,
@@ -9572,6 +9582,65 @@ fn verify_agent_stream_origin<R: crate::StateRootResolver + ?Sized>(
     resolver: &mut R,
     current: &agent_protocol::AgentStreamCurrent,
 ) -> DurableResult<()> {
+    if let Some(reservation) = current.publication_reservation.as_ref() {
+        reservation.verify()?;
+        let mut base = current.clone();
+        base.publication_reservation = None;
+        base.verify()?;
+        let (_, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
+        let retained = match &receipt.outcome {
+            agent_protocol::AgentCommandOutcome::Stream(postcondition) => &postcondition.stream,
+            _ => {
+                return Err(DurableError::Integrity {
+                    code: "agent_stream_reservation_base_origin_mismatch".to_owned(),
+                    message: "Agent publication reservation base is not an admitted stream"
+                        .to_owned(),
+                });
+            }
+        };
+        if retained != &base {
+            return Err(DurableError::Integrity {
+                code: "agent_stream_reservation_base_mismatch".to_owned(),
+                message: "Agent publication reservation changed its exact open stream base"
+                    .to_owned(),
+            });
+        }
+        let finalize = crate::state_root::load_agent_command(
+            manifest,
+            resolver,
+            reservation.intent.command_id(),
+        )?
+        .ok_or_else(|| DurableError::Integrity {
+            code: "agent_stream_reservation_command_missing".to_owned(),
+            message: "Agent publication reservation lost its Finalize command".to_owned(),
+        })?;
+        finalize.verify()?;
+        if !matches!(
+            &finalize.action,
+            agent_protocol::AgentCommandAction::Stream(
+                agent_protocol::AgentStreamCommand::Finalize {
+                    session_id,
+                    stream_id,
+                }
+            ) if session_id == &current.session_id && stream_id == &current.stream_id
+        ) || finalize.command_id != reservation.intent.command_id()
+            || finalize.source_revision != reservation.intent.source_revision()
+            || crate::state_root::load_agent_command_receipt(
+                manifest,
+                resolver,
+                &finalize.command_id,
+            )?
+            .is_some()
+        {
+            return Err(DurableError::Integrity {
+                code: "agent_stream_reservation_command_mismatch".to_owned(),
+                message:
+                    "Agent publication reservation changed or terminalized its Finalize authority"
+                        .to_owned(),
+            });
+        }
+        return Ok(());
+    }
     let (_, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
     let retained = match &receipt.outcome {
         agent_protocol::AgentCommandOutcome::Stream(postcondition) => Some(&postcondition.stream),
@@ -10211,6 +10280,32 @@ fn verify_agent_stream_abort_graph<R: crate::StateRootResolver + ?Sized>(
                 return Err(DurableError::Integrity {
                     code: "agent_abort_resource_pin_current_mismatch".to_owned(),
                     message: "Agent abort Resource pin current changed after release".to_owned(),
+                });
+            }
+            let retention = crate::state_root::load_resource_retention_current(
+                manifest,
+                resolver,
+                &release.pin.subject.family.retention_key,
+            )?
+            .ok_or_else(|| DurableError::Integrity {
+                code: "agent_abort_resource_retention_current_missing".to_owned(),
+                message: "Agent abort lost its Resource retention current".to_owned(),
+            })?;
+            verify_resource_retention_origin(manifest, resolver, &retention)?;
+            if retention.family != release.pin.subject.family
+                || (retention.last_receipt == expected
+                    && (retention.active_pin_count != release.active_pin_count
+                        || retention.disposition
+                            != if release.active_pin_count == 0 {
+                                resource_protocol::ResourceRetentionDisposition::Unretained
+                            } else {
+                                resource_protocol::ResourceRetentionDisposition::Active
+                            }))
+            {
+                return Err(DurableError::Integrity {
+                    code: "agent_abort_resource_retention_current_mismatch".to_owned(),
+                    message: "Agent abort Resource retention current changed under its release"
+                        .to_owned(),
                 });
             }
             Ok(())

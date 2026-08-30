@@ -15,16 +15,40 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 const TIMER_SOURCE_SCAN_LIMIT: usize = 256;
+const MAX_SELECTED_WAIT_IDS_BYTES: usize = 75;
 const FRESH_TIMER_SCAN_SQL: &str = "SELECT substr(activation_id, 1, 513),
                                             length(activation_id),
                                             due_unix_ms,
                                             length(value_json)
      FROM cymule_timers
-     WHERE acknowledged != 1 AND due_unix_ms <= ?1
+     WHERE acknowledged = 0 AND due_unix_ms <= ?1
        AND selected_wait_ids IS NULL
        AND (due_unix_ms, activation_id) > (?2, ?3)
      ORDER BY due_unix_ms, activation_id
      LIMIT ?4";
+const TIMER_POINT_READ_SQL: &str = "SELECT activation_id, timer_id, due_unix_ms,
+                                           schedule_digest, acknowledged,
+                                           length(value_json),
+                                           CASE WHEN length(value_json) <= ?2
+                                                THEN value_json ELSE NULL END,
+                                           length(selected_wait_ids),
+                                           CASE WHEN selected_wait_ids IS NULL THEN NULL
+                                                WHEN length(selected_wait_ids) <= ?3
+                                                THEN selected_wait_ids ELSE NULL END
+                                    FROM cymule_timers WHERE activation_id = ?1";
+const RETAINED_TIMER_READ_SQL: &str = "SELECT activation_id, timer_id, due_unix_ms,
+                                              schedule_digest, acknowledged,
+                                              length(value_json),
+                                              CASE WHEN length(value_json) <= ?1
+                                                   THEN value_json ELSE NULL END,
+                                              length(selected_wait_ids),
+                                              CASE WHEN selected_wait_ids IS NULL THEN NULL
+                                                   WHEN length(selected_wait_ids) <= ?2
+                                                   THEN selected_wait_ids ELSE NULL END
+                                       FROM cymule_timers
+                                       WHERE acknowledged = 0 AND due_unix_ms <= ?3
+                                         AND selected_wait_ids IS NOT NULL
+                                       ORDER BY due_unix_ms, activation_id LIMIT 1";
 
 /// Exact physical generation accepted by the durable timer source.
 pub const TIMER_STORE_SCHEMA_VERSION: &str = "cymule.activation-timer-store/2";
@@ -75,10 +99,12 @@ struct StoredTimer {
     activation_id: String,
     timer_id: String,
     due_unix_ms: i64,
-    value: Vec<u8>,
     schedule_digest: String,
-    wait_ids: Option<Vec<u8>>,
     acknowledged: i64,
+    value_bytes: i64,
+    value: Option<Vec<u8>>,
+    wait_ids_bytes: Option<i64>,
+    wait_ids: Option<Vec<u8>>,
 }
 
 struct VerifiedTimer {
@@ -211,10 +237,12 @@ impl<C: Clock> SqliteTimerDriver<C> {
             .map_err(contention)?;
         let existing: Option<StoredTimer> = transaction
             .query_row(
-                "SELECT activation_id, timer_id, due_unix_ms, value_json,
-                        schedule_digest, selected_wait_ids, acknowledged
-                 FROM cymule_timers WHERE activation_id = ?1",
-                [activation_id],
+                TIMER_POINT_READ_SQL,
+                params![
+                    activation_id,
+                    timer_value_byte_limit(),
+                    selected_wait_ids_byte_limit()
+                ],
                 stored_timer_from_row,
             )
             .optional()
@@ -278,10 +306,12 @@ impl<C: Clock> SqliteTimerDriver<C> {
         let stored = self
             .connection
             .query_row(
-                "SELECT activation_id, timer_id, due_unix_ms, value_json,
-                        schedule_digest, selected_wait_ids, acknowledged
-                 FROM cymule_timers WHERE activation_id = ?1",
-                [activation_id],
+                TIMER_POINT_READ_SQL,
+                params![
+                    activation_id,
+                    timer_value_byte_limit(),
+                    selected_wait_ids_byte_limit()
+                ],
                 stored_timer_from_row,
             )
             .optional()
@@ -409,10 +439,12 @@ impl<C: Clock> SqliteTimerDriver<C> {
         let retained = self
             .connection
             .query_row(
-                "SELECT activation_id, timer_id, due_unix_ms, value_json,
-                        schedule_digest, selected_wait_ids, acknowledged
-                 FROM cymule_timers WHERE activation_id = ?1",
-                [&timer.activation_id],
+                TIMER_POINT_READ_SQL,
+                params![
+                    &timer.activation_id,
+                    timer_value_byte_limit(),
+                    selected_wait_ids_byte_limit()
+                ],
                 stored_timer_from_row,
             )
             .optional()
@@ -492,13 +524,12 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
         let retained: Option<StoredTimer> = self
             .connection
             .query_row(
-                "SELECT activation_id, timer_id, due_unix_ms, value_json,
-                        schedule_digest, selected_wait_ids, acknowledged
-                 FROM cymule_timers
-                 WHERE acknowledged != 1 AND due_unix_ms <= ?1
-                   AND selected_wait_ids IS NOT NULL
-                 ORDER BY due_unix_ms, activation_id LIMIT 1",
-                [now],
+                RETAINED_TIMER_READ_SQL,
+                params![
+                    timer_value_byte_limit(),
+                    selected_wait_ids_byte_limit(),
+                    now
+                ],
                 stored_timer_from_row,
             )
             .optional()
@@ -539,10 +570,12 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
             .map_err(contention)?;
         let existing: Option<StoredTimer> = transaction
             .query_row(
-                "SELECT activation_id, timer_id, due_unix_ms, value_json,
-                        schedule_digest, selected_wait_ids, acknowledged
-                 FROM cymule_timers WHERE activation_id = ?1",
-                [activation_id],
+                TIMER_POINT_READ_SQL,
+                params![
+                    activation_id,
+                    timer_value_byte_limit(),
+                    selected_wait_ids_byte_limit()
+                ],
                 stored_timer_from_row,
             )
             .optional()
@@ -615,6 +648,54 @@ fn validate_wait_id(wait_id: &str) -> DurableResult<()> {
     cymule_core::validate_content_id("timer wait identity", wait_id).map_err(Into::into)
 }
 
+fn timer_value_byte_limit() -> i64 {
+    i64::try_from(cymule_core::MAX_ARTIFACT_BYTES).expect("artifact byte limit fits SQLite INTEGER")
+}
+
+fn selected_wait_ids_byte_limit() -> i64 {
+    i64::try_from(MAX_SELECTED_WAIT_IDS_BYTES)
+        .expect("selected wait-ID byte limit fits SQLite INTEGER")
+}
+
+fn require_gated_timer_blob(
+    activation_id: &str,
+    field: &'static str,
+    sqlite_length: i64,
+    bytes: Option<Vec<u8>>,
+    maximum: usize,
+) -> DurableResult<Vec<u8>> {
+    let length = usize::try_from(sqlite_length).map_err(|error| {
+        timer_row_integrity(
+            "timer_row_blob_length_invalid",
+            format!("timer {field} has invalid SQLite length metadata: {error}"),
+        )
+    })?;
+    if length > maximum {
+        return Err(timer_row_integrity(
+            "timer_row_blob_too_large",
+            format!(
+                "timer activation {activation_id} retains {length} {field} bytes; maximum is {maximum}"
+            ),
+        ));
+    }
+    let bytes = bytes.ok_or_else(|| {
+        timer_row_integrity(
+            "timer_row_blob_gate_missing",
+            format!("timer {field} passed its length bound but SQLite returned no bytes"),
+        )
+    })?;
+    if bytes.len() != length {
+        return Err(timer_row_integrity(
+            "timer_row_blob_length_mismatch",
+            format!(
+                "timer {field} materialized {} bytes but SQLite declared {length}",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(bytes)
+}
+
 fn timer_schedule_digest(
     activation_id: &str,
     timer_id: &str,
@@ -638,18 +719,14 @@ fn verify_stored_timer(stored: StoredTimer) -> DurableResult<VerifiedTimer> {
         .map_err(|error| timer_row_integrity("timer_schedule_timer_invalid", error.to_string()))?;
     let due_unix_ms = u64::try_from(stored.due_unix_ms)
         .map_err(|error| timer_row_integrity("timer_schedule_due_invalid", error.to_string()))?;
-    if stored.value.len() > cymule_core::MAX_ARTIFACT_BYTES {
-        return Err(timer_row_integrity(
-            "timer_schedule_value_too_large",
-            format!(
-                "timer activation {} retains {} value bytes; maximum is {}",
-                stored.activation_id,
-                stored.value.len(),
-                cymule_core::MAX_ARTIFACT_BYTES
-            ),
-        ));
-    }
-    let value = decode_canonical_timer_row(&stored.value, "value_json")?;
+    let value_bytes = require_gated_timer_blob(
+        &stored.activation_id,
+        "value_json",
+        stored.value_bytes,
+        stored.value,
+        cymule_core::MAX_ARTIFACT_BYTES,
+    )?;
+    let value = decode_canonical_timer_row(&value_bytes, "value_json")?;
     let digest =
         timer_schedule_digest(&stored.activation_id, &stored.timer_id, due_unix_ms, &value)
             .map_err(|error| {
@@ -664,18 +741,29 @@ fn verify_stored_timer(stored: StoredTimer) -> DurableResult<VerifiedTimer> {
             ),
         ));
     }
-    let wait_ids = stored
-        .wait_ids
-        .map(
-            |bytes| -> DurableResult<std::collections::BTreeSet<String>> {
-                let wait_ids = decode_canonical_timer_row(&bytes, "selected_wait_ids")?;
-                validate_retained_targets(&wait_ids).map_err(|error| {
-                    timer_row_integrity("timer_selected_targets_invalid", error.to_string())
-                })?;
-                Ok(wait_ids)
-            },
-        )
-        .transpose()?;
+    let wait_ids = match (stored.wait_ids_bytes, stored.wait_ids) {
+        (None, None) => None,
+        (Some(length), bytes) => {
+            let bytes = require_gated_timer_blob(
+                &stored.activation_id,
+                "selected_wait_ids",
+                length,
+                bytes,
+                MAX_SELECTED_WAIT_IDS_BYTES,
+            )?;
+            let wait_ids = decode_canonical_timer_row(&bytes, "selected_wait_ids")?;
+            validate_retained_targets(&wait_ids).map_err(|error| {
+                timer_row_integrity("timer_selected_targets_invalid", error.to_string())
+            })?;
+            Some(wait_ids)
+        }
+        (None, Some(_)) => {
+            return Err(timer_row_integrity(
+                "timer_selected_targets_length_missing",
+                "timer selected_wait_ids has bytes without SQLite length metadata",
+            ));
+        }
+    };
     let acknowledged = match stored.acknowledged {
         0 => false,
         1 => true,
@@ -707,10 +795,12 @@ fn stored_timer_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredTime
         activation_id: row.get(0)?,
         timer_id: row.get(1)?,
         due_unix_ms: row.get(2)?,
-        value: row.get(3)?,
-        schedule_digest: row.get(4)?,
-        wait_ids: row.get(5)?,
-        acknowledged: row.get(6)?,
+        schedule_digest: row.get(3)?,
+        acknowledged: row.get(4)?,
+        value_bytes: row.get(5)?,
+        value: row.get(6)?,
+        wait_ids_bytes: row.get(7)?,
+        wait_ids: row.get(8)?,
     })
 }
 
@@ -880,7 +970,41 @@ fn unsupported_generation(detail: &str) -> DurableError {
 
 #[cfg(test)]
 mod tests {
-    use super::{FRESH_TIMER_SCAN_SQL, TIMER_SOURCE_SCAN_LIMIT};
+    use std::collections::BTreeSet;
+
+    use super::{
+        FRESH_TIMER_SCAN_SQL, MAX_SELECTED_WAIT_IDS_BYTES, RETAINED_TIMER_READ_SQL,
+        SqliteTimerDriver, TIMER_POINT_READ_SQL, TIMER_SOURCE_SCAN_LIMIT,
+        selected_wait_ids_byte_limit, timer_value_byte_limit,
+    };
+    use rusqlite::{Connection, params};
+
+    fn query_plan<P: rusqlite::Params>(
+        connection: &Connection,
+        sql: &str,
+        params: P,
+    ) -> Vec<String> {
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("query plan prepares");
+        statement
+            .query_map(params, |row| row.get(3))
+            .expect("query plan executes")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("query plan rows decode")
+    }
+
+    fn assert_indexed(plan: &[String], index: &str) {
+        assert!(
+            plan.iter().any(|step| step.contains(index)),
+            "query plan omitted {index}: {plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .all(|step| !step.contains("SCAN cymule_timers") && !step.contains("TEMP B-TREE")),
+            "query plan used a table scan or temp sort: {plan:?}"
+        );
+    }
 
     #[test]
     fn fresh_scan_projection_contains_only_bounded_metadata() {
@@ -901,5 +1025,45 @@ mod tests {
         }
         assert_eq!(TIMER_SOURCE_SCAN_LIMIT, 256);
         assert!(FRESH_TIMER_SCAN_SQL.contains("LIMIT ?4"));
+        let target = BTreeSet::from([format!("sha256:{}", "a".repeat(64))]);
+        assert_eq!(
+            cymule_core::canonical_bytes(&target)
+                .expect("single target encodes")
+                .len(),
+            MAX_SELECTED_WAIT_IDS_BYTES
+        );
+    }
+
+    #[test]
+    fn hot_timer_queries_use_their_composite_or_primary_indexes() {
+        let directory = tempfile::tempdir().expect("temporary directory creates");
+        let driver = SqliteTimerDriver::open(directory.path().join("timer.sqlite"))
+            .expect("timer store opens");
+        let fresh = query_plan(
+            &driver.connection,
+            FRESH_TIMER_SCAN_SQL,
+            params![100_i64, i64::MIN, "", 256_i64],
+        );
+        assert_indexed(&fresh, "cymule_timers_due");
+        let retained = query_plan(
+            &driver.connection,
+            RETAINED_TIMER_READ_SQL,
+            params![
+                timer_value_byte_limit(),
+                selected_wait_ids_byte_limit(),
+                100_i64
+            ],
+        );
+        assert_indexed(&retained, "cymule_timers_due");
+        let point = query_plan(
+            &driver.connection,
+            TIMER_POINT_READ_SQL,
+            params![
+                "activation:point",
+                timer_value_byte_limit(),
+                selected_wait_ids_byte_limit()
+            ],
+        );
+        assert_indexed(&point, "sqlite_autoindex_cymule_timers_1");
     }
 }

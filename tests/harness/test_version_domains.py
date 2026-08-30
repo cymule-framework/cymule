@@ -1532,6 +1532,16 @@ fn quotes(bytes: &[u8]) -> bool {
             self.assertEqual(by_version[version]["sources"][0]["role"], role)
             version_domains.validate_identity_source_dependencies(by_version[version])
 
+    def test_agent_command_receipt_registers_resource_lifecycle_receipts(self) -> None:
+        by_version = {domain["version"]: domain for domain in self.registry["domains"]}
+        receipt = by_version["cymule.agent-command-receipt/3"]
+        lifecycle_receipts = {
+            "cymule.resource-pin-receipt/3",
+            "cymule.resource-release-receipt/3",
+        }
+        self.assertTrue(lifecycle_receipts.issubset(receipt["embeds"]))
+        self.assertTrue(lifecycle_receipts.issubset(receipt["depends_on"]))
+
     def test_coupled_checkpoint_receipt_and_key_are_registered(self) -> None:
         by_version = {domain["version"]: domain for domain in self.registry["domains"]}
         key = by_version["cymule.coupled-checkpoint-key/1"]

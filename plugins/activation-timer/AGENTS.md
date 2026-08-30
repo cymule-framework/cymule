@@ -22,6 +22,12 @@
   `MAX_ARTIFACT_BYTES` before opening a SQLite transaction or performing any
   write. Exact-limit values remain valid. Reopen treats an oversized retained
   value as stable `Integrity` rather than allocating it into a delivery.
+- Every schedule replay, exact load, retained delivery, selection readback,
+  and acknowledgement point read projects SQLite `length(...)` first and uses
+  a `CASE` gate before Rust may receive `value_json` or `selected_wait_ids`.
+  Value bytes use Core's artifact bound; the exactly-one content-ID target has
+  a 75-byte canonical upper bound. An oversized generation-`/2` BLOB is stable
+  `Integrity` and remains unacknowledged.
 - Activation and timer identities use the shared 1..=512 Unicode-scalar,
   no-control-character contract. Never substitute UTF-8 byte length.
 - `receive` may return only a currently due timer with an exact target selected
@@ -36,6 +42,10 @@
   value metadata, then loads and authenticates exactly one complete row by
   activation ID before each parked-wait lookup. Never collect a page of timer
   payloads or schedule rows.
+- Hot unacknowledged queries use the exact `acknowledged = 0` predicate so the
+  due composite index owns fresh and retained ordering. Exact point reads use
+  the activation primary index; query-plan tests reject a table scan or temp
+  B-tree for each path.
 - Every newly selected or retained wait ID is an exact lowercase SHA-256
   content ID. An empty fresh selection means that source has no parked match
   and is not retained; every nonempty fresh selection and every retained timer

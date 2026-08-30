@@ -298,6 +298,11 @@
   NotApplied, and commits stream/Session closure plus `Reserved -> Released`
   and family count decrement in that same Agent CAS. DispatchClaimed/Unknown
   remains reconciliation-only, and generic Resource release cannot bypass it.
+  Retained Abort alias replay authenticates the terminal Released pin and
+  physical-family current; missing or tampered sidecars are Integrity. A
+  reservation-phase stream read authenticates its original Open receipt plus
+  exact retained unterminated Finalize command, not equality with the old Open
+  projection alone.
   Known post-publication conflicts remain typed conflicts rather than world
   Unknown. Agent publication reconciliation retains its expected original intent and
   rechecks semantic touched keys. Unknown evidence is append-only; identical

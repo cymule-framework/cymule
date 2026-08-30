@@ -71,6 +71,21 @@ const HTTP_SPOOL_SCHEMA: [(&str, &str, &str, &str); 4] = [
     ),
 ];
 
+const HTTP_RETAINED_READ_SQL: &str = "SELECT activation_id, signal_key, value_json, request_digest,
+            selected_wait_ids, acknowledged
+     FROM cymule_http_signals
+     WHERE acknowledged = 0 AND selected_wait_ids IS NOT NULL
+     ORDER BY activation_id LIMIT 1";
+const HTTP_FRESH_READ_SQL: &str = "SELECT activation_id, signal_key, value_json, request_digest,
+            selected_wait_ids, acknowledged
+     FROM cymule_http_signals
+     WHERE acknowledged = 0 AND selected_wait_ids IS NULL
+       AND signal_key = ?1
+     ORDER BY activation_id LIMIT 1";
+const HTTP_POINT_READ_SQL: &str = "SELECT activation_id, signal_key, value_json, request_digest,
+            selected_wait_ids, acknowledged
+     FROM cymule_http_signals WHERE activation_id = ?1";
+
 /// Frozen HTTP signal request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -322,15 +337,7 @@ impl SqliteHttpSignalDriver {
     fn retained_delivery(&self) -> DurableResult<Option<WaitSourceDelivery>> {
         let retained: Option<StoredSignal> = self
             .connection
-            .query_row(
-                "SELECT activation_id, signal_key, value_json, request_digest,
-                        selected_wait_ids, acknowledged
-                 FROM cymule_http_signals
-                 WHERE acknowledged != 1 AND selected_wait_ids IS NOT NULL
-                 ORDER BY activation_id LIMIT 1",
-                [],
-                stored_signal_from_row,
-            )
+            .query_row(HTTP_RETAINED_READ_SQL, [], stored_signal_from_row)
             .optional()
             .map_err(contention)?;
         let Some(retained) = retained else {
@@ -366,13 +373,7 @@ impl SqliteHttpSignalDriver {
             .map_err(contention)?;
         let retained: StoredSignal = self
             .connection
-            .query_row(
-                "SELECT activation_id, signal_key, value_json, request_digest,
-                        selected_wait_ids, acknowledged
-                 FROM cymule_http_signals WHERE activation_id = ?1",
-                [activation_id],
-                stored_signal_from_row,
-            )
+            .query_row(HTTP_POINT_READ_SQL, [activation_id], stored_signal_from_row)
             .map_err(contention)?;
         let retained = verify_stored_signal(retained)?;
         let WaitActivationSource::Signal { key } = source else {
@@ -449,16 +450,7 @@ impl WaitSourceDriver for SqliteHttpSignalDriver {
             };
             let row: Option<StoredSignal> = self
                 .connection
-                .query_row(
-                    "SELECT activation_id, signal_key, value_json, request_digest,
-                            selected_wait_ids, acknowledged
-                     FROM cymule_http_signals
-                     WHERE acknowledged != 1 AND selected_wait_ids IS NULL
-                       AND signal_key = ?1
-                     ORDER BY activation_id LIMIT 1",
-                    [&key],
-                    stored_signal_from_row,
-                )
+                .query_row(HTTP_FRESH_READ_SQL, [&key], stored_signal_from_row)
                 .optional()
                 .map_err(contention)?;
             let Some(row) = row else {
@@ -499,14 +491,7 @@ impl WaitSourceDriver for SqliteHttpSignalDriver {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(contention)?;
         let existing: Option<StoredSignal> = transaction
-            .query_row(
-                "SELECT activation_id, signal_key, value_json, request_digest,
-                        selected_wait_ids, acknowledged
-                 FROM cymule_http_signals
-                 WHERE activation_id = ?1",
-                [activation_id],
-                stored_signal_from_row,
-            )
+            .query_row(HTTP_POINT_READ_SQL, [activation_id], stored_signal_from_row)
             .optional()
             .map_err(contention)?;
         let Some(existing) = existing else {
@@ -629,13 +614,7 @@ async fn read_acknowledged_async(
 fn read_acknowledged(path: &Path, activation_id: &str) -> DurableResult<bool> {
     let connection = open_spool(path, false)?;
     let stored = connection
-        .query_row(
-            "SELECT activation_id, signal_key, value_json, request_digest,
-                    selected_wait_ids, acknowledged
-             FROM cymule_http_signals WHERE activation_id = ?1",
-            [activation_id],
-            stored_signal_from_row,
-        )
+        .query_row(HTTP_POINT_READ_SQL, [activation_id], stored_signal_from_row)
         .optional()
         .map_err(contention)?
         .ok_or_else(|| {
@@ -995,10 +974,7 @@ fn persist_request(
         .map_err(contention)?;
     let existing: Option<StoredSignal> = transaction
         .query_row(
-            "SELECT activation_id, signal_key, value_json, request_digest,
-                    selected_wait_ids, acknowledged
-             FROM cymule_http_signals
-             WHERE activation_id = ?1",
+            HTTP_POINT_READ_SQL,
             [&request.activation_id],
             stored_signal_from_row,
         )
@@ -1064,8 +1040,50 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
+    fn query_plan<P: rusqlite::Params>(
+        connection: &Connection,
+        sql: &str,
+        params: P,
+    ) -> Vec<String> {
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("query plan prepares");
+        statement
+            .query_map(params, |row| row.get(3))
+            .expect("query plan executes")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("query plan rows decode")
+    }
+
+    fn assert_indexed(plan: &[String], index: &str) {
+        assert!(
+            plan.iter().any(|step| step.contains(index)),
+            "query plan omitted {index}: {plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .all(|step| !step.contains("SCAN cymule_http_signals")
+                    && !step.contains("TEMP B-TREE")),
+            "query plan used a table scan or temp sort: {plan:?}"
+        );
+    }
+
     fn test_wait_id(label: &str) -> String {
         cymule_core::content_id("cymule.test.http-wait/1", &label).expect("wait ID derives")
+    }
+
+    #[test]
+    fn hot_http_queries_use_their_composite_or_primary_indexes() {
+        let directory = tempfile::tempdir().expect("temporary directory creates");
+        let (_router, driver) =
+            durable_signal_router(directory.path().join("http.sqlite"), 1, AllowAll)
+                .expect("HTTP spool opens");
+        let retained = query_plan(&driver.connection, HTTP_RETAINED_READ_SQL, []);
+        assert_indexed(&retained, "cymule_http_signals_pending");
+        let fresh = query_plan(&driver.connection, HTTP_FRESH_READ_SQL, ["signal:test"]);
+        assert_indexed(&fresh, "cymule_http_signals_matching");
+        let point = query_plan(&driver.connection, HTTP_POINT_READ_SQL, ["activation:test"]);
+        assert_indexed(&point, "sqlite_autoindex_cymule_http_signals_1");
     }
 
     #[tokio::test(flavor = "current_thread")]

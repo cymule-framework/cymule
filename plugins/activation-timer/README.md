@@ -19,6 +19,13 @@ retained selections are durable row corruption and surface as `Integrity`. An
 empty fresh selection remains the normal no-matching-wait result and is never
 persisted as a target set.
 
+Every row read obtains SQLite byte lengths before the engine can materialize
+the value or selected-target BLOB. SQL returns those bytes only when the value
+is within Core's artifact limit and the one-target JSON is within its exact
+75-byte canonical ceiling. Oversized generation-`/2` corruption therefore
+returns `Integrity` from receive, replay, selection readback, and
+acknowledgement without copying the BLOB into Rust.
+
 Retained target selections always redeliver first and remain independent of a
 later caller's target limit; fresh selections are checked against their own
 call limit before retention. Fresh due-source discovery uses a fixed 256-row
@@ -29,7 +36,9 @@ later matching timer; the cursor resets after reaching the current end so newly
 inserted earlier rows remain visible. The scan page contains only capped
 activation identity, due-time, and value-length metadata. The driver loads and
 authenticates one complete row at a time, so a 256-row page never accumulates
-256 timer payloads in memory.
+256 timer payloads in memory. Fresh and retained queries use
+`acknowledged = 0` and the due composite index; exact replay and acknowledgement
+reads use the activation primary index without a temporary sort.
 
 Activation and timer identities share Cymule's cross-language boundary: 1..=512
 Unicode scalar values with no control character. Multi-byte identities are not

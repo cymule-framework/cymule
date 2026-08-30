@@ -60,7 +60,9 @@ Cancellation-first never starts the CLI and returns the safe `cancelled`
 failure; launch-first terminates the owned direct Child and preserves the
 read-versus-mutation interruption classification. Deadline loss preserves the
 same structured classification, including `unknown_world_outcome` for a lost
-mutating response.
+mutating response. Cancellation arbitrates completion only after a success or
+remote failure is fully validated; it never masks a local transport, I/O,
+overflow, timeout, kill, wait, or termination failure.
 Every query carries explicit revision/cursor and item/byte bounds and returns
 one revision/StateRoot-pinned response; there is no query ID or full
 Run/domain mirror.

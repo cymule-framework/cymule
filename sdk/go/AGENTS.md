@@ -37,6 +37,9 @@
   and `Cmd.Start` linearize under the same lock: cancellation-first means no
   process creation and a safe `cancelled` failure; launch-first means the
   request began and follows the read/mutation interruption classification.
+  Completion arbitration runs only for a fully validated success or valid
+  remote failure; cancellation never replaces a local transport, I/O,
+  overflow, timeout, kill, wait, or termination failure.
   `CliEngine` exposes no `context.Context`; this token is the only cancellation
   authority, and its finite SDK-owned `Timeout` is the only deadline authority.
 - Every process-backed request carries a complete `EngineProcessConfig` inside

@@ -18,8 +18,8 @@ use cymule_durable::{
     ApplicationJournalPrefix, ApplicationJournalPrefixReplacementAuthority,
     ClockObservationAuthority, CoupledCheckpointReceipt, DurableResult, DurableRuntimeControl,
     DurableStore, DurableStoreControl, ExecutionClockAuthority, GcReceipt, JournalRecordManifest,
-    StateRootManifest, StateRootResolver, StoreBatch, StoreCommit, StoreHead, StoreReclamation,
-    StoreStats,
+    StateRootLeafKind, StateRootManifest, StateRootObject, StateRootResolver, StateRootValue,
+    StoreBatch, StoreCommit, StoreHead, StoreReclamation, StoreStats, decode_state_root_object,
 };
 use cymule_durable_protocol::{ClockObservation, ClockObservationRef};
 use cymule_profile_protocol::ProtocolResult;
@@ -43,6 +43,9 @@ const HOST_TOOL_ID: &str = "tool:agent-process-kill-host";
 const OCCURRENCE_ID: &str = "occurrence:agent-process-kill";
 const STREAM_ID: &str = "stream:agent-process-kill";
 const BINDING_ID: &str = "binding:agent-process-kill/1";
+const EXTERNAL_RESOLVER: &str = "resolver:agent-abort-process-kill/1";
+const EXTERNAL_DIGEST: &str =
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 type AgentRuntime = DurableRuntimeControl<SqliteStore, EmptyPlugin>;
 
@@ -133,6 +136,51 @@ impl agent_protocol::AgentProviders for UnusedAgentProviders {
         _occurrence: &agent_protocol::AgentHostOccurrence,
     ) -> ProtocolResult<agent_protocol::AgentWorkspaceObservation> {
         unreachable!("Agent process-death conformance does not observe workspaces")
+    }
+}
+
+#[derive(Default)]
+struct NotAppliedPublicationProvider {
+    publish_calls: usize,
+}
+
+impl agent_protocol::AgentProviders for NotAppliedPublicationProvider {
+    fn publish_agent_stream(
+        &mut self,
+        _intent: &agent_protocol::AgentStreamPublicationIntent,
+    ) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
+        self.publish_calls += 1;
+        Ok(agent_protocol::AgentStreamPublicationObservation::NotApplied)
+    }
+
+    fn observe_agent_stream_publication(
+        &mut self,
+        _intent: &agent_protocol::AgentStreamPublicationIntent,
+    ) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
+        unreachable!("NotApplied baseline does not reconcile publication")
+    }
+
+    fn bind_agent_workspace(
+        &mut self,
+        _command: &agent_protocol::AgentWorkspaceCommand,
+    ) -> ProtocolResult<agent_protocol::AgentHostBinding> {
+        unreachable!("external Abort conformance does not bind workspaces")
+    }
+
+    fn dispatch_agent_workspace(
+        &mut self,
+        _command: &agent_protocol::AgentWorkspaceCommand,
+        _occurrence: &agent_protocol::AgentHostOccurrence,
+    ) -> ProtocolResult<agent_protocol::AgentWorkspaceSubmission> {
+        unreachable!("external Abort conformance does not dispatch workspaces")
+    }
+
+    fn observe_agent_workspace(
+        &mut self,
+        _command: &agent_protocol::AgentWorkspaceCommand,
+        _occurrence: &agent_protocol::AgentHostOccurrence,
+    ) -> ProtocolResult<agent_protocol::AgentWorkspaceObservation> {
+        unreachable!("external Abort conformance does not observe workspaces")
     }
 }
 
@@ -721,6 +769,66 @@ fn stream_read<P: AgentPersistence>(
             expected_revision: None,
         },
     )
+}
+
+fn prepare_external_not_applied<P: AgentPersistence>(
+    persistence: &mut P,
+) -> AgentResult<cymule_profile_protocol::resource::ResourcePin> {
+    let initial = stream_read(persistence)?;
+    assert!(initial.current.is_none());
+    AgentStreamController::open(
+        persistence,
+        &initial.revision,
+        SESSION_ID,
+        STREAM_ID,
+        agent_protocol::AgentStreamTarget::Message {
+            message_id: "message:agent-abort-process-kill".to_owned(),
+            role: agent_protocol::MessageRole::Agent,
+        },
+        agent_protocol::AgentStreamDelivery::ExternalResource {
+            resolver_binding: EXTERNAL_RESOLVER.to_owned(),
+            content: agent_protocol::AgentStreamPublicationContent {
+                media_type: "application/octet-stream".to_owned(),
+                digest: EXTERNAL_DIGEST.to_owned(),
+                size: 7,
+            },
+        },
+    )?;
+    let opened = stream_read(persistence)?;
+    let outcome =
+        AgentStreamController::finalize(persistence, &opened.revision, SESSION_ID, STREAM_ID)?;
+    assert!(matches!(
+        outcome,
+        agent_protocol::AgentStreamFinalizeOutcome::PublicationNotApplied { .. }
+    ));
+    let current = stream_read(persistence)?
+        .current
+        .ok_or_else(|| AgentError::NotFound("NotApplied external stream is missing".to_owned()))?;
+    let reservation = current
+        .publication_reservation
+        .ok_or_else(|| AgentError::Integrity {
+            code: "agent_abort_process_kill_reservation_missing".to_owned(),
+            message: "NotApplied external stream lost its reservation".to_owned(),
+        })?;
+    assert_eq!(
+        reservation.phase,
+        agent_protocol::AgentStreamPublicationReservationPhase::NotApplied
+    );
+    Ok(reservation.resource_pin_receipt.pin.clone())
+}
+
+fn external_abort_command<P: AgentPersistence>(
+    persistence: &mut P,
+) -> AgentResult<agent_protocol::AgentCommand> {
+    agent_protocol::AgentCommand::new(
+        stream_read(persistence)?.revision,
+        agent_protocol::AgentCommandAction::Stream(agent_protocol::AgentStreamCommand::Abort {
+            session_id: SESSION_ID.to_owned(),
+            stream_id: STREAM_ID.to_owned(),
+            reason: "caller:abort-not-applied-process-kill".to_owned(),
+        }),
+    )
+    .map_err(Into::into)
 }
 
 fn tool_projection(status: agent_protocol::ToolCallStatus) -> agent_protocol::ToolCall {
@@ -1394,6 +1502,44 @@ fn agent_close_process_kill_worker_entry() {
     panic!("Agent Close kill worker unexpectedly completed");
 }
 
+#[test]
+fn agent_external_abort_process_kill_worker_entry() {
+    let Ok(database) = std::env::var("CYMULE_AGENT_ABORT_KILL_DB") else {
+        return;
+    };
+    let marker = PathBuf::from(
+        std::env::var("CYMULE_AGENT_ABORT_KILL_MARKER")
+            .expect("Agent external Abort kill marker exists"),
+    );
+    let command_path = PathBuf::from(
+        std::env::var("CYMULE_AGENT_ABORT_KILL_COMMAND")
+            .expect("Agent external Abort command path exists"),
+    );
+    let phase = match std::env::var("CYMULE_AGENT_ABORT_KILL_PHASE")
+        .expect("Agent external Abort kill phase exists")
+        .as_str()
+    {
+        "objects_staged_before_head_cas" => KillPhase::ObjectsStaged,
+        "cas_acknowledgement_lost" => KillPhase::AcknowledgementLost,
+        phase => panic!("unknown Agent external Abort kill phase {phase}"),
+    };
+    let store = FaultingSqliteStore::killing(Path::new(&database), phase, 1, marker);
+    let mut runtime = open_runtime_with_store(store);
+    let mut providers = UnusedAgentProviders;
+    let mut persistence =
+        RecordingPersistence::new(runtime.agent(&mut providers), Some(command_path));
+    let read = stream_read(&mut persistence).expect("NotApplied stream current reads");
+    AgentStreamController::abort(
+        &mut persistence,
+        &read.revision,
+        SESSION_ID,
+        STREAM_ID,
+        "caller:abort-not-applied-process-kill",
+    )
+    .expect("Agent external Abort worker reaches its selected CAS boundary");
+    panic!("Agent external Abort kill worker unexpectedly completed");
+}
+
 struct AgentFaultCase {
     _world: TestWorld,
     database: PathBuf,
@@ -1652,6 +1798,270 @@ impl AgentCloseFaultCase {
     }
 }
 
+struct AgentExternalAbortFaultCase {
+    _world: TestWorld,
+    database: PathBuf,
+    marker: PathBuf,
+    command_path: PathBuf,
+    pin: cymule_profile_protocol::resource::ResourcePin,
+}
+
+impl AgentExternalAbortFaultCase {
+    fn new(seed: u64) -> Self {
+        let world = TestWorld::new(seed).expect("Agent external Abort fault world creates");
+        let database = world
+            .domain()
+            .path("agent-external-abort.sqlite")
+            .expect("Agent external Abort Store path resolves");
+        let marker = world
+            .domain()
+            .path("external-abort-kill-ready")
+            .expect("Agent external Abort marker path resolves");
+        let command_path = world
+            .domain()
+            .path("external-abort-command.json")
+            .expect("Agent external Abort command path resolves");
+        initialize_store(&database);
+        let pin = {
+            let mut runtime = open_runtime(&database);
+            let mut provider = NotAppliedPublicationProvider::default();
+            let pin = {
+                let mut persistence = runtime.agent(&mut provider);
+                let pin = prepare_external_not_applied(&mut persistence)
+                    .expect("external publication persists NotApplied before Abort");
+                let session = session_read(&mut persistence)
+                    .expect("NotApplied Session reads")
+                    .current
+                    .expect("NotApplied Session exists");
+                assert_eq!(session.open_stream_count, 1);
+                pin
+            };
+            assert_eq!(provider.publish_calls, 1);
+            let current = runtime
+                .resource()
+                .pin_current(&pin.pin_id)
+                .expect("reserved pin reads")
+                .expect("reserved pin exists");
+            assert_eq!(
+                current.status,
+                cymule_profile_protocol::resource::ResourcePinStatus::Reserved
+            );
+            pin
+        };
+        assert_sqlite_integrity(&database);
+        Self {
+            _world: world,
+            database,
+            marker,
+            command_path,
+            pin,
+        }
+    }
+
+    fn kill_abort(&self, phase: KillPhase) {
+        let mut command = Command::new(std::env::current_exe().expect("test executable resolves"));
+        command
+            .arg("--exact")
+            .arg("agent_external_abort_process_kill_worker_entry")
+            .arg("--nocapture")
+            .env("CYMULE_AGENT_ABORT_KILL_DB", &self.database)
+            .env("CYMULE_AGENT_ABORT_KILL_MARKER", &self.marker)
+            .env("CYMULE_AGENT_ABORT_KILL_COMMAND", &self.command_path)
+            .env("CYMULE_AGENT_ABORT_KILL_PHASE", phase.label())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        let mut child =
+            ManagedChild::spawn(&mut command).expect("Agent external Abort kill worker starts");
+        child
+            .wait_for_content(
+                &self.marker,
+                format!("1:{}", phase.label()).as_bytes(),
+                Duration::from_secs(20),
+            )
+            .expect("Agent external Abort reaches its real Store CAS barrier");
+        assert_eq!(
+            child
+                .terminate()
+                .expect("Agent external Abort worker is reaped")
+                .signal(),
+            Some(9)
+        );
+        assert!(child.is_reaped());
+        assert_sqlite_integrity(&self.database);
+    }
+
+    fn converge_abort(&self, phase: KillPhase) {
+        let mut runtime = open_runtime(&self.database);
+        let mut providers = UnusedAgentProviders;
+        let release = {
+            let mut persistence = runtime.agent(&mut providers);
+            let command = read_recorded_command(&self.command_path)
+                .expect("recorded external Abort command verifies");
+            let revision_before = stream_read(&mut persistence)
+                .expect("pre-recovery stream reads")
+                .revision;
+            let first = persistence
+                .commit_agent(&command)
+                .expect("same external Abort command converges after process death");
+            first
+                .verify_for(&command)
+                .expect("converged external Abort receipt verifies");
+            match phase {
+                KillPhase::ObjectsStaged => assert_eq!(
+                    first.committed_revision.as_ref(),
+                    Some(&first.observed_revision),
+                    "pre-head death leaves Abort to commit"
+                ),
+                KillPhase::AcknowledgementLost => assert!(
+                    first.committed_revision.is_none(),
+                    "post-commit death replays the retained Abort receipt"
+                ),
+            }
+            let release = first
+                .receipt
+                .resource_release_receipt_for(&command)
+                .expect("Abort Resource release resolves")
+                .expect("NotApplied Abort retains its Resource release")
+                .clone();
+            let stream = stream_read(&mut persistence)
+                .expect("aborted stream reads")
+                .current
+                .expect("aborted stream exists");
+            assert_eq!(stream.state, agent_protocol::AgentStreamState::Aborted);
+            assert!(stream.publication_reservation.is_none());
+            let session = session_read(&mut persistence)
+                .expect("aborted Session reads")
+                .current
+                .expect("aborted Session exists");
+            assert_eq!(session.open_stream_count, 0);
+            let revision_after = stream_read(&mut persistence)
+                .expect("terminal Abort revision reads")
+                .revision;
+            match phase {
+                KillPhase::ObjectsStaged => assert_ne!(revision_before, revision_after),
+                KillPhase::AcknowledgementLost => assert_eq!(revision_before, revision_after),
+            }
+            let replay = persistence
+                .commit_agent(&command)
+                .expect("external Abort replays a second time");
+            replay
+                .verify_for(&command)
+                .expect("second external Abort replay verifies");
+            assert!(replay.committed_revision.is_none());
+            assert_eq!(replay.receipt, first.receipt);
+            assert_eq!(
+                stream_read(&mut persistence)
+                    .expect("post-replay revision reads")
+                    .revision,
+                revision_after,
+                "second external Abort replay must publish zero writes"
+            );
+            release
+        };
+        assert_eq!(release.pin, self.pin);
+        assert_eq!(release.active_pin_count, 0);
+        let pin = runtime
+            .resource()
+            .pin_current(&self.pin.pin_id)
+            .expect("released pin reads")
+            .expect("released pin exists");
+        assert_eq!(
+            pin.status,
+            cymule_profile_protocol::resource::ResourcePinStatus::Released
+        );
+        let retention = runtime
+            .resource()
+            .retention_current(&self.pin.subject.family.retention_key)
+            .expect("released family reads")
+            .expect("released family exists");
+        assert_eq!(retention.family, self.pin.subject.family);
+        assert_eq!(retention.active_pin_count, 0);
+        assert_eq!(
+            retention.disposition,
+            cymule_profile_protocol::resource::ResourceRetentionDisposition::Unretained
+        );
+        assert_sqlite_integrity(&self.database);
+    }
+
+    fn commit_abort_without_death(&self) -> agent_protocol::AgentCommand {
+        let mut runtime = open_runtime(&self.database);
+        let mut providers = UnusedAgentProviders;
+        let mut persistence = RecordingPersistence::new(
+            runtime.agent(&mut providers),
+            Some(self.command_path.clone()),
+        );
+        let command = external_abort_command(&mut persistence)
+            .expect("external Abort command seals without process death");
+        persistence
+            .commit_agent(&command)
+            .expect("external Abort baseline commits");
+        command
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SidecarFault {
+    Missing,
+    Tampered,
+}
+
+fn fault_state_root_leaf_kind(path: &Path, kind: StateRootLeafKind, fault: SidecarFault) {
+    let connection = Connection::open(path).expect("Agent tamper database opens");
+    let mut statement = connection
+        .prepare("SELECT object_id, object_json FROM cymule_state_root_objects WHERE domain = ?1")
+        .expect("Agent StateRoot inventory query prepares");
+    let rows = statement
+        .query_map([STORE_DOMAIN], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .expect("Agent StateRoot inventory reads");
+    let mut targets = Vec::new();
+    for row in rows {
+        let (object_id, bytes) = row.expect("Agent StateRoot inventory row reads");
+        let object = decode_state_root_object(&bytes).expect("Agent StateRoot object decodes");
+        if matches!(
+            &object,
+            StateRootObject::Value(value)
+                if matches!(&value.value, StateRootValue::Leaf { kind: observed, .. } if *observed == kind)
+        ) {
+            targets.push((object_id, object));
+        }
+    }
+    drop(statement);
+    assert!(!targets.is_empty(), "Agent tamper target {kind:?} exists");
+    for (object_id, object) in targets {
+        match fault {
+            SidecarFault::Missing => {
+                connection
+                    .execute(
+                        "DELETE FROM cymule_state_root_objects WHERE domain = ?1 AND object_id = ?2",
+                        params![STORE_DOMAIN, object_id],
+                    )
+                    .expect("Agent StateRoot sidecar deletes");
+            }
+            SidecarFault::Tampered => {
+                let StateRootObject::Value(mut value) = object else {
+                    unreachable!("selected sidecar is a value object")
+                };
+                let StateRootValue::Leaf { canonical_json, .. } = &mut value.value else {
+                    unreachable!("selected sidecar is a typed leaf")
+                };
+                canonical_json.push(' ');
+                let bytes = cymule_core::canonical_bytes(&StateRootObject::Value(value))
+                    .expect("tampered sidecar still encodes");
+                connection
+                    .execute(
+                        "UPDATE cymule_state_root_objects SET object_json = ?1 WHERE domain = ?2 AND object_id = ?3",
+                        params![bytes, STORE_DOMAIN, object_id],
+                    )
+                    .expect("Agent StateRoot sidecar tampers");
+            }
+        }
+    }
+    assert_sqlite_integrity(path);
+}
+
 fn agent_cas_boundary_count() -> usize {
     let case = AgentFaultCase::new(0);
     let store = FaultingSqliteStore::counting(&case.database);
@@ -1705,6 +2115,58 @@ fn session_close_atomically_cancels_all_tools_across_real_process_death() {
             case.converge_close(phase),
             expected,
             "{phase:?} recovery must exactly match the no-death terminal authority"
+        );
+    }
+}
+
+#[test]
+fn external_not_applied_abort_survives_real_store_process_death() {
+    for (index, phase) in [KillPhase::ObjectsStaged, KillPhase::AcknowledgementLost]
+        .into_iter()
+        .enumerate()
+    {
+        let case = AgentExternalAbortFaultCase::new(
+            20_000 + u64::try_from(index).expect("external Abort phase index fits u64"),
+        );
+        case.kill_abort(phase);
+        case.converge_abort(phase);
+    }
+}
+
+#[test]
+fn retained_external_abort_replay_rejects_missing_or_tampered_resource_sidecars() {
+    for (index, (kind, fault)) in [
+        (StateRootLeafKind::ResourcePinCurrent, SidecarFault::Missing),
+        (
+            StateRootLeafKind::ResourcePinCurrent,
+            SidecarFault::Tampered,
+        ),
+        (
+            StateRootLeafKind::ResourceRetentionCurrent,
+            SidecarFault::Missing,
+        ),
+        (
+            StateRootLeafKind::ResourceRetentionCurrent,
+            SidecarFault::Tampered,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let case = AgentExternalAbortFaultCase::new(
+            21_000 + u64::try_from(index).expect("Abort tamper index fits u64"),
+        );
+        let command = case.commit_abort_without_death();
+        fault_state_root_leaf_kind(&case.database, kind, fault);
+        let mut runtime = open_runtime(&case.database);
+        let mut providers = UnusedAgentProviders;
+        let error = runtime
+            .agent(&mut providers)
+            .commit_agent(&command)
+            .expect_err("retained Abort replay must authenticate Resource sidecars");
+        assert!(
+            matches!(error, cymule_durable::DurableError::Integrity { .. }),
+            "{fault:?} {kind:?} returned {error:?}"
         );
     }
 }

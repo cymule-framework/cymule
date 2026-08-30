@@ -46,6 +46,12 @@ and uses the SQLite `(acknowledged, signal_key, activation_id)` index, so an
 arbitrary prefix of unrelated pending requests cannot starve a later matching
 activation.
 
+Hot fresh and retained reads use the exact `acknowledged = 0` predicate, which
+keeps their ordering on the pending composite indexes even behind a large
+acknowledged prefix. Duplicate-ingress and acknowledgement point reads use the
+activation primary index; none of these paths permits a full table scan or
+temporary B-tree.
+
 Every selected wait identity is an exact lowercase SHA-256 content ID. A
 forged new identity fails before SQLite retains the target set; a malformed
 retained identity is row corruption and returns `Integrity` before an M1

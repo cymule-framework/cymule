@@ -988,9 +988,21 @@ fn fresh_and_retained_signal_row_tamper_fails_before_target_selection() {
                 waits: index_for_signal(source_key),
                 ..ObservedWaitView::default()
             };
-            let error = driver
-                .receive(&mut view, 1)
-                .expect_err("tampered row cannot become a delivery");
+            let error = if name == "acknowledgement" {
+                assert!(
+                    driver
+                        .receive(&mut view, 1)
+                        .expect("invalid acknowledgement is not legal pending work")
+                        .is_none()
+                );
+                driver
+                    .acknowledge("activation:http")
+                    .expect_err("exact acknowledgement read rejects the invalid flag")
+            } else {
+                driver
+                    .receive(&mut view, 1)
+                    .expect_err("tampered row cannot become a delivery")
+            };
             assert!(
                 matches!(error, DurableError::Integrity { .. }),
                 "{name} {retained:?} produced {error:?}"

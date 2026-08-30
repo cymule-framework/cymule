@@ -394,3 +394,8 @@ repeated recovery evidence must perform zero writes while new evidence remains
 append-only and reopenable. Tests also release a sibling pin between reservation
 and promotion, and prove NotApplied Abort releases its reserved pin while
 DispatchClaimed/Unknown Abort writes nothing.
+The SQLite process-death matrix stops at the real Store object-staged/pre-head
+barrier and after committed CAS before acknowledgement for NotApplied Abort;
+reopen must converge the same command with no provider call, authenticate both
+Resource sidecars, and make a second replay with zero writes. Removing either
+the Released pin value or retention value makes retained replay Integrity.

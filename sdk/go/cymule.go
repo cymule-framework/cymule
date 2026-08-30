@@ -7458,7 +7458,7 @@ func (engine CliEngine) Run(plan SealedPlan, input any, plugin EnginePluginTarge
 	return response.Execution, err
 }
 
-func (engine CliEngine) request(request any, response any) (returnError error) {
+func (engine CliEngine) request(request any, response any) error {
 	timeout := engine.Timeout
 	if timeout < 0 {
 		return validationFailure("invalid_engine_timeout", "Engine timeout must be a positive duration")
@@ -7547,11 +7547,6 @@ func (engine CliEngine) request(request any, response any) (returnError error) {
 	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
-	defer func() {
-		if !call.complete() {
-			returnError = interruptedFailure(request, context.Canceled, true)
-		}
-	}()
 	inputDone := make(chan error, 1)
 	stdoutDone := make(chan error, 1)
 	stderrDone := make(chan error, 1)
@@ -7583,18 +7578,10 @@ func (engine CliEngine) request(request any, response any) (returnError error) {
 		stderrDone,
 		overflow.events,
 		engineProcessExitedWithoutReaping,
+		terminateEngineProcess,
 	)
-	if processResult.terminationErr != nil {
-		return responseLossFailure(request, "engine_process_termination_failed")
-	}
-	if processResult.interruption != nil {
-		return interruptedFailure(request, processResult.interruption, true)
-	}
-	if processResult.overflowCode != "" {
-		return responseLossFailure(request, processResult.overflowCode)
-	}
-	if processResult.stdoutErr != nil || processResult.stderrErr != nil {
-		return responseLossFailure(request, "engine_io_failed")
+	if processErr := classifyEngineProcessResult(request, processResult); processErr != nil {
+		return processErr
 	}
 	if stdout.overflowed() || stderr.overflowed() {
 		if stdout.overflowed() {
@@ -7603,7 +7590,7 @@ func (engine CliEngine) request(request any, response any) (returnError error) {
 		return responseLossFailure(request, "engine_diagnostic_limit_exceeded")
 	}
 	if failure, valid := decodeValidEngineFailure(stdout.bytes()); valid {
-		return failure
+		return settleAcceptedEngineOutcome(request, call, failure)
 	}
 	if processResult.waitErr != nil {
 		return responseLossFailure(request, "engine_process_failed")
@@ -7615,7 +7602,10 @@ func (engine CliEngine) request(request any, response any) (returnError error) {
 			return responseLossFailure(request, "engine_request_incomplete")
 		}
 	}
-	return decodeEngineResponseForRequest(stdout.bytes(), response, sentRequest)
+	if err := decodeEngineResponseForRequest(stdout.bytes(), response, sentRequest); err != nil {
+		return err
+	}
+	return settleAcceptedEngineOutcome(request, call, nil)
 }
 
 type engineProcessResult struct {
@@ -7640,6 +7630,7 @@ func awaitEngineProcess(
 	stderrDone <-chan error,
 	overflow <-chan string,
 	processExited func(int) (bool, error),
+	terminateProcess func(*exec.Cmd, io.Closer, io.Closer, io.Closer) (error, error),
 ) engineProcessResult {
 	var result engineProcessResult
 	processID := command.Process.Pid
@@ -7651,7 +7642,7 @@ func awaitEngineProcess(
 	defer ticker.Stop()
 
 	terminate := func() (error, error) {
-		return terminateEngineProcess(command, stdinPipe, stdoutPipe, stderrPipe)
+		return terminateProcess(command, stdinPipe, stdoutPipe, stderrPipe)
 	}
 	for {
 		if !inputComplete {
@@ -7712,6 +7703,29 @@ func awaitEngineProcess(
 		case <-ticker.C:
 		}
 	}
+}
+
+func classifyEngineProcessResult(request any, result engineProcessResult) error {
+	if result.terminationErr != nil {
+		return responseLossFailure(request, "engine_process_termination_failed")
+	}
+	if result.interruption != nil {
+		return interruptedFailure(request, result.interruption, true)
+	}
+	if result.overflowCode != "" {
+		return responseLossFailure(request, result.overflowCode)
+	}
+	if result.stdoutErr != nil || result.stderrErr != nil {
+		return responseLossFailure(request, "engine_io_failed")
+	}
+	return nil
+}
+
+func settleAcceptedEngineOutcome(request any, call *engineCall, outcome error) error {
+	if !call.complete() {
+		return interruptedFailure(request, context.Canceled, true)
+	}
+	return outcome
 }
 
 func terminateEngineProcess(

@@ -505,12 +505,15 @@ impl CliEngine {
         let request = &snapshot.typed;
         if self.timeout.is_zero() {
             return Err(local_request_failure(
-                "invalid_timeout",
+                "invalid_engine_timeout",
                 "CLI Engine timeout must be positive",
             ));
         }
         let deadline = Instant::now().checked_add(self.timeout).ok_or_else(|| {
-            local_request_failure("invalid_timeout", "timeout exceeds the clock range")
+            local_request_failure(
+                "invalid_engine_timeout",
+                "CLI Engine timeout exceeds the clock range",
+            )
         })?;
         let mut call = self.cancellation.begin(request)?;
         let mut command = Command::new(&self.executable);
@@ -5361,7 +5364,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn zero_timeout_is_local_validation_before_engine_spawn() {
+    fn invalid_timeout_is_local_validation_before_engine_spawn() {
         let directory = tempfile::tempdir().expect("isolated Engine fixture directory");
         let executable = directory.path().join("zero-timeout-engine");
         let marker = directory.path().join("spawned");
@@ -5377,17 +5380,30 @@ mod tests {
         std::fs::set_permissions(&executable, permissions)
             .expect("Engine fixture becomes executable");
 
-        let failure = CliEngine::new(&executable)
-            .with_timeout(Duration::ZERO)
-            .seal(&empty_candidate())
-            .expect_err("zero timeout is rejected before Engine spawn");
-        assert_eq!(failure.category, EngineFailureCategory::Validation);
-        assert_eq!(failure.code.as_ref(), "invalid_timeout");
-        assert_eq!(
-            failure.retry_disposition,
-            Some(EngineRetryDisposition::CorrectAndRetry)
+        for (label, timeout) in [
+            ("zero", Duration::ZERO),
+            ("clock-range overflow", Duration::MAX),
+        ] {
+            let failure = CliEngine::new(&executable)
+                .with_timeout(timeout)
+                .seal(&empty_candidate())
+                .expect_err("invalid timeout is rejected before Engine spawn");
+            assert_eq!(
+                failure.category,
+                EngineFailureCategory::Validation,
+                "{label}"
+            );
+            assert_eq!(failure.code.as_ref(), "invalid_engine_timeout", "{label}");
+            assert_eq!(
+                failure.retry_disposition,
+                Some(EngineRetryDisposition::CorrectAndRetry),
+                "{label}"
+            );
+        }
+        assert!(
+            !marker.exists(),
+            "invalid timeout still launched the Engine"
         );
-        assert!(!marker.exists(), "zero timeout still launched the Engine");
     }
 
     #[cfg(unix)]

@@ -50,6 +50,11 @@
   scan a fixed activation-ID prefix; unrelated ingress cannot starve a later
   active source. Reset the cursor only for the view's typed `Stale` outcome;
   every actual view error remains an error.
+- Every hot unacknowledged query uses `acknowledged = 0`, never `!= 1`, so the
+  pending or matching composite index owns retained and fresh ordering. Exact
+  acknowledgement, duplicate-ingress, and selection readbacks use the
+  activation primary index; query-plan tests reject full scans and temp
+  B-trees.
 - Validate a newly selected target set against the `max_targets` supplied to
   that exact `receive` call before SQLite may retain it. Once retained, the
   complete set is the original selection authority: a later caller's smaller

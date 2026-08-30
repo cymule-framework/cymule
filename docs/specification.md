@@ -554,7 +554,32 @@ physical-family current, so exactly one can win before provider I/O. Only a
 fresh reservation or NotApplied rearm acknowledgement MAY invoke publish.
 Published reconciliation MUST promote the exact reserved pin to `Active` in the
 Agent terminal `Finalize` transaction without incrementing the obligation
-count, and the pin has no generic release path.
+count. Promotion MUST bind the physical family's current active count; the
+reservation-time aggregate is historical evidence and MUST NOT act as a lower
+bound after an unrelated sibling pin release.
+
+A public Agent stream `Abort` MAY retire an external publication reservation
+only when the latest claimed attempt is durably `NotApplied`.
+`DispatchClaimed`, including an unresolved or Unknown provider outcome, MUST
+reject Abort and preserve observe-only reconciliation authority. The persisted
+Abort source and effect each carry one required-nullable Resource member:
+ordinary Abort encodes explicit null, while reservation retirement retains the
+exact retention/pin currents and typed reserved-pin release receipt. One and
+only one StateRoot CAS MUST publish all six coupled sides:
+
+1. the exact Agent Abort command and semantic receipt;
+2. the Aborted stream current with `publication_reservation = null`;
+3. the Session current with its open-stream count decremented;
+4. the typed Resource release retained by the Agent effect;
+5. the exact pin current advanced from `Reserved` to `Released`; and
+6. the physical-family current with its active count decremented and its
+   disposition derived from the resulting count.
+
+Exact Abort replay MUST resolve the Agent receipt and authenticate both
+terminal Resource sidecars. A missing or tampered Released pin or family
+current is Integrity, not a successful receipt replay. Generic Resource
+`Release` MUST reject both the pre-publication reservation and its terminal
+Agent pin; this typed Abort is the sole release authority.
 
 GC records the exact physical active-pin count and is deletion-eligible only at
 zero. `BeginDelete` MUST exact-load the command receipt selected by
