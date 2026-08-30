@@ -3534,6 +3534,19 @@ struct ObjectOverlay<'a, R: StateRootResolver + ?Sized> {
     pending: BTreeMap<String, StateRootObject>,
 }
 
+impl<R: StateRootResolver + ?Sized> StateRootResolver for ObjectOverlay<'_, R> {
+    fn pinned_manifest_id(&self) -> &str {
+        self.resolver.pinned_manifest_id()
+    }
+
+    fn load_state_root_object(
+        &mut self,
+        object_id: &str,
+    ) -> DurableResult<Option<StateRootObject>> {
+        self.load_optional(object_id)
+    }
+}
+
 impl<'a, R: StateRootResolver + ?Sized> ObjectOverlay<'a, R> {
     fn new(resolver: &'a mut R) -> Self {
         Self {
@@ -6582,6 +6595,7 @@ pub fn reachable_state_root_objects<R: StateRootResolver + ?Sized>(
     audit_pending_wait_sources(manifest, resolver)?;
     audit_agent_session_closure(manifest, resolver, &materialized)?;
     audit_agent_update_closure(manifest, resolver, &materialized)?;
+    audit_agent_owned_current_closure(manifest, resolver, &materialized)?;
     audit_agent_target_claim_closure(manifest, resolver, &materialized)?;
 
     let mut reachable = BTreeSet::new();
@@ -6633,22 +6647,95 @@ fn audit_agent_session_closure<R: StateRootResolver + ?Sized>(
         StateRootFamily::AgentSessions,
         StateRootLeafKind::AgentSessionCurrent,
     )?;
-    for (key, current) in sessions {
-        if key != agent_session_key(&current.session_id)? {
+    let receipts: BTreeMap<String, cymule_profile_protocol::agent::AgentCommandReceipt> =
+        decode_family_map(
+            &materialized.collections,
+            StateRootFamily::AgentCommandReceipts,
+            StateRootLeafKind::AgentCommandReceipt,
+        )?;
+    for (key, current) in &sessions {
+        if *key != agent_session_key(&current.session_id)? {
             return Err(DurableError::Integrity {
                 code: "agent_session_key_mismatch".to_owned(),
                 message: "Agent Session current changed its exact StateRoot key".to_owned(),
             });
         }
         if current.last_transition.is_some() {
-            crate::coordinator::verify_agent_session_origin(manifest, resolver, &current)?;
-        } else if current != AgentSessionCurrent::new(&current.session_id)? {
+            crate::coordinator::verify_agent_session_origin(manifest, resolver, current)?;
+        } else if *current != AgentSessionCurrent::new(&current.session_id)?
+            || receipts.values().any(|receipt| {
+                crate::coordinator::agent_receipt_session_current(receipt)
+                    .is_some_and(|(_, retained)| retained.session_id == current.session_id)
+            })
+        {
             return Err(DurableError::Integrity {
                 code: "agent_session_pristine_origin_mismatch".to_owned(),
                 message: "Agent Session without a receipt is not pristine".to_owned(),
             });
         }
     }
+    let mut overlay = ObjectOverlay::new(resolver);
+    for current in sessions.values() {
+        validate_agent_session_roots(&manifest.roots, current, &mut overlay)?;
+    }
+    Ok(())
+}
+
+fn audit_agent_owned_current_closure<R: StateRootResolver + ?Sized>(
+    manifest: &StateRootManifest,
+    resolver: &mut R,
+    materialized: &MaterializedStateRoots,
+) -> DurableResult<()> {
+    macro_rules! audit_family {
+        ($family:ident, $kind:ident, $ty:ty, $verify:path) => {
+            for current in decode_family_map::<$ty>(
+                &materialized.collections,
+                StateRootFamily::$family,
+                StateRootLeafKind::$kind,
+            )?
+            .values()
+            {
+                $verify(manifest, resolver, current)?;
+            }
+        };
+    }
+
+    audit_family!(
+        AgentMessages,
+        AgentMessageCurrent,
+        cymule_profile_protocol::agent::AgentMessageCurrent,
+        crate::coordinator::verify_agent_message_origin
+    );
+    audit_family!(
+        AgentTools,
+        AgentToolCurrent,
+        cymule_profile_protocol::agent::AgentToolCurrent,
+        crate::coordinator::verify_agent_tool_origin
+    );
+    audit_family!(
+        AgentElicitations,
+        AgentElicitationCurrent,
+        cymule_profile_protocol::agent::AgentElicitationCurrent,
+        crate::coordinator::verify_agent_elicitation_origin
+    );
+    audit_family!(
+        AgentOccurrences,
+        AgentOccurrenceCurrent,
+        cymule_profile_protocol::agent::AgentOccurrenceCurrent,
+        crate::coordinator::verify_agent_occurrence_origin
+    );
+    audit_family!(
+        AgentStreams,
+        AgentStreamCurrent,
+        cymule_profile_protocol::agent::AgentStreamCurrent,
+        crate::coordinator::verify_agent_stream_origin
+    );
+    audit_family!(
+        AgentStreamChunks,
+        AgentStreamChunkCurrent,
+        cymule_profile_protocol::agent::AgentStreamChunkCurrent,
+        crate::coordinator::verify_agent_stream_chunk_origin
+    );
     Ok(())
 }
 
@@ -8956,8 +9043,9 @@ fn validate_state_root_sidecars<R: StateRootResolver + ?Sized>(
         staged_machine_root_delta,
         overlay,
     )?;
-    validate_agent_session_operation_set(operations, roots, overlay)?;
+    validate_agent_session_operation_set(current, operations, roots, overlay)?;
     validate_agent_update_operation_set(operations, roots, overlay)?;
+    validate_agent_owned_current_operation_set(operations, roots, overlay)?;
     validate_agent_target_claim_operation_set(operations, roots, overlay)?;
     for operation in operations {
         match operation {
@@ -9077,6 +9165,7 @@ fn validate_agent_update_operation_set<R: StateRootResolver + ?Sized>(
 }
 
 fn validate_agent_session_operation_set<R: StateRootResolver + ?Sized>(
+    current: &StateRootManifest,
     operations: &[crate::DurableOperation],
     roots: &StateRoots,
     overlay: &mut ObjectOverlay<'_, R>,
@@ -9094,6 +9183,9 @@ fn validate_agent_session_operation_set<R: StateRootResolver + ?Sized>(
                 })?
                 .decode(StateRootLeafKind::AgentCommand)?;
             receipt.verify_for(&command)?;
+            crate::coordinator::verify_agent_session_receipt_parent(
+                current, overlay, &command, receipt,
+            )?;
             if let Some((_, current)) = crate::coordinator::agent_receipt_session_current(receipt) {
                 expected.push(current.clone());
             }
@@ -9105,19 +9197,129 @@ fn validate_agent_session_operation_set<R: StateRootResolver + ?Sized>(
         };
         if let Some(position) = expected.iter().position(|expected| expected == value) {
             expected.remove(position);
-        } else if value.last_transition.is_some()
-            || *value != AgentSessionCurrent::new(&value.session_id)?
-        {
-            return Err(DurableError::Integrity {
-                code: "agent_session_operation_unowned".to_owned(),
-                message: "Agent Session current has no exact owning receipt".to_owned(),
-            });
+        } else {
+            let key = cymule_profile_protocol::agent::agent_session_key(&value.session_id)?;
+            if value.last_transition.is_some()
+                || *value != AgentSessionCurrent::new(&value.session_id)?
+                || map_get(&current.roots.agent_sessions, &key, overlay)?.is_some()
+            {
+                return Err(DurableError::Integrity {
+                    code: "agent_session_operation_unowned".to_owned(),
+                    message: "Agent Session current has no exact owning receipt".to_owned(),
+                });
+            }
         }
     }
     if !expected.is_empty() {
         return Err(DurableError::Integrity {
             code: "agent_session_operation_missing".to_owned(),
             message: "Agent receipt did not atomically write its Session current".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct AgentReceiptCurrents {
+    messages: Vec<cymule_profile_protocol::agent::AgentMessageCurrent>,
+    tools: Vec<cymule_profile_protocol::agent::AgentToolCurrent>,
+    elicitations: Vec<cymule_profile_protocol::agent::AgentElicitationCurrent>,
+    occurrences: Vec<cymule_profile_protocol::agent::AgentOccurrenceCurrent>,
+    streams: Vec<cymule_profile_protocol::agent::AgentStreamCurrent>,
+    chunks: Vec<cymule_profile_protocol::agent::AgentStreamChunkCurrent>,
+}
+
+fn remove_exact<T: PartialEq>(values: &mut Vec<T>, value: &T) -> bool {
+    values
+        .iter()
+        .position(|expected| expected == value)
+        .is_some_and(|position| {
+            values.remove(position);
+            true
+        })
+}
+
+fn validate_agent_owned_current_operation_set<R: StateRootResolver + ?Sized>(
+    operations: &[crate::DurableOperation],
+    roots: &StateRoots,
+    overlay: &mut ObjectOverlay<'_, R>,
+) -> DurableResult<()> {
+    use cymule_profile_protocol::agent::AgentCommand;
+
+    let mut expected = AgentReceiptCurrents::default();
+    for operation in operations {
+        if let crate::DurableOperation::PutAgentCommandReceipt { value: receipt } = operation {
+            let key = cymule_profile_protocol::agent::agent_command_key(&receipt.command_id)?;
+            let command: AgentCommand = map_get(&roots.agent_commands, &key, overlay)?
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_current_operation_command_missing".to_owned(),
+                    message: "Agent current receipt lost its exact command".to_owned(),
+                })?
+                .decode(StateRootLeafKind::AgentCommand)?;
+            receipt.verify_for(&command)?;
+            expected
+                .messages
+                .extend(crate::coordinator::agent_receipt_message_current(receipt).cloned());
+            expected.tools.extend(
+                crate::coordinator::agent_receipt_tool_currents(receipt)
+                    .into_iter()
+                    .cloned(),
+            );
+            expected
+                .elicitations
+                .extend(crate::coordinator::agent_receipt_elicitation_current(receipt).cloned());
+            expected
+                .occurrences
+                .extend(crate::coordinator::agent_receipt_occurrence_current(receipt).cloned());
+            expected
+                .streams
+                .extend(crate::coordinator::agent_receipt_stream_current(receipt).cloned());
+            expected
+                .chunks
+                .extend(crate::coordinator::agent_receipt_stream_chunk_current(receipt).cloned());
+        }
+    }
+    for operation in operations {
+        let owned = match operation {
+            crate::DurableOperation::PutAgentMessageCurrent { value } => {
+                remove_exact(&mut expected.messages, value)
+            }
+            crate::DurableOperation::PutAgentToolCurrent { value } => {
+                remove_exact(&mut expected.tools, value)
+            }
+            crate::DurableOperation::PutAgentElicitationCurrent { value } => {
+                remove_exact(&mut expected.elicitations, value)
+            }
+            crate::DurableOperation::PutAgentOccurrenceCurrent { value } => {
+                remove_exact(&mut expected.occurrences, value)
+            }
+            crate::DurableOperation::PutAgentStreamCurrent { value }
+                if value.publication_reservation.is_none() =>
+            {
+                remove_exact(&mut expected.streams, value)
+            }
+            crate::DurableOperation::PutAgentStreamChunkCurrent { value } => {
+                remove_exact(&mut expected.chunks, value)
+            }
+            _ => continue,
+        };
+        if !owned {
+            return Err(DurableError::Integrity {
+                code: "agent_current_operation_unowned".to_owned(),
+                message: "Agent current has no exact owning receipt".to_owned(),
+            });
+        }
+    }
+    if !expected.messages.is_empty()
+        || !expected.tools.is_empty()
+        || !expected.elicitations.is_empty()
+        || !expected.occurrences.is_empty()
+        || !expected.streams.is_empty()
+        || !expected.chunks.is_empty()
+    {
+        return Err(DurableError::Integrity {
+            code: "agent_current_operation_missing".to_owned(),
+            message: "Agent receipt did not atomically write every owned current".to_owned(),
         });
     }
     Ok(())
@@ -15878,6 +16080,9 @@ mod tests {
                 &mut resolver,
                 &crate::DurableDelta::new(operations).expect("Agent message delta seals"),
             );
+            if index == 0 {
+                assert_existing_session_cannot_be_pristine(&manifest, &mut resolver);
+            }
             messages.push(current);
             session = post.session;
         }
@@ -15908,7 +16113,66 @@ mod tests {
             }])
             .expect("Agent Session delta seals"),
         );
+        crate::coordinator::verify_agent_session_origin(&manifest, &mut resolver, &session)
+            .expect("exact pristine persisted Session is readable without a receipt");
+        assert_orphan_agent_tool_rejected(&manifest, &mut resolver);
         (manifest, resolver, session)
+    }
+
+    fn agent_message_pristine_session() -> cymule_profile_protocol::agent::AgentSessionCurrent {
+        cymule_profile_protocol::agent::AgentSessionCurrent::new("session:message-prefix")
+            .expect("Agent Session constructs")
+    }
+
+    fn assert_existing_session_cannot_be_pristine(
+        manifest: &StateRootManifest,
+        resolver: &mut TestResolver,
+    ) {
+        let error = manifest
+            .apply(
+                &crate::DurableDelta::new(vec![crate::DurableOperation::PutAgentSessionCurrent {
+                    value: agent_message_pristine_session(),
+                }])
+                .expect("pristine overwrite delta seals"),
+                resolver,
+            )
+            .expect_err("an existing Session cannot be overwritten as pristine");
+        assert!(matches!(
+            error,
+            DurableError::Integrity { ref code, .. }
+                if code == "agent_session_operation_unowned"
+        ));
+    }
+
+    fn assert_orphan_agent_tool_rejected(
+        manifest: &StateRootManifest,
+        resolver: &mut TestResolver,
+    ) {
+        let tool = cymule_profile_protocol::agent::AgentToolCurrent {
+            session_id: "session:message-prefix".to_owned(),
+            tool: cymule_profile_protocol::agent::ToolCall {
+                tool_call_id: "tool:orphan".to_owned(),
+                operation: "test".to_owned(),
+                status: cymule_profile_protocol::agent::ToolCallStatus::Pending,
+                input: serde_json::Value::Null,
+                output: None,
+                locations: Vec::new(),
+            },
+            admitted_by: format!("sha256:{}", "d".repeat(64)),
+        };
+        let error = manifest
+            .apply(
+                &crate::DurableDelta::new(vec![crate::DurableOperation::PutAgentToolCurrent {
+                    value: tool,
+                }])
+                .expect("orphan Tool delta seals"),
+                resolver,
+            )
+            .expect_err("Tool current without a receipt is rejected before commit");
+        assert!(matches!(
+            error,
+            DurableError::Integrity { ref code, .. } if code == "agent_current_operation_unowned"
+        ));
     }
 
     fn assert_agent_receipt_operation_closure(
@@ -16010,7 +16274,7 @@ mod tests {
         assert!(matches!(
             error,
             DurableError::Integrity { ref code, .. }
-                if code == "agent_target_claim_write_operation_mismatch"
+                if code == "agent_current_operation_unowned"
         ));
     }
 

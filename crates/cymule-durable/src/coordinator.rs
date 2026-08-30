@@ -9408,16 +9408,15 @@ pub(crate) fn verify_agent_session_origin<R: crate::StateRootResolver + ?Sized>(
     resolver: &mut R,
     current: &agent_protocol::AgentSessionCurrent,
 ) -> DurableResult<()> {
-    let witness = current
-        .last_transition
-        .as_ref()
-        .ok_or_else(|| DurableError::Integrity {
+    let Some(witness) = current.last_transition.as_ref() else {
+        if *current == agent_protocol::AgentSessionCurrent::new(&current.session_id)? {
+            return Ok(());
+        }
+        return Err(DurableError::Integrity {
             code: "agent_session_origin_missing".to_owned(),
-            message: format!(
-                "persisted Agent Session {} has no admitting transition",
-                current.session_id
-            ),
-        })?;
+            message: "Receipt-free Agent Session is not pristine".to_owned(),
+        });
+    };
     let (_, receipt) = load_verified_agent_origin(manifest, resolver, &witness.command_id)?;
     let Some((kind, retained)) = agent_receipt_session_current(&receipt) else {
         return Err(DurableError::Integrity {
@@ -9469,7 +9468,7 @@ pub(crate) fn agent_receipt_session_current(
     }
 }
 
-fn verify_agent_message_origin<R: crate::StateRootResolver + ?Sized>(
+pub(crate) fn verify_agent_message_origin<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     current: &agent_protocol::AgentMessageCurrent,
@@ -9513,7 +9512,7 @@ pub(crate) fn agent_receipt_message_current(
     }
 }
 
-fn verify_agent_tool_origin<R: crate::StateRootResolver + ?Sized>(
+pub(crate) fn verify_agent_tool_origin<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     current: &agent_protocol::AgentToolCurrent,
@@ -9532,48 +9531,49 @@ pub(crate) fn agent_receipt_tool_current<'a>(
     receipt: &'a agent_protocol::AgentCommandReceipt,
     tool_call_id: &str,
 ) -> Option<&'a agent_protocol::AgentToolCurrent> {
+    agent_receipt_tool_currents(receipt)
+        .into_iter()
+        .find(|current| current.tool.tool_call_id == tool_call_id)
+}
+
+pub(crate) fn agent_receipt_tool_currents(
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> Vec<&agent_protocol::AgentToolCurrent> {
     match &receipt.outcome {
         agent_protocol::AgentCommandOutcome::Session(postcondition) => {
             match &postcondition.effect {
-                agent_protocol::AgentSessionUpdateEffect::Tool { current } => Some(current),
-                agent_protocol::AgentSessionUpdateEffect::Closed { tools } => tools
-                    .iter()
-                    .find(|retained| retained.tool.tool_call_id == tool_call_id),
+                agent_protocol::AgentSessionUpdateEffect::Tool { current } => vec![current],
+                agent_protocol::AgentSessionUpdateEffect::Closed { tools } => {
+                    tools.iter().collect()
+                }
                 agent_protocol::AgentSessionUpdateEffect::Metadata
-                | agent_protocol::AgentSessionUpdateEffect::Message { .. } => None,
+                | agent_protocol::AgentSessionUpdateEffect::Message { .. } => Vec::new(),
             }
         }
         agent_protocol::AgentCommandOutcome::Stream(postcondition) => match &postcondition.effect {
             agent_protocol::AgentStreamEffect::Finalized { session, .. } => match &session.effect {
-                agent_protocol::AgentSessionUpdateEffect::Tool { current } => Some(current),
+                agent_protocol::AgentSessionUpdateEffect::Tool { current } => vec![current],
                 agent_protocol::AgentSessionUpdateEffect::Metadata
                 | agent_protocol::AgentSessionUpdateEffect::Closed { .. }
-                | agent_protocol::AgentSessionUpdateEffect::Message { .. } => None,
+                | agent_protocol::AgentSessionUpdateEffect::Message { .. } => Vec::new(),
             },
             agent_protocol::AgentStreamEffect::Opened { .. }
             | agent_protocol::AgentStreamEffect::Chunk { .. }
-            | agent_protocol::AgentStreamEffect::Aborted { .. } => None,
+            | agent_protocol::AgentStreamEffect::Aborted { .. } => Vec::new(),
         },
         agent_protocol::AgentCommandOutcome::Occurrence(_)
         | agent_protocol::AgentCommandOutcome::Input(_)
-        | agent_protocol::AgentCommandOutcome::Workspace(_) => None,
+        | agent_protocol::AgentCommandOutcome::Workspace(_) => Vec::new(),
     }
 }
 
-fn verify_agent_elicitation_origin<R: crate::StateRootResolver + ?Sized>(
+pub(crate) fn verify_agent_elicitation_origin<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     current: &agent_protocol::AgentElicitationCurrent,
 ) -> DurableResult<()> {
     let (_, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
-    let retained = match &receipt.outcome {
-        agent_protocol::AgentCommandOutcome::Input(checkpoint) => Some(&checkpoint.elicitation),
-        agent_protocol::AgentCommandOutcome::Session(_)
-        | agent_protocol::AgentCommandOutcome::Occurrence(_)
-        | agent_protocol::AgentCommandOutcome::Stream(_)
-        | agent_protocol::AgentCommandOutcome::Workspace(_) => None,
-    };
-    if retained != Some(current) {
+    if agent_receipt_elicitation_current(&receipt) != Some(current) {
         return Err(DurableError::Integrity {
             code: "agent_elicitation_origin_mismatch".to_owned(),
             message: "Agent elicitation does not equal its admitting receipt outcome".to_owned(),
@@ -9582,13 +9582,37 @@ fn verify_agent_elicitation_origin<R: crate::StateRootResolver + ?Sized>(
     Ok(())
 }
 
-fn verify_agent_occurrence_origin<R: crate::StateRootResolver + ?Sized>(
+pub(crate) fn agent_receipt_elicitation_current(
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> Option<&agent_protocol::AgentElicitationCurrent> {
+    match &receipt.outcome {
+        agent_protocol::AgentCommandOutcome::Input(checkpoint) => Some(&checkpoint.elicitation),
+        agent_protocol::AgentCommandOutcome::Session(_)
+        | agent_protocol::AgentCommandOutcome::Occurrence(_)
+        | agent_protocol::AgentCommandOutcome::Stream(_)
+        | agent_protocol::AgentCommandOutcome::Workspace(_) => None,
+    }
+}
+
+pub(crate) fn verify_agent_occurrence_origin<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     current: &agent_protocol::AgentOccurrenceCurrent,
 ) -> DurableResult<()> {
     let (_, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
-    let retained = match &receipt.outcome {
+    if agent_receipt_occurrence_current(&receipt) != Some(current) {
+        return Err(DurableError::Integrity {
+            code: "agent_occurrence_origin_mismatch".to_owned(),
+            message: "Agent occurrence does not equal its admitting receipt outcome".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn agent_receipt_occurrence_current(
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> Option<&agent_protocol::AgentOccurrenceCurrent> {
+    match &receipt.outcome {
         agent_protocol::AgentCommandOutcome::Occurrence(postcondition) => {
             Some(&postcondition.current)
         }
@@ -9598,14 +9622,7 @@ fn verify_agent_occurrence_origin<R: crate::StateRootResolver + ?Sized>(
         agent_protocol::AgentCommandOutcome::Session(_)
         | agent_protocol::AgentCommandOutcome::Stream(_)
         | agent_protocol::AgentCommandOutcome::Input(_) => None,
-    };
-    if retained != Some(current) {
-        return Err(DurableError::Integrity {
-            code: "agent_occurrence_origin_mismatch".to_owned(),
-            message: "Agent occurrence does not equal its admitting receipt outcome".to_owned(),
-        });
     }
-    Ok(())
 }
 
 pub(crate) fn verify_agent_stream_origin<R: crate::StateRootResolver + ?Sized>(
@@ -9617,17 +9634,53 @@ pub(crate) fn verify_agent_stream_origin<R: crate::StateRootResolver + ?Sized>(
         return verify_agent_stream_reservation_origin(manifest, resolver, current, reservation);
     }
     let (_, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
-    let retained = match &receipt.outcome {
+    if agent_receipt_stream_current(&receipt) != Some(current) {
+        return Err(DurableError::Integrity {
+            code: "agent_stream_origin_mismatch".to_owned(),
+            message: "Agent stream does not equal its admitting receipt outcome".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn agent_receipt_stream_current(
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> Option<&agent_protocol::AgentStreamCurrent> {
+    match &receipt.outcome {
         agent_protocol::AgentCommandOutcome::Stream(postcondition) => Some(&postcondition.stream),
         agent_protocol::AgentCommandOutcome::Session(_)
         | agent_protocol::AgentCommandOutcome::Occurrence(_)
         | agent_protocol::AgentCommandOutcome::Input(_)
         | agent_protocol::AgentCommandOutcome::Workspace(_) => None,
-    };
-    if retained != Some(current) {
+    }
+}
+
+pub(crate) fn agent_receipt_stream_chunk_current(
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> Option<&agent_protocol::AgentStreamChunkCurrent> {
+    match &receipt.outcome {
+        agent_protocol::AgentCommandOutcome::Stream(agent_protocol::AgentStreamPostcondition {
+            effect: agent_protocol::AgentStreamEffect::Chunk { current },
+            ..
+        }) => Some(current),
+        agent_protocol::AgentCommandOutcome::Session(_)
+        | agent_protocol::AgentCommandOutcome::Occurrence(_)
+        | agent_protocol::AgentCommandOutcome::Stream(_)
+        | agent_protocol::AgentCommandOutcome::Input(_)
+        | agent_protocol::AgentCommandOutcome::Workspace(_) => None,
+    }
+}
+
+pub(crate) fn verify_agent_stream_chunk_origin<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    current: &agent_protocol::AgentStreamChunkCurrent,
+) -> DurableResult<()> {
+    let (_, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
+    if agent_receipt_stream_chunk_current(&receipt) != Some(current) {
         return Err(DurableError::Integrity {
-            code: "agent_stream_origin_mismatch".to_owned(),
-            message: "Agent stream does not equal its admitting receipt outcome".to_owned(),
+            code: "agent_stream_chunk_origin_mismatch".to_owned(),
+            message: "Agent stream chunk does not equal its admitting receipt outcome".to_owned(),
         });
     }
     Ok(())
@@ -10025,6 +10078,34 @@ fn prepare_agent_session_update<R: crate::StateRootResolver + ?Sized>(
         agent_protocol::AgentCommandOutcome::Session(postcondition),
         operations,
     ))
+}
+
+pub(crate) fn verify_agent_session_receipt_parent<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    command: &agent_protocol::AgentCommand,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> DurableResult<()> {
+    let agent_protocol::AgentCommandAction::SessionUpdate { session_id, update } = &command.action
+    else {
+        return Ok(());
+    };
+    if command.source_revision != manifest.revision {
+        return Err(DurableError::Integrity {
+            code: "agent_session_receipt_parent_revision_mismatch".to_owned(),
+            message: "Agent Session receipt changed its parent StateRoot revision".to_owned(),
+        });
+    }
+    let (source, outcome, _) =
+        prepare_agent_session_update(manifest, resolver, command, session_id, update)?;
+    let expected = agent_protocol::AgentCommandReceipt::new(command, source, outcome)?;
+    if expected != *receipt {
+        return Err(DurableError::Integrity {
+            code: "agent_session_receipt_parent_source_mismatch".to_owned(),
+            message: "Agent Session receipt changed its exact parent source".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn load_agent_session_target_claim_sources<R: crate::StateRootResolver + ?Sized>(

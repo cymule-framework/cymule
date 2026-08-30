@@ -316,7 +316,13 @@
   `admitted_by` field.
   Every non-pristine `AgentSessionCurrent` likewise exact-matches its admitting
   receipt in the CAS and full audit. The only receipt-free Session current is
-  the exact pristine constructor value.
+  the exact pristine constructor value at a parent-absent key; exact read accepts
+  that same state, and it can never overwrite an existing Session. Every
+  receipt-owned Message, Tool, Elicitation, Occurrence, Stream, and stream chunk
+  has the same one-to-one CAS operation and full-audit origin closure.
+  Session-update receipts are also replayed from the exact parent manifest
+  source before admission; a self-consistent receipt cannot substitute a
+  fictional prior Session or keyed source.
   The target claim's exact-key current and monotonic generation are its bounded
   lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
   the retained source, and advances by one. Do not add a predecessor journal or
