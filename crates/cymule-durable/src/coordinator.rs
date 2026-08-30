@@ -3034,6 +3034,10 @@ impl<S: DurableStore> DurableCoordinator<S> {
             load_agent_stream_resource_source(manifest, resolver, &profile_pin)
         })?;
         let source = attach_agent_stream_resource_source(source, resource_source.clone())?;
+        let agent_protocol::AgentStreamSource::Finalize { stream, .. } = &source else {
+            unreachable!("publication reservation source remains Finalize")
+        };
+        let reservation_source_stream = stream.clone();
         let postcondition = agent_protocol::reserve_agent_stream_publication(&source, command)?;
         let reservation = postcondition
             .stream
@@ -3059,8 +3063,9 @@ impl<S: DurableStore> DurableCoordinator<S> {
             resource_source.pin.as_ref(),
         )?;
         self.commit_profile_operations(vec![
-            DurableOperation::PutAgentStreamCurrent {
-                value: postcondition.stream,
+            DurableOperation::ApplyAgentStreamPublicationTransition {
+                source: reservation_source_stream,
+                current: postcondition.stream,
             },
             DurableOperation::ApplyAgentTargetClaim {
                 value: postcondition.target_claim,
@@ -3090,9 +3095,12 @@ impl<S: DurableStore> DurableCoordinator<S> {
             .expect("rearm reducer retains the verified reservation")
             .as_ref()
             .clone();
-        self.commit_profile_operations(vec![DurableOperation::PutAgentStreamCurrent {
-            value: next,
-        }])?;
+        self.commit_profile_operations(vec![
+            DurableOperation::ApplyAgentStreamPublicationTransition {
+                source: stream.clone(),
+                current: next,
+            },
+        ])?;
         Ok(reservation)
     }
 
@@ -3130,9 +3138,12 @@ impl<S: DurableStore> DurableCoordinator<S> {
             return Ok(());
         }
         let next = agent_protocol::mark_agent_stream_publication_not_applied(&stream, command)?;
-        self.commit_profile_operations(vec![DurableOperation::PutAgentStreamCurrent {
-            value: next,
-        }])?;
+        self.commit_profile_operations(vec![
+            DurableOperation::ApplyAgentStreamPublicationTransition {
+                source: stream,
+                current: next,
+            },
+        ])?;
         Ok(())
     }
 
@@ -10080,31 +10091,237 @@ fn prepare_agent_session_update<R: crate::StateRootResolver + ?Sized>(
     ))
 }
 
-pub(crate) fn verify_agent_session_receipt_parent<R: crate::StateRootResolver + ?Sized>(
+pub(crate) fn verify_agent_receipt_parent<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     command: &agent_protocol::AgentCommand,
     receipt: &agent_protocol::AgentCommandReceipt,
 ) -> DurableResult<()> {
-    let agent_protocol::AgentCommandAction::SessionUpdate { session_id, update } = &command.action
-    else {
-        return Ok(());
+    let is_finalize = matches!(
+        command.action,
+        agent_protocol::AgentCommandAction::Stream(
+            agent_protocol::AgentStreamCommand::Finalize { .. }
+        )
+    );
+    if !is_finalize && command.source_revision != manifest.revision {
+        return Err(DurableError::Integrity {
+            code: "agent_receipt_parent_revision_mismatch".to_owned(),
+            message: "Agent receipt changed its parent StateRoot revision".to_owned(),
+        });
+    }
+    match &command.action {
+        agent_protocol::AgentCommandAction::SessionUpdate { .. }
+        | agent_protocol::AgentCommandAction::Occurrence { .. }
+        | agent_protocol::AgentCommandAction::Stream(
+            agent_protocol::AgentStreamCommand::Open { .. }
+            | agent_protocol::AgentStreamCommand::AppendChunk { .. }
+            | agent_protocol::AgentStreamCommand::Abort { .. },
+        ) => {
+            let (expected, _) = prepare_agent_local_transition(manifest, resolver, command)?;
+            if expected != *receipt {
+                return Err(DurableError::Integrity {
+                    code: "agent_receipt_parent_source_mismatch".to_owned(),
+                    message: "Agent receipt changed its exact parent source".to_owned(),
+                });
+            }
+        }
+        agent_protocol::AgentCommandAction::Stream(
+            stream_command @ agent_protocol::AgentStreamCommand::Finalize { .. },
+        ) => verify_agent_finalize_receipt_parent(
+            manifest,
+            resolver,
+            command,
+            stream_command,
+            receipt,
+        )?,
+        agent_protocol::AgentCommandAction::Input(_) => {
+            verify_agent_input_receipt_parent(manifest, resolver, receipt)?;
+        }
+        agent_protocol::AgentCommandAction::Workspace(_) => {
+            verify_agent_workspace_receipt_parent(manifest, resolver, receipt)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_agent_input_receipt_parent<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> DurableResult<()> {
+    let agent_protocol::AgentCommandSource::Input(source) = &receipt.source else {
+        return Err(DurableError::Integrity {
+            code: "agent_input_receipt_source_mismatch".to_owned(),
+            message: "Agent Input receipt retained another source profile".to_owned(),
+        });
     };
-    if command.source_revision != manifest.revision {
+    let (expected_session, request_id, expected_elicitation) = match source {
+        agent_protocol::AgentInputSource::Suspend {
+            session,
+            elicitation,
+        } => (
+            session,
+            receipt_input_request_id(receipt)?,
+            elicitation.as_ref(),
+        ),
+        agent_protocol::AgentInputSource::Complete {
+            session,
+            elicitation,
+        } => (
+            session,
+            elicitation.elicitation.request.request_id.as_str(),
+            Some(elicitation),
+        ),
+    };
+    let actual_session = crate::state_root::load_agent_session_current(
+        manifest,
+        resolver,
+        &expected_session.session_id,
+    )?
+    .map_or_else(
+        || agent_protocol::AgentSessionCurrent::new(&expected_session.session_id),
+        Ok,
+    )?;
+    let actual_elicitation = crate::state_root::load_agent_elicitation_current(
+        manifest,
+        resolver,
+        &expected_session.session_id,
+        request_id,
+    )?;
+    if actual_session != *expected_session || actual_elicitation.as_ref() != expected_elicitation {
         return Err(DurableError::Integrity {
-            code: "agent_session_receipt_parent_revision_mismatch".to_owned(),
-            message: "Agent Session receipt changed its parent StateRoot revision".to_owned(),
+            code: "agent_input_receipt_parent_source_mismatch".to_owned(),
+            message: "Agent Input receipt changed its exact parent source".to_owned(),
         });
     }
-    let (source, outcome, _) =
-        prepare_agent_session_update(manifest, resolver, command, session_id, update)?;
-    let expected = agent_protocol::AgentCommandReceipt::new(command, source, outcome)?;
-    if expected != *receipt {
+    Ok(())
+}
+
+fn receipt_input_request_id(receipt: &agent_protocol::AgentCommandReceipt) -> DurableResult<&str> {
+    let agent_protocol::AgentCommandOutcome::Input(checkpoint) = &receipt.outcome else {
         return Err(DurableError::Integrity {
-            code: "agent_session_receipt_parent_source_mismatch".to_owned(),
-            message: "Agent Session receipt changed its exact parent source".to_owned(),
+            code: "agent_input_receipt_outcome_mismatch".to_owned(),
+            message: "Agent Input receipt retained another outcome profile".to_owned(),
+        });
+    };
+    Ok(&checkpoint.elicitation.elicitation.request.request_id)
+}
+
+fn verify_agent_workspace_receipt_parent<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> DurableResult<()> {
+    let agent_protocol::AgentCommandSource::Workspace(source) = &receipt.source else {
+        return Err(DurableError::Integrity {
+            code: "agent_workspace_receipt_source_mismatch".to_owned(),
+            message: "Agent Workspace receipt retained another source profile".to_owned(),
+        });
+    };
+    let expected_session = &source.occurrence.session;
+    let expected_occurrence = source.occurrence.current.as_ref();
+    let actual_session = crate::state_root::load_agent_session_current(
+        manifest,
+        resolver,
+        &expected_session.session_id,
+    )?
+    .map_or_else(
+        || agent_protocol::AgentSessionCurrent::new(&expected_session.session_id),
+        Ok,
+    )?;
+    let occurrence_id = expected_occurrence
+        .map(|current| current.occurrence.occurrence_id.as_str())
+        .or_else(|| receipt_workspace_occurrence_id(receipt))
+        .ok_or_else(|| DurableError::Integrity {
+            code: "agent_workspace_receipt_occurrence_missing".to_owned(),
+            message: "Agent Workspace receipt lost its occurrence identity".to_owned(),
+        })?;
+    let actual_occurrence = crate::state_root::load_agent_occurrence_current(
+        manifest,
+        resolver,
+        &expected_session.session_id,
+        occurrence_id,
+    )?;
+    if actual_session != *expected_session || actual_occurrence.as_ref() != expected_occurrence {
+        return Err(DurableError::Integrity {
+            code: "agent_workspace_receipt_parent_source_mismatch".to_owned(),
+            message: "Agent Workspace receipt changed its exact parent source".to_owned(),
         });
     }
+    Ok(())
+}
+
+fn receipt_workspace_occurrence_id(receipt: &agent_protocol::AgentCommandReceipt) -> Option<&str> {
+    match &receipt.outcome {
+        agent_protocol::AgentCommandOutcome::Workspace(checkpoint) => {
+            Some(&checkpoint.occurrence.current.occurrence.occurrence_id)
+        }
+        _ => None,
+    }
+}
+
+fn verify_agent_finalize_receipt_parent<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    command: &agent_protocol::AgentCommand,
+    stream_command: &agent_protocol::AgentStreamCommand,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> DurableResult<()> {
+    let agent_protocol::AgentCommandSource::Stream(expected) = &receipt.source else {
+        return Err(DurableError::Integrity {
+            code: "agent_finalize_receipt_source_mismatch".to_owned(),
+            message: "Agent Finalize receipt retained another source profile".to_owned(),
+        });
+    };
+    let mut actual = load_agent_stream_finalization_source(manifest, resolver, stream_command)?;
+    let agent_protocol::AgentStreamSource::Finalize {
+        resource: expected_resource,
+        ..
+    } = expected.as_ref()
+    else {
+        return Err(DurableError::Integrity {
+            code: "agent_finalize_receipt_source_mismatch".to_owned(),
+            message: "Agent Finalize receipt retained another stream source".to_owned(),
+        });
+    };
+    if let Some(expected_resource) = expected_resource {
+        let expected_pin =
+            expected_resource
+                .pin
+                .as_ref()
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_finalize_receipt_resource_missing".to_owned(),
+                    message: "Agent Finalize receipt lost its parent Resource pin".to_owned(),
+                })?;
+        let expected_retention =
+            expected_resource
+                .retention
+                .as_ref()
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_finalize_receipt_resource_missing".to_owned(),
+                    message: "Agent Finalize receipt lost its parent Resource retention".to_owned(),
+                })?;
+        let actual_resource = agent_protocol::AgentStreamResourceSource {
+            retention: crate::state_root::load_resource_retention_current(
+                manifest,
+                resolver,
+                &expected_retention.family.retention_key,
+            )?,
+            pin: crate::state_root::load_resource_pin_current(
+                manifest,
+                resolver,
+                &expected_pin.pin.pin_id,
+            )?,
+        };
+        actual = attach_agent_stream_resource_source(actual, actual_resource)?;
+    }
+    if actual != **expected {
+        return Err(DurableError::Integrity {
+            code: "agent_finalize_receipt_parent_source_mismatch".to_owned(),
+            message: "Agent Finalize receipt changed its exact parent source".to_owned(),
+        });
+    }
+    receipt.verify_for(command)?;
     Ok(())
 }
 
@@ -13885,6 +14102,17 @@ mod agent_stream_publication_reservation_tests {
             .expect("Tool target claim remains current")
     }
 
+    fn current_agent_stream(
+        coordinator: &mut DurableCoordinator<crate::MemoryStore>,
+        stream_id: &str,
+    ) -> agent_protocol::AgentStreamCurrent {
+        coordinator
+            .read_current_state_root(|manifest, resolver| {
+                require_agent_stream(manifest, resolver, SESSION_ID, stream_id)
+            })
+            .expect("Agent stream reads")
+    }
+
     fn reserve_external_tool_not_applied(
         coordinator: &mut DurableCoordinator<crate::MemoryStore>,
         stream_id: &str,
@@ -14010,6 +14238,42 @@ mod agent_stream_publication_reservation_tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    fn assert_reservation_phase_forgery_rejected(
+        coordinator: &mut DurableCoordinator<crate::MemoryStore>,
+        reserved_stream: &agent_protocol::AgentStreamCurrent,
+    ) {
+        let mut forged_not_applied = reserved_stream.clone();
+        forged_not_applied
+            .publication_reservation
+            .as_mut()
+            .expect("stream retains its reservation")
+            .phase = agent_protocol::AgentStreamPublicationReservationPhase::NotApplied;
+        assert!(matches!(
+            coordinator.commit_profile_operations(vec![
+                DurableOperation::PutAgentStreamCurrent {
+                    value: forged_not_applied,
+                },
+            ]),
+            Err(DurableError::Integrity { ref code, .. })
+                if code == "agent_current_operation_unowned"
+        ));
+        let mut forged_attempt = reserved_stream.clone();
+        forged_attempt
+            .publication_reservation
+            .as_mut()
+            .expect("stream retains its reservation")
+            .attempt += 6;
+        assert!(matches!(
+            coordinator.commit_profile_operations(vec![
+                DurableOperation::PutAgentStreamCurrent {
+                    value: forged_attempt,
+                },
+            ]),
+            Err(DurableError::Integrity { ref code, .. })
+                if code == "agent_current_operation_unowned"
+        ));
     }
 
     fn publication(intent: &AgentStreamPublicationIntent) -> ResourcePublication {
@@ -14447,6 +14711,8 @@ mod agent_stream_publication_reservation_tests {
         let AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { intent } = unknown else {
             panic!("Tool publication retains its exact reconciliation intent")
         };
+        let reserved_stream = current_agent_stream(&mut coordinator, STREAM_ID);
+        assert_reservation_phase_forgery_rejected(&mut coordinator, &reserved_stream);
         let reserved_first = current_tool_target_claim(&mut coordinator);
         coordinator
             .read_current_state_root(|manifest, resolver| {

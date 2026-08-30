@@ -6769,6 +6769,27 @@ fn audit_agent_update_closure<R: StateRootResolver + ?Sized>(
         crate::coordinator::verify_agent_update_receipt_graph(
             manifest, resolver, &command, receipt,
         )?;
+        crate::coordinator::verify_agent_target_claim_receipt_graph(
+            manifest, resolver, &command, receipt,
+        )?;
+        verify_agent_receipt_terminal_currents(manifest, resolver, receipt)?;
+        if let cymule_profile_protocol::agent::AgentCommandOutcome::Stream(postcondition) =
+            &receipt.outcome
+        {
+            match postcondition.stream.state {
+                cymule_profile_protocol::agent::AgentStreamState::Finalized => {
+                    crate::coordinator::verify_agent_stream_finalization_graph(
+                        manifest, resolver, &command, receipt,
+                    )?;
+                }
+                cymule_profile_protocol::agent::AgentStreamState::Aborted => {
+                    crate::coordinator::verify_agent_stream_abort_graph(
+                        manifest, resolver, &command, receipt,
+                    )?;
+                }
+                cymule_profile_protocol::agent::AgentStreamState::Open => {}
+            }
+        }
     }
     for (key, current) in &updates {
         let receipt =
@@ -6790,6 +6811,75 @@ fn audit_agent_update_closure<R: StateRootResolver + ?Sized>(
             return Err(DurableError::Integrity {
                 code: "agent_update_origin_mismatch".to_owned(),
                 message: "Agent update current changed its immutable receipt authority".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn verify_agent_receipt_terminal_currents<R: StateRootResolver + ?Sized>(
+    manifest: &StateRootManifest,
+    resolver: &mut R,
+    receipt: &cymule_profile_protocol::agent::AgentCommandReceipt,
+) -> DurableResult<()> {
+    if let Some(expected) = crate::coordinator::agent_receipt_message_current(receipt) {
+        let retained = load_agent_message_current(
+            manifest,
+            resolver,
+            &expected.session_id,
+            &expected.message.message_id,
+        )?;
+        if retained.as_ref() != Some(expected) {
+            return Err(DurableError::Integrity {
+                code: "agent_receipt_message_current_mismatch".to_owned(),
+                message: "Agent receipt lost its immutable Message current".to_owned(),
+            });
+        }
+    }
+    for expected in crate::coordinator::agent_receipt_tool_currents(receipt) {
+        if agent_tool_is_terminal(expected) {
+            let retained = load_agent_tool_current(
+                manifest,
+                resolver,
+                &expected.session_id,
+                &expected.tool.tool_call_id,
+            )?;
+            if retained.as_ref() != Some(expected) {
+                return Err(DurableError::Integrity {
+                    code: "agent_receipt_tool_current_mismatch".to_owned(),
+                    message: "Agent receipt lost its terminal Tool current".to_owned(),
+                });
+            }
+        }
+    }
+    if let Some(expected) = crate::coordinator::agent_receipt_occurrence_current(receipt)
+        && expected.occurrence.is_terminal()
+    {
+        let retained = load_agent_occurrence_current(
+            manifest,
+            resolver,
+            &expected.occurrence.session_id,
+            &expected.occurrence.occurrence_id,
+        )?;
+        if retained.as_ref() != Some(expected) {
+            return Err(DurableError::Integrity {
+                code: "agent_receipt_occurrence_current_mismatch".to_owned(),
+                message: "Agent receipt lost its terminal occurrence current".to_owned(),
+            });
+        }
+    }
+    if let Some(expected) = crate::coordinator::agent_receipt_stream_chunk_current(receipt) {
+        let retained = load_agent_stream_chunk_current(
+            manifest,
+            resolver,
+            &expected.session_id,
+            &expected.stream_id,
+            expected.chunk.sequence,
+        )?;
+        if retained.as_ref() != Some(expected) {
+            return Err(DurableError::Integrity {
+                code: "agent_receipt_stream_chunk_current_mismatch".to_owned(),
+                message: "Agent receipt lost its immutable stream chunk".to_owned(),
             });
         }
     }
@@ -9043,8 +9133,10 @@ fn validate_state_root_sidecars<R: StateRootResolver + ?Sized>(
         staged_machine_root_delta,
         overlay,
     )?;
+    validate_agent_receipt_cardinality(operations)?;
     validate_agent_session_operation_set(current, operations, roots, overlay)?;
     validate_agent_update_operation_set(operations, roots, overlay)?;
+    validate_agent_stream_reservation_operation_set(current, operations, roots, overlay)?;
     validate_agent_owned_current_operation_set(operations, roots, overlay)?;
     validate_agent_target_claim_operation_set(operations, roots, overlay)?;
     for operation in operations {
@@ -9119,6 +9211,26 @@ fn receipt_target_claim_transitions(
     }
 }
 
+fn validate_agent_receipt_cardinality(operations: &[crate::DurableOperation]) -> DurableResult<()> {
+    if operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                crate::DurableOperation::PutAgentCommandReceipt { .. }
+            )
+        })
+        .count()
+        > 1
+    {
+        return Err(DurableError::Integrity {
+            code: "agent_receipt_operation_cardinality".to_owned(),
+            message: "One StateRoot CAS cannot admit multiple Agent semantic receipts".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_agent_update_operation_set<R: StateRootResolver + ?Sized>(
     operations: &[crate::DurableOperation],
     roots: &StateRoots,
@@ -9183,9 +9295,7 @@ fn validate_agent_session_operation_set<R: StateRootResolver + ?Sized>(
                 })?
                 .decode(StateRootLeafKind::AgentCommand)?;
             receipt.verify_for(&command)?;
-            crate::coordinator::verify_agent_session_receipt_parent(
-                current, overlay, &command, receipt,
-            )?;
+            crate::coordinator::verify_agent_receipt_parent(current, overlay, &command, receipt)?;
             if let Some((_, current)) = crate::coordinator::agent_receipt_session_current(receipt) {
                 expected.push(current.clone());
             }
@@ -9298,6 +9408,7 @@ fn validate_agent_owned_current_operation_set<R: StateRootResolver + ?Sized>(
             {
                 remove_exact(&mut expected.streams, value)
             }
+            crate::DurableOperation::PutAgentStreamCurrent { .. } => false,
             crate::DurableOperation::PutAgentStreamChunkCurrent { value } => {
                 remove_exact(&mut expected.chunks, value)
             }
@@ -9321,6 +9432,73 @@ fn validate_agent_owned_current_operation_set<R: StateRootResolver + ?Sized>(
             code: "agent_current_operation_missing".to_owned(),
             message: "Agent receipt did not atomically write every owned current".to_owned(),
         });
+    }
+    Ok(())
+}
+
+fn validate_agent_stream_reservation_operation_set<R: StateRootResolver + ?Sized>(
+    current: &StateRootManifest,
+    operations: &[crate::DurableOperation],
+    roots: &StateRoots,
+    overlay: &mut ObjectOverlay<'_, R>,
+) -> DurableResult<()> {
+    use cymule_profile_protocol::agent::{
+        AgentCommand, AgentStreamCurrent, AgentStreamPublicationReservationPhase,
+        agent_command_key, agent_stream_key,
+    };
+
+    for (source, value) in operations.iter().filter_map(|operation| match operation {
+        crate::DurableOperation::ApplyAgentStreamPublicationTransition { source, current } => {
+            Some((source, current))
+        }
+        _ => None,
+    }) {
+        let reservation = value
+            .publication_reservation
+            .as_ref()
+            .expect("caller selected reservation-bearing streams");
+        let stream_key = agent_stream_key(&source.session_id, &source.stream_id)?;
+        let parent: AgentStreamCurrent =
+            map_get(&current.roots.agent_streams, &stream_key, overlay)?
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_stream_reservation_parent_missing".to_owned(),
+                    message: "Agent publication reservation lost its parent stream".to_owned(),
+                })?
+                .decode(StateRootLeafKind::AgentStreamCurrent)?;
+        if parent != *source {
+            return Err(DurableError::HistoryConflict {
+                code: "agent_stream_reservation_parent_changed".to_owned(),
+                message: "Agent publication reservation source changed before commit".to_owned(),
+            });
+        }
+        let command_key = agent_command_key(reservation.intent.command_id())?;
+        let command: AgentCommand = map_get(&roots.agent_commands, &command_key, overlay)?
+            .ok_or_else(|| DurableError::Integrity {
+                code: "agent_stream_reservation_command_missing".to_owned(),
+                message: "Agent publication reservation lost its Finalize command".to_owned(),
+            })?
+            .decode(StateRootLeafKind::AgentCommand)?;
+        let valid = if source.publication_reservation.is_none() {
+            let mut base = value.clone();
+            base.publication_reservation = None;
+            *source == base
+                && reservation.attempt == 1
+                && reservation.phase == AgentStreamPublicationReservationPhase::DispatchClaimed
+        } else {
+            cymule_profile_protocol::agent::mark_agent_stream_publication_not_applied(
+                source, &command,
+            )
+            .is_ok_and(|expected| expected == *value)
+                || cymule_profile_protocol::agent::rearm_agent_stream_publication(source, &command)
+                    .is_ok_and(|expected| expected == *value)
+        };
+        if !valid {
+            return Err(DurableError::Integrity {
+                code: "agent_stream_reservation_operation_mismatch".to_owned(),
+                message: "Agent publication reservation changed outside its exact phase transition"
+                    .to_owned(),
+            });
+        }
     }
     Ok(())
 }
@@ -9600,7 +9778,10 @@ fn validate_reserved_agent_target_claim_operation<R: StateRootResolver + ?Sized>
         || !operations.iter().any(|operation| {
             matches!(
                 operation,
-                crate::DurableOperation::PutAgentStreamCurrent { value } if value == &stream
+                crate::DurableOperation::ApplyAgentStreamPublicationTransition {
+                    current,
+                    ..
+                } if current == &stream
             )
         })
         || !operations.iter().any(|operation| {
@@ -9696,6 +9877,9 @@ impl<R: StateRootResolver + ?Sized> StateRootSidecarWriter<'_, '_, R> {
             Op::PutAgentElicitationCurrent { value } => self.put_agent_elicitation_current(value),
             Op::PutAgentOccurrenceCurrent { value } => self.put_agent_occurrence_current(value),
             Op::PutAgentStreamCurrent { value } => self.put_agent_stream_current(value),
+            Op::ApplyAgentStreamPublicationTransition { source, current } => {
+                self.apply_agent_stream_publication_transition(source, current)
+            }
             Op::PutAgentStreamChunkCurrent { value } => self.put_agent_stream_chunk_current(value),
             Op::PutEvolutionCurrent { value } => self.put_evolution_current(value),
             Op::PutEvolutionCommandAlias { value } => self.put_evolution_command_alias(value),
@@ -10349,6 +10533,31 @@ impl<R: StateRootResolver + ?Sized> StateRootSidecarWriter<'_, '_, R> {
     ) -> DurableResult<()> {
         put_agent_stream_current(self.roots, value, self.overlay)?;
         Ok(())
+    }
+
+    fn apply_agent_stream_publication_transition(
+        &mut self,
+        source: &cymule_profile_protocol::agent::AgentStreamCurrent,
+        current: &cymule_profile_protocol::agent::AgentStreamCurrent,
+    ) -> DurableResult<()> {
+        let key = cymule_profile_protocol::agent::agent_stream_key(
+            &source.session_id,
+            &source.stream_id,
+        )?;
+        let retained: cymule_profile_protocol::agent::AgentStreamCurrent =
+            map_get(&self.roots.agent_streams, &key, self.overlay)?
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_stream_publication_source_missing".to_owned(),
+                    message: "Agent publication transition lost its exact source stream".to_owned(),
+                })?
+                .decode(StateRootLeafKind::AgentStreamCurrent)?;
+        if retained != *source {
+            return Err(DurableError::HistoryConflict {
+                code: "agent_stream_publication_source_changed".to_owned(),
+                message: "Agent publication transition source changed before commit".to_owned(),
+            });
+        }
+        self.put_agent_stream_current(current)
     }
 
     fn put_agent_stream_chunk_current(

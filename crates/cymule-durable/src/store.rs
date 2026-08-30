@@ -342,6 +342,13 @@ pub(crate) enum DurableOperation {
         /// Exact stream projection.
         value: cymule_profile_protocol::agent::AgentStreamCurrent,
     },
+    /// Apply one exact external-publication reservation phase transition.
+    ApplyAgentStreamPublicationTransition {
+        /// Exact retained stream before the reservation mutation.
+        source: cymule_profile_protocol::agent::AgentStreamCurrent,
+        /// Exact legal reservation successor.
+        current: cymule_profile_protocol::agent::AgentStreamCurrent,
+    },
     /// Insert one immutable Agent stream chunk.
     PutAgentStreamChunkCurrent {
         /// Exact chunk projection.

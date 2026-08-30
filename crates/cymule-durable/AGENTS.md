@@ -322,7 +322,12 @@
   has the same one-to-one CAS operation and full-audit origin closure.
   Session-update receipts are also replayed from the exact parent manifest
   source before admission; a self-consistent receipt cannot substitute a
-  fictional prior Session or keyed source.
+  fictional prior Session or keyed source. Every Agent receipt profile has the
+  same exact-parent check, and one StateRoot CAS admits at most one Agent
+  semantic receipt.
+  External publication reserve, NotApplied observation, and rearm use only the
+  typed `ApplyAgentStreamPublicationTransition { source, current }`; generic
+  stream writes cannot mutate reservation attempt or phase authority.
   The target claim's exact-key current and monotonic generation are its bounded
   lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
   the retained source, and advances by one. Do not add a predecessor journal or
