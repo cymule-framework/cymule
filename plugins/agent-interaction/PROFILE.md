@@ -235,8 +235,9 @@ requires the restored intent and calls only provider observation. Exact
 NotApplied observation is persisted before a later rearm may claim one new
 attempt. Every provider result carries the complete DispatchClaimed reservation
 it observed and can settle only that exact attempt. Published readback is
-reconciled against the retained reservation;
-only an ambiguous final Store acknowledgement becomes
+reconciled against the retained reservation. Reconciliation rejects an already
+durable `NotApplied` phase before provider I/O. Only an ambiguous final Store
+acknowledgement becomes
 `PublicationOutcomeUnknown`, while known source/reducer/CAS conflicts remain
 their typed errors.
 

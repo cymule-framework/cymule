@@ -6624,6 +6624,18 @@ fn audit_control_receipts<R: StateRootResolver + ?Sized>(
         let receipt = value.decode(StateRootLeafKind::EffectResolutionReceipt)?;
         verify_effect_resolution_receipt_leaf(&manifest.roots, &key, &receipt, &mut overlay)?;
     }
+    for (key, value) in materialize_map(&manifest.roots.coupled_checkpoint_receipts, &mut overlay)?
+    {
+        let receipt: crate::CoupledCheckpointReceipt =
+            value.decode(StateRootLeafKind::CoupledCheckpointReceipt)?;
+        receipt.verify()?;
+        if key != receipt.coupling_id {
+            return Err(DurableError::Integrity {
+                code: "state_root_coupled_checkpoint_receipt_key_mismatch".to_owned(),
+                message: "Coupled checkpoint receipt changed its exact StateRoot key".to_owned(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -6759,6 +6771,7 @@ fn audit_agent_owned_current_closure<R: StateRootResolver + ?Sized>(
     resolver: &mut R,
     materialized: &MaterializedStateRoots,
 ) -> DurableResult<()> {
+    audit_agent_owned_current_keys(materialized)?;
     macro_rules! audit_family {
         ($family:ident, $kind:ident, $ty:ty, $verify:path) => {
             for current in decode_family_map::<$ty>(
@@ -6808,6 +6821,100 @@ fn audit_agent_owned_current_closure<R: StateRootResolver + ?Sized>(
         AgentStreamChunkCurrent,
         cymule_profile_protocol::agent::AgentStreamChunkCurrent,
         crate::coordinator::verify_agent_stream_chunk_origin
+    );
+    Ok(())
+}
+
+fn audit_agent_owned_current_keys(materialized: &MaterializedStateRoots) -> DurableResult<()> {
+    macro_rules! audit_keys {
+        ($family:ident, $kind:ident, $ty:ty, $key:expr, $code:literal) => {
+            for (retained_key, current) in decode_family_map::<$ty>(
+                &materialized.collections,
+                StateRootFamily::$family,
+                StateRootLeafKind::$kind,
+            )? {
+                if retained_key != ($key)(&current)? {
+                    return Err(DurableError::Integrity {
+                        code: $code.to_owned(),
+                        message: "Agent current changed its exact StateRoot key".to_owned(),
+                    });
+                }
+            }
+        };
+    }
+
+    audit_keys!(
+        AgentMessages,
+        AgentMessageCurrent,
+        cymule_profile_protocol::agent::AgentMessageCurrent,
+        |current: &cymule_profile_protocol::agent::AgentMessageCurrent| {
+            cymule_profile_protocol::agent::agent_message_key(
+                &current.session_id,
+                &current.message.message_id,
+            )
+        },
+        "state_root_agent_message_key_mismatch"
+    );
+    audit_keys!(
+        AgentTools,
+        AgentToolCurrent,
+        cymule_profile_protocol::agent::AgentToolCurrent,
+        |current: &cymule_profile_protocol::agent::AgentToolCurrent| {
+            cymule_profile_protocol::agent::agent_tool_key(
+                &current.session_id,
+                &current.tool.tool_call_id,
+            )
+        },
+        "state_root_agent_tool_key_mismatch"
+    );
+    audit_keys!(
+        AgentElicitations,
+        AgentElicitationCurrent,
+        cymule_profile_protocol::agent::AgentElicitationCurrent,
+        |current: &cymule_profile_protocol::agent::AgentElicitationCurrent| {
+            cymule_profile_protocol::agent::agent_elicitation_key(
+                &current.session_id,
+                &current.elicitation.request.request_id,
+            )
+        },
+        "state_root_agent_elicitation_key_mismatch"
+    );
+    audit_keys!(
+        AgentOccurrences,
+        AgentOccurrenceCurrent,
+        cymule_profile_protocol::agent::AgentOccurrenceCurrent,
+        |current: &cymule_profile_protocol::agent::AgentOccurrenceCurrent| {
+            cymule_profile_protocol::agent::agent_occurrence_key(
+                &current.occurrence.session_id,
+                &current.occurrence.occurrence_id,
+            )
+        },
+        "state_root_agent_occurrence_key_mismatch"
+    );
+    audit_keys!(
+        AgentStreams,
+        AgentStreamCurrent,
+        cymule_profile_protocol::agent::AgentStreamCurrent,
+        |current: &cymule_profile_protocol::agent::AgentStreamCurrent| {
+            cymule_profile_protocol::agent::agent_stream_key(
+                &current.session_id,
+                &current.stream_id,
+            )
+        },
+        "state_root_agent_stream_key_mismatch"
+    );
+    audit_keys!(
+        AgentStreamChunks,
+        AgentStreamChunkCurrent,
+        cymule_profile_protocol::agent::AgentStreamChunkCurrent,
+        |current: &cymule_profile_protocol::agent::AgentStreamChunkCurrent| {
+            cymule_profile_protocol::agent::agent_stream_chunk_key(
+                &current.session_id,
+                &current.stream_id,
+                current.chunk.sequence,
+            )
+        },
+        "state_root_agent_stream_chunk_key_mismatch"
     );
     Ok(())
 }

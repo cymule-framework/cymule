@@ -6028,6 +6028,12 @@ pub fn reconcile_agent_stream_publication<P: AgentProviders + ?Sized>(
 ) -> ProtocolResult<AgentStreamPublicationResult> {
     reservation.verify()?;
     expected_intent.verify()?;
+    if reservation.phase != AgentStreamPublicationReservationPhase::DispatchClaimed {
+        return Err(ProtocolError::Conflict {
+            code: "agent_stream_publication_dispatch_not_claimed".to_owned(),
+            message: "Agent stream reconciliation requires the claimed dispatch attempt".to_owned(),
+        });
+    }
     if &reservation.intent != expected_intent {
         return Err(ProtocolError::Conflict {
             code: "agent_stream_publication_intent_changed".to_owned(),
@@ -14277,6 +14283,15 @@ mod tests {
             providers.publication_intents,
             vec![intent.clone(), intent.clone()]
         );
+        let not_applied = reservation
+            .mark_not_applied()
+            .expect("NotApplied reservation derives");
+        assert!(matches!(
+            reconcile_agent_stream_publication(&not_applied, &restored, &mut providers),
+            Err(ProtocolError::Conflict { ref code, .. })
+                if code == "agent_stream_publication_dispatch_not_claimed"
+        ));
+        assert_eq!(providers.publication_observation_calls, 1);
 
         let (_, _, drifted_source) = external_stream_finalize_fixture_for(
             "session:external-drifted",

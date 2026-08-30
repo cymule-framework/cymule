@@ -338,7 +338,8 @@
   reservation; orphan commands are invalid at CAS and audit boundaries.
   Provider results retain and exact-match the complete DispatchClaimed
   reservation, so a late NotApplied or Published result cannot settle a later
-  rearmed attempt.
+  rearmed attempt. Full audit also exact-matches every keyed Agent current and
+  coupled-checkpoint receipt to its physical map key.
   The target claim's exact-key current and monotonic generation are its bounded
   lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
   the retained source, and advances by one. Do not add a predecessor journal or

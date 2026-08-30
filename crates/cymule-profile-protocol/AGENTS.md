@@ -102,7 +102,8 @@
   fresh reservation or NotApplied rearm acknowledgement owns one publish call;
   reopen observes a claimed attempt. Every provider publication result retains
   the complete DispatchClaimed reservation it observed, including attempt; a
-  late result cannot settle a rearmed attempt. The reservation intent's
+  late result cannot settle a rearmed attempt, and reconciliation rejects a
+  durable NotApplied phase before provider I/O. The reservation intent's
   immutable target must equal the stream current target exactly, in addition to
   matching Session, stream, resolver, and content. Terminal finalization
   promotes that exact reservation without changing the family obligation count.
