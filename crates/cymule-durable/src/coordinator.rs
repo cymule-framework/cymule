@@ -10251,6 +10251,15 @@ fn verify_agent_workspace_receipt_parent<R: crate::StateRootResolver + ?Sized>(
     Ok(())
 }
 
+pub(crate) fn verify_agent_workspace_receipt_graph<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    command: &agent_protocol::AgentCommand,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> DurableResult<()> {
+    agent_workspace::verify_workspace_agent_receipt_graph(manifest, resolver, command, receipt)
+}
+
 fn receipt_workspace_occurrence_id(receipt: &agent_protocol::AgentCommandReceipt) -> Option<&str> {
     match &receipt.outcome {
         agent_protocol::AgentCommandOutcome::Workspace(checkpoint) => {
@@ -10332,6 +10341,69 @@ fn verify_agent_finalize_receipt_parent<R: crate::StateRootResolver + ?Sized>(
     }
     receipt.verify_for(command)?;
     Ok(())
+}
+
+pub(crate) fn derive_agent_initial_reservation_postcondition<
+    R: crate::StateRootResolver + ?Sized,
+>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    command: &agent_protocol::AgentCommand,
+    reserved_stream: &agent_protocol::AgentStreamCurrent,
+) -> DurableResult<(
+    agent_protocol::AgentStreamCurrent,
+    agent_protocol::AgentTargetClaimTransition,
+    resource_protocol::ResourceRetentionCurrent,
+    resource_protocol::ResourcePinCurrent,
+)> {
+    let agent_protocol::AgentCommandAction::Stream(
+        stream_command @ agent_protocol::AgentStreamCommand::Finalize { .. },
+    ) = &command.action
+    else {
+        return Err(DurableError::Integrity {
+            code: "agent_reservation_command_shape_mismatch".to_owned(),
+            message: "Initial Agent publication reservation retained a non-Finalize command"
+                .to_owned(),
+        });
+    };
+    let reservation = reserved_stream
+        .publication_reservation
+        .as_ref()
+        .ok_or_else(|| DurableError::Integrity {
+            code: "agent_stream_reservation_current_missing".to_owned(),
+            message: "Initial Agent publication reservation is missing".to_owned(),
+        })?;
+    let source = load_agent_stream_finalization_source(manifest, resolver, stream_command)?;
+    let pin = &reservation.resource_pin_receipt.pin;
+    let resource_source = agent_protocol::AgentStreamResourceSource {
+        retention: crate::state_root::load_resource_retention_current(
+            manifest,
+            resolver,
+            &pin.subject.family.retention_key,
+        )?,
+        pin: crate::state_root::load_resource_pin_current(manifest, resolver, &pin.pin_id)?,
+    };
+    let source = attach_agent_stream_resource_source(source, resource_source.clone())?;
+    let postcondition = agent_protocol::reserve_agent_stream_publication(&source, command)?;
+    let origin =
+        resource_protocol::ResourceLifecycleReceiptRef::from_agent_publication_reservation(
+            command.command_id.clone(),
+            reservation.intent.session_id().to_owned(),
+            reservation.intent.stream_id().to_owned(),
+            reservation.reservation_id.clone(),
+        )?;
+    let resource_post = resource_protocol::project_resource_pin_reservation_receipt(
+        &postcondition.resource_pin_receipt,
+        origin,
+        resource_source.retention.as_ref(),
+        resource_source.pin.as_ref(),
+    )?;
+    Ok((
+        postcondition.stream,
+        postcondition.target_claim,
+        resource_post.retention,
+        resource_post.pin,
+    ))
 }
 
 fn load_agent_session_target_claim_sources<R: crate::StateRootResolver + ?Sized>(

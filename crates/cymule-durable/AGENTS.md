@@ -332,6 +332,10 @@
   retention family, Finalize command, and exact parent revision in that CAS.
   Full audit walks terminal receipts back to terminal Session, Elicitation,
   target, occurrence, stream, and immutable chunk currents.
+  Workspace receipts also resolve their exact M1 coupled receipt during full
+  audit. Every retained Agent command is reverse-owned by its receipt, a live
+  publication reservation, or the terminal receipt that consumed that
+  reservation; orphan commands are invalid at CAS and audit boundaries.
   The target claim's exact-key current and monotonic generation are its bounded
   lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
   the retained source, and advances by one. Do not add a predecessor journal or

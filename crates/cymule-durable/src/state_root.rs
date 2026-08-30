@@ -6593,6 +6593,7 @@ pub fn reachable_state_root_objects<R: StateRootResolver + ?Sized>(
     audit_run_current_memberships(manifest, resolver)?;
     audit_component_attempt_frontiers(manifest, resolver)?;
     audit_pending_wait_sources(manifest, resolver)?;
+    audit_agent_command_closure(&materialized)?;
     audit_agent_session_closure(manifest, resolver, &materialized)?;
     audit_agent_update_closure(manifest, resolver, &materialized)?;
     audit_agent_owned_current_closure(manifest, resolver, &materialized)?;
@@ -6633,6 +6634,58 @@ fn agent_tool_is_terminal(tool: &cymule_profile_protocol::agent::AgentToolCurren
             | cymule_profile_protocol::agent::ToolCallStatus::Failed
             | cymule_profile_protocol::agent::ToolCallStatus::Cancelled
     )
+}
+
+fn audit_agent_command_closure(materialized: &MaterializedStateRoots) -> DurableResult<()> {
+    use cymule_profile_protocol::agent::{
+        AgentCommand, AgentCommandReceipt, AgentCommandSource, AgentStreamCurrent,
+        AgentStreamSource,
+    };
+
+    let commands: BTreeMap<String, AgentCommand> = decode_family_map(
+        &materialized.collections,
+        StateRootFamily::AgentCommands,
+        StateRootLeafKind::AgentCommand,
+    )?;
+    let receipts: BTreeMap<String, AgentCommandReceipt> = decode_family_map(
+        &materialized.collections,
+        StateRootFamily::AgentCommandReceipts,
+        StateRootLeafKind::AgentCommandReceipt,
+    )?;
+    let streams: BTreeMap<String, AgentStreamCurrent> = decode_family_map(
+        &materialized.collections,
+        StateRootFamily::AgentStreams,
+        StateRootLeafKind::AgentStreamCurrent,
+    )?;
+    for (key, command) in commands {
+        let receipt_owner = receipts.contains_key(&command.command_id);
+        let live_reservation_owner = streams.values().any(|stream| {
+            stream
+                .publication_reservation
+                .as_ref()
+                .is_some_and(|reservation| reservation.intent.command_id() == command.command_id)
+        });
+        let terminal_reservation_owner = receipts.values().any(|receipt| {
+            matches!(
+                &receipt.source,
+                AgentCommandSource::Stream(source)
+                    if matches!(source.as_ref(), AgentStreamSource::Abort { stream, .. }
+                        | AgentStreamSource::Finalize { stream, .. }
+                        if stream.publication_reservation.as_ref().is_some_and(|reservation| {
+                            reservation.intent.command_id() == command.command_id
+                        }))
+            )
+        });
+        if key != command.command_id
+            || !(receipt_owner || live_reservation_owner || terminal_reservation_owner)
+        {
+            return Err(DurableError::Integrity {
+                code: "agent_command_origin_missing".to_owned(),
+                message: "Agent command has no receipt or publication reservation owner".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn audit_agent_session_closure<R: StateRootResolver + ?Sized>(
@@ -6773,6 +6826,9 @@ fn audit_agent_update_closure<R: StateRootResolver + ?Sized>(
             manifest, resolver, &command, receipt,
         )?;
         verify_agent_receipt_terminal_currents(manifest, resolver, receipt)?;
+        crate::coordinator::verify_agent_workspace_receipt_graph(
+            manifest, resolver, &command, receipt,
+        )?;
         if let cymule_profile_protocol::agent::AgentCommandOutcome::Stream(postcondition) =
             &receipt.outcome
         {
@@ -9161,6 +9217,7 @@ fn validate_state_root_sidecars<R: StateRootResolver + ?Sized>(
         overlay,
     )?;
     validate_agent_receipt_cardinality(operations)?;
+    validate_agent_command_operation_set(operations)?;
     validate_agent_session_operation_set(current, operations, roots, overlay)?;
     validate_agent_update_operation_set(operations, roots, overlay)?;
     validate_agent_stream_reservation_operation_set(current, operations, roots, overlay)?;
@@ -9254,6 +9311,49 @@ fn validate_agent_receipt_cardinality(operations: &[crate::DurableOperation]) ->
             code: "agent_receipt_operation_cardinality".to_owned(),
             message: "One StateRoot CAS cannot admit multiple Agent semantic receipts".to_owned(),
         });
+    }
+    Ok(())
+}
+
+fn validate_agent_command_operation_set(
+    operations: &[crate::DurableOperation],
+) -> DurableResult<()> {
+    for command in operations.iter().filter_map(|operation| match operation {
+        crate::DurableOperation::PutAgentCommand { value } => Some(value),
+        _ => None,
+    }) {
+        let receipt_owners = operations
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    crate::DurableOperation::PutAgentCommandReceipt { value }
+                        if value.command_id == command.command_id
+                )
+            })
+            .count();
+        let reservation_owners = operations
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    crate::DurableOperation::ApplyAgentStreamPublicationTransition {
+                        source,
+                        current,
+                    } if source.publication_reservation.is_none()
+                        && current.publication_reservation.as_ref().is_some_and(|reservation| {
+                            reservation.intent.command_id() == command.command_id
+                        })
+                )
+            })
+            .count();
+        if receipt_owners + reservation_owners != 1 {
+            return Err(DurableError::Integrity {
+                code: "agent_command_operation_unowned".to_owned(),
+                message: "Agent command has no unique receipt or initial reservation owner"
+                    .to_owned(),
+            });
+        }
     }
     Ok(())
 }
@@ -9510,7 +9610,9 @@ fn validate_agent_stream_reservation_operation_set<R: StateRootResolver + ?Sized
             })?
             .decode(StateRootLeafKind::AgentCommand)?;
         if source.publication_reservation.is_none() {
-            validate_initial_agent_stream_reservation_sidecars(operations, roots, overlay, value)?;
+            validate_initial_agent_stream_reservation_sidecars(
+                current, operations, roots, overlay, &command, value,
+            )?;
         }
         let valid = if source.publication_reservation.is_none() {
             let mut base = value.clone();
@@ -9539,9 +9641,11 @@ fn validate_agent_stream_reservation_operation_set<R: StateRootResolver + ?Sized
 }
 
 fn validate_initial_agent_stream_reservation_sidecars<R: StateRootResolver + ?Sized>(
+    parent: &StateRootManifest,
     operations: &[crate::DurableOperation],
     roots: &StateRoots,
     overlay: &mut ObjectOverlay<'_, R>,
+    command: &cymule_profile_protocol::agent::AgentCommand,
     stream: &cymule_profile_protocol::agent::AgentStreamCurrent,
 ) -> DurableResult<()> {
     let reservation =
@@ -9579,7 +9683,43 @@ fn validate_initial_agent_stream_reservation_sidecars<R: StateRootResolver + ?Si
                 .to_owned(),
         });
     };
-    validate_reserved_agent_target_claim_operation(operations, roots, overlay, transition)
+    validate_reserved_agent_target_claim_operation(operations, roots, overlay, transition)?;
+    let (expected_stream, expected_claim, expected_retention, expected_pin) =
+        crate::coordinator::derive_agent_initial_reservation_postcondition(
+            parent, overlay, command, stream,
+        )?;
+    let retention_count = operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                crate::DurableOperation::PutResourceRetentionCurrent { value }
+                    if value == &expected_retention
+            )
+        })
+        .count();
+    let pin_count = operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                crate::DurableOperation::PutResourcePinCurrent { value }
+                    if value == &expected_pin
+            )
+        })
+        .count();
+    if expected_stream != *stream
+        || expected_claim != **transition
+        || retention_count != 1
+        || pin_count != 1
+    {
+        return Err(DurableError::Integrity {
+            code: "agent_stream_reservation_parent_source_mismatch".to_owned(),
+            message: "Initial Agent publication reservation changed its exact parent authority"
+                .to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_agent_target_claim_operation_set<R: StateRootResolver + ?Sized>(

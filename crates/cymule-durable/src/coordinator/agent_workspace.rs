@@ -40,6 +40,39 @@ use cymule_profile_protocol::agent as agent_protocol;
 use cymule_runtime::{ExecutionBinding, ExecutionOperationKind};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(super) fn verify_workspace_agent_receipt_graph<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    command: &AgentCommand,
+    receipt: &AgentCommandReceipt,
+) -> DurableResult<()> {
+    let (
+        AgentCommandAction::Workspace(workspace),
+        AgentCommandOutcome::Workspace(agent_checkpoint),
+    ) = (&command.action, &receipt.outcome)
+    else {
+        return Ok(());
+    };
+    let coupled = crate::state_root::load_coupled_checkpoint_receipt(
+        manifest,
+        resolver,
+        &agent_workspace_coupling_id(&command.command_id)?,
+    )?
+    .ok_or_else(|| {
+        workspace_integrity(
+            "agent_workspace_m1_receipt_missing",
+            "Agent workspace receipt has no real M1 coupled receipt",
+        )
+    })?;
+    let CoupledCheckpoint::AgentWorkspace { checkpoint } = &coupled.checkpoint else {
+        return Err(workspace_integrity(
+            "agent_workspace_origin_shape_mismatch",
+            "Agent workspace receipt retained another coupled checkpoint",
+        ));
+    };
+    verify_workspace_receipt_link(command, workspace, agent_checkpoint, &coupled, checkpoint)
+}
+
 struct WorkspaceM1Source {
     authority_root: String,
     run: MachineRunCurrent,
