@@ -29,6 +29,9 @@
   Natural exit is observed with `waitid(WNOWAIT)` and reaped only after local
   request writing and stdout/stderr EOF finish. Leader exit closes the local
   stdin endpoint so an inherited but unread pipe cannot strand the writer.
+  Once that retained terminal status is observed, a simultaneously ready
+  timeout/cancellation/overflow may close local endpoints and reap but never
+  signal or reclassify the already completed Child as interrupted.
   A non-EINTR wait-authority error kills and synchronously reaps the still-owned
   Child; it never delegates `Cmd.Wait` to an unbounded goroutine. The
   Engine/executor watchdog owns descendants; the SDK never signals a raw PID or

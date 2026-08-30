@@ -7644,6 +7644,15 @@ func awaitEngineProcess(
 	terminate := func() (error, error) {
 		return terminateProcess(command, stdinPipe, stdoutPipe, stderrPipe)
 	}
+	reapExited := func() error {
+		if !inputComplete {
+			result.inputErr = io.ErrClosedPipe
+		}
+		_ = stdinPipe.Close()
+		_ = stdoutPipe.Close()
+		_ = stderrPipe.Close()
+		return command.Wait()
+	}
 	for {
 		if !inputComplete {
 			select {
@@ -7684,15 +7693,27 @@ func awaitEngineProcess(
 		}
 		select {
 		case <-deadline:
+			if childExited {
+				result.waitErr = reapExited()
+				return result
+			}
 			result.waitErr, result.terminationErr = terminate()
 			result.interruption = context.DeadlineExceeded
 			return result
 		case <-cancellationDone:
+			if childExited {
+				result.waitErr = reapExited()
+				return result
+			}
 			result.waitErr, result.terminationErr = terminate()
 			result.interruption = context.Canceled
 			return result
 		case result.overflowCode = <-overflow:
-			result.waitErr, result.terminationErr = terminate()
+			if childExited {
+				result.waitErr = reapExited()
+			} else {
+				result.waitErr, result.terminationErr = terminate()
+			}
 			return result
 		case result.inputErr = <-inputDone:
 			inputComplete = true

@@ -1037,60 +1037,71 @@ func TestCliEngineClassifiesPostStartInterruptionByMutation(t *testing.T) {
 }
 
 func TestAwaitEngineProcessPrefersAnAlreadyCompletedNaturalExit(t *testing.T) {
-	command := exec.Command("/usr/bin/true")
-	stdinPipe, err := command.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdoutPipe, err := command.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stderrPipe, err := command.StderrPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	stdoutDone := make(chan error, 1)
-	stderrDone := make(chan error, 1)
-	inputDone := make(chan error, 1)
-	inputDone <- stdinPipe.Close()
-	go func() { _, err := io.Copy(io.Discard, stdoutPipe); stdoutDone <- err }()
-	go func() { _, err := io.Copy(io.Discard, stderrPipe); stderrDone <- err }()
-	for {
-		exited, err := engineProcessExitedWithoutReaping(command.Process.Pid)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if exited {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	deadline := make(chan time.Time, 1)
-	deadline <- time.Now()
-	result := awaitEngineProcess(
-		deadline,
-		make(chan struct{}),
-		command,
-		stdinPipe,
-		stdoutPipe,
-		stderrPipe,
-		inputDone,
-		stdoutDone,
-		stderrDone,
-		make(chan string),
-		engineProcessExitedWithoutReaping,
-		terminateEngineProcess,
-	)
-	if result.waitErr != nil || result.inputErr != nil || result.stdoutErr != nil ||
-		result.stderrErr != nil || result.interruption != nil || result.terminationErr != nil {
-		t.Fatalf(
-			"completed Engine process was reclassified: wait=%v interruption=%v termination=%v",
-			result.waitErr, result.interruption, result.terminationErr,
-		)
+	for _, testCase := range []struct {
+		name      string
+		interrupt func(chan<- time.Time, chan<- struct{})
+	}{
+		{"deadline", func(deadline chan<- time.Time, _ chan<- struct{}) { deadline <- time.Now() }},
+		{"cancellation", func(_ chan<- time.Time, cancellation chan<- struct{}) { cancellation <- struct{}{} }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			command := exec.Command("/usr/bin/true")
+			stdinPipe, err := command.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdoutPipe, err := command.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stderrPipe, err := command.StderrPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			stdoutDone := make(chan error, 1)
+			stderrDone := make(chan error, 1)
+			inputDone := make(chan error, 1)
+			inputDone <- stdinPipe.Close()
+			go func() { _, err := io.Copy(io.Discard, stdoutPipe); stdoutDone <- err }()
+			go func() { _, err := io.Copy(io.Discard, stderrPipe); stderrDone <- err }()
+			for {
+				exited, err := engineProcessExitedWithoutReaping(command.Process.Pid)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if exited {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			deadline := make(chan time.Time, 1)
+			cancellation := make(chan struct{}, 1)
+			testCase.interrupt(deadline, cancellation)
+			result := awaitEngineProcess(
+				deadline,
+				cancellation,
+				command,
+				stdinPipe,
+				stdoutPipe,
+				stderrPipe,
+				inputDone,
+				stdoutDone,
+				stderrDone,
+				make(chan string),
+				engineProcessExitedWithoutReaping,
+				terminateEngineProcess,
+			)
+			if result.waitErr != nil || result.inputErr != nil || result.stdoutErr != nil ||
+				result.stderrErr != nil || result.interruption != nil || result.terminationErr != nil {
+				t.Fatalf(
+					"completed Engine process was reclassified: wait=%v interruption=%v termination=%v",
+					result.waitErr, result.interruption, result.terminationErr,
+				)
+			}
+		})
 	}
 }
 
