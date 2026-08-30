@@ -306,8 +306,12 @@
   physical-family current plus the Released target claim; missing or tampered
   sidecars are Integrity. Finalized replay likewise authenticates the
   Materialized claim, Active pin, current retention family, and exact catalog;
-  a valid later sibling Resource-family receipt remains admissible. A
-  reservation-phase stream read authenticates its original Open receipt plus
+  a valid later sibling Resource-family receipt remains admissible. The target
+  claim's exact-key current and monotonic generation are its bounded
+  lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
+  the retained source, and advances by one. Do not add a predecessor journal or
+  scan claim history to replay an older Released receipt. A reservation-phase
+  stream read authenticates its original Open receipt plus
   exact retained unterminated Finalize command, not equality with the old Open
   projection alone. It also rejects a self-consistent reservation whose intent
   target differs from the immutable stream target; no replacement source hash

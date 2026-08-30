@@ -2274,6 +2274,11 @@ fn retained_external_abort_replay_rejects_missing_or_tampered_resource_sidecars(
 #[test]
 fn retained_publication_reservation_rejects_missing_or_tampered_claim_and_resource_sidecars() {
     for (index, (kind, fault)) in [
+        (StateRootLeafKind::AgentStreamCurrent, SidecarFault::Missing),
+        (
+            StateRootLeafKind::AgentStreamCurrent,
+            SidecarFault::Tampered,
+        ),
         (
             StateRootLeafKind::AgentTargetClaimCurrent,
             SidecarFault::Missing,
@@ -2340,6 +2345,11 @@ fn retained_publication_reservation_rejects_missing_or_tampered_claim_and_resour
 #[test]
 fn retained_external_finalization_rejects_missing_or_tampered_claim_and_resource_sidecars() {
     for (index, (kind, fault)) in [
+        (StateRootLeafKind::AgentStreamCurrent, SidecarFault::Missing),
+        (
+            StateRootLeafKind::AgentStreamCurrent,
+            SidecarFault::Tampered,
+        ),
         (
             StateRootLeafKind::AgentTargetClaimCurrent,
             SidecarFault::Missing,

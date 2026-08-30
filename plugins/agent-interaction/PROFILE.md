@@ -256,6 +256,7 @@ External terminal finalization is one later StateRoot CAS over:
 
 - command and semantic receipt;
 - stream and Session/update/message-or-tool currents;
+- the exact target claim promoted from `Reserved` to `Materialized`;
 - exact `ResourceCatalogRecord` publication;
 - the already content-derived `ResourcePinKind::AgentStream`; and
 - promotion of the exact `Reserved` Resource pin to `Active` without changing
@@ -366,7 +367,7 @@ Agent/M1 transition.
 
 ## Wire and compatibility
 
-Current persisted command and receipt selectors are `cymule.agent-command/3`
+Current persisted command and receipt selectors are `cymule.agent-command/4`
 and `cymule.agent-command-receipt/4`; bounded Session metadata is
 `cymule.agent-session-current/2`, and the current closed schema generation is
 `cymule.agent/8`. Publication intent/reservation use `/2`; target claims use

@@ -9989,6 +9989,7 @@ fn prepare_agent_session_update<R: crate::StateRootResolver + ?Sized>(
     operations.extend(
         agent_protocol::agent_session_target_claim_transitions(
             command,
+            &session,
             &update_source,
             &postcondition,
         )?
@@ -10171,14 +10172,15 @@ fn prepare_agent_stream<R: crate::StateRootResolver + ?Sized>(
             } else {
                 None
             };
-            let target_claim_target =
-                agent_protocol::AgentTargetClaimTarget::from_stream_target(&stream.target);
-            let target_claim = crate::state_root::load_agent_target_claim_current(
-                manifest,
-                resolver,
-                session_id,
-                &target_claim_target,
-            )?;
+            let target_claim = if stream.publication_reservation.is_some() {
+                let target =
+                    agent_protocol::AgentTargetClaimTarget::from_stream_target(&stream.target);
+                crate::state_root::load_agent_target_claim_current(
+                    manifest, resolver, session_id, &target,
+                )?
+            } else {
+                None
+            };
             agent_protocol::AgentStreamSource::Abort {
                 session: require_agent_session(manifest, resolver, session_id)?,
                 stream,
@@ -10460,10 +10462,15 @@ fn agent_receipt_target_claim_transitions(
     receipt.verify_for(command)?;
     match (&receipt.source, &receipt.outcome) {
         (
-            agent_protocol::AgentCommandSource::Session { update, .. },
+            agent_protocol::AgentCommandSource::Session { session, update },
             agent_protocol::AgentCommandOutcome::Session(postcondition),
-        ) => agent_protocol::agent_session_target_claim_transitions(command, update, postcondition)
-            .map_err(Into::into),
+        ) => agent_protocol::agent_session_target_claim_transitions(
+            command,
+            session,
+            update,
+            postcondition,
+        )
+        .map_err(Into::into),
         (
             agent_protocol::AgentCommandSource::Stream(source),
             agent_protocol::AgentCommandOutcome::Stream(postcondition),
@@ -10538,6 +10545,11 @@ fn agent_target_claim_descends_from<R: crate::StateRootResolver + ?Sized>(
     current: &agent_protocol::AgentTargetClaimCurrent,
     expected: &agent_protocol::AgentTargetClaimCurrent,
 ) -> DurableResult<bool> {
+    // This exact-key current is the lineage authority: ApplyAgentTargetClaim is
+    // the sole writer, exact-compares the retained source, and advances the
+    // generation by exactly one. After authenticating the current origin, any
+    // higher generation for the same key is therefore a causal successor; no
+    // separate predecessor journal or history scan is an authority.
     let mut cursor = current.clone();
     let mut authenticated_by_successor = false;
     loop {
@@ -10556,12 +10568,13 @@ fn agent_target_claim_descends_from<R: crate::StateRootResolver + ?Sized>(
                 agent_protocol::AgentTargetClaimPhase::Reserved { .. }
             )
         {
-            return Ok(cursor.generation == expected.generation + 1);
+            return Ok(true);
         }
         let generation = cursor.generation;
         let Some(source) = verify_agent_target_claim_current_origin(manifest, resolver, &cursor)?
         else {
-            return Ok(generation == expected.generation + 1);
+            debug_assert!(generation > expected.generation);
+            return Ok(true);
         };
         cursor = source;
         authenticated_by_successor = true;
@@ -10674,6 +10687,7 @@ pub(crate) fn verify_agent_stream_finalization_graph<R: crate::StateRootResolver
     receipt.verify_for(command)?;
     verify_agent_target_claim_receipt_graph(manifest, resolver, command, receipt)?;
     let agent_protocol::AgentCommandOutcome::Stream(agent_protocol::AgentStreamPostcondition {
+        stream,
         effect:
             agent_protocol::AgentStreamEffect::Finalized {
                 publication_record,
@@ -10688,6 +10702,7 @@ pub(crate) fn verify_agent_stream_finalization_graph<R: crate::StateRootResolver
             message: "Agent finalization command retained a non-final stream outcome".to_owned(),
         });
     };
+    verify_agent_finalized_stream_current(manifest, resolver, stream)?;
     match (publication_record, resource_pin_receipt) {
         (Some(record), Some(pin_receipt)) => {
             let retained = crate::state_root::load_resource_catalog_record(
@@ -10770,7 +10785,31 @@ pub(crate) fn verify_agent_stream_finalization_graph<R: crate::StateRootResolver
     Ok(())
 }
 
-fn verify_agent_stream_abort_graph<R: crate::StateRootResolver + ?Sized>(
+fn verify_agent_finalized_stream_current<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    expected: &agent_protocol::AgentStreamCurrent,
+) -> DurableResult<()> {
+    let retained = crate::state_root::load_agent_stream_current(
+        manifest,
+        resolver,
+        &expected.session_id,
+        &expected.stream_id,
+    )?
+    .ok_or_else(|| DurableError::Integrity {
+        code: "agent_finalize_stream_current_missing".to_owned(),
+        message: "Agent finalization lost its terminal stream current".to_owned(),
+    })?;
+    if retained != *expected {
+        return Err(DurableError::Integrity {
+            code: "agent_finalize_stream_current_mismatch".to_owned(),
+            message: "Agent finalization changed its terminal stream current".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_agent_stream_abort_graph<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     command: &agent_protocol::AgentCommand,
@@ -13682,6 +13721,51 @@ mod agent_stream_publication_reservation_tests {
             .expect("Tool target claim remains current")
     }
 
+    fn reserve_external_tool_not_applied(
+        coordinator: &mut DurableCoordinator<crate::MemoryStore>,
+        stream_id: &str,
+    ) -> agent_protocol::AgentTargetClaimCurrent {
+        open_external_tool_stream(coordinator, stream_id);
+        let finalize = external_finalize_command(coordinator, stream_id);
+        let mut provider = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([ProviderOutcome::NotApplied]),
+            observe_outcome: ProviderOutcome::NotApplied,
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        assert!(matches!(
+            coordinator
+                .finalize_agent_stream(&finalize, &mut provider)
+                .unwrap(),
+            AgentStreamFinalizeOutcome::PublicationNotApplied { .. }
+        ));
+        assert_eq!(provider.publish_calls, 1);
+        assert_eq!(provider.observe_calls, 0);
+        current_tool_target_claim(coordinator)
+    }
+
+    fn abort_external_tool(
+        coordinator: &mut DurableCoordinator<crate::MemoryStore>,
+        stream_id: &str,
+        reason: &str,
+    ) -> agent_protocol::AgentTargetClaimCurrent {
+        let abort = AgentCommand::new(
+            coordinator.current_revision().unwrap().to_owned(),
+            AgentCommandAction::Stream(AgentStreamCommand::Abort {
+                session_id: SESSION_ID.to_owned(),
+                stream_id: stream_id.to_owned(),
+                reason: reason.to_owned(),
+            }),
+        )
+        .unwrap();
+        coordinator.commit_agent_local(&abort).unwrap();
+        current_tool_target_claim(coordinator)
+    }
+
     fn target_claim_value_id(
         claim: &agent_protocol::AgentTargetClaimCurrent,
     ) -> DurableResult<String> {
@@ -13717,6 +13801,51 @@ mod agent_stream_publication_reservation_tests {
         for claim in historical {
             assert!(!reachable.contains(&target_claim_value_id(claim).unwrap()));
         }
+    }
+
+    fn abort_losing_message_stream(
+        winner: &mut DurableCoordinator<crate::MemoryStore>,
+        loser: &mut DurableCoordinator<crate::MemoryStore>,
+        stream_id: &str,
+    ) {
+        let target = agent_protocol::AgentTargetClaimTarget::Message {
+            message_id: "message:external-reservation".to_owned(),
+        };
+        let winning_claim = winner
+            .read_current_state_root(|manifest, resolver| {
+                crate::state_root::load_agent_target_claim_current(
+                    manifest, resolver, SESSION_ID, &target,
+                )
+            })
+            .unwrap()
+            .expect("winning Message claim remains current");
+        let abort = AgentCommand::new(
+            loser.current_revision().unwrap().to_owned(),
+            AgentCommandAction::Stream(AgentStreamCommand::Abort {
+                session_id: SESSION_ID.to_owned(),
+                stream_id: stream_id.to_owned(),
+                reason: "caller:abort-losing-stream".to_owned(),
+            }),
+        )
+        .unwrap();
+        loser.commit_agent_local(&abort).unwrap();
+        loser
+            .read_current_state_root(|manifest, resolver| {
+                let stream = require_agent_stream(manifest, resolver, SESSION_ID, stream_id)?;
+                let session = require_agent_session(manifest, resolver, SESSION_ID)?;
+                let claim = crate::state_root::load_agent_target_claim_current(
+                    manifest, resolver, SESSION_ID, &target,
+                )?
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "test_winning_claim_missing".to_owned(),
+                    message: "winning Message claim disappeared".to_owned(),
+                })?;
+                assert_eq!(stream.state, agent_protocol::AgentStreamState::Aborted);
+                assert_eq!(session.open_stream_count, 0);
+                assert_eq!(claim, winning_claim);
+                Ok(())
+            })
+            .unwrap();
     }
 
     fn publication(intent: &AgentStreamPublicationIntent) -> ResourcePublication {
@@ -14126,10 +14255,16 @@ mod agent_stream_publication_reservation_tests {
             Err(DurableError::Conflict { .. } | DurableError::HistoryConflict { .. })
         ));
         assert_eq!(sibling_provider.publish_calls, 0);
+
+        abort_losing_message_stream(
+            &mut first,
+            &mut sibling,
+            "stream:external-reservation:sibling",
+        );
     }
 
     #[test]
-    fn not_applied_abort_releases_tool_target_for_one_later_materialization() {
+    fn old_abort_replays_across_repeated_release_and_live_reservation_generations() {
         let mut coordinator = initialized_with_open_tool_stream();
         let finalize = finalize_command(&coordinator);
         let mut provider = CountingProvider {
@@ -14149,6 +14284,11 @@ mod agent_stream_publication_reservation_tests {
             panic!("Tool publication retains its exact reconciliation intent")
         };
         let reserved_first = current_tool_target_claim(&mut coordinator);
+        coordinator
+            .read_current_state_root(|manifest, resolver| {
+                crate::reachable_state_root_objects(manifest, resolver).map(|_| ())
+            })
+            .expect("InProgress Tool with a Reserved stream claim passes full audit");
         assert!(matches!(
             commit_tool_update(&mut coordinator, ToolCallStatus::Completed),
             Err(DurableError::HistoryConflict { ref code, .. })
@@ -14174,51 +14314,46 @@ mod agent_stream_publication_reservation_tests {
         let released_first = current_tool_target_claim(&mut coordinator);
 
         let sibling_stream = "stream:external-reservation:second-tool";
-        open_external_tool_stream(&mut coordinator, sibling_stream);
-        let second_finalize = external_finalize_command(&coordinator, sibling_stream);
-        let mut second_provider = CountingProvider {
-            publish_calls: 0,
-            observe_calls: 0,
-            publish_outcomes: VecDeque::from([ProviderOutcome::NotApplied]),
-            observe_outcome: ProviderOutcome::NotApplied,
-            race: None,
-            refresh_racer: false,
-            race_conflicted: false,
-            race_committed: false,
-        };
+        let reserved_second = reserve_external_tool_not_applied(&mut coordinator, sibling_stream);
+        let released_second = abort_external_tool(
+            &mut coordinator,
+            sibling_stream,
+            "caller:release-tool-target-again",
+        );
+
+        let third_stream = "stream:external-reservation:third-tool";
+        let reserved_third = reserve_external_tool_not_applied(&mut coordinator, third_stream);
+        assert_eq!(reserved_third.generation, 5);
         assert!(matches!(
-            coordinator
-                .finalize_agent_stream(&second_finalize, &mut second_provider)
-                .unwrap(),
-            AgentStreamFinalizeOutcome::PublicationNotApplied { .. }
+            reserved_third.phase,
+            agent_protocol::AgentTargetClaimPhase::Reserved { .. }
         ));
-        let reserved_second = current_tool_target_claim(&mut coordinator);
-        let second_abort = AgentCommand::new(
-            coordinator.current_revision().unwrap().to_owned(),
-            AgentCommandAction::Stream(AgentStreamCommand::Abort {
-                session_id: SESSION_ID.to_owned(),
-                stream_id: sibling_stream.to_owned(),
-                reason: "caller:release-tool-target-again".to_owned(),
-            }),
-        )
-        .unwrap();
-        coordinator.commit_agent_local(&second_abort).unwrap();
-        let released_second = current_tool_target_claim(&mut coordinator);
+
+        let store = coordinator.into_store();
+        let mut coordinator = DurableCoordinator::open(store).unwrap();
+        let replay_revision = coordinator.current_revision().unwrap().to_owned();
+        let replay_claim = current_tool_target_claim(&mut coordinator);
         let old_replay = coordinator.commit_agent_local(&abort).unwrap();
         assert!(old_replay.committed_revision.is_none());
+        assert_eq!(coordinator.current_revision().unwrap(), replay_revision);
+        assert_eq!(current_tool_target_claim(&mut coordinator), replay_claim);
+
+        let released_third = abort_external_tool(
+            &mut coordinator,
+            third_stream,
+            "caller:release-tool-target-third",
+        );
 
         commit_tool_update(&mut coordinator, ToolCallStatus::Completed)
             .expect("released Tool target materializes through one later Session update");
         let claim = current_tool_target_claim(&mut coordinator);
-        assert_eq!(claim.generation, 5);
+        assert_eq!(claim.generation, 7);
         assert!(matches!(
             claim.phase,
             agent_protocol::AgentTargetClaimPhase::Materialized
         ));
         assert_eq!(provider.publish_calls, 1);
         assert_eq!(provider.observe_calls, 1);
-        assert_eq!(second_provider.publish_calls, 1);
-        assert_eq!(second_provider.observe_calls, 0);
 
         assert_only_current_target_claim_value_reachable(
             coordinator,
@@ -14228,6 +14363,8 @@ mod agent_stream_publication_reservation_tests {
                 released_first,
                 reserved_second,
                 released_second,
+                reserved_third,
+                released_third,
             ],
         );
     }

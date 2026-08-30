@@ -6619,6 +6619,34 @@ fn agent_tool_is_terminal(tool: &cymule_profile_protocol::agent::AgentToolCurren
     )
 }
 
+fn audit_unmaterialized_agent_tool(
+    phase: &cymule_profile_protocol::agent::AgentTargetClaimPhase,
+    tool: Option<&cymule_profile_protocol::agent::AgentToolCurrent>,
+) -> DurableResult<()> {
+    use cymule_profile_protocol::agent::{AgentTargetClaimPhase, ToolCallStatus};
+
+    match phase {
+        AgentTargetClaimPhase::Reserved { .. } => {
+            if tool.is_some_and(agent_tool_is_terminal) {
+                return Err(DurableError::Integrity {
+                    code: "agent_target_claim_tool_phase_mismatch".to_owned(),
+                    message: "Reserved Agent Tool claim has a terminal target".to_owned(),
+                });
+            }
+        }
+        AgentTargetClaimPhase::Released { .. } => {
+            if tool.is_none_or(|tool| tool.tool.status != ToolCallStatus::InProgress) {
+                return Err(DurableError::Integrity {
+                    code: "agent_target_claim_released_tool_missing".to_owned(),
+                    message: "Released Agent Tool claim lost its InProgress target".to_owned(),
+                });
+            }
+        }
+        AgentTargetClaimPhase::Materialized => unreachable!("caller selects unmaterialized claims"),
+    }
+    Ok(())
+}
+
 fn audit_agent_claim_currents<R: StateRootResolver + ?Sized>(
     manifest: &StateRootManifest,
     resolver: &mut R,
@@ -6685,12 +6713,7 @@ fn audit_agent_claim_currents<R: StateRootResolver + ?Sized>(
             }
             (AgentTargetClaimPhase::Reserved { .. }, AgentTargetClaimTarget::Tool { .. })
             | (AgentTargetClaimPhase::Released { .. }, AgentTargetClaimTarget::Tool { .. }) => {
-                if tools.get(&target_key).is_some_and(agent_tool_is_terminal) {
-                    return Err(DurableError::Integrity {
-                        code: "agent_target_claim_tool_phase_mismatch".to_owned(),
-                        message: "Unmaterialized Agent Tool claim has a terminal target".to_owned(),
-                    });
-                }
+                audit_unmaterialized_agent_tool(&claim.phase, tools.get(&target_key))?;
             }
         }
     }
@@ -6756,11 +6779,11 @@ fn audit_agent_tool_claims(
                 });
             }
         } else if claim
-            .is_some_and(|claim| !matches!(claim.phase, AgentTargetClaimPhase::Released { .. }))
+            .is_some_and(|claim| matches!(claim.phase, AgentTargetClaimPhase::Materialized))
         {
             return Err(DurableError::Integrity {
                 code: "agent_tool_target_claim_phase_mismatch".to_owned(),
-                message: "Non-terminal Agent Tool is reserved or materialized".to_owned(),
+                message: "Non-terminal Agent Tool is materialized".to_owned(),
             });
         }
         if *key
@@ -6841,6 +6864,10 @@ fn audit_terminal_agent_stream<R: StateRootResolver + ?Sized>(
     )?;
     if stream.state == cymule_profile_protocol::agent::AgentStreamState::Finalized {
         crate::coordinator::verify_agent_stream_finalization_graph(
+            manifest, resolver, &command, &receipt,
+        )?;
+    } else if stream.state == cymule_profile_protocol::agent::AgentStreamState::Aborted {
+        crate::coordinator::verify_agent_stream_abort_graph(
             manifest, resolver, &command, &receipt,
         )?;
     }
@@ -8873,10 +8900,11 @@ fn receipt_target_claim_transitions(
     receipt.verify_for(command)?;
     match (&receipt.source, &receipt.outcome) {
         (
-            AgentCommandSource::Session { update, .. },
+            AgentCommandSource::Session { session, update },
             AgentCommandOutcome::Session(postcondition),
         ) => cymule_profile_protocol::agent::agent_session_target_claim_transitions(
             command,
+            session,
             update,
             postcondition,
         )
@@ -15566,6 +15594,16 @@ mod tests {
             let post = session
                 .reduce_update(&command.command_id, &update, &source)
                 .expect("Agent message reduces");
+            let claim = cymule_profile_protocol::agent::agent_session_target_claim_transitions(
+                &command,
+                &source_session,
+                &source,
+                &post,
+            )
+            .expect("Agent message target claim derives")
+            .into_iter()
+            .next()
+            .expect("Agent message materializes one target claim");
             let receipt = AgentCommandReceipt::new(
                 &command,
                 AgentCommandSource::Session {
@@ -15575,13 +15613,6 @@ mod tests {
                 AgentCommandOutcome::Session(post.clone()),
             )
             .expect("Agent message receipt derives");
-            let claim = cymule_profile_protocol::agent::agent_session_target_claim_transitions(
-                &command, &source, &post,
-            )
-            .expect("Agent message target claim derives")
-            .into_iter()
-            .next()
-            .expect("Agent message materializes one target claim");
             let AgentSessionUpdateEffect::Message { current } = post.effect else {
                 panic!("Agent message update returned another effect")
             };
@@ -15651,6 +15682,19 @@ mod tests {
                 .then(|| object_id.clone())
             })
             .expect("Agent target-claim value object exists")
+    }
+
+    #[test]
+    fn released_tool_claim_requires_its_inprogress_target_during_full_audit() {
+        let phase = cymule_profile_protocol::agent::AgentTargetClaimPhase::Released {
+            stream_id: "stream:released-tool-audit".to_owned(),
+            reservation_id: format!("sha256:{}", "a".repeat(64)),
+        };
+        assert!(matches!(
+            audit_unmaterialized_agent_tool(&phase, None),
+            Err(DurableError::Integrity { ref code, .. })
+                if code == "agent_target_claim_released_tool_missing"
+        ));
     }
 
     #[test]

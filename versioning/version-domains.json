@@ -4,7 +4,7 @@
     "generation": "source-0.2.0-unreleased-generation-3",
     "workspace_version": "0.2.0",
     "state": "source",
-    "source_snapshot_digest": "sha256:df34c843a4ce77f7bcffa6e83f4a128e343b6dba0cd8177c03c2375ea3516438",
+    "source_snapshot_digest": "sha256:fcedb95adfbe879da1b14e38c5e4f4f3ecc75035fc4834154483cc136278557b",
     "baseline_source_snapshot_digest": "sha256:e3783a1ae7e61f331d90f7d456f60eb132712ba1f70e1b7f2363078a3c31540a",
     "predecessor_registry_digest": null,
     "predecessor_source_snapshot_digest": null,
@@ -274,7 +274,7 @@
     },
     {
       "domain": "cymule.agent-command",
-      "version": "cymule.agent-command/3",
+      "version": "cymule.agent-command/4",
       "kind": "semantic",
       "owner": "cymule-profile-protocol",
       "writers": [
@@ -308,7 +308,7 @@
       "migration": {
         "mode": "unsupported",
         "edge": null,
-        "runbook": "docs/migrations/pre-segmented-store-generations.md"
+        "runbook": "docs/migrations/durable-state-root-generation-5.md"
       },
       "removal_gate": null,
       "conformance": [
@@ -4577,7 +4577,7 @@
       ],
       "depends_on": [
         "cymule.agent-command-id/1",
-        "cymule.agent-command/3",
+        "cymule.agent-command/4",
         "cymule.artifact/2",
         "cymule.clock-observation/2",
         "cymule.command-batch-receipt/1",

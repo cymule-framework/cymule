@@ -2756,7 +2756,7 @@ def main() -> int:
         "resource_handoff_index", "resource_handoff_activation_index", "agent_command",
         "agent_command_receipt", "agent_input_suspension_receipt",
         "agent_input_completion_receipt", "agent_session_current", "agent_update_current",
-        "agent_message_current", "agent_tool_current", "agent_elicitation_current",
+        "agent_message_current", "agent_tool_current", "agent_target_claim_current", "agent_elicitation_current",
         "agent_occurrence_current", "agent_stream_current", "agent_stream_chunk_current",
         "evolution_current", "evolution_command_alias", "evolution_persistence_receipt",
         "evolution_mutation", "virtual_current", "virtual_persistence_receipt",

@@ -1907,6 +1907,7 @@ fn reduce_agent_session_target_claims(
 /// closed claim transition differs from the unique Session reducer result.
 pub fn agent_session_target_claim_transitions(
     command: &AgentCommand,
+    session: &AgentSessionCurrent,
     source: &AgentSessionUpdateSource,
     postcondition: &AgentSessionPostcondition,
 ) -> ProtocolResult<Vec<AgentTargetClaimTransition>> {
@@ -1919,6 +1920,12 @@ pub fn agent_session_target_claim_transitions(
     if postcondition.session.session_id != *session_id {
         return Err(ProtocolError::IdentityMismatch(
             "Agent Session target claims changed their Session owner".to_owned(),
+        ));
+    }
+    let expected = session.reduce_update(&command.command_id, update, source)?;
+    if expected != *postcondition {
+        return Err(ProtocolError::IdentityMismatch(
+            "Agent Session target claims changed the authorized postcondition".to_owned(),
         ));
     }
     reduce_agent_session_target_claims(&command.command_id, update, source, postcondition)
@@ -7668,7 +7675,7 @@ fn workspace_checkpoint_phase(
 }
 
 /// Closed Agent persistence command generation.
-pub const AGENT_COMMAND_VERSION: &str = "cymule.agent-command/3";
+pub const AGENT_COMMAND_VERSION: &str = "cymule.agent-command/4";
 /// Closed Agent persistence receipt generation.
 pub const AGENT_COMMAND_RECEIPT_VERSION: &str = "cymule.agent-command-receipt/4";
 
@@ -8540,7 +8547,7 @@ fn reduce_reserved_stream_abort(
     })?;
     verify_stream_abort_resource(reservation, retention, pin)?;
     let expected_target = AgentTargetClaimTarget::from_stream_target(&stream.target);
-    verify_stream_abort_target(stream, reservation, target_claim, &expected_target)?;
+    verify_stream_reserved_target(stream, reservation, target_claim, &expected_target)?;
     let transition = AgentTargetClaimTransition::new(
         &stream.session_id,
         expected_target,
@@ -8585,7 +8592,7 @@ fn verify_stream_abort_resource(
     Ok(())
 }
 
-fn verify_stream_abort_target(
+fn verify_stream_reserved_target(
     stream: &AgentStreamCurrent,
     reservation: &AgentStreamPublicationReservation,
     target_claim: &AgentTargetClaimCurrent,
@@ -8602,8 +8609,8 @@ fn verify_stream_abort_target(
             })
     {
         return Err(ProtocolError::Conflict {
-            code: "agent_stream_abort_target_claim_changed".to_owned(),
-            message: "Agent stream abort lost its exact target reservation".to_owned(),
+            code: "agent_stream_target_claim_changed".to_owned(),
+            message: "Agent stream lost its exact target reservation".to_owned(),
         });
     }
     Ok(())
@@ -8644,6 +8651,12 @@ fn reduce_stream_finalization(
             "Agent stream finalization requires its exact open Session current".to_owned(),
         ));
     }
+    let target_claim_target = AgentTargetClaimTarget::from_stream_target(&input.stream.target);
+    verify_stream_finalization_target_claim_source(
+        input.stream,
+        input.target_claim_source,
+        &target_claim_target,
+    )?;
     verify_stream_target_source(input.session_id, &input.stream.target, input.target_source)?;
     verify_stream_chunks(input.stream, input.chunks)?;
     let content = stream_finalization_content(input)?;
@@ -9119,7 +9132,7 @@ pub fn agent_stream_target_claim_transition(
     source: &AgentStreamSource,
     postcondition: &AgentStreamPostcondition,
 ) -> ProtocolResult<Option<AgentTargetClaimTransition>> {
-    command.verify()?;
+    source.verify_postcondition(command, postcondition)?;
     let AgentCommandAction::Stream(stream_command) = &command.action else {
         return Err(ProtocolError::Validation(
             "Agent stream target claim requires a Stream command".to_owned(),
@@ -9201,7 +9214,36 @@ fn finalized_stream_target_claim_transition(
         current: target_claim.cloned(),
     };
     claim_source.verify_for(session_id)?;
+    verify_stream_finalization_target_claim_source(stream, target_claim, &target)?;
     materialize_target_claim(session_id, target, &claim_source, command_id)
+}
+
+fn verify_stream_finalization_target_claim_source(
+    stream: &AgentStreamCurrent,
+    target_claim: Option<&AgentTargetClaimCurrent>,
+    target: &AgentTargetClaimTarget,
+) -> ProtocolResult<()> {
+    match (stream.publication_reservation.as_deref(), target_claim) {
+        (Some(reservation), Some(current)) => {
+            verify_stream_reserved_target(stream, reservation, current, target)?;
+        }
+        (Some(_), None) => {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent external finalization lost its target reservation".to_owned(),
+            ));
+        }
+        (None, Some(current))
+            if matches!(current.phase, AgentTargetClaimPhase::Reserved { .. }) =>
+        {
+            return Err(ProtocolError::Conflict {
+                code: "agent_target_already_claimed".to_owned(),
+                message: "Agent staged finalization cannot consume an external reservation"
+                    .to_owned(),
+            });
+        }
+        (None, _) => {}
+    }
+    Ok(())
 }
 
 fn aborted_stream_target_claim_transition(
@@ -11671,6 +11713,9 @@ mod tests {
             },
         )
         .expect("Session command seals");
+        let mut predecessor_command = command.clone();
+        predecessor_command.command_version = "cymule.agent-command/3".to_owned();
+        assert!(predecessor_command.verify().is_err());
         let session = AgentSessionCurrent::new("session:receipt").expect("Session constructs");
         let source = AgentSessionUpdateSource {
             update: None,
@@ -13900,6 +13945,41 @@ mod tests {
         );
     }
 
+    fn assert_foreign_target_reservation_is_rejected(
+        source: &AgentStreamSource,
+        command: &AgentCommand,
+        product: &AgentStreamPublicationProduct,
+    ) {
+        let mut wrong = source.clone();
+        let AgentStreamSource::Finalize {
+            stream,
+            target_claim: Some(target_claim),
+            ..
+        } = &mut wrong
+        else {
+            panic!("reserved fixture retains its stream and target claim")
+        };
+        let reservation = stream
+            .publication_reservation
+            .as_ref()
+            .expect("reserved fixture retains its publication reservation");
+        **target_claim = AgentTargetClaimCurrent::new(
+            &stream.session_id,
+            AgentTargetClaimTarget::from_stream_target(&stream.target),
+            target_claim.generation,
+            AgentTargetClaimPhase::Reserved {
+                stream_id: stream.stream_id.clone(),
+                reservation_id: revision('e'),
+            },
+            reservation.intent.command_id(),
+        )
+        .expect("foreign reservation target claim seals independently");
+        assert!(
+            wrong.reduce_with_publication(command, product).is_err(),
+            "publication cannot consume a target claim owned by another reservation"
+        );
+    }
+
     #[test]
     fn external_stream_provider_is_preflighted_and_couples_resource_pin() {
         let (finalize_command, finalize, source) = external_stream_finalize_fixture();
@@ -13972,6 +14052,7 @@ mod tests {
                 .is_err(),
             "publication cannot promote a pin owned by another reservation"
         );
+        assert_foreign_target_reservation_is_rejected(&source, &finalize_command, &product);
         let finalized = source
             .reduce_with_publication(&finalize_command, &product)
             .expect("authorized external publication finalizes");

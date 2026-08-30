@@ -317,8 +317,8 @@ domains described in `docs/specification.md`.
   compete on one exact role-free target key before provider I/O; finalization
   materializes the claim and NotApplied Abort releases it without an open-stream
   scan. Exact replay/full audit authenticate claim, catalog, pin, and retention
-  sidecars. This hard-cuts Agent to `/8`, receipt to `/4`, publication intent
-  and reservation to `/2`, and StateRoot/value to `/5`; retained `/4` stores
+  sidecars. This hard-cuts Agent to `/8`, command/receipt to `/4`, publication
+  intent and reservation to `/2`, and StateRoot/value to `/5`; retained `/4` stores
   require drain/export/recreate/requeue with no importer.
 - Make the macOS process executor use one fork-only watchdog and suspended raw
   `posix_spawn` provider launch with exact inherited-FD closure. Retain reaped

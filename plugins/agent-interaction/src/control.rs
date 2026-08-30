@@ -1162,16 +1162,21 @@ fn resolve_stream_source(
             let stream = stream.ok_or_else(|| {
                 AgentError::NotFound(format!("Agent stream {stream_id} does not exist"))
             })?;
-            let target = AgentTargetClaimTarget::from_stream_target(&stream.target);
+            let target_claim = if stream.publication_reservation.is_some() {
+                let target = AgentTargetClaimTarget::from_stream_target(&stream.target);
+                state
+                    .target_claims
+                    .get(&(session_id.clone(), target))
+                    .cloned()
+                    .map(Box::new)
+            } else {
+                None
+            };
             AgentStreamSource::Abort {
                 session: state.sessions.get(&session_id).cloned().ok_or_else(|| {
                     AgentError::NotFound(format!("Session {session_id} does not exist"))
                 })?,
-                target_claim: state
-                    .target_claims
-                    .get(&(session_id.clone(), target))
-                    .cloned()
-                    .map(Box::new),
+                target_claim,
                 stream,
                 resource: None,
             }
@@ -1304,10 +1309,11 @@ fn ephemeral_target_claim_transitions(
 
     match (source, outcome) {
         (
-            AgentCommandSource::Session { update, .. },
+            AgentCommandSource::Session { session, update },
             AgentCommandOutcome::Session(postcondition),
         ) => cymule_profile_protocol::agent::agent_session_target_claim_transitions(
             command,
+            session,
             update,
             postcondition,
         )

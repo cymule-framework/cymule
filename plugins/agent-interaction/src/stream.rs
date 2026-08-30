@@ -204,11 +204,83 @@ mod tests {
     const STREAM_ID: &str = "stream:controller";
 
     fn stream_query(expected_revision: Option<String>) -> AgentStreamQuery {
+        stream_query_for(STREAM_ID, expected_revision)
+    }
+
+    fn stream_query_for(stream_id: &str, expected_revision: Option<String>) -> AgentStreamQuery {
         AgentStreamQuery {
             session_id: SESSION_ID.to_owned(),
-            stream_id: STREAM_ID.to_owned(),
+            stream_id: stream_id.to_owned(),
             expected_revision,
         }
+    }
+
+    #[test]
+    fn staged_stream_loser_aborts_without_consuming_the_winning_target_claim() {
+        const LOSER_STREAM_ID: &str = "stream:controller:loser";
+        let mut persistence = EphemeralAgentPersistence::default();
+        let initial = AgentStreamController::load(&mut persistence, &stream_query(None)).unwrap();
+        let target = AgentStreamTarget::Message {
+            message_id: "message:shared-staged-target".to_owned(),
+            role: MessageRole::Agent,
+        };
+        let winner = AgentStreamController::open(
+            &mut persistence,
+            &initial.revision,
+            SESSION_ID,
+            STREAM_ID,
+            target.clone(),
+            AgentStreamDelivery::Staged,
+        )
+        .unwrap();
+        let loser = AgentStreamController::open(
+            &mut persistence,
+            &winner.observed_revision,
+            SESSION_ID,
+            LOSER_STREAM_ID,
+            target,
+            AgentStreamDelivery::Staged,
+        )
+        .unwrap();
+        let appended = AgentStreamController::append(
+            &mut persistence,
+            &loser.observed_revision,
+            SESSION_ID,
+            STREAM_ID,
+            AgentStreamChunk {
+                sequence: 0,
+                content: vec![ContentBlock::Text {
+                    text: "winner".to_owned(),
+                }],
+            },
+        )
+        .unwrap();
+        let finalized = AgentStreamController::finalize(
+            &mut persistence,
+            &appended.observed_revision,
+            SESSION_ID,
+            STREAM_ID,
+        )
+        .unwrap();
+        let AgentStreamFinalizeOutcome::Committed { commit } = finalized else {
+            panic!("staged winner commits directly")
+        };
+        let aborted = AgentStreamController::abort(
+            &mut persistence,
+            &commit.observed_revision,
+            SESSION_ID,
+            LOSER_STREAM_ID,
+            "caller:loser",
+        )
+        .expect("unreserved loser aborts without consuming the winner claim");
+        let loser = AgentStreamController::load(
+            &mut persistence,
+            &stream_query_for(LOSER_STREAM_ID, Some(aborted.observed_revision)),
+        )
+        .unwrap()
+        .current
+        .expect("loser stream remains queryable");
+        assert_eq!(loser.state, AgentStreamState::Aborted);
     }
 
     #[test]

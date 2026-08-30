@@ -1875,7 +1875,7 @@ fn quotes(bytes: &[u8]) -> bool {
         self.assertIn("cymule.agent/8", versions)
         self.assertTrue(
             {
-                "cymule.agent-command/3",
+                "cymule.agent-command/4",
                 "cymule.agent-command-receipt/4",
                 "cymule.agent-session-current/2",
                 "cymule.agent-stream-publication-reservation/2",
@@ -1936,7 +1936,6 @@ fn quotes(bytes: &[u8]) -> bool {
                 {"mode": "unsupported", "edge": None, "runbook": runbook},
             )
         for version in (
-            "cymule.agent-command/3",
             "cymule.resource-lifecycle-receipt-ref/3",
             "cymule.resource-pin-current/2",
         ):
@@ -1947,6 +1946,7 @@ fn quotes(bytes: &[u8]) -> bool {
             "runbook": "docs/migrations/durable-state-root-generation-5.md",
         }
         for version in (
+            "cymule.agent-command/4",
             "cymule.agent-command-receipt/4",
             "cymule.agent-target-claim-current/1",
             "cymule.agent/8",

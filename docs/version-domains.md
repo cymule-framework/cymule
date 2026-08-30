@@ -9,7 +9,7 @@ Status: generated from `versioning/version-domains.json`; do not edit by hand.
 | `cymule.agent-command-id/1` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-command-receipt-id/1` | receipt | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-command-receipt/4` | receipt | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
-| `cymule.agent-command/3` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
+| `cymule.agent-command/4` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-elicitation-key/1` | persistence | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-host-binding/1` | binding | `cymule-profile-protocol` | exact-reject | `plugins/agent-interaction/schemas/agent-protocol.schema.json` | `protocol`, `rust-agent-plugin` |
 | `cymule.agent-input-completion-key/1` | persistence | `cymule-durable` | exact-reject | — | `rust-durable` |
