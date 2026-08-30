@@ -2887,25 +2887,49 @@ impl<S: DurableStore> DurableCoordinator<S> {
         command.verify()?;
         expected_intent.verify()?;
         let agent_protocol::AgentCommandAction::Stream(
-            stream_command @ agent_protocol::AgentStreamCommand::Finalize { .. },
+            stream_command @ agent_protocol::AgentStreamCommand::Finalize {
+                session_id,
+                stream_id,
+            },
         ) = &command.action
         else {
             return Err(DurableError::Validation(
                 "Agent stream reconciliation accepts only Finalize".to_owned(),
             ));
         };
-        if let Some(commit) = self.replay_agent_stream_finalization(command)? {
-            return Ok(agent_protocol::AgentStreamFinalizeOutcome::Committed {
-                commit: Box::new(commit),
-            });
-        }
         if expected_intent.source_revision() != command.source_revision
             || expected_intent.command_id() != command.command_id
+            || expected_intent.session_id() != session_id
+            || expected_intent.stream_id() != stream_id
         {
             return Err(DurableError::Validation(
                 "Agent stream reconciliation intent does not belong to the exact Finalize command"
                     .to_owned(),
             ));
+        }
+        if let Some(commit) = self.replay_agent_stream_finalization(command)? {
+            let agent_protocol::AgentCommandSource::Stream(source) = &commit.receipt.source else {
+                unreachable!("Finalize receipt retains a Stream source")
+            };
+            let agent_protocol::AgentStreamSource::Finalize { stream, .. } = source.as_ref() else {
+                unreachable!("Finalize receipt retains a Finalize source")
+            };
+            if !matches!(
+                stream.delivery,
+                agent_protocol::AgentStreamDelivery::ExternalResource { .. }
+            ) || stream
+                .publication_reservation
+                .as_ref()
+                .is_none_or(|reservation| reservation.intent != *expected_intent)
+            {
+                return Err(DurableError::Validation(
+                    "Agent stream reconciliation cannot replay a staged or foreign publication"
+                        .to_owned(),
+                ));
+            }
+            return Ok(agent_protocol::AgentStreamFinalizeOutcome::Committed {
+                commit: Box::new(commit),
+            });
         }
         let source = self.read_current_state_root(|manifest, resolver| {
             load_agent_stream_finalization_source(manifest, resolver, stream_command)
@@ -2941,6 +2965,13 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 code: "agent_stream_publication_command_conflict".to_owned(),
                 message: "Agent stream is reserved by another Finalize command".to_owned(),
             });
+        }
+        if reservation.phase == agent_protocol::AgentStreamPublicationReservationPhase::NotApplied {
+            return Ok(
+                agent_protocol::AgentStreamFinalizeOutcome::PublicationNotApplied {
+                    intent: expected_intent.clone(),
+                },
+            );
         }
         let result = agent_protocol::reconcile_agent_stream_publication(
             reservation,
@@ -14823,6 +14854,13 @@ mod agent_stream_publication_reservation_tests {
         coordinator
             .mark_agent_stream_publication_not_applied(&finalize, &attempt_one, &intent)
             .expect("attempt one receives exact NotApplied evidence");
+        assert!(matches!(
+            coordinator
+                .reconcile_agent_stream(&finalize, &intent, &mut provider)
+                .expect("durable NotApplied replays without observation"),
+            AgentStreamFinalizeOutcome::PublicationNotApplied { .. }
+        ));
+        assert_eq!(provider.observe_calls, 0);
         let not_applied = current_agent_stream(&mut coordinator, STREAM_ID);
         let attempt_two = coordinator
             .rearm_agent_stream_publication(&finalize, &not_applied)

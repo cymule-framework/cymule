@@ -10016,10 +10016,8 @@ impl AgentStreamFinalizeOutcome {
     #[must_use]
     pub const fn publication_intent(&self) -> Option<&AgentStreamPublicationIntent> {
         match self {
-            Self::Committed { .. } => None,
-            Self::PublicationNotApplied { intent } | Self::PublicationOutcomeUnknown { intent } => {
-                Some(intent)
-            }
+            Self::Committed { .. } | Self::PublicationNotApplied { .. } => None,
+            Self::PublicationOutcomeUnknown { intent } => Some(intent),
         }
     }
 }

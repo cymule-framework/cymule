@@ -6593,6 +6593,7 @@ pub fn reachable_state_root_objects<R: StateRootResolver + ?Sized>(
     audit_run_current_memberships(manifest, resolver)?;
     audit_component_attempt_frontiers(manifest, resolver)?;
     audit_pending_wait_sources(manifest, resolver)?;
+    audit_agent_catalog_closure(&materialized)?;
     audit_agent_command_closure(&materialized)?;
     audit_agent_session_closure(manifest, resolver, &materialized)?;
     audit_agent_update_closure(manifest, resolver, &materialized)?;
@@ -6624,17 +6625,25 @@ fn audit_control_receipts<R: StateRootResolver + ?Sized>(
         let receipt = value.decode(StateRootLeafKind::EffectResolutionReceipt)?;
         verify_effect_resolution_receipt_leaf(&manifest.roots, &key, &receipt, &mut overlay)?;
     }
-    for (key, value) in materialize_map(&manifest.roots.coupled_checkpoint_receipts, &mut overlay)?
-    {
-        let receipt: crate::CoupledCheckpointReceipt =
-            value.decode(StateRootLeafKind::CoupledCheckpointReceipt)?;
-        receipt.verify()?;
-        if key != receipt.coupling_id {
-            return Err(DurableError::Integrity {
-                code: "state_root_coupled_checkpoint_receipt_key_mismatch".to_owned(),
-                message: "Coupled checkpoint receipt changed its exact StateRoot key".to_owned(),
-            });
-        }
+    let coupled_keys = materialize_map(&manifest.roots.coupled_checkpoint_receipts, &mut overlay)?
+        .into_keys()
+        .collect::<Vec<_>>();
+    drop(overlay);
+    for key in coupled_keys {
+        let receipt =
+            load_coupled_checkpoint_receipt(manifest, resolver, &key)?.ok_or_else(|| {
+                DurableError::Integrity {
+                    code: "state_root_coupled_checkpoint_receipt_missing".to_owned(),
+                    message: "Coupled checkpoint receipt disappeared during full audit".to_owned(),
+                }
+            })?;
+        let mut overlay = ObjectOverlay::new(&mut *resolver);
+        validate_coupled_checkpoint_history(
+            &manifest.roots,
+            &manifest.machine_frontier.authority_root,
+            &receipt,
+            &mut overlay,
+        )?;
     }
     Ok(())
 }
@@ -6646,6 +6655,51 @@ fn agent_tool_is_terminal(tool: &cymule_profile_protocol::agent::AgentToolCurren
             | cymule_profile_protocol::agent::ToolCallStatus::Failed
             | cymule_profile_protocol::agent::ToolCallStatus::Cancelled
     )
+}
+
+fn agent_receipt_catalog_record(
+    receipt: &cymule_profile_protocol::agent::AgentCommandReceipt,
+) -> Option<&cymule_profile_protocol::resource::ResourceCatalogRecord> {
+    match &receipt.outcome {
+        cymule_profile_protocol::agent::AgentCommandOutcome::Stream(
+            cymule_profile_protocol::agent::AgentStreamPostcondition {
+                effect:
+                    cymule_profile_protocol::agent::AgentStreamEffect::Finalized {
+                        publication_record,
+                        ..
+                    },
+                ..
+            },
+        ) => publication_record.as_ref(),
+        _ => None,
+    }
+}
+
+fn audit_agent_catalog_closure(materialized: &MaterializedStateRoots) -> DurableResult<()> {
+    let receipts: BTreeMap<String, cymule_profile_protocol::agent::AgentCommandReceipt> =
+        decode_family_map(
+            &materialized.collections,
+            StateRootFamily::AgentCommandReceipts,
+            StateRootLeafKind::AgentCommandReceipt,
+        )?;
+    let records: BTreeMap<String, cymule_profile_protocol::resource::ResourceCatalogRecord> =
+        decode_family_map(
+            &materialized.collections,
+            StateRootFamily::ResourceCatalogRecords,
+            StateRootLeafKind::ResourceCatalogRecord,
+        )?;
+    let expected = receipts
+        .values()
+        .filter_map(agent_receipt_catalog_record)
+        .map(|record| (record.record_id.clone(), record.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if records != expected {
+        return Err(DurableError::Integrity {
+            code: "agent_resource_catalog_origin_mismatch".to_owned(),
+            message: "Resource catalog records differ from terminal Agent receipts".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn audit_agent_command_closure(materialized: &MaterializedStateRoots) -> DurableResult<()> {
@@ -9349,6 +9403,7 @@ fn validate_state_root_sidecars<R: StateRootResolver + ?Sized>(
     validate_agent_update_operation_set(operations, roots, overlay)?;
     validate_agent_stream_reservation_operation_set(current, operations, roots, overlay)?;
     validate_agent_owned_current_operation_set(operations, roots, overlay)?;
+    validate_agent_catalog_operation_set(operations)?;
     validate_agent_target_claim_operation_set(operations, roots, overlay)?;
     for operation in operations {
         match operation {
@@ -9481,6 +9536,39 @@ fn validate_agent_command_operation_set(
                     .to_owned(),
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_agent_catalog_operation_set(
+    operations: &[crate::DurableOperation],
+) -> DurableResult<()> {
+    let mut expected = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            crate::DurableOperation::PutAgentCommandReceipt { value } => {
+                agent_receipt_catalog_record(value).cloned()
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for value in operations.iter().filter_map(|operation| match operation {
+        crate::DurableOperation::PutResourceCatalogRecord { value } => Some(value),
+        _ => None,
+    }) {
+        if !remove_exact(&mut expected, value) {
+            return Err(DurableError::Integrity {
+                code: "agent_resource_catalog_operation_unowned".to_owned(),
+                message: "Resource catalog record has no exact Agent receipt owner".to_owned(),
+            });
+        }
+    }
+    if !expected.is_empty() {
+        return Err(DurableError::Integrity {
+            code: "agent_resource_catalog_operation_missing".to_owned(),
+            message: "Agent receipt did not atomically write its Resource catalog record"
+                .to_owned(),
+        });
     }
     Ok(())
 }

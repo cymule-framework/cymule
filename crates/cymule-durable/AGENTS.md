@@ -339,7 +339,11 @@
   Provider results retain and exact-match the complete DispatchClaimed
   reservation, so a late NotApplied or Published result cannot settle a later
   rearmed attempt. Full audit also exact-matches every keyed Agent current and
-  coupled-checkpoint receipt to its physical map key.
+  fully loads every coupled-checkpoint receipt from its physical map key,
+  including journal, AgentWorkspace Artifact, and ResourceHandoff
+  Machine/Wait/Continuation/receipt closure. Resource catalog records are
+  one-to-one sidecars of their terminal Agent Finalize receipts at CAS and audit
+  boundaries.
   The target claim's exact-key current and monotonic generation are its bounded
   lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
   the retained source, and advances by one. Do not add a predecessor journal or
