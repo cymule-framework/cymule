@@ -4,7 +4,7 @@
     "generation": "source-0.2.0-unreleased-generation-3",
     "workspace_version": "0.2.0",
     "state": "source",
-    "source_snapshot_digest": "sha256:6ff347f6c886cb904ee6fdfd4b698bb8f536c30eda94d3cbc25ced6c4163436d",
+    "source_snapshot_digest": "sha256:870e85bfcbf5c62ac1c7036a8a935c1a637112d53ae4db2fad2a90ff648f3b82",
     "baseline_source_snapshot_digest": "sha256:e3783a1ae7e61f331d90f7d456f60eb132712ba1f70e1b7f2363078a3c31540a",
     "predecessor_registry_digest": null,
     "predecessor_source_snapshot_digest": null,

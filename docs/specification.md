@@ -774,13 +774,15 @@ revision authenticate that exact representation history. A prefix
 different transition histories for the same materialized sequence have the
 same physical root.
 
-Generation `/5` adds the fixed `agent_target_claims` map and
-`agent_target_claim_current` leaf kind. The StateRoot writer accepts only the
-closed `ApplyAgentTargetClaim` transition, exact-compares its retained source,
-and exposes no generic put/remove seam. Full audit closes claims and
-Message/Tool/stream targets in both directions; reachability and GC retain the
-current generation while reclaiming superseded value objects. StateRoot/value
-`/4` has no reader or importer; retained internal domains follow the registered
+Generation `/6` adds the fixed `agent_target_claims` current map, immutable
+`agent_target_claim_generations` membership index, and their closed leaf kinds.
+The StateRoot writer accepts only the closed `ApplyAgentTargetClaim` transition,
+exact-compares its retained source, writes current plus generation slot in the
+same CAS, and exposes no generic put/remove seam. Full audit closes claims and
+Message/Tool/stream targets in both directions and validates each actual
+gap-free generation sequence once; reachability and GC retain every immutable
+slot while reclaiming superseded current value objects. StateRoot/value `/4`
+has no reader or importer; retained internal domains follow the registered
 drain/export/recreate/requeue runbook.
 
 The head MUST bind the semantic revision, manifest ID, semantic sequence,

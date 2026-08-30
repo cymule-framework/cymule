@@ -9451,7 +9451,7 @@ fn verify_agent_input_receipt_graph<R: crate::StateRootResolver + ?Sized>(
     }
 }
 
-fn load_verified_agent_origin<R: crate::StateRootResolver + ?Sized>(
+fn load_agent_origin_receipt<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     command_id: &str,
@@ -9470,6 +9470,18 @@ fn load_verified_agent_origin<R: crate::StateRootResolver + ?Sized>(
             message: format!("Agent current lost receipt for admitting command {command_id}"),
         })?;
     receipt.verify_for(&command)?;
+    Ok((command, receipt))
+}
+
+fn load_verified_agent_origin<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    command_id: &str,
+) -> DurableResult<(
+    agent_protocol::AgentCommand,
+    agent_protocol::AgentCommandReceipt,
+)> {
+    let (command, receipt) = load_agent_origin_receipt(manifest, resolver, command_id)?;
     verify_agent_update_receipt_graph(manifest, resolver, &command, &receipt)?;
     match &command.action {
         agent_protocol::AgentCommandAction::Input(_) => {
@@ -11019,7 +11031,7 @@ pub(crate) fn verify_agent_target_claim_current_origin<R: crate::StateRootResolv
         }
         return Ok(());
     }
-    let (command, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
+    let (command, receipt) = load_agent_origin_receipt(manifest, resolver, &current.admitted_by)?;
     agent_receipt_target_claim_transitions(&command, &receipt)?
         .into_iter()
         .find(|transition| transition.current == *current)
