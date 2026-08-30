@@ -2129,7 +2129,7 @@ mod tests {
     impl AgentProviders for WorkspaceProviders {
         fn publish_agent_stream(
             &mut self,
-            _: &agent_protocol::AgentStreamPublicationIntent,
+            _: &agent_protocol::AgentStreamPublicationReservation,
         ) -> cymule_profile_protocol::ProtocolResult<
             agent_protocol::AgentStreamPublicationObservation,
         > {
@@ -2137,9 +2137,9 @@ mod tests {
                 "workspace test has no stream provider".to_owned(),
             ))
         }
-        fn observe_agent_stream_publication(
+        fn reconcile_agent_stream_publication(
             &mut self,
-            _: &agent_protocol::AgentStreamPublicationIntent,
+            _: &agent_protocol::AgentStreamPublicationReservation,
         ) -> cymule_profile_protocol::ProtocolResult<
             agent_protocol::AgentStreamPublicationObservation,
         > {

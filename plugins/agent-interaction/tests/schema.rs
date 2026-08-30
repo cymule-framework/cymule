@@ -13,9 +13,9 @@ use cymule_profile_protocol::agent::{
     AgentStreamDelivery, AgentStreamEffect, AgentStreamPublicationContent,
     AgentStreamPublicationIntent, AgentStreamPublicationReservation, AgentStreamResourceSource,
     AgentStreamSource, AgentStreamState, AgentStreamTarget, AgentStreamTargetSource,
-    AgentWorkspaceCommand, AgentWorkspaceSource, ContextRequest, ContextSnapshot,
-    MAX_AGENT_RECOVERY_OBSERVATIONS, MAX_AGENT_VALUE_ENTRIES, MessageRole, ModelRequest,
-    reserve_agent_stream_publication,
+    AgentTargetClaimCurrent, AgentWorkspaceCommand, AgentWorkspaceSource, ContextRequest,
+    ContextSnapshot, MAX_AGENT_RECOVERY_OBSERVATIONS, MAX_AGENT_VALUE_ENTRIES, MessageRole,
+    ModelRequest, reserve_agent_stream_publication,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -139,7 +139,7 @@ fn stream_current() -> Value {
 #[test]
 fn schema_accepts_terminal_currents_and_rejects_removed_aggregate_records() {
     let schema = agent_schema();
-    assert_eq!(schema["title"], "Cymule Agent Protocol cymule.agent/9");
+    assert_eq!(schema["title"], "Cymule Agent Protocol cymule.agent/10");
     assert_eq!(
         schema["$id"],
         "https://cymule.dev/schemas/agent-protocol.schema.json"
@@ -1232,6 +1232,60 @@ fn assert_reservation_predecessor_rejected(wire: &Value) {
     );
 }
 
+fn assert_target_claim_predecessor_generation_constraints(
+    validator: &jsonschema::Validator,
+    genesis: &Value,
+) {
+    let predecessor_claim_id = json!(format!("sha256:{}", "d".repeat(64)));
+    let predecessor_admitted_by = json!(format!("sha256:{}", "e".repeat(64)));
+    for (field, predecessor) in [
+        ("predecessor_claim_id", &predecessor_claim_id),
+        ("predecessor_admitted_by", &predecessor_admitted_by),
+    ] {
+        let mut generation_one_with_predecessor = genesis.clone();
+        generation_one_with_predecessor[field] = predecessor.clone();
+        assert!(!validator.is_valid(&generation_one_with_predecessor));
+        assert!(
+            serde_json::from_value::<AgentTargetClaimCurrent>(generation_one_with_predecessor)
+                .unwrap()
+                .verify()
+                .is_err()
+        );
+    }
+
+    let mut later_generation = genesis.clone();
+    later_generation["generation"] = json!(2);
+    later_generation["predecessor_claim_id"] = predecessor_claim_id;
+    later_generation["predecessor_admitted_by"] = predecessor_admitted_by;
+    validator
+        .validate(&later_generation)
+        .expect("later target claim with exact predecessor identities validates");
+    let mut exact_limit = later_generation.clone();
+    exact_limit["generation"] = json!(9_007_199_254_740_991_u64);
+    validator
+        .validate(&exact_limit)
+        .expect("exact JSON integer generation limit validates");
+    exact_limit["generation"] = json!(9_007_199_254_740_992_u64);
+    assert!(!validator.is_valid(&exact_limit));
+    for null_fields in [
+        &["predecessor_claim_id"][..],
+        &["predecessor_admitted_by"][..],
+        &["predecessor_claim_id", "predecessor_admitted_by"][..],
+    ] {
+        let mut incomplete_predecessor = later_generation.clone();
+        for field in null_fields {
+            incomplete_predecessor[*field] = Value::Null;
+        }
+        assert!(!validator.is_valid(&incomplete_predecessor));
+        assert!(
+            serde_json::from_value::<AgentTargetClaimCurrent>(incomplete_predecessor)
+                .unwrap()
+                .verify()
+                .is_err()
+        );
+    }
+}
+
 #[test]
 fn target_claim_current_is_role_free_required_and_phase_closed() {
     let open = AgentStreamCommand::Open {
@@ -1282,7 +1336,8 @@ fn target_claim_current_is_role_free_required_and_phase_closed() {
     };
     let reserved = reserve_agent_stream_publication(&source, &command).unwrap();
     let wire = serde_json::to_value(&reserved.target_claim.current).unwrap();
-    schema_validator("agentTargetClaimCurrent")
+    let target_claim_validator = schema_validator("agentTargetClaimCurrent");
+    target_claim_validator
         .validate(&wire)
         .expect("framework Reserved target claim validates");
     assert!(wire["target"].get("role").is_none());
@@ -1292,26 +1347,31 @@ fn target_claim_current_is_role_free_required_and_phase_closed() {
         "session_id",
         "target",
         "generation",
+        "predecessor_claim_id",
+        "predecessor_admitted_by",
         "phase",
         "admitted_by",
     ] {
         let mut missing = wire.clone();
         missing.as_object_mut().unwrap().remove(field);
-        assert!(!schema_validator("agentTargetClaimCurrent").is_valid(&missing));
+        assert!(serde_json::from_value::<AgentTargetClaimCurrent>(missing.clone()).is_err());
+        assert!(!target_claim_validator.is_valid(&missing));
     }
     let mut legacy = wire.clone();
     legacy["current_version"] = Value::String("cymule.agent-target-claim-current/0".to_owned());
-    assert!(!schema_validator("agentTargetClaimCurrent").is_valid(&legacy));
+    assert!(!target_claim_validator.is_valid(&legacy));
     let mut materialized = wire.clone();
     materialized["phase"] = json!({"phase": "materialized"});
-    assert!(schema_validator("agentTargetClaimCurrent").is_valid(&materialized));
+    assert!(target_claim_validator.is_valid(&materialized));
+    assert_target_claim_predecessor_generation_constraints(&target_claim_validator, &wire);
+
     let mut released = wire;
     released["phase"] = json!({
         "phase": "released",
         "stream_id": "stream:target-claim-schema",
         "reservation_id": format!("sha256:{}", "d".repeat(64))
     });
-    assert!(schema_validator("agentTargetClaimCurrent").is_valid(&released));
+    assert!(target_claim_validator.is_valid(&released));
 }
 
 #[test]

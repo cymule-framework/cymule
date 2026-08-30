@@ -136,14 +136,14 @@ struct UnusedAgentProviders;
 impl agent_protocol::AgentProviders for UnusedAgentProviders {
     fn publish_agent_stream(
         &mut self,
-        _intent: &agent_protocol::AgentStreamPublicationIntent,
+        _dispatch: &agent_protocol::AgentStreamPublicationReservation,
     ) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
         unreachable!("Agent Session message persistence does not publish streams")
     }
 
-    fn observe_agent_stream_publication(
+    fn reconcile_agent_stream_publication(
         &mut self,
-        _intent: &agent_protocol::AgentStreamPublicationIntent,
+        _dispatch: &agent_protocol::AgentStreamPublicationReservation,
     ) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
         unreachable!("Agent Session message persistence does not observe streams")
     }

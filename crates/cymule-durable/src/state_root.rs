@@ -30,9 +30,9 @@ pub(crate) mod pinned_machine;
 pub(crate) mod pinned_wait;
 
 /// Fixed-shape durable root manifest schema.
-pub const STATE_ROOT_MANIFEST_VERSION: &str = "cymule.durable-state-root/5";
+pub const STATE_ROOT_MANIFEST_VERSION: &str = "cymule.durable-state-root/6";
 /// Immutable canonical JSON value object schema.
-pub const STATE_ROOT_VALUE_VERSION: &str = "cymule.durable-state-value/5";
+pub const STATE_ROOT_VALUE_VERSION: &str = "cymule.durable-state-value/6";
 /// Domain-separated revision chain over exact persistent roots.
 pub const DURABLE_REVISION_VERSION: &str = "cymule.durable-revision/3";
 pub const RUN_QUERY_INDEXES_VERSION: &str = "cymule.run-query-indexes/3";
@@ -150,6 +150,8 @@ pub enum StateRootLeafKind {
     AgentToolCurrent,
     /// Exact generation-bearing Agent target claim.
     AgentTargetClaimCurrent,
+    /// Immutable membership record for one Agent target-claim generation.
+    AgentTargetClaimGenerationRecord,
     /// Keyed Agent elicitation projection.
     AgentElicitationCurrent,
     /// Keyed Agent host-occurrence projection.
@@ -1669,6 +1671,9 @@ fn verify_leaf_bytes(kind: StateRootLeafKind, bytes: &[u8]) -> DurableResult<()>
         Kind::AgentMessageCurrent => verify_typed_leaf::<agent::AgentMessageCurrent>(bytes),
         Kind::AgentToolCurrent => verify_typed_leaf::<agent::AgentToolCurrent>(bytes),
         Kind::AgentTargetClaimCurrent => verify_typed_leaf::<agent::AgentTargetClaimCurrent>(bytes),
+        Kind::AgentTargetClaimGenerationRecord => {
+            verify_typed_leaf::<agent::AgentTargetClaimGenerationRecord>(bytes)
+        }
         Kind::AgentElicitationCurrent => verify_typed_leaf::<agent::AgentElicitationCurrent>(bytes),
         Kind::AgentOccurrenceCurrent => verify_typed_leaf::<agent::AgentOccurrenceCurrent>(bytes),
         Kind::AgentStreamCurrent => verify_typed_leaf::<agent::AgentStreamCurrent>(bytes),
@@ -2154,6 +2159,8 @@ pub enum StateRootFamily {
     AgentTools,
     /// Agent target claims keyed by Session, target kind, and local identity.
     AgentTargetClaims,
+    /// Immutable Agent target-claim generation records keyed by exact slot.
+    AgentTargetClaimGenerations,
     /// Agent elicitation currents keyed by protocol storage identity.
     AgentElicitations,
     /// Agent occurrence currents keyed by protocol storage identity.
@@ -2244,7 +2251,7 @@ pub enum StateRootFamily {
 
 impl StateRootFamily {
     /// Every family in manifest field order.
-    pub const ALL: [Self; 88] = [
+    pub const ALL: [Self; 89] = [
         Self::MachinePlans,
         Self::MachineArtifacts,
         Self::MachineCommands,
@@ -2290,6 +2297,7 @@ impl StateRootFamily {
         Self::AgentMessageIndexes,
         Self::AgentTools,
         Self::AgentTargetClaims,
+        Self::AgentTargetClaimGenerations,
         Self::AgentElicitations,
         Self::AgentOccurrences,
         Self::AgentUnresolvedOccurrenceIndexes,
@@ -2362,6 +2370,9 @@ impl StateRootFamily {
     ];
 
     const fn expected_leaf_kind(self) -> Option<StateRootLeafKind> {
+        if self.is_agent_family() {
+            return self.expected_agent_leaf_kind();
+        }
         match self {
             Self::MachineCommands
             | Self::RunQueryIndexes
@@ -2371,10 +2382,7 @@ impl StateRootFamily {
             | Self::ApplicationJournalRecordManifests
             | Self::ResourceHandoffSlots
             | Self::ResourceHandoffIndexes
-            | Self::ResourceHandoffActivationIndexes
-            | Self::AgentMessageIndexes
-            | Self::AgentUnresolvedOccurrenceIndexes
-            | Self::AgentOpenStreamIndexes => None,
+            | Self::ResourceHandoffActivationIndexes => None,
             Self::MachinePlans => Some(StateRootLeafKind::MachinePlan),
             Self::MachineArtifacts => Some(StateRootLeafKind::MachineArtifact),
             Self::MachineCommandBatches => Some(StateRootLeafKind::MachineCommandBatch),
@@ -2406,23 +2414,6 @@ impl StateRootFamily {
             Self::ResourceHandoffActivationCurrent | Self::ResourceHandoffActivationsByTransfer => {
                 Some(StateRootLeafKind::ResourceHandoffActivationCurrent)
             }
-            Self::AgentCommands => Some(StateRootLeafKind::AgentCommand),
-            Self::AgentCommandReceipts => Some(StateRootLeafKind::AgentCommandReceipt),
-            Self::AgentInputSuspensionReceipts => {
-                Some(StateRootLeafKind::AgentInputSuspensionReceipt)
-            }
-            Self::AgentInputCompletionReceipts => {
-                Some(StateRootLeafKind::AgentInputCompletionReceipt)
-            }
-            Self::AgentSessions => Some(StateRootLeafKind::AgentSessionCurrent),
-            Self::AgentUpdates => Some(StateRootLeafKind::AgentUpdateCurrent),
-            Self::AgentMessages => Some(StateRootLeafKind::AgentMessageCurrent),
-            Self::AgentTools => Some(StateRootLeafKind::AgentToolCurrent),
-            Self::AgentTargetClaims => Some(StateRootLeafKind::AgentTargetClaimCurrent),
-            Self::AgentElicitations => Some(StateRootLeafKind::AgentElicitationCurrent),
-            Self::AgentOccurrences => Some(StateRootLeafKind::AgentOccurrenceCurrent),
-            Self::AgentStreams => Some(StateRootLeafKind::AgentStreamCurrent),
-            Self::AgentStreamChunks => Some(StateRootLeafKind::AgentStreamChunkCurrent),
             Self::EvolutionCurrents => Some(StateRootLeafKind::EvolutionCurrent),
             Self::EvolutionCommandAliases => Some(StateRootLeafKind::EvolutionCommandAlias),
             Self::EvolutionReceipts => Some(StateRootLeafKind::EvolutionPersistenceReceipt),
@@ -2460,6 +2451,59 @@ impl StateRootFamily {
             | Self::VirtualMigrations
             | Self::VirtualCertificates => Some(StateRootLeafKind::VirtualStateLeaf),
             Self::ResourceCatalogRecords => Some(StateRootLeafKind::ResourceCatalogRecord),
+            _ => unreachable!(),
+        }
+    }
+
+    const fn is_agent_family(self) -> bool {
+        matches!(
+            self,
+            Self::AgentCommands
+                | Self::AgentCommandReceipts
+                | Self::AgentInputSuspensionReceipts
+                | Self::AgentInputCompletionReceipts
+                | Self::AgentSessions
+                | Self::AgentUpdates
+                | Self::AgentMessages
+                | Self::AgentMessageIndexes
+                | Self::AgentTools
+                | Self::AgentTargetClaims
+                | Self::AgentTargetClaimGenerations
+                | Self::AgentElicitations
+                | Self::AgentOccurrences
+                | Self::AgentUnresolvedOccurrenceIndexes
+                | Self::AgentStreams
+                | Self::AgentOpenStreamIndexes
+                | Self::AgentStreamChunks
+        )
+    }
+
+    const fn expected_agent_leaf_kind(self) -> Option<StateRootLeafKind> {
+        match self {
+            Self::AgentMessageIndexes
+            | Self::AgentUnresolvedOccurrenceIndexes
+            | Self::AgentOpenStreamIndexes => None,
+            Self::AgentCommands => Some(StateRootLeafKind::AgentCommand),
+            Self::AgentCommandReceipts => Some(StateRootLeafKind::AgentCommandReceipt),
+            Self::AgentInputSuspensionReceipts => {
+                Some(StateRootLeafKind::AgentInputSuspensionReceipt)
+            }
+            Self::AgentInputCompletionReceipts => {
+                Some(StateRootLeafKind::AgentInputCompletionReceipt)
+            }
+            Self::AgentSessions => Some(StateRootLeafKind::AgentSessionCurrent),
+            Self::AgentUpdates => Some(StateRootLeafKind::AgentUpdateCurrent),
+            Self::AgentMessages => Some(StateRootLeafKind::AgentMessageCurrent),
+            Self::AgentTools => Some(StateRootLeafKind::AgentToolCurrent),
+            Self::AgentTargetClaims => Some(StateRootLeafKind::AgentTargetClaimCurrent),
+            Self::AgentTargetClaimGenerations => {
+                Some(StateRootLeafKind::AgentTargetClaimGenerationRecord)
+            }
+            Self::AgentElicitations => Some(StateRootLeafKind::AgentElicitationCurrent),
+            Self::AgentOccurrences => Some(StateRootLeafKind::AgentOccurrenceCurrent),
+            Self::AgentStreams => Some(StateRootLeafKind::AgentStreamCurrent),
+            Self::AgentStreamChunks => Some(StateRootLeafKind::AgentStreamChunkCurrent),
+            _ => unreachable!(),
         }
     }
 }
@@ -2754,6 +2798,8 @@ pub struct StateRoots {
     pub agent_tools: MapRoot,
     /// Exact generation-bearing Agent target claims.
     pub agent_target_claims: MapRoot,
+    /// Immutable exact generation membership for Agent target claims.
+    pub agent_target_claim_generations: MapRoot,
     /// Agent elicitation currents.
     pub agent_elicitations: MapRoot,
     /// Agent occurrence currents.
@@ -2830,6 +2876,7 @@ impl StateRoots {
             agent_message_indexes: MapRoot::empty(),
             agent_tools: MapRoot::empty(),
             agent_target_claims: MapRoot::empty(),
+            agent_target_claim_generations: MapRoot::empty(),
             agent_elicitations: MapRoot::empty(),
             agent_occurrences: MapRoot::empty(),
             agent_unresolved_occurrence_indexes: MapRoot::empty(),
@@ -2899,6 +2946,7 @@ impl StateRoots {
             Family::AgentMessageIndexes => &self.agent_message_indexes,
             Family::AgentTools => &self.agent_tools,
             Family::AgentTargetClaims => &self.agent_target_claims,
+            Family::AgentTargetClaimGenerations => &self.agent_target_claim_generations,
             Family::AgentElicitations => &self.agent_elicitations,
             Family::AgentOccurrences => &self.agent_occurrences,
             Family::AgentUnresolvedOccurrenceIndexes => &self.agent_unresolved_occurrence_indexes,
@@ -5343,6 +5391,41 @@ pub(crate) fn load_agent_target_claim_current<R: StateRootResolver + ?Sized>(
     Ok(current)
 }
 
+pub(crate) fn load_agent_target_claim_generation<R: StateRootResolver + ?Sized>(
+    manifest: &StateRootManifest,
+    resolver: &mut R,
+    session_id: &str,
+    target: &cymule_profile_protocol::agent::AgentTargetClaimTarget,
+    generation: u64,
+) -> DurableResult<Option<cymule_profile_protocol::agent::AgentTargetClaimGenerationRecord>> {
+    use cymule_profile_protocol::agent::{
+        AgentTargetClaimGenerationRecord, agent_target_claim_generation_key,
+    };
+
+    let key = agent_target_claim_generation_key(session_id, target, generation)?;
+    let mut overlay = ObjectOverlay::new(resolver);
+    let record: Option<AgentTargetClaimGenerationRecord> = map_get(
+        manifest
+            .roots
+            .get(StateRootFamily::AgentTargetClaimGenerations),
+        &key,
+        &mut overlay,
+    )?
+    .map(|value| value.decode(StateRootLeafKind::AgentTargetClaimGenerationRecord))
+    .transpose()?;
+    if record.as_ref().is_some_and(|record| {
+        record.session_id != session_id
+            || record.target != *target
+            || record.generation != generation
+    }) {
+        return Err(DurableError::Integrity {
+            code: "state_root_agent_target_claim_generation_key_mismatch".to_owned(),
+            message: "Agent target-claim generation record changed its exact key".to_owned(),
+        });
+    }
+    Ok(record)
+}
+
 load_agent_exact_current!(
     load_agent_elicitation_current,
     cymule_profile_protocol::agent::AgentElicitationCurrent,
@@ -6728,6 +6811,24 @@ fn audit_agent_command_closure(materialized: &MaterializedStateRoots) -> Durable
         }
         receipt_owner_ids.insert(receipt.command_id.clone());
     }
+    for stream in streams.values() {
+        if let Some(reservation) = &stream.publication_reservation {
+            audit_agent_reservation_command(&commands, stream, reservation)?;
+        }
+    }
+    for receipt in receipts.values() {
+        if let AgentCommandSource::Stream(source) = &receipt.source {
+            match source.as_ref() {
+                AgentStreamSource::Abort { stream, .. }
+                | AgentStreamSource::Finalize { stream, .. } => {
+                    if let Some(reservation) = &stream.publication_reservation {
+                        audit_agent_reservation_command(&commands, stream, reservation)?;
+                    }
+                }
+                AgentStreamSource::Open { .. } | AgentStreamSource::AppendChunk { .. } => {}
+            }
+        }
+    }
     let live_reservation_owner_ids = streams
         .values()
         .filter_map(|stream| {
@@ -6765,6 +6866,38 @@ fn audit_agent_command_closure(materialized: &MaterializedStateRoots) -> Durable
                 message: "Agent command has no receipt or publication reservation owner".to_owned(),
             });
         }
+    }
+    Ok(())
+}
+
+fn audit_agent_reservation_command(
+    commands: &BTreeMap<String, cymule_profile_protocol::agent::AgentCommand>,
+    stream: &cymule_profile_protocol::agent::AgentStreamCurrent,
+    reservation: &cymule_profile_protocol::agent::AgentStreamPublicationReservation,
+) -> DurableResult<()> {
+    use cymule_profile_protocol::agent::{AgentCommandAction, AgentStreamCommand};
+
+    reservation.verify()?;
+    let command = commands
+        .get(reservation.intent.command_id())
+        .ok_or_else(|| DurableError::Integrity {
+            code: "agent_stream_reservation_command_missing".to_owned(),
+            message: "Agent publication reservation lost its Finalize command".to_owned(),
+        })?;
+    command.verify()?;
+    if command.source_revision != reservation.intent.source_revision()
+        || !matches!(
+            &command.action,
+            AgentCommandAction::Stream(AgentStreamCommand::Finalize {
+                session_id,
+                stream_id,
+            }) if session_id == &stream.session_id && stream_id == &stream.stream_id
+        )
+    {
+        return Err(DurableError::Integrity {
+            code: "agent_stream_reservation_command_mismatch".to_owned(),
+            message: "Agent publication reservation changed its exact Finalize command".to_owned(),
+        });
     }
     Ok(())
 }
@@ -7183,9 +7316,7 @@ fn audit_agent_claim_currents<R: StateRootResolver + ?Sized>(
     use cymule_profile_protocol::agent::{AgentTargetClaimPhase, AgentTargetClaimTarget};
 
     for claim in claims.values() {
-        let _ = crate::coordinator::verify_agent_target_claim_current_origin(
-            manifest, resolver, claim,
-        )?;
+        crate::coordinator::verify_agent_target_claim_current_origin(manifest, resolver, claim)?;
         if let AgentTargetClaimPhase::Released { stream_id, .. } = &claim.phase {
             let stream =
                 load_agent_stream_current(manifest, resolver, &claim.session_id, stream_id)?
@@ -7423,7 +7554,8 @@ fn audit_agent_target_claim_closure<R: StateRootResolver + ?Sized>(
     materialized: &MaterializedStateRoots,
 ) -> DurableResult<()> {
     use cymule_profile_protocol::agent::{
-        AgentMessageCurrent, AgentStreamCurrent, AgentTargetClaimCurrent, AgentToolCurrent,
+        AgentCommand, AgentCommandReceipt, AgentMessageCurrent, AgentStreamCurrent,
+        AgentTargetClaimCurrent, AgentTargetClaimGenerationRecord, AgentToolCurrent,
     };
 
     let claims: BTreeMap<String, AgentTargetClaimCurrent> = decode_family_map(
@@ -7459,6 +7591,21 @@ fn audit_agent_target_claim_closure<R: StateRootResolver + ?Sized>(
         StateRootFamily::AgentStreams,
         StateRootLeafKind::AgentStreamCurrent,
     )?;
+    let generations: BTreeMap<String, AgentTargetClaimGenerationRecord> = decode_family_map(
+        &materialized.collections,
+        StateRootFamily::AgentTargetClaimGenerations,
+        StateRootLeafKind::AgentTargetClaimGenerationRecord,
+    )?;
+    let commands: BTreeMap<String, AgentCommand> = decode_family_map(
+        &materialized.collections,
+        StateRootFamily::AgentCommands,
+        StateRootLeafKind::AgentCommand,
+    )?;
+    let receipts: BTreeMap<String, AgentCommandReceipt> = decode_family_map(
+        &materialized.collections,
+        StateRootFamily::AgentCommandReceipts,
+        StateRootLeafKind::AgentCommandReceipt,
+    )?;
     for current in messages.values() {
         current.verify()?;
     }
@@ -7469,11 +7616,190 @@ fn audit_agent_target_claim_closure<R: StateRootResolver + ?Sized>(
         current.verify()?;
     }
 
+    audit_agent_target_claim_generations(&claims, &generations, &commands, &receipts)?;
     audit_agent_claim_currents(manifest, resolver, &claims, &messages, &tools)?;
     audit_agent_message_claims(&claims, &messages)?;
     audit_agent_tool_claims(&claims, &tools)?;
     audit_agent_stream_claims(manifest, resolver, &claims, &streams)?;
     Ok(())
+}
+
+fn audit_agent_target_claim_generations(
+    claims: &BTreeMap<String, cymule_profile_protocol::agent::AgentTargetClaimCurrent>,
+    generations: &BTreeMap<
+        String,
+        cymule_profile_protocol::agent::AgentTargetClaimGenerationRecord,
+    >,
+    commands: &BTreeMap<String, cymule_profile_protocol::agent::AgentCommand>,
+    receipts: &BTreeMap<String, cymule_profile_protocol::agent::AgentCommandReceipt>,
+) -> DurableResult<()> {
+    use cymule_profile_protocol::agent::agent_target_claim_key;
+
+    let mut by_target = BTreeMap::<
+        String,
+        Vec<(
+            &str,
+            &cymule_profile_protocol::agent::AgentTargetClaimGenerationRecord,
+        )>,
+    >::new();
+    for (key, record) in generations {
+        record.verify()?;
+        by_target
+            .entry(agent_target_claim_key(&record.session_id, &record.target)?)
+            .or_default()
+            .push((key, record));
+    }
+    for (stored_current_key, current) in claims {
+        let target_key = agent_target_claim_key(&current.session_id, &current.target)?;
+        if stored_current_key != &target_key {
+            return Err(DurableError::Integrity {
+                code: "agent_target_claim_current_key_mismatch".to_owned(),
+                message: "Agent target-claim current changed its exact target key".to_owned(),
+            });
+        }
+        let mut records = by_target
+            .remove(&target_key)
+            .ok_or_else(|| DurableError::Integrity {
+                code: "agent_target_claim_generation_gap".to_owned(),
+                message: "Agent target claim lost its immutable generation history".to_owned(),
+            })?;
+        records.sort_by_key(|(_, record)| record.generation);
+        audit_agent_target_claim_generation_sequence(current, &records, commands, receipts)?;
+    }
+    if !by_target.is_empty() {
+        return Err(DurableError::Integrity {
+            code: "agent_target_claim_generation_orphan".to_owned(),
+            message: "Agent target-claim generation index contains an unowned slot".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn audit_agent_target_claim_generation_sequence(
+    current: &cymule_profile_protocol::agent::AgentTargetClaimCurrent,
+    records: &[(
+        &str,
+        &cymule_profile_protocol::agent::AgentTargetClaimGenerationRecord,
+    )],
+    commands: &BTreeMap<String, cymule_profile_protocol::agent::AgentCommand>,
+    receipts: &BTreeMap<String, cymule_profile_protocol::agent::AgentCommandReceipt>,
+) -> DurableResult<()> {
+    if records.first().map(|(_, record)| record.generation) != Some(1)
+        || records.last().map(|(_, record)| record.generation) != Some(current.generation)
+        || records
+            .windows(2)
+            .any(|pair| pair[0].1.generation.checked_add(1) != Some(pair[1].1.generation))
+    {
+        return Err(DurableError::Integrity {
+            code: "agent_target_claim_generation_gap".to_owned(),
+            message: "Agent target claim lost one immutable generation slot".to_owned(),
+        });
+    }
+    let mut previous: Option<cymule_profile_protocol::agent::AgentTargetClaimCurrent> = None;
+    for (index, (stored_key, record)) in records.iter().enumerate() {
+        let claim = audit_agent_target_claim_generation_record(
+            current,
+            records.get(index + 1).map(|(_, record)| *record),
+            stored_key,
+            record,
+            commands,
+            receipts,
+        )?;
+        if let Some(predecessor) = &previous
+            && (predecessor.generation.checked_add(1) != Some(claim.generation)
+                || claim.predecessor_claim_id.as_deref() != Some(predecessor.claim_id.as_str())
+                || claim.predecessor_admitted_by.as_deref()
+                    != Some(predecessor.admitted_by.as_str()))
+        {
+            return Err(DurableError::Integrity {
+                code: "agent_target_claim_generation_fork".to_owned(),
+                message: "Agent target-claim generation index forked its predecessor".to_owned(),
+            });
+        }
+        previous = Some(claim);
+    }
+    Ok(())
+}
+
+fn audit_agent_target_claim_generation_record(
+    current: &cymule_profile_protocol::agent::AgentTargetClaimCurrent,
+    successor: Option<&cymule_profile_protocol::agent::AgentTargetClaimGenerationRecord>,
+    stored_key: &str,
+    record: &cymule_profile_protocol::agent::AgentTargetClaimGenerationRecord,
+    commands: &BTreeMap<String, cymule_profile_protocol::agent::AgentCommand>,
+    receipts: &BTreeMap<String, cymule_profile_protocol::agent::AgentCommandReceipt>,
+) -> DurableResult<cymule_profile_protocol::agent::AgentTargetClaimCurrent> {
+    use cymule_profile_protocol::agent::{
+        AgentTargetClaimPhase, agent_target_claim_generation_key,
+    };
+
+    let expected_key =
+        agent_target_claim_generation_key(&record.session_id, &record.target, record.generation)?;
+    if stored_key != expected_key || !commands.contains_key(&record.admitted_by) {
+        return Err(DurableError::Integrity {
+            code: "agent_target_claim_generation_key_mismatch".to_owned(),
+            message: "Agent target-claim generation changed its slot or admitting command"
+                .to_owned(),
+        });
+    }
+    if record.generation == current.generation {
+        record.verify_for(current)?;
+        if !matches!(current.phase, AgentTargetClaimPhase::Reserved { .. })
+            && find_audited_agent_target_claim_transition(commands, receipts, record)?
+                .is_none_or(|transition| transition.current != *current)
+        {
+            return Err(DurableError::Integrity {
+                code: "agent_target_claim_generation_origin_mismatch".to_owned(),
+                message: "Current Agent target claim differs from its generation origin".to_owned(),
+            });
+        }
+        return Ok(current.clone());
+    }
+    if let Some(transition) =
+        find_audited_agent_target_claim_transition(commands, receipts, record)?
+    {
+        return Ok(transition.current);
+    }
+    let successor = successor.ok_or_else(|| DurableError::Integrity {
+        code: "agent_target_claim_generation_gap".to_owned(),
+        message: "Historical Reserved target claim lost its successor".to_owned(),
+    })?;
+    let transition = find_audited_agent_target_claim_transition(commands, receipts, successor)?
+        .ok_or_else(|| DurableError::Integrity {
+            code: "agent_target_claim_generation_origin_mismatch".to_owned(),
+            message: "Historical Reserved target claim lost its terminal successor".to_owned(),
+        })?;
+    let source = transition.source.ok_or_else(|| DurableError::Integrity {
+        code: "agent_target_claim_generation_fork".to_owned(),
+        message: "Non-genesis Agent target-claim generation lost its predecessor".to_owned(),
+    })?;
+    record.verify_for(&source)?;
+    Ok(source)
+}
+
+fn find_audited_agent_target_claim_transition(
+    commands: &BTreeMap<String, cymule_profile_protocol::agent::AgentCommand>,
+    receipts: &BTreeMap<String, cymule_profile_protocol::agent::AgentCommandReceipt>,
+    record: &cymule_profile_protocol::agent::AgentTargetClaimGenerationRecord,
+) -> DurableResult<Option<cymule_profile_protocol::agent::AgentTargetClaimTransition>> {
+    let command = commands
+        .get(&record.admitted_by)
+        .ok_or_else(|| DurableError::Integrity {
+            code: "agent_target_claim_generation_command_missing".to_owned(),
+            message: "Agent target-claim generation lost its admitting command".to_owned(),
+        })?;
+    let Some(receipt) = receipts.get(&record.admitted_by) else {
+        return Ok(None);
+    };
+    Ok(receipt_target_claim_transitions(command, receipt)?
+        .into_iter()
+        .find(|transition| {
+            transition.current.session_id == record.session_id
+                && transition.current.target == record.target
+                && transition.current.generation == record.generation
+                && transition.current.claim_id == record.claim_id
+                && transition.current.admitted_by == record.admitted_by
+        }))
 }
 
 fn audit_component_attempt_frontiers<R: StateRootResolver + ?Sized>(
@@ -14219,7 +14545,10 @@ fn apply_agent_target_claim<R: StateRootResolver + ?Sized>(
     transition: &cymule_profile_protocol::agent::AgentTargetClaimTransition,
     overlay: &mut ObjectOverlay<'_, R>,
 ) -> DurableResult<()> {
-    use cymule_profile_protocol::agent::{AgentTargetClaimCurrent, agent_target_claim_key};
+    use cymule_profile_protocol::agent::{
+        AgentTargetClaimCurrent, AgentTargetClaimGenerationRecord,
+        agent_target_claim_generation_key, agent_target_claim_key,
+    };
 
     transition.verify()?;
     let key = agent_target_claim_key(&transition.current.session_id, &transition.current.target)?;
@@ -14234,6 +14563,33 @@ fn apply_agent_target_claim<R: StateRootResolver + ?Sized>(
             message: "Agent target claim no longer matches its exact source generation".to_owned(),
         });
     }
+    let generation_record = AgentTargetClaimGenerationRecord::from_current(&transition.current)?;
+    let generation_key = agent_target_claim_generation_key(
+        &transition.current.session_id,
+        &transition.current.target,
+        transition.current.generation,
+    )?;
+    if map_get(
+        &roots.agent_target_claim_generations,
+        &generation_key,
+        overlay,
+    )?
+    .is_some()
+    {
+        return Err(DurableError::HistoryConflict {
+            code: "agent_target_claim_generation_already_exists".to_owned(),
+            message: "Agent target-claim generation slot is already occupied".to_owned(),
+        });
+    }
+    roots.agent_target_claim_generations = map_put(
+        &roots.agent_target_claim_generations,
+        &generation_key,
+        StateRootValue::encode(
+            StateRootLeafKind::AgentTargetClaimGenerationRecord,
+            &generation_record,
+        )?,
+        overlay,
+    )?;
     roots.agent_target_claims = map_put(
         &roots.agent_target_claims,
         &key,
@@ -17119,6 +17475,89 @@ mod tests {
             .expect("Agent target-claim value object exists")
     }
 
+    fn agent_target_claim_generation_fixture() -> (
+        StateRootManifest,
+        TestResolver,
+        cymule_profile_protocol::agent::AgentTargetClaimCurrent,
+        cymule_profile_protocol::agent::AgentTargetClaimGenerationRecord,
+    ) {
+        let (manifest, mut resolver, _, _) = agent_message_fixture(1);
+        let target = cymule_profile_protocol::agent::AgentTargetClaimTarget::Message {
+            message_id: "message:0".to_owned(),
+        };
+        let current = load_agent_target_claim_current(
+            &manifest,
+            &mut resolver,
+            "session:message-prefix",
+            &target,
+        )
+        .expect("claim current loads")
+        .expect("claim current exists");
+        let record = load_agent_target_claim_generation(
+            &manifest,
+            &mut resolver,
+            &current.session_id,
+            &current.target,
+            current.generation,
+        )
+        .expect("generation record loads")
+        .expect("generation record exists");
+        (manifest, resolver, current, record)
+    }
+
+    fn remanifest_agent_target_claim_generations(
+        manifest: &StateRootManifest,
+        mut resolver: TestResolver,
+        records: &[cymule_profile_protocol::agent::AgentTargetClaimGenerationRecord],
+    ) -> (StateRootManifest, TestResolver) {
+        let entries = records
+            .iter()
+            .map(|record| {
+                let key = cymule_profile_protocol::agent::agent_target_claim_generation_key(
+                    &record.session_id,
+                    &record.target,
+                    record.generation,
+                )
+                .expect("generation key derives");
+                let (value_id, _) = insert_raw_value(
+                    &mut resolver,
+                    StateRootValue::encode(
+                        StateRootLeafKind::AgentTargetClaimGenerationRecord,
+                        record,
+                    )
+                    .expect("generation record encodes"),
+                );
+                (key, value_id)
+            })
+            .collect();
+        let mut roots = (*manifest.roots).clone();
+        roots.agent_target_claim_generations = insert_raw_map(&mut resolver, entries);
+        let frontier = (*manifest.machine_frontier).clone();
+        let revision = derive_genesis_revision(revision_state(&frontier, &roots))
+            .expect("tampered generation revision derives");
+        let manifest = StateRootManifest::new(
+            StateRootManifestMetadata {
+                durable_version: crate::DURABLE_STATE_VERSION.to_owned(),
+                revision,
+                sequence: 0,
+                parent_manifest: None,
+                parent_revision: None,
+                delta_digest: None,
+                machine_snapshot_version: cymule_core::MachineSnapshot::VERSION.to_owned(),
+            },
+            frontier,
+            None,
+            roots,
+        )
+        .expect("tampered generation manifest closes physically");
+        resolver.pinned.clone_from(&manifest.manifest_id);
+        resolver.objects.insert(
+            manifest.manifest_id.clone(),
+            StateRootObject::Manifest(manifest.clone()),
+        );
+        (manifest, resolver)
+    }
+
     #[test]
     fn released_tool_claim_requires_its_inprogress_target_during_full_audit() {
         let phase = cymule_profile_protocol::agent::AgentTargetClaimPhase::Released {
@@ -17186,6 +17625,36 @@ mod tests {
         canonical_json.push(' ');
         assert!(matches!(
             reachable_state_root_objects(&manifest, &mut tampered),
+            Err(DurableError::Integrity { .. })
+        ));
+    }
+
+    #[test]
+    fn full_audit_rejects_target_claim_generation_gap_fork_and_tamper() {
+        let (manifest, resolver, _, _) = agent_target_claim_generation_fixture();
+        let (missing, mut missing_resolver) =
+            remanifest_agent_target_claim_generations(&manifest, resolver, &[]);
+        assert!(matches!(
+            reachable_state_root_objects(&missing, &mut missing_resolver),
+            Err(DurableError::Integrity { .. })
+        ));
+
+        let (manifest, resolver, _, mut record) = agent_target_claim_generation_fixture();
+        record.claim_id = format!("sha256:{}", "e".repeat(64));
+        let (tampered, mut tampered_resolver) =
+            remanifest_agent_target_claim_generations(&manifest, resolver, &[record]);
+        assert!(reachable_state_root_objects(&tampered, &mut tampered_resolver).is_err());
+
+        let (manifest, resolver, _, record) = agent_target_claim_generation_fixture();
+        let mut fork = record.clone();
+        fork.generation = 2;
+        fork.claim_id = format!("sha256:{}", "f".repeat(64));
+        fork.verify()
+            .expect("fork slot is independently well formed");
+        let (forked, mut forked_resolver) =
+            remanifest_agent_target_claim_generations(&manifest, resolver, &[record, fork]);
+        assert!(matches!(
+            reachable_state_root_objects(&forked, &mut forked_resolver),
             Err(DurableError::Integrity { .. })
         ));
     }

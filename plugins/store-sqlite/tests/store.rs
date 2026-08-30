@@ -22,7 +22,7 @@ use cymule_profile_protocol::{
     agent::{
         AgentCommand, AgentCommandAction, AgentHostBinding, AgentHostOccurrence, AgentMessage,
         AgentMessageCurrent, AgentMessagePageQuery, AgentProviders, AgentSessionCurrent,
-        AgentSessionQuery, AgentStreamPublicationIntent, AgentStreamPublicationObservation,
+        AgentSessionQuery, AgentStreamPublicationObservation, AgentStreamPublicationReservation,
         AgentUpdate, AgentWorkspaceCommand, AgentWorkspaceObservation, AgentWorkspaceSubmission,
         ContentBlock, MAX_AGENT_PAGE_BYTES, MessageRole,
     },
@@ -1674,14 +1674,14 @@ fn unused_agent_prefix_provider<T>() -> ProtocolResult<T> {
 impl AgentProviders for UnusedAgentPrefixProviders {
     fn publish_agent_stream(
         &mut self,
-        _intent: &AgentStreamPublicationIntent,
+        _dispatch: &AgentStreamPublicationReservation,
     ) -> ProtocolResult<AgentStreamPublicationObservation> {
         unused_agent_prefix_provider()
     }
 
-    fn observe_agent_stream_publication(
+    fn reconcile_agent_stream_publication(
         &mut self,
-        _intent: &AgentStreamPublicationIntent,
+        _dispatch: &AgentStreamPublicationReservation,
     ) -> ProtocolResult<AgentStreamPublicationObservation> {
         unused_agent_prefix_provider()
     }

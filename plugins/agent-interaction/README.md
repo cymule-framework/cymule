@@ -29,12 +29,15 @@ Resource reservation CAS exclude every ordinary Message/Tool writer for that
 exact Session-local target. Durable finalization derives a closed serializable
 intent binding the exact source revision/digest, Session, stream, Finalize command, target,
 resolver, and content; the provider product remains non-Serde. The provider
-must publish that intent idempotently and return an exact readback before one
+must claim the exact dispatch in its durable ledger, publish idempotently, and
+return an exact readback before one
 CAS commits the publication, catalog record, permanent Agent-stream Resource
 pin, Session/stream currents, command, and receipt. Unknown publication or a
 post-I/O CAS failure returns the same intent; `reconcile_finalization` requires
 that restored intent, exact-matches it against freshly read touched state, and
-performs observation only, never another publish. Workspace provider binding
+performs provider-ledger reconciliation without another world write. A terminal
+NotApplied tombstone fences a stale publisher for the same dispatch; an
+in-flight publisher remains Unknown. Workspace provider binding
 and reconciliation results use the same
 specialized authority boundary. Ordinary `commit_agent` rejects both
 authority-requiring paths.

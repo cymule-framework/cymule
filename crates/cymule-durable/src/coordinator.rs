@@ -10968,8 +10968,20 @@ pub(crate) fn verify_agent_target_claim_current_origin<R: crate::StateRootResolv
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     current: &agent_protocol::AgentTargetClaimCurrent,
-) -> DurableResult<Option<agent_protocol::AgentTargetClaimCurrent>> {
+) -> DurableResult<()> {
     current.verify()?;
+    let generation = crate::state_root::load_agent_target_claim_generation(
+        manifest,
+        resolver,
+        &current.session_id,
+        &current.target,
+        current.generation,
+    )?
+    .ok_or_else(|| DurableError::Integrity {
+        code: "agent_target_claim_generation_missing".to_owned(),
+        message: "Agent target claim lost its immutable generation record".to_owned(),
+    })?;
+    generation.verify_for(current)?;
     if let agent_protocol::AgentTargetClaimPhase::Reserved {
         stream_id,
         reservation_id,
@@ -11005,10 +11017,10 @@ pub(crate) fn verify_agent_target_claim_current_origin<R: crate::StateRootResolv
                 message: "Reserved Agent target claim changed its stream authority".to_owned(),
             });
         }
-        return load_agent_target_claim_predecessor(manifest, resolver, current);
+        return Ok(());
     }
     let (command, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
-    let transition = agent_receipt_target_claim_transitions(&command, &receipt)?
+    agent_receipt_target_claim_transitions(&command, &receipt)?
         .into_iter()
         .find(|transition| transition.current == *current)
         .ok_or_else(|| DurableError::Integrity {
@@ -11021,79 +11033,7 @@ pub(crate) fn verify_agent_target_claim_current_origin<R: crate::StateRootResolv
     ) {
         verify_materialized_agent_target(manifest, resolver, current, &receipt)?;
     }
-    Ok(transition.source)
-}
-
-fn load_agent_target_claim_predecessor<R: crate::StateRootResolver + ?Sized>(
-    manifest: &crate::StateRootManifest,
-    resolver: &mut R,
-    current: &agent_protocol::AgentTargetClaimCurrent,
-) -> DurableResult<Option<agent_protocol::AgentTargetClaimCurrent>> {
-    let Some(predecessor_command) = current.predecessor_admitted_by.as_deref() else {
-        return Ok(None);
-    };
-    let predecessor_claim_id =
-        current
-            .predecessor_claim_id
-            .as_deref()
-            .ok_or_else(|| DurableError::Integrity {
-                code: "agent_target_claim_predecessor_missing".to_owned(),
-                message: "Agent target claim lost its predecessor identity".to_owned(),
-            })?;
-    let (command, receipt) = load_verified_agent_origin(manifest, resolver, predecessor_command)?;
-    let predecessor = agent_receipt_target_claim_transitions(&command, &receipt)?
-        .into_iter()
-        .map(|transition| transition.current)
-        .find(|claim| claim.claim_id == predecessor_claim_id)
-        .ok_or_else(|| DurableError::Integrity {
-            code: "agent_target_claim_predecessor_mismatch".to_owned(),
-            message: "Agent target claim predecessor is absent from its receipt".to_owned(),
-        })?;
-    if predecessor.session_id != current.session_id
-        || predecessor.target != current.target
-        || predecessor.generation.checked_add(1) != Some(current.generation)
-    {
-        return Err(DurableError::Integrity {
-            code: "agent_target_claim_predecessor_mismatch".to_owned(),
-            message: "Agent target claim changed its exact predecessor".to_owned(),
-        });
-    }
-    Ok(Some(predecessor))
-}
-
-fn agent_target_claim_descends_from<R: crate::StateRootResolver + ?Sized>(
-    manifest: &crate::StateRootManifest,
-    resolver: &mut R,
-    current: &agent_protocol::AgentTargetClaimCurrent,
-    expected: &agent_protocol::AgentTargetClaimCurrent,
-) -> DurableResult<bool> {
-    let mut cursor = current.clone();
-    let mut authenticated_by_successor = false;
-    loop {
-        if cursor == *expected {
-            return Ok(true);
-        }
-        if cursor.session_id != expected.session_id
-            || cursor.target != expected.target
-            || cursor.generation <= expected.generation
-        {
-            return Ok(false);
-        }
-        let source = if authenticated_by_successor
-            && matches!(
-                cursor.phase,
-                agent_protocol::AgentTargetClaimPhase::Reserved { .. }
-            ) {
-            load_agent_target_claim_predecessor(manifest, resolver, &cursor)?
-        } else {
-            verify_agent_target_claim_current_origin(manifest, resolver, &cursor)?
-        };
-        let Some(source) = source else {
-            return Ok(false);
-        };
-        cursor = source;
-        authenticated_by_successor = true;
-    }
+    Ok(())
 }
 
 pub(crate) fn verify_agent_target_claim_receipt_graph<R: crate::StateRootResolver + ?Sized>(
@@ -11103,6 +11043,18 @@ pub(crate) fn verify_agent_target_claim_receipt_graph<R: crate::StateRootResolve
     receipt: &agent_protocol::AgentCommandReceipt,
 ) -> DurableResult<()> {
     for transition in agent_receipt_target_claim_transitions(command, receipt)? {
+        let generation = crate::state_root::load_agent_target_claim_generation(
+            manifest,
+            resolver,
+            &transition.current.session_id,
+            &transition.current.target,
+            transition.current.generation,
+        )?
+        .ok_or_else(|| DurableError::Integrity {
+            code: "agent_target_claim_generation_missing".to_owned(),
+            message: "Agent command receipt lost its immutable claim generation".to_owned(),
+        })?;
+        generation.verify_for(&transition.current)?;
         let current = crate::state_root::load_agent_target_claim_current(
             manifest,
             resolver,
@@ -11113,25 +11065,30 @@ pub(crate) fn verify_agent_target_claim_receipt_graph<R: crate::StateRootResolve
             code: "agent_target_claim_current_missing".to_owned(),
             message: "Agent command receipt lost its target-claim current".to_owned(),
         })?;
-        let valid = match transition.current.phase {
-            agent_protocol::AgentTargetClaimPhase::Materialized => {
-                if current == transition.current {
-                    verify_materialized_agent_target(
-                        manifest,
-                        resolver,
-                        &transition.current,
-                        receipt,
-                    )?;
-                    true
-                } else {
-                    false
+        verify_agent_target_claim_current_origin(manifest, resolver, &current)?;
+        let current_is_same_or_later = current.session_id == transition.current.session_id
+            && current.target == transition.current.target
+            && current.generation >= transition.current.generation
+            && (current.generation != transition.current.generation
+                || current == transition.current);
+        let valid = current_is_same_or_later
+            && match transition.current.phase {
+                agent_protocol::AgentTargetClaimPhase::Materialized => {
+                    if current == transition.current {
+                        verify_materialized_agent_target(
+                            manifest,
+                            resolver,
+                            &transition.current,
+                            receipt,
+                        )?;
+                        true
+                    } else {
+                        false
+                    }
                 }
-            }
-            agent_protocol::AgentTargetClaimPhase::Released { .. } => {
-                agent_target_claim_descends_from(manifest, resolver, &current, &transition.current)?
-            }
-            agent_protocol::AgentTargetClaimPhase::Reserved { .. } => false,
-        };
+                agent_protocol::AgentTargetClaimPhase::Released { .. } => true,
+                agent_protocol::AgentTargetClaimPhase::Reserved { .. } => false,
+            };
         if !valid {
             return Err(DurableError::Integrity {
                 code: "agent_target_claim_current_mismatch".to_owned(),
@@ -14314,6 +14271,7 @@ mod agent_stream_publication_reservation_tests {
             observe_calls: 0,
             publish_outcomes: VecDeque::from([ProviderOutcome::NotApplied]),
             observe_outcome: ProviderOutcome::NotApplied,
+            ledger: BTreeMap::new(),
             race: None,
             refresh_racer: false,
             race_conflicted: false,
@@ -14543,6 +14501,7 @@ mod agent_stream_publication_reservation_tests {
             observe_calls: 0,
             publish_outcomes: VecDeque::from([ProviderOutcome::Unknown]),
             observe_outcome: ProviderOutcome::Unknown,
+            ledger: BTreeMap::new(),
             race: None,
             refresh_racer: false,
             race_conflicted: false,
@@ -14564,6 +14523,62 @@ mod agent_stream_publication_reservation_tests {
     struct PersistedStreamResolver {
         pinned: String,
         objects: BTreeMap<String, StateRootObject>,
+    }
+
+    struct ClaimReplayReadCounter<'a> {
+        inner: &'a mut dyn crate::StateRootResolver,
+        claim_current_reads: usize,
+        generation_record_reads: usize,
+    }
+
+    impl crate::StateRootResolver for ClaimReplayReadCounter<'_> {
+        fn pinned_manifest_id(&self) -> &str {
+            self.inner.pinned_manifest_id()
+        }
+
+        fn load_state_root_object(
+            &mut self,
+            object_id: &str,
+        ) -> DurableResult<Option<StateRootObject>> {
+            let object = self.inner.load_state_root_object(object_id)?;
+            if let Some(StateRootObject::Value(value)) = &object
+                && let StateRootValue::Leaf { kind, .. } = &value.value
+            {
+                match kind {
+                    StateRootLeafKind::AgentTargetClaimCurrent => {
+                        self.claim_current_reads += 1;
+                    }
+                    StateRootLeafKind::AgentTargetClaimGenerationRecord => {
+                        self.generation_record_reads += 1;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(object)
+        }
+    }
+
+    fn count_target_claim_replay_reads(
+        store: &mut crate::MemoryStore,
+        command: &AgentCommand,
+        receipt: &agent_protocol::AgentCommandReceipt,
+    ) -> (usize, usize) {
+        let head = store.load_head().unwrap().expect("Agent head exists");
+        let manifest = store
+            .load_state_root_manifest(&head.state_root_manifest_id)
+            .unwrap()
+            .expect("Agent manifest exists");
+        store
+            .with_state_root_resolver(&manifest, |resolver| {
+                let mut counter = ClaimReplayReadCounter {
+                    inner: resolver,
+                    claim_current_reads: 0,
+                    generation_record_reads: 0,
+                };
+                verify_agent_target_claim_receipt_graph(&manifest, &mut counter, command, receipt)?;
+                Ok((counter.claim_current_reads, counter.generation_record_reads))
+            })
+            .expect("historical target claim verifies")
     }
 
     #[derive(serde::Serialize)]
@@ -14712,6 +14727,7 @@ mod agent_stream_publication_reservation_tests {
         observe_calls: usize,
         publish_outcomes: VecDeque<ProviderOutcome>,
         observe_outcome: ProviderOutcome,
+        ledger: BTreeMap<String, ProviderOutcome>,
         race: Option<(
             &'a mut DurableCoordinator<crate::MemoryStore>,
             ResourceCommand,
@@ -14737,9 +14753,12 @@ mod agent_stream_publication_reservation_tests {
     impl AgentProviders for CountingProvider<'_> {
         fn publish_agent_stream(
             &mut self,
-            intent: &AgentStreamPublicationIntent,
+            dispatch: &agent_protocol::AgentStreamPublicationReservation,
         ) -> ProtocolResult<AgentStreamPublicationObservation> {
             self.publish_calls += 1;
+            if let Some(outcome) = self.ledger.get(&dispatch.dispatch_id).copied() {
+                return Ok(provider_observation(outcome, &dispatch.intent));
+            }
             if let Some((coordinator, command)) = self.race.take() {
                 if self.refresh_racer {
                     coordinator
@@ -14752,20 +14771,29 @@ mod agent_stream_publication_reservation_tests {
                     Err(error) => panic!("unexpected racing Resource outcome: {error}"),
                 }
             }
-            Ok(provider_observation(
-                self.publish_outcomes
-                    .pop_front()
-                    .unwrap_or(ProviderOutcome::Published),
-                intent,
-            ))
+            let outcome = self
+                .publish_outcomes
+                .pop_front()
+                .unwrap_or(ProviderOutcome::Published);
+            if !matches!(outcome, ProviderOutcome::Unknown) {
+                self.ledger.insert(dispatch.dispatch_id.clone(), outcome);
+            }
+            Ok(provider_observation(outcome, &dispatch.intent))
         }
 
-        fn observe_agent_stream_publication(
+        fn reconcile_agent_stream_publication(
             &mut self,
-            intent: &AgentStreamPublicationIntent,
+            dispatch: &agent_protocol::AgentStreamPublicationReservation,
         ) -> ProtocolResult<AgentStreamPublicationObservation> {
             self.observe_calls += 1;
-            Ok(provider_observation(self.observe_outcome, intent))
+            if let Some(outcome) = self.ledger.get(&dispatch.dispatch_id).copied() {
+                return Ok(provider_observation(outcome, &dispatch.intent));
+            }
+            if !matches!(self.observe_outcome, ProviderOutcome::Unknown) {
+                self.ledger
+                    .insert(dispatch.dispatch_id.clone(), self.observe_outcome);
+            }
+            Ok(provider_observation(self.observe_outcome, &dispatch.intent))
         }
 
         fn bind_agent_workspace(
@@ -14811,6 +14839,7 @@ mod agent_stream_publication_reservation_tests {
             observe_calls: 0,
             publish_outcomes: VecDeque::from([ProviderOutcome::Unknown]),
             observe_outcome: ProviderOutcome::Published,
+            ledger: BTreeMap::new(),
             race: None,
             refresh_racer: false,
             race_conflicted: false,
@@ -14829,6 +14858,7 @@ mod agent_stream_publication_reservation_tests {
             observe_calls: 0,
             publish_outcomes: VecDeque::from([ProviderOutcome::Published]),
             observe_outcome: ProviderOutcome::Published,
+            ledger: BTreeMap::new(),
             race: None,
             refresh_racer: false,
             race_conflicted: false,
@@ -14896,6 +14926,7 @@ mod agent_stream_publication_reservation_tests {
             observe_calls: 0,
             publish_outcomes: VecDeque::from([ProviderOutcome::Unknown]),
             observe_outcome: ProviderOutcome::Unknown,
+            ledger: BTreeMap::new(),
             race: None,
             refresh_racer: false,
             race_conflicted: false,
@@ -14964,6 +14995,7 @@ mod agent_stream_publication_reservation_tests {
             observe_calls: 0,
             publish_outcomes: VecDeque::from([ProviderOutcome::Unknown]),
             observe_outcome: ProviderOutcome::NotApplied,
+            ledger: BTreeMap::new(),
             race: None,
             refresh_racer: false,
             race_conflicted: false,
@@ -15064,6 +15096,123 @@ mod agent_stream_publication_reservation_tests {
     }
 
     #[test]
+    fn target_claim_history_continues_past_64_with_constant_historical_replay_reads() {
+        let mut coordinator = initialized_with_open_tool_stream();
+        let first_finalize = finalize_command(&coordinator);
+        let mut first_provider = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([ProviderOutcome::NotApplied]),
+            observe_outcome: ProviderOutcome::NotApplied,
+            ledger: BTreeMap::new(),
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        assert!(matches!(
+            coordinator
+                .finalize_agent_stream(&first_finalize, &mut first_provider)
+                .expect("first target reservation reaches NotApplied"),
+            AgentStreamFinalizeOutcome::PublicationNotApplied { .. }
+        ));
+        let first_abort = AgentCommand::new(
+            coordinator.current_revision().unwrap().to_owned(),
+            AgentCommandAction::Stream(AgentStreamCommand::Abort {
+                session_id: SESSION_ID.to_owned(),
+                stream_id: STREAM_ID.to_owned(),
+                reason: "caller:generation-cycle:0".to_owned(),
+            }),
+        )
+        .unwrap();
+        let first_abort_receipt = coordinator
+            .commit_agent_local(&first_abort)
+            .expect("first target reservation releases")
+            .receipt;
+
+        let store = coordinator.into_store();
+        let mut early_store = store.clone();
+        let early_reads =
+            count_target_claim_replay_reads(&mut early_store, &first_abort, &first_abort_receipt);
+        assert_eq!(early_reads, (1, 2));
+        let mut coordinator = DurableCoordinator::open(store).unwrap();
+
+        for ordinal in 1..33 {
+            let stream_id = format!("stream:external-reservation:generation:{ordinal}");
+            reserve_external_tool_not_applied(&mut coordinator, &stream_id);
+            abort_external_tool(
+                &mut coordinator,
+                &stream_id,
+                &format!("caller:generation-cycle:{ordinal}"),
+            );
+        }
+        let claim = current_tool_target_claim(&mut coordinator);
+        assert_eq!(claim.generation, 66);
+
+        let store = coordinator.into_store();
+        let mut late_store = store.clone();
+        let late_reads =
+            count_target_claim_replay_reads(&mut late_store, &first_abort, &first_abort_receipt);
+        assert_eq!(late_reads, early_reads);
+        let mut coordinator = DurableCoordinator::open(store).unwrap();
+        let replay = coordinator
+            .commit_agent_local(&first_abort)
+            .expect("generation-two Abort replays after generation 66");
+        assert!(replay.committed_revision.is_none());
+
+        commit_tool_update(&mut coordinator, ToolCallStatus::Completed)
+            .expect("generation 67 still materializes terminal Tool state");
+        let terminal = current_tool_target_claim(&mut coordinator);
+        assert_eq!(terminal.generation, 67);
+        assert!(matches!(
+            terminal.phase,
+            agent_protocol::AgentTargetClaimPhase::Materialized
+        ));
+        coordinator
+            .read_current_state_root(|manifest, resolver| {
+                crate::reachable_state_root_objects(manifest, resolver).map(|_| ())
+            })
+            .expect("generation 67 passes complete linear audit");
+    }
+
+    #[test]
+    fn full_audit_rejects_deleted_receiptless_finalize_command_after_abort() {
+        let mut coordinator = initialized_with_open_tool_stream();
+        let finalize = finalize_command(&coordinator);
+        let mut provider = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([ProviderOutcome::NotApplied]),
+            observe_outcome: ProviderOutcome::NotApplied,
+            ledger: BTreeMap::new(),
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        assert!(matches!(
+            coordinator
+                .finalize_agent_stream(&finalize, &mut provider)
+                .expect("Finalize retains its receiptless reservation command"),
+            AgentStreamFinalizeOutcome::PublicationNotApplied { .. }
+        ));
+        abort_external_tool(
+            &mut coordinator,
+            STREAM_ID,
+            "caller:terminalize-before-command-deletion",
+        );
+
+        let mut store = coordinator.into_store();
+        store
+            .remove_agent_command_value_for_test(&finalize.command_id)
+            .expect("test removes the initial receiptless Finalize command");
+        assert!(matches!(
+            store.load_full_audit(),
+            Err(DurableError::Integrity { .. })
+        ));
+    }
+
+    #[test]
     fn publication_reservation_wins_delete_cas_and_replay_never_republishes() {
         let mut coordinator = initialized_with_open_stream();
         let delete = gc_and_delete(&mut coordinator, "delete:reservation-loser");
@@ -15076,6 +15225,7 @@ mod agent_stream_publication_reservation_tests {
             observe_calls: 0,
             publish_outcomes: VecDeque::new(),
             observe_outcome: ProviderOutcome::Published,
+            ledger: BTreeMap::new(),
             race: Some((&mut deleter, delete)),
             refresh_racer: false,
             race_conflicted: false,
@@ -15135,6 +15285,7 @@ mod agent_stream_publication_reservation_tests {
             observe_calls: 0,
             publish_outcomes: VecDeque::new(),
             observe_outcome: ProviderOutcome::Published,
+            ledger: BTreeMap::new(),
             race: None,
             refresh_racer: false,
             race_conflicted: false,
@@ -15162,6 +15313,7 @@ mod agent_stream_publication_reservation_tests {
                 ProviderOutcome::Published,
             ]),
             observe_outcome: ProviderOutcome::NotApplied,
+            ledger: BTreeMap::new(),
             race: None,
             refresh_racer: false,
             race_conflicted: false,
@@ -15188,7 +15340,7 @@ mod agent_stream_publication_reservation_tests {
 
         let not_applied = reopened
             .reconcile_agent_stream(&command, &intent, &mut providers)
-            .expect("read-only reconciliation proves NotApplied");
+            .expect("provider-ledger reconciliation proves NotApplied");
         assert!(matches!(
             not_applied,
             AgentStreamFinalizeOutcome::PublicationNotApplied { .. }
@@ -15205,6 +15357,63 @@ mod agent_stream_publication_reservation_tests {
         ));
         assert_eq!(providers.publish_calls, 2);
         assert_eq!(providers.observe_calls, 1);
+    }
+
+    #[test]
+    fn provider_not_applied_tombstone_fences_an_already_authorized_stale_publisher() {
+        let coordinator = initialized_with_open_stream();
+        let command = finalize_command(&coordinator);
+        let store = coordinator.into_store();
+        let mut publisher = DurableCoordinator::open(store.clone()).expect("publisher opens");
+        let mut providers = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([
+                ProviderOutcome::Unknown,
+                ProviderOutcome::Published,
+            ]),
+            observe_outcome: ProviderOutcome::NotApplied,
+            ledger: BTreeMap::new(),
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        let unknown = publisher
+            .finalize_agent_stream(&command, &mut providers)
+            .expect("publisher retains its ambiguous dispatch");
+        let AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { intent } = unknown else {
+            panic!("initial publication remains unknown")
+        };
+        let stale_dispatch = publisher
+            .read_current_state_root(|manifest, resolver| {
+                require_agent_stream(manifest, resolver, SESSION_ID, STREAM_ID)
+            })
+            .expect("reserved stream reads")
+            .publication_reservation
+            .expect("reserved stream retains its dispatch");
+
+        let mut reconciler = DurableCoordinator::open(store).expect("reconciler opens");
+        let not_applied = reconciler
+            .reconcile_agent_stream(&command, &intent, &mut providers)
+            .expect("reconciler installs the provider-side NotApplied tombstone");
+        assert!(matches!(
+            not_applied,
+            AgentStreamFinalizeOutcome::PublicationNotApplied { .. }
+        ));
+
+        let stale = agent_protocol::execute_agent_stream_publication(
+            stale_dispatch.as_ref(),
+            &mut providers,
+        )
+        .expect("stale publisher is fenced by the exact dispatch tombstone");
+        assert!(matches!(
+            stale,
+            agent_protocol::AgentStreamPublicationResult::NotApplied { .. }
+        ));
+        assert_eq!(providers.publish_calls, 2);
+        assert_eq!(providers.observe_calls, 1);
+        assert_eq!(providers.publish_outcomes.len(), 1);
     }
 
     #[test]
@@ -15229,6 +15438,7 @@ mod agent_stream_publication_reservation_tests {
             observe_calls: 0,
             publish_outcomes: VecDeque::new(),
             observe_outcome: ProviderOutcome::Published,
+            ledger: BTreeMap::new(),
             race: Some((&mut racer, unrelated)),
             refresh_racer: true,
             race_conflicted: false,
@@ -15291,6 +15501,7 @@ mod agent_stream_publication_reservation_tests {
             observe_calls: 0,
             publish_outcomes: VecDeque::from([ProviderOutcome::Unknown]),
             observe_outcome: ProviderOutcome::Published,
+            ledger: BTreeMap::new(),
             race: None,
             refresh_racer: false,
             race_conflicted: false,
@@ -15352,6 +15563,7 @@ mod agent_stream_publication_reservation_tests {
             observe_calls: 0,
             publish_outcomes: VecDeque::from([ProviderOutcome::Unknown]),
             observe_outcome: ProviderOutcome::Unknown,
+            ledger: BTreeMap::new(),
             race: None,
             refresh_racer: false,
             race_conflicted: false,
@@ -15438,6 +15650,7 @@ mod agent_stream_publication_reservation_tests {
             observe_calls: 0,
             publish_outcomes: VecDeque::from([ProviderOutcome::NotApplied]),
             observe_outcome: ProviderOutcome::NotApplied,
+            ledger: BTreeMap::new(),
             race: None,
             refresh_racer: false,
             race_conflicted: false,

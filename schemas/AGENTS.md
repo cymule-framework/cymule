@@ -177,9 +177,17 @@
   lowercase 64-character projection digest, unique lowercase effect content
   IDs, and a closed precondition token whose decimal epoch is canonical and no
   greater than `9007199254740991`.
+- Current Agent selector set: `cymule.agent/10`, `cymule.agent-command/4`,
+  `cymule.agent-command-id/2`, `cymule.agent-command-receipt/6`,
+  `cymule.agent-command-receipt-id/4`,
+  `cymule.agent-target-claim-current/3`,
+  `cymule.agent-target-claim-generation-record/1`,
+  `cymule.agent-target-claim-generation-key/1`,
+  `cymule.agent-target-claim-key/1`, and
+  `cymule.agent-target-claim-id/3`.
 - `durable-storage.schema.json` freezes the exact provider-neutral physical
   union: `cymule.durable-head/2`, the
-  `cymule.durable-state-root/5` immutable object graph and fixed manifest,
+  `cymule.durable-state-root/6` immutable object graph and fixed manifest,
   `cymule.durable-gc-receipt/2`, and Core `MachineCommandArchiveObject`s.
   StateRoot is the sole persisted semantic projection authority. The closed
   `cymule.machine-delta/6`, `cymule.durable-state/7`, and
@@ -198,10 +206,10 @@
   to the typed latest history receipt value object. The same CAS updates its
   existing primary receipt map; head/base presence and a nonempty primary map
   agree exactly. There is no second history index or head map.
-  Generation `/5` additionally requires `agent_target_claims` and the closed
-  `agent_target_claim_current` leaf kind. The leaf uses Agent target-claim `/1`;
-  the physical schema admits neither a `/4` root/value nor an omitted claim
-  root.
+  Generation `/6` additionally requires `agent_target_claims`, immutable
+  `agent_target_claim_generations`, and their closed current/generation-record
+  leaf kinds. The physical schema admits neither a `/4` root/value nor an
+  omitted claim root.
   History compaction `/2` admits only `event_prefix` and
   `event_free_admissions`; the retired conflict-only tag has no alias.
   Its fixed root set reaches only closed typed value objects and persistent

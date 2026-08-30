@@ -1,4 +1,4 @@
-# Durable StateRoot Generation 5
+# Durable StateRoot Generation 6
 
 Status: source implemented; operator execution pending.
 
@@ -7,14 +7,17 @@ or SQLite `/6` domain with no retained compatibility or replay promise.
 
 ## Scope and terminal boundary
 
-`cymule.durable-state-root/5` and `cymule.durable-state-value/5` add the
-independent `agent_target_claims` family. The family is the sole authority for
-exclusive `(Session, target kind, local identity)` ownership across ordinary
-Agent Message/Tool writes and Agent stream publication. Agent commands and
-receipts are `cymule.agent-command/4` and `cymule.agent-command-receipt/5`;
+`cymule.durable-state-root/6` and `cymule.durable-state-value/6` add the
+independent `agent_target_claims` current family and its immutable
+`agent_target_claim_generations` membership index. The current family is the
+sole mutable authority for exclusive `(Session, target kind, local identity)`
+ownership across ordinary Agent Message/Tool writes and Agent stream
+publication; the generation index is written in the same CAS and provides
+fixed-read historical membership plus linear full audit. Agent commands and
+receipts are `cymule.agent-command/4` and `cymule.agent-command-receipt/6`;
 their complete-body identity domains are `cymule.agent-command-id/2` and
-`cymule.agent-command-receipt-id/3`; external publication intent and reservation
-records are `/2` and `/3`; the Agent schema is `cymule.agent/9`.
+`cymule.agent-command-receipt-id/4`; external publication intent and reservation
+records are `/2` and `/3`; the Agent schema is `cymule.agent/10`.
 
 Generation `/4` cannot represent that claim family or prove that a provider
 publication reservation won the same CAS as every competing target writer.
@@ -74,10 +77,11 @@ Stop without deleting or replacing the old store when any of these is true:
    target claims from projections.
 4. Preserve the complete old store as a read-only rollback artifact with its
    exact generation, digest, and owner record.
-5. Create a new empty directory `/5` or SQLite `/6` store with a generation `/5`
+5. Create a new empty directory `/5` or SQLite `/6` store with a generation `/6`
    StateRoot. Never reuse the old physical location in place.
 6. Start exactly one current-generation writer and verify its empty manifest,
-   value objects, and `agent_target_claims` root.
+   value objects, `agent_target_claims` root, and
+   `agent_target_claim_generations` root.
 7. Requeue only the step-3 never-admitted items under new
    Run/Session/command identities through current admission. Do not requeue an
    accepted terminal input or import old receipts, revisions, reservations, or
@@ -98,13 +102,18 @@ mutable StateRoot or Agent claim records between generations.
 Completion requires all of the following:
 
 - old admission remains fenced and the preserved old bytes are unchanged;
-- the new head resolves only `/5` manifest and value objects;
+- the new head resolves only `/6` manifest and value objects;
 - full audit and reachable-object traversal pass;
 - every Message and terminal Tool has one `Materialized` claim;
 - every non-terminal Tool has no `Materialized` claim; `Reserved` is legal only
   with its exact open external stream and Resource reservation sidecars;
 - every external publication reservation has one exact `Reserved` claim,
   Reserved Resource pin, and active retention family before provider I/O;
+- every claim has a gap-free one-based immutable generation index with exact
+  admitting commands, and historical replay reads only its expected slot plus
+  current authority regardless of later reuse depth;
+- provider reconciliation linearizes publication claim against a terminal
+  NotApplied tombstone for the exact dispatch;
 - `NotApplied` Abort releases the same claim and Resource pin in one CAS;
 - exact command replay performs no provider call or second write; and
 - requeued items were all proved never admitted, and retired terminal outcomes

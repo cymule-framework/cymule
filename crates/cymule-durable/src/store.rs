@@ -2360,6 +2360,37 @@ impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    #[cfg(test)]
+    pub(crate) fn remove_agent_command_value_for_test(
+        &mut self,
+        command_id: &str,
+    ) -> DurableResult<()> {
+        let mut domain = lock_memory(&self.current, None)?;
+        let object_id = domain
+            .state_root_objects
+            .iter()
+            .find_map(|(object_id, object)| match object {
+                crate::StateRootObject::Value(value)
+                    if matches!(
+                        &value.value,
+                        crate::StateRootValue::Leaf {
+                            kind: crate::StateRootLeafKind::AgentCommand,
+                            canonical_json,
+                        } if cymule_core::decode_json::<cymule_profile_protocol::agent::AgentCommand>(
+                            canonical_json.as_bytes(),
+                        )
+                        .is_ok_and(|command| command.command_id == command_id)
+                    ) =>
+                {
+                    Some(object_id.clone())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| DurableError::NotFound(format!("Agent command {command_id} is missing")))?;
+        domain.state_root_objects.remove(&object_id);
+        Ok(())
+    }
 }
 
 impl DurableStore for MemoryStore {

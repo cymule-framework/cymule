@@ -349,13 +349,14 @@
   ResourceHandoff admission exact-matches the then-current Machine, Wait, and
   Continuation; later full audit validates only its retained immutable history
   and never compares that historical checkpoint with newer mutable currents.
-  The target claim's exact-key current and monotonic generation are its bounded
-  lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
-  the retained source, and advances by one. Each non-genesis claim retains its
-  immediate predecessor claim and admitting command IDs; replay resolves that
-  edge through the already retained Agent receipt, without a separate journal
-  or global history scan. The protocol's 64-generation ceiling bounds this
-  per-key replay and keeps full-audit work linear in the number of target keys.
+  The target claim's exact-key current is its sole mutable authority.
+  `ApplyAgentTargetClaim` exact-compares the retained source, advances by one,
+  and writes the unique immutable `(Session, target, generation)` membership
+  slot in the same CAS. Historical receipt replay exact-loads one slot and the
+  current, independent of later reuse depth. Full audit scans the actual slots
+  once per target, requires a gap-free one-based sequence and exact admitting
+  commands, and rejects forked, missing, tampered, or orphaned slots without
+  looping to an untrusted claimed generation.
   A reservation-phase
   stream read authenticates its original Open receipt plus
   exact retained unterminated Finalize command, not equality with the old Open
@@ -363,8 +364,11 @@
   target differs from the immutable stream target; no replacement source hash
   or compatibility derivation substitutes for that direct edge.
   Known post-publication conflicts remain typed conflicts rather than world
-  Unknown. Agent publication reconciliation retains its expected original intent and
-  rechecks semantic touched keys. Unknown evidence is append-only; identical
+  Unknown. Agent publication reconciliation retains its expected original
+  intent and exact dispatch. The provider-owned dispatch ledger atomically
+  excludes a world-write claim from a terminal NotApplied tombstone; an
+  in-flight publisher remains Unknown and a tombstoned stale publisher performs
+  no world write. Unknown evidence is append-only; identical
   Unknown workspace observation is Unchanged with zero CAS.
 - Agent context message pages pin an immutable append-only prefix by exact
   message count and head, independently of a later Session head. A missing

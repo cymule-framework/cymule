@@ -310,12 +310,16 @@ Target ownership is a separate fixed StateRoot family keyed by Session,
 Message/Tool kind, and local identity. Ordinary writers and streams use the
 same pure transition: absence or a Released tombstone may become Reserved or
 Materialized; a Reserved generation may become Materialized or Released;
-Materialized is terminal. External reservation writes that target claim,
+Materialized is terminal. Each transition also writes one immutable generation
+membership slot in the same CAS; replay loads one exact slot and full audit
+validates the actual gap-free sequence once. External reservation writes that target claim,
 Resource pin/family, stream current, and Finalize command in one CAS before
 provider I/O. Finalize writes the target, Materialized claim, stream/Session,
 catalog, Active pin, command, and receipt in one CAS. This exact-key design
 closes double-stream and stream-versus-direct-write races without an open-stream
-scan or another target authority.
+scan or another target authority. The external provider separately linearizes
+world-write claim against a terminal NotApplied tombstone in its durable ledger
+for the exact dispatch.
 
 ## Verification boundary
 

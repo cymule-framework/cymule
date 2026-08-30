@@ -550,7 +550,7 @@ only Virtual `RetireArchive` may atomically commit terminal retirement and its
 exact `cymule.resource-archive-release/1`; generic release MUST reject it. An
 Agent external-stream pin MUST first be introduced as `Reserved` by the
 pre-publication reservation CAS. The same CAS MUST acquire one independent
-`cymule.agent-target-claim-current/2`, addressed exactly by Session, target kind,
+`cymule.agent-target-claim-current/3`, addressed exactly by Session, target kind,
 and local Message/Tool identity; Message role MUST NOT enter its key. Direct
 Message writes, every ordinary Tool transition, Session Close, staged Finalize,
 and external Finalize MUST exact-read that family rather than scanning open
@@ -560,8 +560,12 @@ Finalize command advances its exact reservation to `Materialized`. Durable
 `NotApplied` Abort advances it to `Released`; later reuse MUST increment the
 generation and bind the immediate predecessor claim plus its admitting command;
 the retained receipt authenticates non-reservation predecessors. This prevents
-ABA and generation jumps. Generation is capped at 64; exhausting 32
-complete reserve/release reuse cycles requires a new target identity.
+ABA and generation jumps. The same CAS MUST write one unique immutable
+`cymule.agent-target-claim-generation-record/1` at the exact
+Session/target/generation key. Historical replay exact-loads that slot and the
+current; full audit scans actual slots once, requires a gap-free one-based
+sequence, and never loops to an untrusted claimed generation. Generation has no
+business retry cap beyond the shared exact-integer domain.
 `Materialized` has no successor. That CAS
 and `BeginDelete` mutate the same
 physical-family current, so exactly one can win before provider I/O. Only a
@@ -580,7 +584,11 @@ replacement source digest authority.
 A public Agent stream `Abort` MAY retire an external publication reservation
 only when the latest claimed attempt is durably `NotApplied`.
 `DispatchClaimed`, including an unresolved or Unknown provider outcome, MUST
-reject Abort and preserve observe-only reconciliation authority. The persisted
+reject Abort and preserve provider-ledger reconciliation authority. The provider
+MUST key its durable dispatch ledger by `dispatch_id`; publication claim and a
+terminal `NotApplied` tombstone are mutually exclusive. Reconciliation MUST
+return Unknown for an in-flight publisher, and any publisher which observes the
+tombstone MUST return NotApplied without issuing the world write. The persisted
 Abort source and effect each carry one required-nullable Resource member:
 ordinary Abort encodes explicit null, while reservation retirement retains the
 exact retention/pin currents and typed reserved-pin release receipt. One and
@@ -754,7 +762,7 @@ does not claim this persistence because it deliberately uses one-shot memory.
 
 The M1 store MUST lower each admitted transition into immutable typed
 state-root objects and atomically move one small head that pins the exact
-`cymule.durable-state-root/5` manifest. The fixed manifest separately roots
+`cymule.durable-state-root/6` manifest. The fixed manifest separately roots
 Machine authority, admitted material, ordered batches, compacted base, Events,
 admissions, commands, proofs, and every closed M1 sidecar family; a complete
 `MachineSnapshot` or `DurableState` value is never a storage object. Persistent maps copy only the

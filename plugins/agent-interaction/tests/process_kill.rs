@@ -103,14 +103,14 @@ struct UnusedAgentProviders;
 impl agent_protocol::AgentProviders for UnusedAgentProviders {
     fn publish_agent_stream(
         &mut self,
-        _intent: &agent_protocol::AgentStreamPublicationIntent,
+        _dispatch: &agent_protocol::AgentStreamPublicationReservation,
     ) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
         unreachable!("staged Agent streams do not publish through a provider")
     }
 
-    fn observe_agent_stream_publication(
+    fn reconcile_agent_stream_publication(
         &mut self,
-        _intent: &agent_protocol::AgentStreamPublicationIntent,
+        _dispatch: &agent_protocol::AgentStreamPublicationReservation,
     ) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
         unreachable!("staged Agent streams do not observe a publication provider")
     }
@@ -150,41 +150,48 @@ struct PublishedPublicationProvider {
     unknown: bool,
 }
 
+fn published_observation(
+    dispatch: &agent_protocol::AgentStreamPublicationReservation,
+) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
+    let intent = &dispatch.intent;
+    let resource = intent.resource_handle()?;
+    Ok(
+        agent_protocol::AgentStreamPublicationObservation::Published {
+            publication: Box::new(cymule_profile_protocol::resource::ResourcePublication {
+                locators: cymule_profile_protocol::resource::ResourceLocatorSet {
+                    locator_version: cymule_profile_protocol::resource::RESOURCE_LOCATOR_VERSION
+                        .to_owned(),
+                    resource_id: resource.resource_id.clone(),
+                    resolver_binding: intent.resolver_binding().to_owned(),
+                    locations: vec![
+                        cymule_profile_protocol::resource::ResourceLocation::Opaque {
+                            reference: "object:agent-process-kill".to_owned(),
+                        },
+                    ],
+                },
+                resource,
+            }),
+        },
+    )
+}
+
 impl agent_protocol::AgentProviders for PublishedPublicationProvider {
     fn publish_agent_stream(
         &mut self,
-        intent: &agent_protocol::AgentStreamPublicationIntent,
+        dispatch: &agent_protocol::AgentStreamPublicationReservation,
     ) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
         self.publish_calls += 1;
         if self.unknown {
             return Ok(agent_protocol::AgentStreamPublicationObservation::Unknown);
         }
-        let resource = intent.resource_handle()?;
-        Ok(
-            agent_protocol::AgentStreamPublicationObservation::Published {
-                publication: Box::new(cymule_profile_protocol::resource::ResourcePublication {
-                    locators: cymule_profile_protocol::resource::ResourceLocatorSet {
-                        locator_version:
-                            cymule_profile_protocol::resource::RESOURCE_LOCATOR_VERSION.to_owned(),
-                        resource_id: resource.resource_id.clone(),
-                        resolver_binding: intent.resolver_binding().to_owned(),
-                        locations: vec![
-                            cymule_profile_protocol::resource::ResourceLocation::Opaque {
-                                reference: "object:agent-process-kill".to_owned(),
-                            },
-                        ],
-                    },
-                    resource,
-                }),
-            },
-        )
+        published_observation(dispatch)
     }
 
-    fn observe_agent_stream_publication(
+    fn reconcile_agent_stream_publication(
         &mut self,
-        intent: &agent_protocol::AgentStreamPublicationIntent,
+        dispatch: &agent_protocol::AgentStreamPublicationReservation,
     ) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
-        self.publish_agent_stream(intent)
+        published_observation(dispatch)
     }
 
     fn bind_agent_workspace(
@@ -214,15 +221,15 @@ impl agent_protocol::AgentProviders for PublishedPublicationProvider {
 impl agent_protocol::AgentProviders for NotAppliedPublicationProvider {
     fn publish_agent_stream(
         &mut self,
-        _intent: &agent_protocol::AgentStreamPublicationIntent,
+        _dispatch: &agent_protocol::AgentStreamPublicationReservation,
     ) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
         self.publish_calls += 1;
         Ok(agent_protocol::AgentStreamPublicationObservation::NotApplied)
     }
 
-    fn observe_agent_stream_publication(
+    fn reconcile_agent_stream_publication(
         &mut self,
-        _intent: &agent_protocol::AgentStreamPublicationIntent,
+        _dispatch: &agent_protocol::AgentStreamPublicationReservation,
     ) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
         unreachable!("NotApplied baseline does not reconcile publication")
     }

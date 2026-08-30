@@ -57,7 +57,10 @@ Use this precedence order when guidance conflicts:
   local identity. Ordinary Message writes, every Tool lifecycle write, Session
   Close, staged Finalize, and external Finalize all exact-read that same claim;
   no stream scan or second target authority exists. Only a freshly acknowledged
-  reservation or rearm may publish. Finalization atomically promotes that exact
+  reservation or rearm may publish. The same claim CAS writes one immutable
+  Session/target/generation membership slot; historical replay exact-loads one
+  slot while full audit verifies the actual gap-free sequence once. Finalization
+  atomically promotes that exact
   claim from `Reserved` to terminal `Materialized` while promoting the exact
   reservation to the permanent pin, catalog, and terminal stream state. After
   a provider-proved durable `NotApplied`, stream Abort is the sole reservation
@@ -65,6 +68,10 @@ Use this precedence order when guidance conflicts:
   closes the stream/Session, and moves that exact pin from `Reserved` to
   `Released`; an unresolved attempt cannot be aborted. Released claim tombstones
   advance generation on later reuse, preventing ABA.
+  The provider owns one durable ledger keyed by the exact publication dispatch;
+  world-write claim and a terminal `NotApplied` tombstone are mutually exclusive,
+  so reconciliation cannot race a stale authorized publisher into an orphaned
+  external object.
 - Every Run-to-Run Resource transfer has one exact keyed current authority, one
   target-Run slot map, and one payload-free entry in that target owner's
   persistent-log index. Exact lookup addresses the keyed authority directly;

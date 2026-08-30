@@ -30,7 +30,7 @@ fresh dispatch ownership. The physical envelope never enters receipt identity.
 The public persistence capability exposes only:
 
 - ordinary `commit_agent` for commands requiring no provider product;
-- specialized stream finalization, observe-only publication reconciliation,
+- specialized stream finalization, provider-ledger publication reconciliation,
   and workspace commit methods whose provider registries are framework-owned
   and binding-keyed;
 - exact Session, message, tool, elicitation, occurrence, and stream reads;
@@ -209,9 +209,12 @@ uppercase, empty tokens, and additional slashes fail before Open. Its serialized
 Finalize command carries only Session/stream identity;
 framework preflight derives a closed serializable intent binding source
 revision/digest, Session, stream, command, target, resolver, and content. The
-provider product remains non-Serde. The provider accepts only that intent,
-publishes idempotently, and may return only Published with exact readback,
-NotApplied, or Unknown.
+provider product remains non-Serde. The provider accepts only the exact durable
+dispatch, keys its own ledger by `dispatch_id`, publishes idempotently, and may
+return only Published with exact readback, NotApplied, or Unknown. Claiming the
+world write and installing a terminal NotApplied tombstone are mutually
+exclusive provider-ledger transitions; an in-flight write remains Unknown, and
+a stale publisher fenced by the tombstone performs no world write.
 
 The retained reservation intent target MUST equal the immutable stream current
 target exactly. A separately self-consistent intent/reservation for another
@@ -373,13 +376,13 @@ Agent/M1 transition.
 ## Wire and compatibility
 
 Current persisted command and receipt selectors are `cymule.agent-command/4`
-and `cymule.agent-command-receipt/5`; their complete-body IDs use
-`cymule.agent-command-id/2` and `cymule.agent-command-receipt-id/3`; bounded
+and `cymule.agent-command-receipt/6`; their complete-body IDs use
+`cymule.agent-command-id/2` and `cymule.agent-command-receipt-id/4`; bounded
 Session metadata is `cymule.agent-session-current/2`, and the current closed
-schema generation is `cymule.agent/9`. Publication intent/reservation use `/2`
+schema generation is `cymule.agent/10`. Publication intent/reservation use `/2`
 and `/3`; target
-claims use `cymule.agent-target-claim-current/2` with key `/1` and identity
-`/2` domains.
+claims use `cymule.agent-target-claim-current/3` with key `/1` and identity
+`/3` domains; immutable generation records and keys use `/1`.
 Recovery observations use their own content-ID generation. All persisted unions
 deny unknown fields.
 There is no reader or writer for the removed aggregate Session, recursive
@@ -412,7 +415,7 @@ delete-fenced family rejects a later finalization. Reservation and terminal
 replay authenticate claim, pin, retention, and catalog sidecars; full audit
 closes claims in both directions against every Message, terminal/non-terminal
 Tool, and stream. Publication Unknown must
-reopen through observe-only reconciliation with zero additional publish calls;
+reopen through provider-ledger reconciliation with zero additional world writes;
 repeated recovery evidence must perform zero writes while new evidence remains
 append-only and reopenable. Tests also release a sibling pin between reservation
 and promotion, and prove NotApplied Abort releases its reserved pin while

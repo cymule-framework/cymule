@@ -42,11 +42,17 @@ pub const AGENT_STREAM_PUBLICATION_RESERVATION_VERSION: &str =
 pub const AGENT_STREAM_PUBLICATION_DISPATCH_ID_DOMAIN: &str =
     "cymule.agent-stream-publication-dispatch-id/1";
 /// Frozen current generation for one exact Agent target claim.
-pub const AGENT_TARGET_CLAIM_CURRENT_VERSION: &str = "cymule.agent-target-claim-current/2";
+pub const AGENT_TARGET_CLAIM_CURRENT_VERSION: &str = "cymule.agent-target-claim-current/3";
 /// Domain-separated key for one Session-local Message or Tool target.
 pub const AGENT_TARGET_CLAIM_KEY_DOMAIN: &str = "cymule.agent-target-claim-key/1";
 /// Content identity domain for one exact target-claim generation.
-pub const AGENT_TARGET_CLAIM_ID_DOMAIN: &str = "cymule.agent-target-claim-id/2";
+pub const AGENT_TARGET_CLAIM_ID_DOMAIN: &str = "cymule.agent-target-claim-id/3";
+/// Frozen immutable index-record generation for one exact target-claim generation.
+pub const AGENT_TARGET_CLAIM_GENERATION_RECORD_VERSION: &str =
+    "cymule.agent-target-claim-generation-record/1";
+/// Domain-separated key for one immutable target-claim generation record.
+pub const AGENT_TARGET_CLAIM_GENERATION_KEY_DOMAIN: &str =
+    "cymule.agent-target-claim-generation-key/1";
 const AGENT_OCCURRENCE_TRANSITION_ID_DOMAIN: &str = "cymule.agent-occurrence-transition-id/1";
 const AGENT_UPDATE_DIGEST_DOMAIN: &str = "cymule.agent-update-current/1";
 const AGENT_MESSAGE_DIGEST_DOMAIN: &str = "cymule.agent-message-current/1";
@@ -103,8 +109,6 @@ pub const MAX_AGENT_PAGE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_AGENT_VALUE_ENTRIES: usize = 256;
 /// Maximum distinct reconciliation observations retained by one occurrence.
 pub const MAX_AGENT_RECOVERY_OBSERVATIONS: usize = 64;
-/// Maximum generations retained for one exact role-free Agent target.
-pub const MAX_AGENT_TARGET_CLAIM_GENERATION: u64 = 64;
 /// Maximum concurrently non-terminal tools retained by one Session.
 pub const MAX_AGENT_NONTERMINAL_TOOLS: usize = 64;
 /// Maximum summed before/Cancelled canonical bytes reserved for Session close.
@@ -4440,6 +4444,30 @@ pub fn agent_target_claim_key(
     content_id(AGENT_TARGET_CLAIM_KEY_DOMAIN, &(session_id, target)).map_err(Into::into)
 }
 
+/// Stable `StateRoot` key for one immutable target-claim generation slot.
+///
+/// # Errors
+///
+/// Returns an error when the Session, target, or generation is invalid.
+pub fn agent_target_claim_generation_key(
+    session_id: &str,
+    target: &AgentTargetClaimTarget,
+    generation: u64,
+) -> ProtocolResult<String> {
+    validate_identity("Agent Session", session_id)?;
+    target.verify()?;
+    if generation == 0 || generation > MAX_EXACT_INTEGER {
+        return Err(ProtocolError::Validation(
+            "Agent target-claim generation is outside the exact integer range".to_owned(),
+        ));
+    }
+    content_id(
+        AGENT_TARGET_CLAIM_GENERATION_KEY_DOMAIN,
+        &(session_id, target, generation),
+    )
+    .map_err(Into::into)
+}
+
 /// Closed lifecycle phase of one exact Agent target claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
@@ -4571,7 +4599,7 @@ impl AgentTargetClaimCurrent {
         )?;
         validate_identity("Agent Session", &self.session_id)?;
         self.target.verify()?;
-        if self.generation == 0 || self.generation > MAX_AGENT_TARGET_CLAIM_GENERATION {
+        if self.generation == 0 || self.generation > MAX_EXACT_INTEGER {
             return Err(ProtocolError::Validation(
                 "Agent target-claim generation is outside the exact integer range".to_owned(),
             ));
@@ -4614,6 +4642,92 @@ impl AgentTargetClaimCurrent {
             ));
         }
         validate_canonical_size("Agent target claim current", self, MAX_AGENT_CURRENT_BYTES)
+    }
+}
+
+/// Immutable membership record for one exact target-claim generation.
+///
+/// The current claim remains the sole mutable authority for a target. This
+/// record is the append-only generation index used to prove historical
+/// membership without walking predecessor receipts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTargetClaimGenerationRecord {
+    /// Frozen record generation.
+    pub record_version: String,
+    /// Owning Session identity.
+    pub session_id: String,
+    /// Role-free target identity.
+    pub target: AgentTargetClaimTarget,
+    /// Exact one-based generation slot.
+    pub generation: u64,
+    /// Content identity of the exact claim stored at this slot.
+    pub claim_id: String,
+    /// Exact Agent command which admitted this claim generation.
+    pub admitted_by: String,
+}
+
+impl AgentTargetClaimGenerationRecord {
+    /// Derive the immutable generation slot from one verified claim current.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the claim current or derived record is invalid.
+    pub fn from_current(current: &AgentTargetClaimCurrent) -> ProtocolResult<Self> {
+        current.verify()?;
+        let record = Self {
+            record_version: AGENT_TARGET_CLAIM_GENERATION_RECORD_VERSION.to_owned(),
+            session_id: current.session_id.clone(),
+            target: current.target.clone(),
+            generation: current.generation,
+            claim_id: current.claim_id.clone(),
+            admitted_by: current.admitted_by.clone(),
+        };
+        record.verify()?;
+        Ok(record)
+    }
+
+    /// Verify this exact immutable generation membership record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when its version, owner, target, generation, claim,
+    /// command, key material, or bounded encoding is invalid.
+    pub fn verify(&self) -> ProtocolResult<()> {
+        require_agent_version(
+            "Agent target claim generation record",
+            &self.record_version,
+            AGENT_TARGET_CLAIM_GENERATION_RECORD_VERSION,
+        )?;
+        agent_target_claim_generation_key(&self.session_id, &self.target, self.generation)?;
+        validate_sha256("Agent target-claim generation claim", &self.claim_id)?;
+        validate_sha256("Agent target-claim generation command", &self.admitted_by)?;
+        validate_canonical_size(
+            "Agent target claim generation record",
+            self,
+            MAX_AGENT_CURRENT_BYTES,
+        )
+    }
+
+    /// Verify that this slot records one exact claim current.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the record and claim differ.
+    pub fn verify_for(&self, current: &AgentTargetClaimCurrent) -> ProtocolResult<()> {
+        self.verify()?;
+        current.verify()?;
+        if self.session_id != current.session_id
+            || self.target != current.target
+            || self.generation != current.generation
+            || self.claim_id != current.claim_id
+            || self.admitted_by != current.admitted_by
+        {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent target-claim generation record changed its exact claim".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -6014,7 +6128,13 @@ fn workspace_observation_artifacts(
 /// supplied stream or workspace occurrence. Mutable defaults, caller-supplied
 /// provider products, and generation fallback are outside this contract.
 pub trait AgentProviders {
-    /// Idempotently publish and exactly read back one framework-derived intent.
+    /// Atomically claim and execute one exact provider dispatch.
+    ///
+    /// Implementations MUST use a provider-owned durable ledger keyed by
+    /// `dispatch.dispatch_id`. Claiming publication and fencing the same
+    /// dispatch as `NotApplied` are mutually exclusive terminal transitions.
+    /// A call which observes a provider-side `NotApplied` tombstone MUST NOT
+    /// issue the world write.
     ///
     /// # Errors
     ///
@@ -6022,18 +6142,24 @@ pub trait AgentProviders {
     /// defect. Ambiguous world outcomes return [`AgentStreamPublicationObservation::Unknown`].
     fn publish_agent_stream(
         &mut self,
-        intent: &AgentStreamPublicationIntent,
+        dispatch: &AgentStreamPublicationReservation,
     ) -> ProtocolResult<AgentStreamPublicationObservation>;
 
-    /// Observe one prior publication intent without issuing another write.
+    /// Reconcile one exact dispatch through the provider-owned ledger.
+    ///
+    /// Returning `NotApplied` MUST atomically install a terminal tombstone for
+    /// `dispatch.dispatch_id` before returning. A concurrent or later publish
+    /// call for that dispatch must then return `NotApplied` without issuing the
+    /// world write. If publication has already been claimed but is not yet
+    /// terminal, this method MUST return `Unknown`.
     ///
     /// # Errors
     ///
     /// Returns an error only when the retained binding cannot observe the exact
     /// intent or violates the closed provider protocol.
-    fn observe_agent_stream_publication(
+    fn reconcile_agent_stream_publication(
         &mut self,
-        intent: &AgentStreamPublicationIntent,
+        dispatch: &AgentStreamPublicationReservation,
     ) -> ProtocolResult<AgentStreamPublicationObservation>;
 
     /// Resolve the exact workspace implementation binding before dispatch.
@@ -6100,7 +6226,7 @@ pub fn execute_agent_stream_publication<P: AgentProviders + ?Sized>(
         });
     }
     let intent = reservation.intent.clone();
-    let observation = providers.publish_agent_stream(&intent)?;
+    let observation = providers.publish_agent_stream(reservation)?;
     agent_stream_publication_result(reservation.clone(), intent, observation)
 }
 
@@ -6131,7 +6257,7 @@ pub fn reconcile_agent_stream_publication<P: AgentProviders + ?Sized>(
                 .to_owned(),
         });
     }
-    let observation = providers.observe_agent_stream_publication(expected_intent)?;
+    let observation = providers.reconcile_agent_stream_publication(reservation)?;
     agent_stream_publication_result(reservation.clone(), expected_intent.clone(), observation)
 }
 
@@ -7793,10 +7919,10 @@ fn workspace_checkpoint_phase(
 /// Closed Agent persistence command generation.
 pub const AGENT_COMMAND_VERSION: &str = "cymule.agent-command/4";
 /// Closed Agent persistence receipt generation.
-pub const AGENT_COMMAND_RECEIPT_VERSION: &str = "cymule.agent-command-receipt/5";
+pub const AGENT_COMMAND_RECEIPT_VERSION: &str = "cymule.agent-command-receipt/6";
 
 const AGENT_COMMAND_ID_DOMAIN: &str = "cymule.agent-command-id/2";
-const AGENT_COMMAND_RECEIPT_ID_DOMAIN: &str = "cymule.agent-command-receipt-id/3";
+const AGENT_COMMAND_RECEIPT_ID_DOMAIN: &str = "cymule.agent-command-receipt-id/4";
 const AGENT_UPDATE_KEY_DOMAIN: &str = "cymule.agent-update-key/1";
 const AGENT_MESSAGE_KEY_DOMAIN: &str = "cymule.agent-message-key/1";
 const AGENT_TOOL_KEY_DOMAIN: &str = "cymule.agent-tool-key/1";
@@ -10072,7 +10198,7 @@ impl AgentCommit {
 ///
 /// A provider publication may have applied even when the later Durable CAS did
 /// not return a commit receipt. The Unknown variant retains the exact immutable
-/// publication intent required for read-only reconciliation.
+/// publication intent required for provider-ledger reconciliation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentStreamFinalizeOutcome {
     /// The Agent/Resource postcondition committed or replayed exactly.
@@ -10089,7 +10215,7 @@ pub enum AgentStreamFinalizeOutcome {
     },
     /// Publication or post-publication CAS outcome remains ambiguous.
     PublicationOutcomeUnknown {
-        /// Exact intent required for read-only reconciliation.
+        /// Exact intent required for provider-ledger reconciliation.
         intent: AgentStreamPublicationIntent,
     },
 }
@@ -10781,6 +10907,49 @@ mod tests {
         );
     }
 
+    fn materialize_target_claim_after_64(
+        session_id: &str,
+        target: AgentTargetClaimTarget,
+        mut reusable: AgentTargetClaimCurrent,
+    ) -> AgentTargetClaimCurrent {
+        for ordinal in 0..33_u8 {
+            let reservation_id = revision(char::from(b'f' - (ordinal % 6)));
+            let reservation = AgentTargetClaimTransition::new(
+                session_id,
+                target.clone(),
+                Some(&reusable),
+                AgentTargetClaimPhase::Reserved {
+                    stream_id: format!("stream:target-claim:{ordinal}"),
+                    reservation_id: reservation_id.clone(),
+                },
+                &revision(char::from(b'0' + (ordinal % 10))),
+            )
+            .expect("released target admits another reservation without a business cap");
+            reusable = AgentTargetClaimTransition::new(
+                session_id,
+                target.clone(),
+                Some(&reservation.current),
+                AgentTargetClaimPhase::Released {
+                    stream_id: format!("stream:target-claim:{ordinal}"),
+                    reservation_id,
+                },
+                &revision(char::from(b'a' + (ordinal % 6))),
+            )
+            .expect("reserved target remains releasable after generation 64")
+            .current;
+        }
+        assert!(reusable.generation > 64);
+        AgentTargetClaimTransition::new(
+            session_id,
+            target,
+            Some(&reusable),
+            AgentTargetClaimPhase::Materialized,
+            &revision('5'),
+        )
+        .expect("a target beyond generation 64 can still materialize")
+        .current
+    }
+
     #[test]
     fn target_claim_key_is_role_free_and_phase_generations_are_closed() {
         let session_id = "session:target-claim";
@@ -10854,30 +11023,12 @@ mod tests {
         .expect("released target admits one later materialization generation");
         assert_eq!(reused.current.generation, released.current.generation + 1);
 
-        let terminal_generation = AgentTargetClaimCurrent::new(
-            session_id,
-            user.clone(),
-            MAX_AGENT_TARGET_CLAIM_GENERATION,
-            Some(&revision('1')),
-            Some(&revision('2')),
-            AgentTargetClaimPhase::Released {
-                stream_id: "stream:target-claim-limit".to_owned(),
-                reservation_id: revision('3'),
-            },
-            &revision('4'),
-        )
-        .expect("the exact target-claim generation ceiling verifies");
-        assert_eq!(terminal_generation.generation, 64);
-        assert!(AgentTargetClaimCurrent::new(
-            session_id,
-            user,
-            MAX_AGENT_TARGET_CLAIM_GENERATION + 1,
-            Some(&terminal_generation.claim_id),
-            Some(&terminal_generation.admitted_by),
-            AgentTargetClaimPhase::Materialized,
-            &revision('5'),
-        )
-        .is_err());
+        let terminal = materialize_target_claim_after_64(session_id, user, released.current);
+        let record = AgentTargetClaimGenerationRecord::from_current(&terminal)
+            .expect("terminal generation record derives");
+        record
+            .verify_for(&terminal)
+            .expect("generation record binds the exact claim");
     }
 
     #[test]
@@ -11545,6 +11696,7 @@ mod tests {
         workspace_artifacts: Vec<cymule_core::ArtifactRecord>,
         publication_calls: usize,
         publication_intents: Vec<AgentStreamPublicationIntent>,
+        publication_dispatches: BTreeMap<String, AgentStreamPublicationObservation>,
         publication_observation_calls: usize,
         binding_calls: usize,
         workspace_dispatch_calls: usize,
@@ -11554,40 +11706,62 @@ mod tests {
     impl AgentProviders for TestAgentProviders {
         fn publish_agent_stream(
             &mut self,
-            intent: &AgentStreamPublicationIntent,
+            dispatch: &AgentStreamPublicationReservation,
         ) -> ProtocolResult<AgentStreamPublicationObservation> {
             self.publication_calls += 1;
-            self.publication_intents.push(intent.clone());
-            if let Some(observation) = &self.publication_observation {
+            self.publication_intents.push(dispatch.intent.clone());
+            if let Some(observation) = self.publication_dispatches.get(&dispatch.dispatch_id) {
                 return Ok(observation.clone());
             }
-            self.publication
+            if let Some(observation) = self.publication_observation.clone() {
+                if !matches!(observation, AgentStreamPublicationObservation::Unknown) {
+                    self.publication_dispatches
+                        .insert(dispatch.dispatch_id.clone(), observation.clone());
+                }
+                return Ok(observation);
+            }
+            let observation = self
+                .publication
                 .clone()
                 .map(|publication| AgentStreamPublicationObservation::Published {
                     publication: Box::new(publication),
                 })
                 .ok_or_else(|| {
                     ProtocolError::Validation("test stream provider has no publication".to_owned())
-                })
+                })?;
+            self.publication_dispatches
+                .insert(dispatch.dispatch_id.clone(), observation.clone());
+            Ok(observation)
         }
 
-        fn observe_agent_stream_publication(
+        fn reconcile_agent_stream_publication(
             &mut self,
-            intent: &AgentStreamPublicationIntent,
+            dispatch: &AgentStreamPublicationReservation,
         ) -> ProtocolResult<AgentStreamPublicationObservation> {
             self.publication_observation_calls += 1;
-            self.publication_intents.push(intent.clone());
-            if let Some(observation) = &self.reconciliation_observation {
+            self.publication_intents.push(dispatch.intent.clone());
+            if let Some(observation) = self.publication_dispatches.get(&dispatch.dispatch_id) {
                 return Ok(observation.clone());
             }
-            self.publication
+            if let Some(observation) = self.reconciliation_observation.clone() {
+                if !matches!(observation, AgentStreamPublicationObservation::Unknown) {
+                    self.publication_dispatches
+                        .insert(dispatch.dispatch_id.clone(), observation.clone());
+                }
+                return Ok(observation);
+            }
+            let observation = self
+                .publication
                 .clone()
                 .map(|publication| AgentStreamPublicationObservation::Published {
                     publication: Box::new(publication),
                 })
                 .ok_or_else(|| {
                     ProtocolError::Validation("test stream provider has no publication".to_owned())
-                })
+                })?;
+            self.publication_dispatches
+                .insert(dispatch.dispatch_id.clone(), observation.clone());
+            Ok(observation)
         }
 
         fn bind_agent_workspace(
@@ -14473,7 +14647,7 @@ mod tests {
     }
 
     #[test]
-    fn external_stream_unknown_retains_exact_intent_for_read_only_reconciliation() {
+    fn external_stream_unknown_retains_exact_intent_for_provider_reconciliation() {
         let (command, _, source) = external_stream_finalize_fixture();
         let (_, reservation) = reserve_external_stream_source(&command, source);
         let mut providers = TestAgentProviders {
@@ -14496,7 +14670,7 @@ mod tests {
 
         let reconciled =
             reconcile_agent_stream_publication(&reservation, &restored, &mut providers)
-                .expect("read-only publication observation resolves");
+                .expect("provider-ledger publication reconciliation resolves");
         let AgentStreamPublicationResult::Published { product, .. } = reconciled else {
             panic!("exact readback must return the verified publication product")
         };
@@ -14589,6 +14763,40 @@ mod tests {
         let (_, reservation) = reserve_external_stream_source(&finalize_command, source);
         assert!(execute_agent_stream_publication(&reservation, &mut providers).is_err());
         assert_eq!(providers.publication_calls, 1);
+    }
+
+    #[test]
+    fn provider_not_applied_fence_prevents_a_late_stale_dispatch_write() {
+        let (command, _, source) = external_stream_finalize_fixture();
+        let (_, reservation) = reserve_external_stream_source(&command, source);
+        let intent = reservation.intent.clone();
+        let mut providers = TestAgentProviders {
+            publication: Some(external_publication()),
+            reconciliation_observation: Some(AgentStreamPublicationObservation::NotApplied),
+            ..TestAgentProviders::default()
+        };
+
+        let reconciled = reconcile_agent_stream_publication(&reservation, &intent, &mut providers)
+            .expect("provider ledger fences the exact dispatch as NotApplied");
+        assert!(matches!(
+            reconciled,
+            AgentStreamPublicationResult::NotApplied { .. }
+        ));
+
+        let stale = execute_agent_stream_publication(&reservation, &mut providers)
+            .expect("stale publisher observes the provider-side tombstone");
+        assert!(matches!(
+            stale,
+            AgentStreamPublicationResult::NotApplied { .. }
+        ));
+        assert_eq!(providers.publication_observation_calls, 1);
+        assert_eq!(providers.publication_calls, 1);
+        assert!(matches!(
+            providers
+                .publication_dispatches
+                .get(&reservation.dispatch_id),
+            Some(AgentStreamPublicationObservation::NotApplied)
+        ));
     }
 
     #[test]

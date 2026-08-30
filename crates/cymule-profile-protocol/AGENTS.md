@@ -64,9 +64,16 @@
   bind the exact parent source, semantic command, outcome, and ordered typed
   mutations, but never their own result current, physical manifest, revision,
   or CAS token.
-- Agent command and receipt generation `/4` use identity domains `/2`; each ID
-  preimage includes its current selector. Never reuse a predecessor command or
-  receipt identity across a reducer-semantic hard cut.
+- Current Agent selector set: `cymule.agent/10`, `cymule.agent-command/4`,
+  `cymule.agent-command-id/2`, `cymule.agent-command-receipt/6`,
+  `cymule.agent-command-receipt-id/4`,
+  `cymule.agent-target-claim-current/3`,
+  `cymule.agent-target-claim-generation-record/1`,
+  `cymule.agent-target-claim-generation-key/1`,
+  `cymule.agent-target-claim-key/1`, and
+  `cymule.agent-target-claim-id/3`. Each command and receipt ID preimage
+  includes its current selector. Never reuse a predecessor command or receipt
+  identity across a reducer-semantic hard cut.
 - Every leaf, command, receipt, source view, postcondition, page, and fanout has
   a checked count and canonical-byte bound. Account keys, negative lookups, and
   non-serializable source authority in aggregate accounting before provider
@@ -96,16 +103,21 @@
   through `Reserved`, `Materialized`, or `Released` with a monotonic generation.
   Every non-genesis generation binds its immediate predecessor claim and
   admitting command IDs, so higher generation alone is never lineage proof.
-  Generation is capped at 64, bounding any receipt-linked replay; exhausted
-  reuse requires a new Message or Tool identity.
+  Every transition also derives one immutable generation record for the same
+  CAS. Its unique Session/target/generation key is historical membership
+  authority; generation remains within the shared exact-integer domain and is
+  not a business retry cap.
   Direct Message and terminal Tool writes materialize it; non-terminal Tool
   writes reject Reserved/Materialized; Session Close materializes every
   Cancelled Tool in claim-key order. Before provider I/O, an external Finalize
   persists its content-derived publication reservation, `Reserved` target claim,
   and `Reserved` profile pin in the same physical retention family. Only a
   fresh reservation or NotApplied rearm acknowledgement owns one publish call;
-  reopen observes a claimed attempt. Every provider publication result retains
-  the complete DispatchClaimed reservation it observed, including attempt; a
+  reopen reconciles a claimed attempt through a provider-owned ledger keyed by
+  dispatch ID. Publication claim and a terminal NotApplied tombstone are
+  mutually exclusive; an in-flight attempt remains Unknown and a tombstoned
+  stale publisher performs no world write. Every provider publication result
+  retains the complete DispatchClaimed reservation it observed, including attempt; a
   late result cannot settle a rearmed attempt, and reconciliation rejects a
   durable NotApplied phase before provider I/O. A public NotApplied outcome
   carries that exact durable reservation generation, not an intent-only claim.
@@ -140,7 +152,7 @@
   validator owns this state-dependent capacity for helpers, public snapshot
   commands, current reads, and receipt replay alike.
 - These Agent bounds and the required counters belong to the current unfrozen
-  internal `cymule.agent/9` hard cut. Omitted counters, omitted target-claim
+  internal `cymule.agent/10` hard cut. Omitted counters, omitted target-claim
   sources, omitted publication reservations, and historical aggregate stream
   shapes have no default, compatibility decoder, or migration fallback;
   freeze the final schema digest with this release generation.

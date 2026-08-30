@@ -91,7 +91,7 @@
   required-nullable Resource member, so omission cannot erase the owning
   release edge. Generic Resource release cannot consume an Agent reservation.
 - Stream Open, Append, and Abort return the exact Agent commit. Finalize and
-  observe-only reconciliation return the closed finalization outcome, which
+  provider-ledger reconciliation returns the closed finalization outcome, which
   may retain an Unknown publication intent instead of claiming a commit. The
   public controller verifies every outcome against its Finalize command and,
   for reconciliation, the exact restored intent; custom persistence cannot
@@ -107,11 +107,15 @@
   closed intent binding source revision/digest,
   Session, stream, command, resolver, target, and content. The intent is the
   only serializable recovery authority; provider products remain non-Serde.
-  Providers accept only that intent, publish idempotently, and return a closed
-  exact-readback observation. Unknown or an unacknowledged post-I/O CAS returns
-  the same intent; known CAS/reducer conflicts remain typed errors. Recovery
-  requires the intent, exact-matches the durable reservation, and uses the
-  observe-only finalization path without calling publish again.
+  Providers accept the exact durable dispatch, key their own ledger by its
+  `dispatch_id`, publish idempotently, and return a closed exact-readback
+  observation. Publication claim and a terminal `NotApplied` tombstone are
+  mutually exclusive provider-ledger transitions: reconciliation returns
+  Unknown while publication is in flight, and a later publisher that observes
+  the tombstone performs no world write. Unknown or an unacknowledged post-I/O
+  CAS returns the same intent; known CAS/reducer conflicts remain typed errors.
+  Recovery requires the intent, exact-matches the durable reservation, and uses
+  the provider-ledger finalization path without issuing the world write again.
 - Input checkpoints bind exact Run, full `WaitOwner`, response-derived result
   Artifact, and typed M1 receipt references. Workspace checkpoints bind exact
   Run/scope/phase/Continuation/Effect/obligation plus a closed M1 receipt ref.
