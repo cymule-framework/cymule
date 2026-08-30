@@ -6580,6 +6580,7 @@ pub fn reachable_state_root_objects<R: StateRootResolver + ?Sized>(
     audit_run_current_memberships(manifest, resolver)?;
     audit_component_attempt_frontiers(manifest, resolver)?;
     audit_pending_wait_sources(manifest, resolver)?;
+    audit_agent_update_closure(manifest, resolver, &materialized)?;
     audit_agent_target_claim_closure(manifest, resolver, &materialized)?;
 
     let mut reachable = BTreeSet::new();
@@ -6617,6 +6618,63 @@ fn agent_tool_is_terminal(tool: &cymule_profile_protocol::agent::AgentToolCurren
             | cymule_profile_protocol::agent::ToolCallStatus::Failed
             | cymule_profile_protocol::agent::ToolCallStatus::Cancelled
     )
+}
+
+fn audit_agent_update_closure<R: StateRootResolver + ?Sized>(
+    manifest: &StateRootManifest,
+    resolver: &mut R,
+    materialized: &MaterializedStateRoots,
+) -> DurableResult<()> {
+    use cymule_profile_protocol::agent::{
+        AgentCommandReceipt, AgentUpdateCurrent, agent_update_key,
+    };
+
+    let updates: BTreeMap<String, AgentUpdateCurrent> = decode_family_map(
+        &materialized.collections,
+        StateRootFamily::AgentUpdates,
+        StateRootLeafKind::AgentUpdateCurrent,
+    )?;
+    let receipts: BTreeMap<String, AgentCommandReceipt> = decode_family_map(
+        &materialized.collections,
+        StateRootFamily::AgentCommandReceipts,
+        StateRootLeafKind::AgentCommandReceipt,
+    )?;
+    for receipt in receipts.values() {
+        let command =
+            load_agent_command(manifest, resolver, &receipt.command_id)?.ok_or_else(|| {
+                DurableError::Integrity {
+                    code: "agent_update_receipt_command_missing".to_owned(),
+                    message: "Agent receipt lost its admitting command".to_owned(),
+                }
+            })?;
+        crate::coordinator::verify_agent_update_receipt_graph(
+            manifest, resolver, &command, receipt,
+        )?;
+    }
+    for (key, current) in &updates {
+        let receipt =
+            receipts
+                .get(&current.admitted_by)
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_update_origin_receipt_missing".to_owned(),
+                    message: "Agent update current lost its admitting receipt".to_owned(),
+                })?;
+        let expected =
+            crate::coordinator::agent_receipt_update_current(receipt).ok_or_else(|| {
+                DurableError::Integrity {
+                    code: "agent_update_origin_receipt_mismatch".to_owned(),
+                    message: "Agent update current cites a receipt without an update".to_owned(),
+                }
+            })?;
+        if current != expected || *key != agent_update_key(&current.session_id, &current.update_id)?
+        {
+            return Err(DurableError::Integrity {
+                code: "agent_update_origin_mismatch".to_owned(),
+                message: "Agent update current changed its immutable receipt authority".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn audit_unmaterialized_agent_tool(

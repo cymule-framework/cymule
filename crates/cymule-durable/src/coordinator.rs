@@ -2744,6 +2744,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
             }
             receipt.verify_for(command)?;
             self.read_current_state_root(|manifest, resolver| {
+                verify_agent_update_receipt_graph(manifest, resolver, command, &receipt)?;
                 verify_agent_target_claim_receipt_graph(manifest, resolver, command, &receipt)
             })?;
             if matches!(
@@ -9379,6 +9380,7 @@ fn load_verified_agent_origin<R: crate::StateRootResolver + ?Sized>(
             message: format!("Agent current lost receipt for admitting command {command_id}"),
         })?;
     receipt.verify_for(&command)?;
+    verify_agent_update_receipt_graph(manifest, resolver, &command, &receipt)?;
     match &command.action {
         agent_protocol::AgentCommandAction::Input(_) => {
             verify_agent_input_receipt_graph(manifest, resolver, &command, &receipt)?;
@@ -10623,6 +10625,51 @@ pub(crate) fn verify_agent_target_claim_receipt_graph<R: crate::StateRootResolve
     Ok(())
 }
 
+pub(crate) fn agent_receipt_update_current(
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> Option<&agent_protocol::AgentUpdateCurrent> {
+    match &receipt.outcome {
+        agent_protocol::AgentCommandOutcome::Session(postcondition) => Some(&postcondition.update),
+        agent_protocol::AgentCommandOutcome::Stream(agent_protocol::AgentStreamPostcondition {
+            effect: agent_protocol::AgentStreamEffect::Finalized { session, .. },
+            ..
+        }) => Some(&session.update),
+        agent_protocol::AgentCommandOutcome::Occurrence(_)
+        | agent_protocol::AgentCommandOutcome::Stream(_)
+        | agent_protocol::AgentCommandOutcome::Input(_)
+        | agent_protocol::AgentCommandOutcome::Workspace(_) => None,
+    }
+}
+
+pub(crate) fn verify_agent_update_receipt_graph<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    command: &agent_protocol::AgentCommand,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> DurableResult<()> {
+    receipt.verify_for(command)?;
+    let Some(expected) = agent_receipt_update_current(receipt) else {
+        return Ok(());
+    };
+    let retained = crate::state_root::load_agent_update_current(
+        manifest,
+        resolver,
+        &expected.session_id,
+        &expected.update_id,
+    )?
+    .ok_or_else(|| DurableError::Integrity {
+        code: "agent_update_current_missing".to_owned(),
+        message: "Agent receipt lost its immutable update current".to_owned(),
+    })?;
+    if retained != *expected {
+        return Err(DurableError::Integrity {
+            code: "agent_update_current_mismatch".to_owned(),
+            message: "Agent receipt changed its immutable update current".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn verify_materialized_agent_target<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
@@ -10685,6 +10732,7 @@ pub(crate) fn verify_agent_stream_finalization_graph<R: crate::StateRootResolver
     receipt: &agent_protocol::AgentCommandReceipt,
 ) -> DurableResult<()> {
     receipt.verify_for(command)?;
+    verify_agent_update_receipt_graph(manifest, resolver, command, receipt)?;
     verify_agent_target_claim_receipt_graph(manifest, resolver, command, receipt)?;
     let agent_protocol::AgentCommandOutcome::Stream(agent_protocol::AgentStreamPostcondition {
         stream,

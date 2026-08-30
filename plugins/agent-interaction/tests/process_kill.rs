@@ -2348,8 +2348,13 @@ fn retained_publication_reservation_rejects_missing_or_tampered_claim_and_resour
 }
 
 #[test]
-fn retained_external_finalization_rejects_missing_or_tampered_claim_and_resource_sidecars() {
+fn retained_external_finalization_rejects_missing_or_tampered_terminal_sidecars() {
     for (index, (kind, fault)) in [
+        (StateRootLeafKind::AgentUpdateCurrent, SidecarFault::Missing),
+        (
+            StateRootLeafKind::AgentUpdateCurrent,
+            SidecarFault::Tampered,
+        ),
         (StateRootLeafKind::AgentStreamCurrent, SidecarFault::Missing),
         (
             StateRootLeafKind::AgentStreamCurrent,

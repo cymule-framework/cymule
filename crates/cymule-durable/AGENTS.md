@@ -306,8 +306,11 @@
   physical-family current plus the Released target claim; missing or tampered
   sidecars are Integrity. Finalized replay likewise authenticates the
   Materialized claim, Active pin, current retention family, and exact catalog;
-  a valid later sibling Resource-family receipt remains admissible. The target
-  claim's exact-key current and monotonic generation are its bounded
+  a valid later sibling Resource-family receipt remains admissible. Every
+  Session-update or finalized-stream receipt also authenticates the exact
+  immutable `AgentUpdateCurrent` it admitted; full audit enforces both
+  receipt-to-update and update-to-receipt closure.
+  The target claim's exact-key current and monotonic generation are its bounded
   lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
   the retained source, and advances by one. Do not add a predecessor journal or
   scan claim history to replay an older Released receipt. A reservation-phase
