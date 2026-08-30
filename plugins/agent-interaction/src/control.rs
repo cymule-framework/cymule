@@ -13,10 +13,11 @@ use cymule_profile_protocol::agent::{
     AgentSessionCurrent, AgentSessionEntrySource, AgentSessionPostcondition, AgentSessionQuery,
     AgentSessionRead, AgentSessionUpdateEffect, AgentSessionUpdateSource, AgentStreamCommand,
     AgentStreamEffect, AgentStreamFinalizeOutcome, AgentStreamPublicationIntent, AgentStreamQuery,
-    AgentStreamRead, AgentStreamSource, AgentStreamTarget, AgentStreamTargetSource, AgentToolQuery,
-    AgentToolRead, AgentUpdate, AgentUpdateCurrent, AgentWorkspaceAdmissionQuery,
-    AgentWorkspaceAdmissionRead, AgentWorkspaceCommitOutcome, ContextRequest, ContextSnapshot,
-    MAX_AGENT_PAGE, MAX_AGENT_PAGE_BYTES,
+    AgentStreamRead, AgentStreamSource, AgentStreamTarget, AgentStreamTargetSource,
+    AgentTargetClaimCurrent, AgentTargetClaimSource, AgentTargetClaimTarget,
+    AgentTargetClaimTransition, AgentToolQuery, AgentToolRead, AgentUpdate, AgentUpdateCurrent,
+    AgentWorkspaceAdmissionQuery, AgentWorkspaceAdmissionRead, AgentWorkspaceCommitOutcome,
+    ContextRequest, ContextSnapshot, MAX_AGENT_PAGE, MAX_AGENT_PAGE_BYTES,
 };
 
 use crate::{AgentError, AgentResult};
@@ -470,6 +471,7 @@ struct EphemeralAgentState {
     messages: BTreeMap<(String, String), AgentMessageCurrent>,
     message_order: BTreeMap<(String, u64), String>,
     tools: BTreeMap<(String, String), cymule_profile_protocol::agent::AgentToolCurrent>,
+    target_claims: BTreeMap<(String, AgentTargetClaimTarget), AgentTargetClaimCurrent>,
     elicitations:
         BTreeMap<(String, String), cymule_profile_protocol::agent::AgentElicitationCurrent>,
     occurrences: BTreeMap<(String, String), AgentOccurrenceCurrent>,
@@ -490,6 +492,7 @@ impl Default for EphemeralAgentState {
             messages: BTreeMap::new(),
             message_order: BTreeMap::new(),
             tools: BTreeMap::new(),
+            target_claims: BTreeMap::new(),
             elicitations: BTreeMap::new(),
             occurrences: BTreeMap::new(),
             unresolved_occurrences: BTreeMap::new(),
@@ -532,6 +535,7 @@ impl AgentPersistence for EphemeralAgentPersistence {
         let mut state = self.state()?;
         if let Some(receipt) = state.receipts.get(&command.command_id).cloned() {
             receipt.verify_for(command)?;
+            verify_ephemeral_target_claim_receipt(&state, command, &receipt)?;
             let commit = AgentCommit {
                 observed_revision: state.revision.clone(),
                 committed_revision: None,
@@ -561,14 +565,14 @@ impl AgentPersistence for EphemeralAgentPersistence {
             ),
         )
         .map_err(|error| AgentError::Validation(error.to_string()))?;
-        let receipt = AgentCommandReceipt::new(command, source, outcome.clone())?;
+        let receipt = AgentCommandReceipt::new(command, source.clone(), outcome.clone())?;
         let commit = AgentCommit {
             observed_revision: result_revision.clone(),
             committed_revision: Some(result_revision.clone()),
             receipt: receipt.clone(),
         };
         commit.verify_for(command)?;
-        apply_outcome(&mut state, outcome)?;
+        apply_outcome(&mut state, command, &source, outcome)?;
         state.revision = result_revision;
         state.receipts.insert(command.command_id.clone(), receipt);
         Ok(commit)
@@ -1034,11 +1038,13 @@ fn resolve_source(
                 | AgentUpdate::Plan { .. }
                 | AgentUpdate::Usage { .. } => AgentSessionEntrySource::Metadata,
             };
+            let target_claims = ephemeral_target_claim_sources(state, session_id, update, &entry)?;
             AgentCommandSource::Session {
                 session,
                 update: AgentSessionUpdateSource {
                     update: update_current,
                     entry,
+                    target_claims,
                 },
             }
         }
@@ -1063,6 +1069,68 @@ fn resolve_source(
             ));
         }
     })
+}
+
+fn ephemeral_target_claim_sources(
+    state: &EphemeralAgentState,
+    session_id: &str,
+    update: &AgentUpdate,
+    entry: &AgentSessionEntrySource,
+) -> AgentResult<Vec<AgentTargetClaimSource>> {
+    let targets = match (update, entry) {
+        (AgentUpdate::Message { message, .. }, AgentSessionEntrySource::Message { .. }) => {
+            vec![AgentTargetClaimTarget::Message {
+                message_id: message.message_id.clone(),
+            }]
+        }
+        (AgentUpdate::Tool { tool, .. }, AgentSessionEntrySource::Tool { .. }) => {
+            vec![AgentTargetClaimTarget::Tool {
+                tool_call_id: tool.tool_call_id.clone(),
+            }]
+        }
+        (
+            AgentUpdate::State {
+                state: cymule_profile_protocol::agent::AgentState::Closed,
+                ..
+            },
+            AgentSessionEntrySource::Close { tools },
+        ) => tools
+            .iter()
+            .map(|tool| AgentTargetClaimTarget::Tool {
+                tool_call_id: tool.tool.tool_call_id.clone(),
+            })
+            .collect(),
+        (
+            AgentUpdate::State { .. } | AgentUpdate::Plan { .. } | AgentUpdate::Usage { .. },
+            AgentSessionEntrySource::Metadata,
+        ) => Vec::new(),
+        _ => {
+            return Err(AgentError::persistence(
+                "ephemeral_agent_target_claim_source_mismatch",
+                "Agent update and entry source disagree before target-claim resolution",
+            ));
+        }
+    };
+    let mut keyed = targets
+        .into_iter()
+        .map(|target| {
+            Ok((
+                cymule_profile_protocol::agent::agent_target_claim_key(session_id, &target)?,
+                target,
+            ))
+        })
+        .collect::<AgentResult<Vec<_>>>()?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(keyed
+        .into_iter()
+        .map(|(_, target)| AgentTargetClaimSource {
+            current: state
+                .target_claims
+                .get(&(session_id.to_owned(), target.clone()))
+                .cloned(),
+            target,
+        })
+        .collect())
 }
 
 fn resolve_stream_source(
@@ -1090,15 +1158,24 @@ fn resolve_stream_source(
                 .get(&(session_id, stream_id, chunk.sequence))
                 .cloned(),
         },
-        AgentStreamCommand::Abort { .. } => AgentStreamSource::Abort {
-            session: state.sessions.get(&session_id).cloned().ok_or_else(|| {
-                AgentError::NotFound(format!("Session {session_id} does not exist"))
-            })?,
-            stream: stream.ok_or_else(|| {
+        AgentStreamCommand::Abort { .. } => {
+            let stream = stream.ok_or_else(|| {
                 AgentError::NotFound(format!("Agent stream {stream_id} does not exist"))
-            })?,
-            resource: None,
-        },
+            })?;
+            let target = AgentTargetClaimTarget::from_stream_target(&stream.target);
+            AgentStreamSource::Abort {
+                session: state.sessions.get(&session_id).cloned().ok_or_else(|| {
+                    AgentError::NotFound(format!("Session {session_id} does not exist"))
+                })?,
+                target_claim: state
+                    .target_claims
+                    .get(&(session_id.clone(), target))
+                    .cloned()
+                    .map(Box::new),
+                stream,
+                resource: None,
+            }
+        }
         AgentStreamCommand::Finalize { .. } => {
             let stream = stream.ok_or_else(|| {
                 AgentError::NotFound(format!("Agent stream {stream_id} does not exist"))
@@ -1126,6 +1203,7 @@ fn resolve_stream_source(
                         })
                 })
                 .collect::<AgentResult<Vec<_>>>()?;
+            let target_claim_target = AgentTargetClaimTarget::from_stream_target(&stream.target);
             AgentStreamSource::Finalize {
                 session: state.sessions.get(&session_id).cloned().ok_or_else(|| {
                     AgentError::NotFound(format!("Session {session_id} does not exist"))
@@ -1144,6 +1222,11 @@ fn resolve_stream_source(
                 stream,
                 chunks,
                 resource: None,
+                target_claim: state
+                    .target_claims
+                    .get(&(session_id, target_claim_target))
+                    .cloned()
+                    .map(Box::new),
             }
         }
     })
@@ -1212,7 +1295,77 @@ fn reduce_ephemeral(
     })
 }
 
-fn apply_outcome(state: &mut EphemeralAgentState, outcome: AgentCommandOutcome) -> AgentResult<()> {
+fn ephemeral_target_claim_transitions(
+    command: &AgentCommand,
+    source: &cymule_profile_protocol::agent::AgentCommandSource,
+    outcome: &AgentCommandOutcome,
+) -> AgentResult<Vec<AgentTargetClaimTransition>> {
+    use cymule_profile_protocol::agent::AgentCommandSource;
+
+    match (source, outcome) {
+        (
+            AgentCommandSource::Session { update, .. },
+            AgentCommandOutcome::Session(postcondition),
+        ) => cymule_profile_protocol::agent::agent_session_target_claim_transitions(
+            command,
+            update,
+            postcondition,
+        )
+        .map_err(Into::into),
+        (AgentCommandSource::Stream(source), AgentCommandOutcome::Stream(postcondition)) => Ok(
+            cymule_profile_protocol::agent::agent_stream_target_claim_transition(
+                command,
+                source,
+                postcondition,
+            )?
+            .into_iter()
+            .collect(),
+        ),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn verify_ephemeral_target_claim_receipt(
+    state: &EphemeralAgentState,
+    command: &AgentCommand,
+    receipt: &AgentCommandReceipt,
+) -> AgentResult<()> {
+    for transition in
+        ephemeral_target_claim_transitions(command, &receipt.source, &receipt.outcome)?
+    {
+        let retained = state.target_claims.get(&(
+            transition.current.session_id.clone(),
+            transition.current.target.clone(),
+        ));
+        if retained != Some(&transition.current) {
+            return Err(AgentError::persistence(
+                "ephemeral_agent_target_claim_replay_mismatch",
+                "Agent receipt target claim changed after its process-local commit",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_outcome(
+    state: &mut EphemeralAgentState,
+    command: &AgentCommand,
+    source: &cymule_profile_protocol::agent::AgentCommandSource,
+    outcome: AgentCommandOutcome,
+) -> AgentResult<()> {
+    let transitions = ephemeral_target_claim_transitions(command, source, &outcome)?;
+    for transition in &transitions {
+        let retained = state.target_claims.get(&(
+            transition.current.session_id.clone(),
+            transition.current.target.clone(),
+        ));
+        if retained != transition.source.as_ref() {
+            return Err(AgentError::persistence(
+                "ephemeral_agent_target_claim_source_changed",
+                "Agent target claim no longer matches its exact source generation",
+            ));
+        }
+    }
     match outcome {
         AgentCommandOutcome::Session(postcondition) => apply_session(state, postcondition),
         AgentCommandOutcome::Occurrence(postcondition) => {
@@ -1266,6 +1419,15 @@ fn apply_outcome(state: &mut EphemeralAgentState, outcome: AgentCommandOutcome) 
                 "ephemeral Agent persistence received an M1-only outcome".to_owned(),
             ));
         }
+    }
+    for transition in transitions {
+        state.target_claims.insert(
+            (
+                transition.current.session_id.clone(),
+                transition.current.target.clone(),
+            ),
+            transition.current,
+        );
     }
     Ok(())
 }

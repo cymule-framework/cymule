@@ -322,6 +322,11 @@ pub(crate) enum DurableOperation {
         /// Exact tool-call projection.
         value: cymule_profile_protocol::agent::AgentToolCurrent,
     },
+    /// Apply one exact generation successor in the independent Agent target-claim family.
+    ApplyAgentTargetClaim {
+        /// Exact before/after claim transition.
+        value: cymule_profile_protocol::agent::AgentTargetClaimTransition,
+    },
     /// Insert or replace one Agent elicitation current.
     PutAgentElicitationCurrent {
         /// Exact elicitation projection.

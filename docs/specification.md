@@ -549,7 +549,17 @@ pin MUST be introduced only in the same CAS as its compaction certificate, and
 only Virtual `RetireArchive` may atomically commit terminal retirement and its
 exact `cymule.resource-archive-release/1`; generic release MUST reject it. An
 Agent external-stream pin MUST first be introduced as `Reserved` by the
-pre-publication reservation CAS. That CAS and `BeginDelete` mutate the same
+pre-publication reservation CAS. The same CAS MUST acquire one independent
+`cymule.agent-target-claim-current/1`, addressed exactly by Session, target kind,
+and local Message/Tool identity; Message role MUST NOT enter its key. Direct
+Message writes, every ordinary Tool transition, Session Close, staged Finalize,
+and external Finalize MUST exact-read that family rather than scanning open
+streams. A terminal target advances to `Materialized`. External publication
+advances absence or `Released` to `Reserved` before provider I/O, then the same
+Finalize command advances its exact reservation to `Materialized`. Durable
+`NotApplied` Abort advances it to `Released`; later reuse MUST increment the
+generation, preventing ABA. `Materialized` has no successor. That CAS and
+`BeginDelete` mutate the same
 physical-family current, so exactly one can win before provider I/O. Only a
 fresh reservation or NotApplied rearm acknowledgement MAY invoke publish.
 Published reconciliation MUST promote the exact reserved pin to `Active` in the
@@ -570,19 +580,23 @@ reject Abort and preserve observe-only reconciliation authority. The persisted
 Abort source and effect each carry one required-nullable Resource member:
 ordinary Abort encodes explicit null, while reservation retirement retains the
 exact retention/pin currents and typed reserved-pin release receipt. One and
-only one StateRoot CAS MUST publish all six coupled sides:
+only one StateRoot CAS MUST publish all seven coupled sides:
 
 1. the exact Agent Abort command and semantic receipt;
 2. the Aborted stream current with `publication_reservation = null`;
 3. the Session current with its open-stream count decremented;
-4. the typed Resource release retained by the Agent effect;
-5. the exact pin current advanced from `Reserved` to `Released`; and
-6. the physical-family current with its active count decremented and its
+4. the target claim advanced from `Reserved` to `Released`;
+5. the typed Resource release retained by the Agent effect;
+6. the exact pin current advanced from `Reserved` to `Released`; and
+7. the physical-family current with its active count decremented and its
    disposition derived from the resulting count.
 
 Exact Abort replay MUST resolve the Agent receipt and authenticate both
-terminal Resource sidecars. A missing or tampered Released pin or family
-current is Integrity, not a successful receipt replay. Generic Resource
+terminal Resource sidecars and the Released target claim. Finalize replay MUST
+authenticate the Materialized claim, Active pin, current retention family, and
+catalog record; a valid later sibling retention-family receipt remains legal.
+A missing or tampered claim, pin, family current, or catalog is Integrity, not a
+successful receipt replay. Generic Resource
 `Release` MUST reject both the pre-publication reservation and its terminal
 Agent pin; this typed Abort is the sole release authority.
 
@@ -736,7 +750,7 @@ does not claim this persistence because it deliberately uses one-shot memory.
 
 The M1 store MUST lower each admitted transition into immutable typed
 state-root objects and atomically move one small head that pins the exact
-`cymule.durable-state-root/4` manifest. The fixed manifest separately roots
+`cymule.durable-state-root/5` manifest. The fixed manifest separately roots
 Machine authority, admitted material, ordered batches, compacted base, Events,
 admissions, commands, proofs, and every closed M1 sidecar family; a complete
 `MachineSnapshot` or `DurableState` value is never a storage object. Persistent maps copy only the
@@ -747,6 +761,15 @@ revision authenticate that exact representation history. A prefix
 `ordered_root` is therefore exact current-manifest evidence, not a promise that
 different transition histories for the same materialized sequence have the
 same physical root.
+
+Generation `/5` adds the fixed `agent_target_claims` map and
+`agent_target_claim_current` leaf kind. The StateRoot writer accepts only the
+closed `ApplyAgentTargetClaim` transition, exact-compares its retained source,
+and exposes no generic put/remove seam. Full audit closes claims and
+Message/Tool/stream targets in both directions; reachability and GC retain the
+current generation while reclaiming superseded value objects. StateRoot/value
+`/4` has no reader or importer; retained internal domains follow the registered
+drain/export/recreate/requeue runbook.
 
 The head MUST bind the semantic revision, manifest ID, semantic sequence,
 monotonic GC sequence, latest GC receipt, and a content-addressed physical CAS

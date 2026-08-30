@@ -223,9 +223,11 @@ edge.
 Before provider I/O Durable derives the semantic Resource handle, physical
 retention family, and exact `ResourceProfilePin` from the immutable Open
 content. One StateRoot CAS persists the publication reservation on the stream,
-the `Reserved` pin, its family count, and the Finalize command. That CAS competes
-directly with `BeginDelete`; whichever head transition wins makes the loser a
-typed conflict before its provider call.
+the role-free generation-bearing `Reserved` target claim, the `Reserved` pin,
+its family count, and the Finalize command. Every ordinary Message/Tool write
+and both staged and external Finalize paths exact-read that claim family. That
+CAS competes directly with `BeginDelete`; whichever head transition wins makes
+the loser a typed conflict before its provider call.
 
 Only a freshly acknowledged reservation or NotApplied rearm owns one publish
 call. Reopen of `DispatchClaimed` performs no publish. Dedicated reconciliation
@@ -241,7 +243,8 @@ latest `NotApplied` observation is durable. That Agent command carries the
 exact reservation Resource currents in its bounded source and one typed
 reserved-pin release in its outcome. Its single CAS clears the reservation,
 marks the stream Aborted, decrements the Session open-stream index, changes the
-pin from `Reserved` to `Released`, and decrements the family's current count.
+target claim from `Reserved` to `Released`, changes the Resource pin from
+`Reserved` to `Released`, and decrements the family's current count.
 `DispatchClaimed`—including a provider result still reported as Unknown—rejects
 Abort and preserves reconciliation authority. Generic Resource release cannot
 consume this profile-owned reservation.
@@ -364,11 +367,12 @@ Agent/M1 transition.
 ## Wire and compatibility
 
 Current persisted command and receipt selectors are `cymule.agent-command/3`
-and `cymule.agent-command-receipt/3`; bounded Session metadata is
+and `cymule.agent-command-receipt/4`; bounded Session metadata is
 `cymule.agent-session-current/2`, and the current closed schema generation is
-`cymule.agent/7`. Recovery observations, publication intents, and publication
-reservations use their own content-ID generations. All persisted unions deny
-unknown fields.
+`cymule.agent/8`. Publication intent/reservation use `/2`; target claims use
+`cymule.agent-target-claim-current/1` with separate key and identity domains.
+Recovery observations use their own content-ID generation. All persisted unions
+deny unknown fields.
 There is no reader or writer for the removed aggregate Session, recursive
 journal-base, or stream-record formats. This profile is still internal, so the
 terminal keyed model is a deliberate historical incompatibility rather than a
@@ -395,7 +399,10 @@ cargo test -p cymule-agent --all-targets --locked
 Durable integration tests must additionally prove late replay performs no CAS,
 input/workspace receipt references fail closed when missing or mismatched, and
 external finalization survives reopen/GC with its Agent-stream pin while a
-delete-fenced family rejects a later finalization. Publication Unknown must
+delete-fenced family rejects a later finalization. Reservation and terminal
+replay authenticate claim, pin, retention, and catalog sidecars; full audit
+closes claims in both directions against every Message, terminal/non-terminal
+Tool, and stream. Publication Unknown must
 reopen through observe-only reconciliation with zero additional publish calls;
 repeated recovery evidence must perform zero writes while new evidence remains
 append-only and reopenable. Tests also release a sibling pin between reservation
@@ -404,5 +411,6 @@ DispatchClaimed/Unknown Abort writes nothing.
 The SQLite process-death matrix stops at the real Store object-staged/pre-head
 barrier and after committed CAS before acknowledgement for NotApplied Abort;
 reopen must converge the same command with no provider call, authenticate both
-Resource sidecars, and make a second replay with zero writes. Removing either
-the Released pin value or retention value makes retained replay Integrity.
+Resource and target-claim sidecars, and make a second replay with zero writes.
+Removing or tampering with any claim, pin, retention, or terminal catalog value
+makes retained replay Integrity.

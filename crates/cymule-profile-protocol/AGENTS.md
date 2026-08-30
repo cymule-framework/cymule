@@ -83,18 +83,24 @@
   Resource must equal that prederived Handle exactly. Finalized current and
   receipt reads recompute the full update byte count for both delivery modes.
   External streams keep staged bytes and content blocks zero, while their final
-  update byte counter remains nonzero. Before provider I/O, an external Finalize
-  persists its content-derived publication reservation plus a `Reserved` profile
-  pin in the same physical retention family. Only a fresh reservation or
-  NotApplied rearm acknowledgement owns one publish call; reopen observes a
-  claimed attempt. The reservation intent's immutable target must equal the
+  update byte counter remains nonzero. The independent Agent target-claim
+  current is keyed by Session plus role-free Message/Tool target and advances
+  through `Reserved`, `Materialized`, or `Released` with a monotonic generation.
+  Direct Message and terminal Tool writes materialize it; non-terminal Tool
+  writes reject Reserved/Materialized; Session Close materializes every
+  Cancelled Tool in claim-key order. Before provider I/O, an external Finalize
+  persists its content-derived publication reservation, `Reserved` target claim,
+  and `Reserved` profile pin in the same physical retention family. Only a
+  fresh reservation or NotApplied rearm acknowledgement owns one publish call;
+  reopen observes a claimed attempt. The reservation intent's immutable target must equal the
   stream current target exactly, in addition to matching Session, stream,
   resolver, and content. Terminal finalization promotes that exact reservation without
   changing the family obligation count. Promotion binds the family's current
   count, not the reservation-time aggregate as a lower bound. A public Abort
   carries required-nullable Resource source/effect members: only durable
-  NotApplied may atomically clear the reservation, release `Reserved` to
-  `Released`, decrement the current family count, and close stream/Session.
+  NotApplied may atomically clear the reservation, advance the claim to
+  `Released`, release the Resource pin from `Reserved` to `Released`, decrement
+  the current family count, and close stream/Session.
   DispatchClaimed or Unknown rejects Abort. Generic Resource release cannot
   consume that profile pin. The staged-chunk byte limit is unchanged.
 - Agent Session close is the sole reducer authority for terminal Session state.
@@ -116,9 +122,9 @@
   validator owns this state-dependent capacity for helpers, public snapshot
   commands, current reads, and receipt replay alike.
 - These Agent bounds and the required counters belong to the current unfrozen
-  internal `cymule.agent/7` hard cut. Omitted counters, omitted publication
-  reservations, and historical aggregate stream shapes have no default,
-  compatibility decoder, or migration fallback;
+  internal `cymule.agent/8` hard cut. Omitted counters, omitted target-claim
+  sources, omitted publication reservations, and historical aggregate stream
+  shapes have no default, compatibility decoder, or migration fallback;
   freeze the final schema digest with this release generation.
 - Required-nullable fields reject a missing JSON member and accept explicit
   `null`. Never use Serde defaults as a compatibility path for a required

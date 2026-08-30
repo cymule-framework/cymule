@@ -289,7 +289,11 @@
   owning facade. No profile accepts a caller-authored target Continuation,
   generic journal callback, or arbitrary Machine write.
 - Agent external publication reserves its physical family and dispatch attempt
-  before I/O. The reservation CAS is the sole fresh publish authority; reopen
+  before I/O. The reservation CAS also acquires the sole exact
+  `(Session, target kind, local identity)` target claim. Every ordinary
+  Message/Tool write and staged/external terminalization reads that same family;
+  no open-stream scan or parallel target authority is permitted. The
+  reservation CAS is the sole fresh publish authority; reopen
   observes `DispatchClaimed`, durable NotApplied may be rearmed by one later CAS,
   and published reconciliation promotes the reserved pin in the final Agent CAS.
   Promotion uses the exact current family count, so a sibling release after
@@ -299,7 +303,10 @@
   and family count decrement in that same Agent CAS. DispatchClaimed/Unknown
   remains reconciliation-only, and generic Resource release cannot bypass it.
   Retained Abort alias replay authenticates the terminal Released pin and
-  physical-family current; missing or tampered sidecars are Integrity. A
+  physical-family current plus the Released target claim; missing or tampered
+  sidecars are Integrity. Finalized replay likewise authenticates the
+  Materialized claim, Active pin, current retention family, and exact catalog;
+  a valid later sibling Resource-family receipt remains admissible. A
   reservation-phase stream read authenticates its original Open receipt plus
   exact retained unterminated Finalize command, not equality with the old Open
   projection alone. It also rejects a self-consistent reservation whose intent

@@ -3134,7 +3134,7 @@ def main() -> int:
     archive_entry = storage_fixture["command_archive_objects"][1]
     machine_command_current_object = {
         "object": "value",
-        "value_version": "cymule.durable-state-value/4",
+        "value_version": "cymule.durable-state-value/5",
         "object_id": "sha256:" + "f" * 64,
         "value": {
             "value": "machine_command_current",

@@ -13,7 +13,7 @@ This is an intentional terminal decision. The removed `migrate_v1` functions
 decoded a whole-state physical shell directly into the then-current
 `cymule.durable-state/3` type; the current source generation uses exact-reject
 `cymule.durable-state/7` with `cymule.machine-snapshot/11` behind
-`cymule.durable-state-root/4`. They therefore never supported bytes produced by
+`cymule.durable-state-root/5`. They therefore never supported bytes produced by
 the `66a432c45c81a74dfa3b030783a75ad7df5b772e` source generation, whose payload
 contains `cymule.durable-state/1`, `cymule.machine-snapshot/1`, and earlier
 semantic records. Keeping those functions would advertise a migration edge
@@ -34,8 +34,11 @@ Predecessors cannot represent the physical-family obligation that must win its
 CAS before provider I/O, so no compatibility decoder or inferred reservation is
 valid.
 
-The current StateRoot `/4`, value `/4`, and Run-query-index `/3` generations
-also hard-reject their pre-release `/3`, `/3`, and `/2` predecessors. The older
+StateRoot/value `/4` previously hard-rejected pre-release `/3`; current `/5`
+now rejects `/4` as well because `/4` cannot represent the Agent target-claim
+family. That later boundary is owned by the
+[generation 5 runbook](durable-state-root-generation-5.md). Run-query-index `/3`
+still rejects its `/2` predecessor. The older
 Run Wait query index pointed at complete Wait leaves and could compile as many
 as 256 retained Input schemas during one page read. The current index instead
 stores a same-CAS bounded summary leaf and keeps the complete Wait only behind

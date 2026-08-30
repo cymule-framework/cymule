@@ -144,6 +144,73 @@ struct NotAppliedPublicationProvider {
     publish_calls: usize,
 }
 
+#[derive(Default)]
+struct PublishedPublicationProvider {
+    publish_calls: usize,
+    unknown: bool,
+}
+
+impl agent_protocol::AgentProviders for PublishedPublicationProvider {
+    fn publish_agent_stream(
+        &mut self,
+        intent: &agent_protocol::AgentStreamPublicationIntent,
+    ) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
+        self.publish_calls += 1;
+        if self.unknown {
+            return Ok(agent_protocol::AgentStreamPublicationObservation::Unknown);
+        }
+        let resource = intent.resource_handle()?;
+        Ok(
+            agent_protocol::AgentStreamPublicationObservation::Published {
+                publication: Box::new(cymule_profile_protocol::resource::ResourcePublication {
+                    locators: cymule_profile_protocol::resource::ResourceLocatorSet {
+                        locator_version:
+                            cymule_profile_protocol::resource::RESOURCE_LOCATOR_VERSION.to_owned(),
+                        resource_id: resource.resource_id.clone(),
+                        resolver_binding: intent.resolver_binding().to_owned(),
+                        locations: vec![
+                            cymule_profile_protocol::resource::ResourceLocation::Opaque {
+                                reference: "object:agent-process-kill".to_owned(),
+                            },
+                        ],
+                    },
+                    resource,
+                }),
+            },
+        )
+    }
+
+    fn observe_agent_stream_publication(
+        &mut self,
+        intent: &agent_protocol::AgentStreamPublicationIntent,
+    ) -> ProtocolResult<agent_protocol::AgentStreamPublicationObservation> {
+        self.publish_agent_stream(intent)
+    }
+
+    fn bind_agent_workspace(
+        &mut self,
+        _command: &agent_protocol::AgentWorkspaceCommand,
+    ) -> ProtocolResult<agent_protocol::AgentHostBinding> {
+        unreachable!("publication replay tests do not bind workspaces")
+    }
+
+    fn dispatch_agent_workspace(
+        &mut self,
+        _command: &agent_protocol::AgentWorkspaceCommand,
+        _occurrence: &agent_protocol::AgentHostOccurrence,
+    ) -> ProtocolResult<agent_protocol::AgentWorkspaceSubmission> {
+        unreachable!("publication replay tests do not dispatch workspaces")
+    }
+
+    fn observe_agent_workspace(
+        &mut self,
+        _command: &agent_protocol::AgentWorkspaceCommand,
+        _occurrence: &agent_protocol::AgentHostOccurrence,
+    ) -> ProtocolResult<agent_protocol::AgentWorkspaceObservation> {
+        unreachable!("publication replay tests do not observe workspaces")
+    }
+}
+
 impl agent_protocol::AgentProviders for NotAppliedPublicationProvider {
     fn publish_agent_stream(
         &mut self,
@@ -769,6 +836,39 @@ fn stream_read<P: AgentPersistence>(
             expected_revision: None,
         },
     )
+}
+
+fn open_external_finalize_command<P: AgentPersistence>(
+    persistence: &mut P,
+) -> AgentResult<agent_protocol::AgentCommand> {
+    let initial = stream_read(persistence)?;
+    assert!(initial.current.is_none());
+    AgentStreamController::open(
+        persistence,
+        &initial.revision,
+        SESSION_ID,
+        STREAM_ID,
+        agent_protocol::AgentStreamTarget::Message {
+            message_id: "message:agent-sidecar-replay".to_owned(),
+            role: agent_protocol::MessageRole::Agent,
+        },
+        agent_protocol::AgentStreamDelivery::ExternalResource {
+            resolver_binding: EXTERNAL_RESOLVER.to_owned(),
+            content: agent_protocol::AgentStreamPublicationContent {
+                media_type: "application/octet-stream".to_owned(),
+                digest: EXTERNAL_DIGEST.to_owned(),
+                size: 7,
+            },
+        },
+    )?;
+    agent_protocol::AgentCommand::new(
+        stream_read(persistence)?.revision,
+        agent_protocol::AgentCommandAction::Stream(agent_protocol::AgentStreamCommand::Finalize {
+            session_id: SESSION_ID.to_owned(),
+            stream_id: STREAM_ID.to_owned(),
+        }),
+    )
+    .map_err(Into::into)
 }
 
 fn prepare_external_not_applied<P: AgentPersistence>(
@@ -2164,6 +2264,148 @@ fn retained_external_abort_replay_rejects_missing_or_tampered_resource_sidecars(
             .agent(&mut providers)
             .commit_agent(&command)
             .expect_err("retained Abort replay must authenticate Resource sidecars");
+        assert!(
+            matches!(error, cymule_durable::DurableError::Integrity { .. }),
+            "{fault:?} {kind:?} returned {error:?}"
+        );
+    }
+}
+
+#[test]
+fn retained_publication_reservation_rejects_missing_or_tampered_claim_and_resource_sidecars() {
+    for (index, (kind, fault)) in [
+        (
+            StateRootLeafKind::AgentTargetClaimCurrent,
+            SidecarFault::Missing,
+        ),
+        (
+            StateRootLeafKind::AgentTargetClaimCurrent,
+            SidecarFault::Tampered,
+        ),
+        (StateRootLeafKind::ResourcePinCurrent, SidecarFault::Missing),
+        (
+            StateRootLeafKind::ResourcePinCurrent,
+            SidecarFault::Tampered,
+        ),
+        (
+            StateRootLeafKind::ResourceRetentionCurrent,
+            SidecarFault::Missing,
+        ),
+        (
+            StateRootLeafKind::ResourceRetentionCurrent,
+            SidecarFault::Tampered,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let world = TestWorld::new(22_000 + u64::try_from(index).unwrap()).unwrap();
+        let database = world
+            .domain()
+            .path("agent-reservation-replay.sqlite")
+            .unwrap();
+        initialize_store(&database);
+        let command = {
+            let mut runtime = open_runtime(&database);
+            let mut provider = PublishedPublicationProvider {
+                publish_calls: 0,
+                unknown: true,
+            };
+            let command = {
+                let mut persistence = runtime.agent(&mut provider);
+                let command = open_external_finalize_command(&mut persistence).unwrap();
+                assert!(matches!(
+                    persistence.finalize_agent_stream(&command).unwrap(),
+                    agent_protocol::AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { .. }
+                ));
+                command
+            };
+            assert_eq!(provider.publish_calls, 1);
+            command
+        };
+        fault_state_root_leaf_kind(&database, kind, fault);
+        let mut runtime = open_runtime(&database);
+        let mut providers = UnusedAgentProviders;
+        let error = runtime
+            .agent(&mut providers)
+            .finalize_agent_stream(&command)
+            .expect_err("reservation replay authenticates target and Resource sidecars");
+        assert!(
+            matches!(error, cymule_durable::DurableError::Integrity { .. }),
+            "{fault:?} {kind:?} returned {error:?}"
+        );
+    }
+}
+
+#[test]
+fn retained_external_finalization_rejects_missing_or_tampered_claim_and_resource_sidecars() {
+    for (index, (kind, fault)) in [
+        (
+            StateRootLeafKind::AgentTargetClaimCurrent,
+            SidecarFault::Missing,
+        ),
+        (
+            StateRootLeafKind::AgentTargetClaimCurrent,
+            SidecarFault::Tampered,
+        ),
+        (
+            StateRootLeafKind::AgentMessageCurrent,
+            SidecarFault::Missing,
+        ),
+        (
+            StateRootLeafKind::AgentMessageCurrent,
+            SidecarFault::Tampered,
+        ),
+        (StateRootLeafKind::ResourcePinCurrent, SidecarFault::Missing),
+        (
+            StateRootLeafKind::ResourcePinCurrent,
+            SidecarFault::Tampered,
+        ),
+        (
+            StateRootLeafKind::ResourceRetentionCurrent,
+            SidecarFault::Missing,
+        ),
+        (
+            StateRootLeafKind::ResourceRetentionCurrent,
+            SidecarFault::Tampered,
+        ),
+        (
+            StateRootLeafKind::ResourceCatalogRecord,
+            SidecarFault::Missing,
+        ),
+        (
+            StateRootLeafKind::ResourceCatalogRecord,
+            SidecarFault::Tampered,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let world = TestWorld::new(23_000 + u64::try_from(index).unwrap()).unwrap();
+        let database = world.domain().path("agent-finalize-replay.sqlite").unwrap();
+        initialize_store(&database);
+        let command = {
+            let mut runtime = open_runtime(&database);
+            let mut provider = PublishedPublicationProvider::default();
+            let command = {
+                let mut persistence = runtime.agent(&mut provider);
+                let command = open_external_finalize_command(&mut persistence).unwrap();
+                assert!(matches!(
+                    persistence.finalize_agent_stream(&command).unwrap(),
+                    agent_protocol::AgentStreamFinalizeOutcome::Committed { .. }
+                ));
+                command
+            };
+            assert_eq!(provider.publish_calls, 1);
+            command
+        };
+        fault_state_root_leaf_kind(&database, kind, fault);
+        let mut runtime = open_runtime(&database);
+        let mut providers = UnusedAgentProviders;
+        let error = runtime
+            .agent(&mut providers)
+            .finalize_agent_stream(&command)
+            .expect_err("finalization replay authenticates claim, catalog, pin, and retention");
         assert!(
             matches!(error, cymule_durable::DurableError::Integrity { .. }),
             "{fault:?} {kind:?} returned {error:?}"

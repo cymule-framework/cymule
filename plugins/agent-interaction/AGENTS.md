@@ -66,21 +66,25 @@
   a caller-supplied publication, host response, reconciliation result, token,
   trait object, or opaque bytes at commit time.
 - External stream finalization first commits one content-derived publication
-  reservation, `Reserved` Agent-stream Resource pin, and physical retention
-  current before provider I/O. Only that fresh CAS acknowledgement, or a fresh
-  rearm after durable NotApplied evidence, authorizes one publish call. Reopen
+  reservation, role-free `Reserved` target claim, `Reserved` Agent-stream
+  Resource pin, and physical retention current before provider I/O. Direct
+  Message/Tool writes, Session Close, and both Finalize modes exact-read the
+  same generation-bearing claim family. Only that fresh CAS acknowledgement,
+  or a fresh rearm after durable NotApplied evidence, authorizes one publish call. Reopen
   observes a claimed attempt without redispatch. Reservation intent and stream
   current must retain the same exact immutable target; an independently valid
   foreign-target intent is not a stream authority. Published reconciliation then
-  commits Agent current/receipt, catalog record, and promotion of that exact pin
-  to `Active` in one CAS; it never increments the obligation twice. Promotion
+  commits Agent current/receipt, Materialized target claim, catalog record, and
+  promotion of that exact pin to `Active` in one CAS; it never increments the
+  obligation twice. Promotion
   uses the physical family's current active count and does not retain the
   reservation-time aggregate as a lower bound, so unrelated sibling pin
   releases cannot strand the exact reserved pin.
 - Public stream Abort may consume an external publication reservation only
   after its latest provider observation is durably `NotApplied`. One typed
   Agent receipt atomically clears the reservation, closes stream and Session,
-  releases the exact `Reserved` pin, and decrements the current family count.
+  advances the target claim to `Released`, releases the exact `Reserved` pin,
+  and decrements the current family count.
   `DispatchClaimed` and Unknown publication outcomes remain reconcilable and
   reject Abort. Its persisted Abort source and effect each retain a
   required-nullable Resource member, so omission cannot erase the owning

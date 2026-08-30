@@ -34,10 +34,16 @@ pub const AGENT_HOST_BINDING_VERSION: &str = "cymule.agent-host-binding/1";
 pub const AGENT_RECOVERY_OBSERVATION_VERSION: &str = "cymule.agent-recovery-observation/1";
 /// Frozen identity generation for one external stream publication intent.
 pub const AGENT_STREAM_PUBLICATION_INTENT_VERSION: &str =
-    "cymule.agent-stream-publication-intent/1";
+    "cymule.agent-stream-publication-intent/2";
 /// Frozen persisted pre-publication reservation generation.
 pub const AGENT_STREAM_PUBLICATION_RESERVATION_VERSION: &str =
-    "cymule.agent-stream-publication-reservation/1";
+    "cymule.agent-stream-publication-reservation/2";
+/// Frozen current generation for one exact Agent target claim.
+pub const AGENT_TARGET_CLAIM_CURRENT_VERSION: &str = "cymule.agent-target-claim-current/1";
+/// Domain-separated key for one Session-local Message or Tool target.
+pub const AGENT_TARGET_CLAIM_KEY_DOMAIN: &str = "cymule.agent-target-claim-key/1";
+/// Content identity domain for one exact target-claim generation.
+pub const AGENT_TARGET_CLAIM_ID_DOMAIN: &str = "cymule.agent-target-claim-id/1";
 const AGENT_OCCURRENCE_TRANSITION_ID_DOMAIN: &str = "cymule.agent-occurrence-transition-id/1";
 const AGENT_UPDATE_DIGEST_DOMAIN: &str = "cymule.agent-update-current/1";
 const AGENT_MESSAGE_DIGEST_DOMAIN: &str = "cymule.agent-message-current/1";
@@ -1411,6 +1417,8 @@ pub struct AgentSessionUpdateSource {
     pub update: Option<AgentUpdateCurrent>,
     /// Exact keyed domain entry affected by the update.
     pub entry: AgentSessionEntrySource,
+    /// Exact target-claim sources affected by this update, ordered by claim key.
+    pub target_claims: Vec<AgentTargetClaimSource>,
 }
 
 /// Bounded exact postcondition of one Session update.
@@ -1499,6 +1507,7 @@ impl AgentSessionCurrent {
             effect,
         };
         postcondition.verify_for(update)?;
+        let _ = reduce_agent_session_target_claims(command_id, update, source, &postcondition)?;
         Ok(postcondition)
     }
 }
@@ -1717,6 +1726,202 @@ fn reduce_tool_update(
     };
     advance_nonterminal_tool_directory(session, current.as_ref(), &next)?;
     Ok(AgentSessionUpdateEffect::Tool { current: next })
+}
+
+fn exact_target_claim_sources<'a>(
+    session_id: &str,
+    sources: &'a [AgentTargetClaimSource],
+    expected: &[AgentTargetClaimTarget],
+) -> ProtocolResult<Vec<&'a AgentTargetClaimSource>> {
+    if sources.len() != expected.len() {
+        return Err(ProtocolError::IdentityMismatch(
+            "Agent Session update changed its exact target-claim source set".to_owned(),
+        ));
+    }
+    let mut previous_key: Option<String> = None;
+    let mut selected = Vec::with_capacity(sources.len());
+    for (source, expected_target) in sources.iter().zip(expected) {
+        source.verify_for(session_id)?;
+        let key = agent_target_claim_key(session_id, &source.target)?;
+        if source.target != *expected_target
+            || previous_key
+                .as_ref()
+                .is_some_and(|previous| previous >= &key)
+        {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent Session update target-claim sources changed key or order".to_owned(),
+            ));
+        }
+        previous_key = Some(key);
+        selected.push(source);
+    }
+    Ok(selected)
+}
+
+fn require_unclaimed_target(source: &AgentTargetClaimSource) -> ProtocolResult<()> {
+    if source
+        .current
+        .as_ref()
+        .is_some_and(|current| !matches!(current.phase, AgentTargetClaimPhase::Released { .. }))
+    {
+        return Err(ProtocolError::Conflict {
+            code: "agent_target_already_claimed".to_owned(),
+            message: "Agent target is reserved or already materialized".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn materialize_target_claim(
+    session_id: &str,
+    target: AgentTargetClaimTarget,
+    source: &AgentTargetClaimSource,
+    command_id: &str,
+) -> ProtocolResult<AgentTargetClaimTransition> {
+    match source.current.as_ref().map(|current| &current.phase) {
+        Some(AgentTargetClaimPhase::Reserved { .. })
+            if source
+                .current
+                .as_ref()
+                .is_some_and(|current| current.admitted_by == command_id) => {}
+        _ => require_unclaimed_target(source)?,
+    }
+    AgentTargetClaimTransition::new(
+        session_id,
+        target,
+        source.current.as_ref(),
+        AgentTargetClaimPhase::Materialized,
+        command_id,
+    )
+}
+
+fn reduce_agent_session_target_claims(
+    command_id: &str,
+    update: &AgentUpdate,
+    source: &AgentSessionUpdateSource,
+    postcondition: &AgentSessionPostcondition,
+) -> ProtocolResult<Vec<AgentTargetClaimTransition>> {
+    let session_id = postcondition.session.session_id.as_str();
+    match (update, &postcondition.effect) {
+        (AgentUpdate::Message { message, .. }, AgentSessionUpdateEffect::Message { current }) => {
+            let target = AgentTargetClaimTarget::Message {
+                message_id: message.message_id.clone(),
+            };
+            if current.session_id != session_id || current.message != *message {
+                return Err(ProtocolError::IdentityMismatch(
+                    "Agent Message postcondition changed its target claim".to_owned(),
+                ));
+            }
+            let claims = exact_target_claim_sources(
+                session_id,
+                &source.target_claims,
+                std::slice::from_ref(&target),
+            )?;
+            Ok(vec![materialize_target_claim(
+                session_id, target, claims[0], command_id,
+            )?])
+        }
+        (AgentUpdate::Tool { tool, .. }, AgentSessionUpdateEffect::Tool { current }) => {
+            let target = AgentTargetClaimTarget::Tool {
+                tool_call_id: tool.tool_call_id.clone(),
+            };
+            if current.session_id != session_id || current.tool != *tool {
+                return Err(ProtocolError::IdentityMismatch(
+                    "Agent Tool postcondition changed its target claim".to_owned(),
+                ));
+            }
+            let claims = exact_target_claim_sources(
+                session_id,
+                &source.target_claims,
+                std::slice::from_ref(&target),
+            )?;
+            if tool.status.is_terminal() {
+                Ok(vec![materialize_target_claim(
+                    session_id, target, claims[0], command_id,
+                )?])
+            } else {
+                require_unclaimed_target(claims[0])?;
+                Ok(Vec::new())
+            }
+        }
+        (
+            AgentUpdate::State {
+                state: AgentState::Closed,
+                ..
+            },
+            AgentSessionUpdateEffect::Closed { tools },
+        ) => {
+            let mut targets = tools
+                .iter()
+                .map(|current| {
+                    let target = AgentTargetClaimTarget::Tool {
+                        tool_call_id: current.tool.tool_call_id.clone(),
+                    };
+                    Ok((
+                        agent_target_claim_key(session_id, &target)?,
+                        target,
+                        current,
+                    ))
+                })
+                .collect::<ProtocolResult<Vec<_>>>()?;
+            targets.sort_by(|left, right| left.0.cmp(&right.0));
+            let expected = targets
+                .iter()
+                .map(|(_, target, _)| target.clone())
+                .collect::<Vec<_>>();
+            let claims = exact_target_claim_sources(session_id, &source.target_claims, &expected)?;
+            targets
+                .into_iter()
+                .zip(claims)
+                .map(|((_, target, current), source)| {
+                    if current.session_id != session_id
+                        || current.tool.status != ToolCallStatus::Cancelled
+                    {
+                        return Err(ProtocolError::IdentityMismatch(
+                            "Agent Session close changed its cancelled target".to_owned(),
+                        ));
+                    }
+                    materialize_target_claim(session_id, target, source, command_id)
+                })
+                .collect()
+        }
+        (
+            AgentUpdate::State { .. } | AgentUpdate::Plan { .. } | AgentUpdate::Usage { .. },
+            AgentSessionUpdateEffect::Metadata,
+        ) => {
+            exact_target_claim_sources(session_id, &source.target_claims, &[])?;
+            Ok(Vec::new())
+        }
+        _ => Err(ProtocolError::IdentityMismatch(
+            "Agent Session update target claims do not match its typed postcondition".to_owned(),
+        )),
+    }
+}
+
+/// Derive the exact independent target-claim mutations owned by one Session
+/// command receipt.
+///
+/// # Errors
+///
+/// Returns an error when command, source, postcondition, target source, or
+/// closed claim transition differs from the unique Session reducer result.
+pub fn agent_session_target_claim_transitions(
+    command: &AgentCommand,
+    source: &AgentSessionUpdateSource,
+    postcondition: &AgentSessionPostcondition,
+) -> ProtocolResult<Vec<AgentTargetClaimTransition>> {
+    command.verify()?;
+    let AgentCommandAction::SessionUpdate { session_id, update } = &command.action else {
+        return Err(ProtocolError::Validation(
+            "Agent Session target claims require a SessionUpdate command".to_owned(),
+        ));
+    };
+    if postcondition.session.session_id != *session_id {
+        return Err(ProtocolError::IdentityMismatch(
+            "Agent Session target claims changed their Session owner".to_owned(),
+        ));
+    }
+    reduce_agent_session_target_claims(&command.command_id, update, source, postcondition)
 }
 
 fn advance_nonterminal_tool_directory(
@@ -4161,6 +4366,349 @@ impl AgentStreamTarget {
     }
 }
 
+/// Session-local identity governed by one Agent target claim.
+///
+/// Message role is intentionally absent: the physical claim key is exactly
+/// `(session_id, target kind, local identity)`, so two roles cannot create
+/// parallel authorities for the same immutable Message slot.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentTargetClaimTarget {
+    /// One immutable Message slot.
+    Message {
+        /// Stable message identity.
+        message_id: String,
+    },
+    /// One Tool lifecycle slot.
+    Tool {
+        /// Stable tool-call identity.
+        tool_call_id: String,
+    },
+}
+
+impl AgentTargetClaimTarget {
+    /// Derive the role-free claim target from one stream target.
+    #[must_use]
+    pub fn from_stream_target(target: &AgentStreamTarget) -> Self {
+        match target {
+            AgentStreamTarget::Message { message_id, .. } => Self::Message {
+                message_id: message_id.clone(),
+            },
+            AgentStreamTarget::Tool { tool_call_id } => Self::Tool {
+                tool_call_id: tool_call_id.clone(),
+            },
+        }
+    }
+
+    /// Verify the exact local identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the local Message or Tool identity is invalid.
+    pub fn verify(&self) -> ProtocolResult<()> {
+        match self {
+            Self::Message { message_id } => validate_identity("Agent target Message", message_id),
+            Self::Tool { tool_call_id } => validate_identity("Agent target Tool", tool_call_id),
+        }
+        .map_err(Into::into)
+    }
+}
+
+/// Stable `StateRoot` key for one exact Session-local target claim.
+///
+/// # Errors
+///
+/// Returns an error when the Session or target identity is invalid.
+pub fn agent_target_claim_key(
+    session_id: &str,
+    target: &AgentTargetClaimTarget,
+) -> ProtocolResult<String> {
+    validate_identity("Agent Session", session_id)?;
+    target.verify()?;
+    content_id(AGENT_TARGET_CLAIM_KEY_DOMAIN, &(session_id, target)).map_err(Into::into)
+}
+
+/// Closed lifecycle phase of one exact Agent target claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentTargetClaimPhase {
+    /// An external stream exclusively owns the target before provider I/O.
+    Reserved {
+        /// Owning stream identity.
+        stream_id: String,
+        /// Exact publication reservation identity.
+        reservation_id: String,
+    },
+    /// The target has been terminally materialized and cannot be reused.
+    Materialized,
+    /// Durable `NotApplied` Abort released the former reservation.
+    Released {
+        /// Former owning stream identity.
+        stream_id: String,
+        /// Exact released publication reservation identity.
+        reservation_id: String,
+    },
+}
+
+impl AgentTargetClaimPhase {
+    fn verify(&self) -> ProtocolResult<()> {
+        match self {
+            Self::Reserved {
+                stream_id,
+                reservation_id,
+            }
+            | Self::Released {
+                stream_id,
+                reservation_id,
+            } => {
+                validate_identity("Agent target-claim stream", stream_id)?;
+                validate_sha256("Agent target-claim reservation", reservation_id)
+            }
+            Self::Materialized => Ok(()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct AgentTargetClaimIdentity<'a> {
+    current_version: &'a str,
+    session_id: &'a str,
+    target: &'a AgentTargetClaimTarget,
+    generation: u64,
+    phase: &'a AgentTargetClaimPhase,
+    admitted_by: &'a str,
+}
+
+/// Exact generation-bearing authority for one Agent target slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTargetClaimCurrent {
+    /// Current wire generation.
+    pub current_version: String,
+    /// Content identity of this exact generation and phase.
+    pub claim_id: String,
+    /// Owning Session identity.
+    pub session_id: String,
+    /// Role-free target identity.
+    pub target: AgentTargetClaimTarget,
+    /// Monotonic one-based generation preventing release/reuse ABA.
+    pub generation: u64,
+    /// Closed reservation/materialization lifecycle.
+    pub phase: AgentTargetClaimPhase,
+    /// Exact Agent command admitting this generation.
+    pub admitted_by: String,
+}
+
+impl AgentTargetClaimCurrent {
+    fn new(
+        session_id: &str,
+        target: AgentTargetClaimTarget,
+        generation: u64,
+        phase: AgentTargetClaimPhase,
+        admitted_by: &str,
+    ) -> ProtocolResult<Self> {
+        let claim_id = content_id(
+            AGENT_TARGET_CLAIM_ID_DOMAIN,
+            &AgentTargetClaimIdentity {
+                current_version: AGENT_TARGET_CLAIM_CURRENT_VERSION,
+                session_id,
+                target: &target,
+                generation,
+                phase: &phase,
+                admitted_by,
+            },
+        )?;
+        let current = Self {
+            current_version: AGENT_TARGET_CLAIM_CURRENT_VERSION.to_owned(),
+            claim_id,
+            session_id: session_id.to_owned(),
+            target,
+            generation,
+            phase,
+            admitted_by: admitted_by.to_owned(),
+        };
+        current.verify()?;
+        Ok(current)
+    }
+
+    /// Verify the complete content-derived claim generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when version, owner, target, generation, phase,
+    /// admitting command, identity, or bounded representation changed.
+    pub fn verify(&self) -> ProtocolResult<()> {
+        require_agent_version(
+            "Agent target claim current",
+            &self.current_version,
+            AGENT_TARGET_CLAIM_CURRENT_VERSION,
+        )?;
+        validate_identity("Agent Session", &self.session_id)?;
+        self.target.verify()?;
+        if self.generation == 0 || self.generation > MAX_EXACT_INTEGER {
+            return Err(ProtocolError::Validation(
+                "Agent target-claim generation is outside the exact integer range".to_owned(),
+            ));
+        }
+        self.phase.verify()?;
+        validate_sha256("Agent target-claim command", &self.admitted_by)?;
+        let expected = content_id(
+            AGENT_TARGET_CLAIM_ID_DOMAIN,
+            &AgentTargetClaimIdentity {
+                current_version: &self.current_version,
+                session_id: &self.session_id,
+                target: &self.target,
+                generation: self.generation,
+                phase: &self.phase,
+                admitted_by: &self.admitted_by,
+            },
+        )?;
+        if self.claim_id != expected {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent target claim does not match its exact generation".to_owned(),
+            ));
+        }
+        validate_canonical_size("Agent target claim current", self, MAX_AGENT_CURRENT_BYTES)
+    }
+}
+
+/// Exact source membership or non-membership used by one target transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTargetClaimSource {
+    /// Role-free exact target identity.
+    pub target: AgentTargetClaimTarget,
+    /// Current generation, absent before first ownership.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub current: Option<AgentTargetClaimCurrent>,
+}
+
+impl AgentTargetClaimSource {
+    fn verify_for(&self, session_id: &str) -> ProtocolResult<()> {
+        self.target.verify()?;
+        if let Some(current) = &self.current {
+            current.verify()?;
+            if current.session_id != session_id || current.target != self.target {
+                return Err(ProtocolError::IdentityMismatch(
+                    "Agent target-claim source changed its exact key".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Closed exact before/after mutation for the independent target-claim family.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTargetClaimTransition {
+    /// Exact source generation or proved absence.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub source: Option<AgentTargetClaimCurrent>,
+    /// Exact successor generation.
+    pub current: AgentTargetClaimCurrent,
+}
+
+impl AgentTargetClaimTransition {
+    fn new(
+        session_id: &str,
+        target: AgentTargetClaimTarget,
+        source: Option<&AgentTargetClaimCurrent>,
+        phase: AgentTargetClaimPhase,
+        admitted_by: &str,
+    ) -> ProtocolResult<Self> {
+        if let Some(source) = source {
+            source.verify()?;
+            if source.session_id != session_id || source.target != target {
+                return Err(ProtocolError::IdentityMismatch(
+                    "Agent target-claim transition changed its exact key".to_owned(),
+                ));
+            }
+        }
+        validate_target_claim_phase_transition(source, &phase, admitted_by)?;
+        let generation = source.map_or(Ok(1), |source| {
+            source.generation.checked_add(1).ok_or_else(|| {
+                ProtocolError::Validation("Agent target-claim generation is exhausted".to_owned())
+            })
+        })?;
+        let transition = Self {
+            source: source.cloned(),
+            current: AgentTargetClaimCurrent::new(
+                session_id,
+                target,
+                generation,
+                phase,
+                admitted_by,
+            )?,
+        };
+        transition.verify()?;
+        Ok(transition)
+    }
+
+    /// Verify the exact generation successor and closed phase transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the source, key, generation, phase, command, or
+    /// derived successor changed.
+    pub fn verify(&self) -> ProtocolResult<()> {
+        self.current.verify()?;
+        if let Some(source) = &self.source {
+            source.verify()?;
+            if source.session_id != self.current.session_id
+                || source.target != self.current.target
+                || source.generation.checked_add(1) != Some(self.current.generation)
+            {
+                return Err(ProtocolError::IdentityMismatch(
+                    "Agent target-claim transition changed its key or generation".to_owned(),
+                ));
+            }
+        } else if self.current.generation != 1 {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent target-claim genesis must use generation one".to_owned(),
+            ));
+        }
+        validate_target_claim_phase_transition(
+            self.source.as_ref(),
+            &self.current.phase,
+            &self.current.admitted_by,
+        )
+    }
+}
+
+fn validate_target_claim_phase_transition(
+    source: Option<&AgentTargetClaimCurrent>,
+    next: &AgentTargetClaimPhase,
+    admitted_by: &str,
+) -> ProtocolResult<()> {
+    validate_sha256("Agent target-claim command", admitted_by)?;
+    next.verify()?;
+    match (source.map(|current| &current.phase), next) {
+        (
+            None | Some(AgentTargetClaimPhase::Released { .. }),
+            AgentTargetClaimPhase::Reserved { .. } | AgentTargetClaimPhase::Materialized,
+        ) => Ok(()),
+        (
+            Some(AgentTargetClaimPhase::Reserved {
+                stream_id: source_stream,
+                reservation_id: source_reservation,
+            }),
+            AgentTargetClaimPhase::Released {
+                stream_id,
+                reservation_id,
+            },
+        ) if source_stream == stream_id && source_reservation == reservation_id => Ok(()),
+        (Some(AgentTargetClaimPhase::Reserved { .. }), AgentTargetClaimPhase::Materialized)
+            if source.is_some_and(|current| current.admitted_by == admitted_by) =>
+        {
+            Ok(())
+        }
+        _ => Err(ProtocolError::IllegalTransition(
+            "Agent target claim does not admit the requested phase successor".to_owned(),
+        )),
+    }
+}
+
 /// Immutable expected content of one external stream publication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -4359,7 +4907,7 @@ pub struct AgentStreamCurrent {
     /// Final Session update, present only after finalization.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub final_update: Option<AgentUpdate>,
-    /// Digest of exact finalized content, present only after finalization.
+    /// Raw canonical SHA-256 digest of the exact finalized update content.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub content_digest: Option<String>,
     /// Stable abort reason, present only after abort.
@@ -4409,67 +4957,82 @@ impl AgentStreamCurrent {
             validate_sha256("Agent stream chunk head", head)?;
         }
         match self.state {
-            AgentStreamState::Open => {
-                if self.final_update.is_some()
-                    || self.content_digest.is_some()
-                    || self.abort_reason.is_some()
-                {
-                    return Err(ProtocolError::Validation(
-                        "open Agent stream cannot retain a terminal outcome".to_owned(),
-                    ));
-                }
-            }
-            AgentStreamState::Finalized => {
-                if self.publication_reservation.is_some() {
-                    return Err(ProtocolError::Validation(
-                        "finalized Agent stream cannot retain a publication reservation".to_owned(),
-                    ));
-                }
-                let update = self.final_update.as_ref().ok_or_else(|| {
-                    ProtocolError::Validation(
-                        "finalized Agent stream current requires its Session update".to_owned(),
-                    )
-                })?;
-                update.validate_content()?;
-                if self.final_update_bytes != cymule_core::canonical_bytes(update)?.len() as u64 {
-                    return Err(ProtocolError::IdentityMismatch(
-                        "Agent stream final update byte count does not match its admitted capacity"
-                            .to_owned(),
-                    ));
-                }
-                if update.update_id()
-                    != agent_stream_final_update_id(&self.session_id, &self.stream_id)?
-                    || self.content_digest.is_none()
-                    || self.abort_reason.is_some()
-                {
-                    return Err(ProtocolError::Validation(
-                        "finalized Agent stream current has inconsistent terminal fields"
-                            .to_owned(),
-                    ));
-                }
-            }
-            AgentStreamState::Aborted => {
-                if self.publication_reservation.is_some() {
-                    return Err(ProtocolError::Validation(
-                        "aborted Agent stream cannot retain a publication reservation".to_owned(),
-                    ));
-                }
-                if self.final_update.is_some() || self.content_digest.is_some() {
-                    return Err(ProtocolError::Validation(
-                        "aborted Agent stream cannot retain finalized output".to_owned(),
-                    ));
-                }
-                validate_identity(
-                    "Agent stream abort reason",
-                    self.abort_reason.as_deref().ok_or_else(|| {
-                        ProtocolError::Validation(
-                            "aborted Agent stream requires its reason".to_owned(),
-                        )
-                    })?,
-                )?;
-            }
+            AgentStreamState::Open => self.verify_open_state()?,
+            AgentStreamState::Finalized => self.verify_finalized_state()?,
+            AgentStreamState::Aborted => self.verify_aborted_state()?,
         }
         validate_canonical_size("Agent stream current", self, MAX_AGENT_CURRENT_BYTES)
+    }
+
+    fn verify_open_state(&self) -> ProtocolResult<()> {
+        if self.final_update.is_some()
+            || self.content_digest.is_some()
+            || self.abort_reason.is_some()
+        {
+            return Err(ProtocolError::Validation(
+                "open Agent stream cannot retain a terminal outcome".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_finalized_state(&self) -> ProtocolResult<()> {
+        if self.publication_reservation.is_some() {
+            return Err(ProtocolError::Validation(
+                "finalized Agent stream cannot retain a publication reservation".to_owned(),
+            ));
+        }
+        let update = self.final_update.as_ref().ok_or_else(|| {
+            ProtocolError::Validation(
+                "finalized Agent stream current requires its Session update".to_owned(),
+            )
+        })?;
+        update.validate_content()?;
+        if self.final_update_bytes != cymule_core::canonical_bytes(update)?.len() as u64 {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent stream final update byte count does not match its admitted capacity"
+                    .to_owned(),
+            ));
+        }
+        if update.update_id() != agent_stream_final_update_id(&self.session_id, &self.stream_id)?
+            || self.abort_reason.is_some()
+        {
+            return Err(ProtocolError::Validation(
+                "finalized Agent stream current has inconsistent terminal fields".to_owned(),
+            ));
+        }
+        let content_digest = self.content_digest.as_deref().ok_or_else(|| {
+            ProtocolError::Validation(
+                "finalized Agent stream current requires its content digest".to_owned(),
+            )
+        })?;
+        validate_canonical_digest("Agent stream finalized content digest", content_digest)?;
+        if content_digest != agent_stream_final_update_content_digest(&self.target, update)? {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent stream finalized content digest does not match its final update".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_aborted_state(&self) -> ProtocolResult<()> {
+        if self.publication_reservation.is_some() {
+            return Err(ProtocolError::Validation(
+                "aborted Agent stream cannot retain a publication reservation".to_owned(),
+            ));
+        }
+        if self.final_update.is_some() || self.content_digest.is_some() {
+            return Err(ProtocolError::Validation(
+                "aborted Agent stream cannot retain finalized output".to_owned(),
+            ));
+        }
+        validate_identity(
+            "Agent stream abort reason",
+            self.abort_reason.as_deref().ok_or_else(|| {
+                ProtocolError::Validation("aborted Agent stream requires its reason".to_owned())
+            })?,
+        )?;
+        Ok(())
     }
 
     fn verify_delivery_state(&self) -> ProtocolResult<()> {
@@ -4512,6 +5075,34 @@ impl AgentStreamCurrent {
         }
         Ok(())
     }
+}
+
+fn agent_stream_final_update_content_digest(
+    target: &AgentStreamTarget,
+    update: &AgentUpdate,
+) -> ProtocolResult<String> {
+    let content = match (target, update) {
+        (AgentStreamTarget::Message { message_id, role }, AgentUpdate::Message { message, .. })
+            if message.message_id == *message_id && message.role == *role =>
+        {
+            &message.content
+        }
+        (AgentStreamTarget::Tool { tool_call_id }, AgentUpdate::Tool { tool, .. })
+            if tool.tool_call_id == *tool_call_id && tool.status == ToolCallStatus::Completed =>
+        {
+            tool.output.as_ref().ok_or_else(|| {
+                ProtocolError::IdentityMismatch(
+                    "Agent stream finalized Tool update lost its output".to_owned(),
+                )
+            })?
+        }
+        _ => {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent stream final update changed its immutable target".to_owned(),
+            ));
+        }
+    };
+    canonical_digest(content).map_err(Into::into)
 }
 
 /// Revision-pinned exact stream current read.
@@ -4706,6 +5297,9 @@ pub enum AgentStreamSource {
         /// `NotApplied` publication reservation.
         #[serde(deserialize_with = "deserialize_required_nullable")]
         resource: Option<Box<AgentStreamResourceSource>>,
+        /// Exact target-claim generation when this Abort releases a reservation.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        target_claim: Option<Box<AgentTargetClaimCurrent>>,
     },
     /// Before witness for finalization.
     Finalize {
@@ -4727,6 +5321,9 @@ pub enum AgentStreamSource {
         /// the exact currents read from the command's pinned source revision.
         #[serde(deserialize_with = "deserialize_required_nullable")]
         resource: Option<Box<AgentStreamResourceSource>>,
+        /// Exact target-claim generation or proved absence.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        target_claim: Option<Box<AgentTargetClaimCurrent>>,
     },
 }
 
@@ -7068,7 +7665,7 @@ fn workspace_checkpoint_phase(
 /// Closed Agent persistence command generation.
 pub const AGENT_COMMAND_VERSION: &str = "cymule.agent-command/3";
 /// Closed Agent persistence receipt generation.
-pub const AGENT_COMMAND_RECEIPT_VERSION: &str = "cymule.agent-command-receipt/3";
+pub const AGENT_COMMAND_RECEIPT_VERSION: &str = "cymule.agent-command-receipt/4";
 
 const AGENT_COMMAND_ID_DOMAIN: &str = "cymule.agent-command-id/1";
 const AGENT_COMMAND_RECEIPT_ID_DOMAIN: &str = "cymule.agent-command-receipt-id/1";
@@ -7659,6 +8256,7 @@ impl AgentStreamSource {
             session,
             stream,
             resource,
+            target_claim,
         } = self
         else {
             return Err(stream_source_shape_error());
@@ -7674,72 +8272,19 @@ impl AgentStreamSource {
                 "Agent stream abort requires its exact open current".to_owned(),
             ));
         }
-        let resource_release_receipt = match (
-            stream.publication_reservation.as_deref(),
+        let (resource_release_receipt, target_claim_transition) = reduce_stream_abort_reservation(
+            command_id,
+            stream,
             resource.as_deref(),
-        ) {
-            (None, None) => None,
-            (Some(reservation), Some(resource)) => {
-                reservation.verify()?;
-                if reservation.phase != AgentStreamPublicationReservationPhase::NotApplied {
-                    return Err(ProtocolError::Conflict {
-                        code: "agent_stream_publication_abort_unresolved".to_owned(),
-                        message: "Agent stream publication must be durably NotApplied before abort"
-                            .to_owned(),
-                    });
-                }
-                let retention = resource.retention.as_ref().ok_or_else(|| {
-                    ProtocolError::IllegalTransition(
-                        "Agent stream abort lost its reserved Resource family".to_owned(),
-                    )
-                })?;
-                let pin = resource.pin.as_ref().ok_or_else(|| {
-                    ProtocolError::IllegalTransition(
-                        "Agent stream abort lost its reserved Resource pin".to_owned(),
-                    )
-                })?;
-                let reservation_origin =
-                    crate::resource::ResourceLifecycleReceiptRef::from_agent_publication_reservation(
-                        reservation.intent.command_id().to_owned(),
-                        reservation.intent.session_id().to_owned(),
-                        reservation.intent.stream_id().to_owned(),
-                        reservation.reservation_id.clone(),
-                    )
-                    .map_err(resource_protocol_error)?;
-                if reservation.resource_pin_receipt.pin != pin.pin
-                    || pin.status != crate::resource::ResourcePinStatus::Reserved
-                    || pin.last_receipt != reservation_origin
-                    || retention.family != pin.pin.subject.family
-                {
-                    return Err(ProtocolError::Conflict {
-                        code: "agent_stream_publication_abort_reservation_changed".to_owned(),
-                        message: "Agent stream abort lost its exact publication reservation"
-                            .to_owned(),
-                    });
-                }
-                Some(
-                    reduce_resource_reserved_pin_release_receipt(command_id, retention, pin)
-                        .map_err(resource_protocol_error)?,
-                )
-            }
-            (Some(_), None) => {
-                return Err(ProtocolError::IllegalTransition(
-                    "Agent stream abort requires its exact reserved Resource source".to_owned(),
-                ));
-            }
-            (None, Some(_)) => {
-                return Err(ProtocolError::Validation(
-                    "Agent stream abort cannot carry Resource state without a reservation"
-                        .to_owned(),
-                ));
-            }
-        };
+            target_claim.as_deref(),
+        )?;
         let mut next = stream.clone();
         next.state = AgentStreamState::Aborted;
         next.publication_reservation = None;
         next.abort_reason = Some(reason.to_owned());
         command_id.clone_into(&mut next.admitted_by);
         let session = close_open_stream(session, stream_id, command_id)?;
+        let _ = target_claim_transition;
         Ok(AgentStreamPostcondition {
             stream: next,
             effect: AgentStreamEffect::Aborted {
@@ -7762,6 +8307,7 @@ impl AgentStreamSource {
             target,
             update,
             resource,
+            target_claim,
         } = self
         else {
             return Err(stream_source_shape_error());
@@ -7787,6 +8333,7 @@ impl AgentStreamSource {
             target_source: target,
             update_source: update.as_ref(),
             resource_source: resource.as_deref(),
+            target_claim_source: target_claim.as_deref(),
         })
     }
 
@@ -7821,6 +8368,7 @@ impl AgentStreamSource {
                 target,
                 update,
                 resource,
+                target_claim,
             },
         ) = (stream_command, self)
         else {
@@ -7866,6 +8414,7 @@ impl AgentStreamSource {
             target_source: target,
             update_source: update.as_ref(),
             resource_source: resource.as_deref(),
+            target_claim_source: target_claim.as_deref(),
         })?;
         postcondition.verify_for(stream_command)?;
         Ok(postcondition)
@@ -7926,6 +8475,135 @@ impl AgentStreamSource {
     }
 }
 
+fn reduce_stream_abort_reservation(
+    command_id: &str,
+    stream: &AgentStreamCurrent,
+    resource: Option<&AgentStreamResourceSource>,
+    target_claim: Option<&AgentTargetClaimCurrent>,
+) -> ProtocolResult<(
+    Option<ResourceReleaseReceipt>,
+    Option<AgentTargetClaimTransition>,
+)> {
+    match (
+        stream.publication_reservation.as_deref(),
+        resource,
+        target_claim,
+    ) {
+        (None, None, None) => Ok((None, None)),
+        (Some(reservation), Some(resource), Some(target_claim)) => {
+            reduce_reserved_stream_abort(command_id, stream, reservation, resource, target_claim)
+        }
+        (Some(_), None, _) => Err(ProtocolError::IllegalTransition(
+            "Agent stream abort requires its exact reserved Resource source".to_owned(),
+        )),
+        (None, Some(_), _) | (None, None, Some(_)) => Err(ProtocolError::Validation(
+            "Agent stream abort cannot carry Resource or target-claim state without a reservation"
+                .to_owned(),
+        )),
+        (Some(_), Some(_), None) => Err(ProtocolError::IllegalTransition(
+            "Agent stream abort requires its exact target reservation".to_owned(),
+        )),
+    }
+}
+
+fn reduce_reserved_stream_abort(
+    command_id: &str,
+    stream: &AgentStreamCurrent,
+    reservation: &AgentStreamPublicationReservation,
+    resource: &AgentStreamResourceSource,
+    target_claim: &AgentTargetClaimCurrent,
+) -> ProtocolResult<(
+    Option<ResourceReleaseReceipt>,
+    Option<AgentTargetClaimTransition>,
+)> {
+    reservation.verify()?;
+    if reservation.phase != AgentStreamPublicationReservationPhase::NotApplied {
+        return Err(ProtocolError::Conflict {
+            code: "agent_stream_publication_abort_unresolved".to_owned(),
+            message: "Agent stream publication must be durably NotApplied before abort".to_owned(),
+        });
+    }
+    let retention = resource.retention.as_ref().ok_or_else(|| {
+        ProtocolError::IllegalTransition(
+            "Agent stream abort lost its reserved Resource family".to_owned(),
+        )
+    })?;
+    let pin = resource.pin.as_ref().ok_or_else(|| {
+        ProtocolError::IllegalTransition(
+            "Agent stream abort lost its reserved Resource pin".to_owned(),
+        )
+    })?;
+    verify_stream_abort_resource(reservation, retention, pin)?;
+    let expected_target = AgentTargetClaimTarget::from_stream_target(&stream.target);
+    verify_stream_abort_target(stream, reservation, target_claim, &expected_target)?;
+    let transition = AgentTargetClaimTransition::new(
+        &stream.session_id,
+        expected_target,
+        Some(target_claim),
+        AgentTargetClaimPhase::Released {
+            stream_id: stream.stream_id.clone(),
+            reservation_id: reservation.reservation_id.clone(),
+        },
+        command_id,
+    )?;
+    Ok((
+        Some(
+            reduce_resource_reserved_pin_release_receipt(command_id, retention, pin)
+                .map_err(resource_protocol_error)?,
+        ),
+        Some(transition),
+    ))
+}
+
+fn verify_stream_abort_resource(
+    reservation: &AgentStreamPublicationReservation,
+    retention: &ResourceRetentionCurrent,
+    pin: &ResourcePinCurrent,
+) -> ProtocolResult<()> {
+    let origin = crate::resource::ResourceLifecycleReceiptRef::from_agent_publication_reservation(
+        reservation.intent.command_id().to_owned(),
+        reservation.intent.session_id().to_owned(),
+        reservation.intent.stream_id().to_owned(),
+        reservation.reservation_id.clone(),
+    )
+    .map_err(resource_protocol_error)?;
+    if reservation.resource_pin_receipt.pin != pin.pin
+        || pin.status != crate::resource::ResourcePinStatus::Reserved
+        || pin.last_receipt != origin
+        || retention.family != pin.pin.subject.family
+    {
+        return Err(ProtocolError::Conflict {
+            code: "agent_stream_publication_abort_reservation_changed".to_owned(),
+            message: "Agent stream abort lost its exact publication reservation".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn verify_stream_abort_target(
+    stream: &AgentStreamCurrent,
+    reservation: &AgentStreamPublicationReservation,
+    target_claim: &AgentTargetClaimCurrent,
+    expected_target: &AgentTargetClaimTarget,
+) -> ProtocolResult<()> {
+    target_claim.verify()?;
+    if target_claim.session_id != stream.session_id
+        || target_claim.target != *expected_target
+        || target_claim.admitted_by != reservation.intent.command_id()
+        || target_claim.phase
+            != (AgentTargetClaimPhase::Reserved {
+                stream_id: stream.stream_id.clone(),
+                reservation_id: reservation.reservation_id.clone(),
+            })
+    {
+        return Err(ProtocolError::Conflict {
+            code: "agent_stream_abort_target_claim_changed".to_owned(),
+            message: "Agent stream abort lost its exact target reservation".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn stream_source_shape_error() -> ProtocolError {
     ProtocolError::Validation(
         "Agent stream before witness does not match its command transition".to_owned(),
@@ -7944,6 +8622,7 @@ struct StreamFinalizationInput<'a> {
     target_source: &'a AgentStreamTargetSource,
     update_source: Option<&'a AgentUpdateCurrent>,
     resource_source: Option<&'a AgentStreamResourceSource>,
+    target_claim_source: Option<&'a AgentTargetClaimCurrent>,
 }
 
 fn reduce_stream_finalization(
@@ -7980,6 +8659,10 @@ fn reduce_stream_finalization(
                 current: current.clone(),
             },
         },
+        target_claims: vec![AgentTargetClaimSource {
+            target: AgentTargetClaimTarget::from_stream_target(&input.stream.target),
+            current: input.target_claim_source.cloned(),
+        }],
     };
     let session = close_open_stream(input.session, input.stream_id, input.command_id)?;
     let mut session_postcondition =
@@ -7989,11 +8672,12 @@ fn reduce_stream_finalization(
         kind: AgentSessionTransitionKind::Stream,
     });
     session_postcondition.session.verify()?;
+    let content_digest = agent_stream_final_update_content_digest(&input.stream.target, &update)?;
     let mut next = input.stream.clone();
     next.state = AgentStreamState::Finalized;
     next.publication_reservation = None;
     next.final_update = Some(update);
-    next.content_digest = Some(canonical_digest(&content)?);
+    next.content_digest = Some(content_digest);
     input.command_id.clone_into(&mut next.admitted_by);
     let (publication_record, resource_pin_receipt) = stream_finalization_resource(input)?;
     Ok(AgentStreamPostcondition {
@@ -8211,6 +8895,7 @@ fn preflight_external_stream_publication(
             target,
             update,
             resource: _,
+            target_claim: _,
         },
     ) = (command, source)
     else {
@@ -8280,6 +8965,8 @@ pub struct AgentStreamPublicationReservationPostcondition {
     pub stream: AgentStreamCurrent,
     /// Exact reserved Resource pin receipt used by Durable lowering.
     pub resource_pin_receipt: ResourcePinReceipt,
+    /// Exact independent target claim acquired before provider I/O.
+    pub target_claim: AgentTargetClaimTransition,
 }
 
 /// Reduce one external publication reservation over its exact Agent and
@@ -8297,6 +8984,7 @@ pub fn reserve_agent_stream_publication(
     let AgentStreamSource::Finalize {
         stream,
         resource: Some(resource),
+        target_claim,
         ..
     } = source
     else {
@@ -8318,12 +9006,30 @@ pub fn reserve_agent_stream_publication(
     )
     .map_err(resource_protocol_error)?;
     let reservation = AgentStreamPublicationReservation::new(intent, resource_pin_receipt.clone())?;
+    let target = AgentTargetClaimTarget::from_stream_target(&stream.target);
+    let target_source = AgentTargetClaimSource {
+        target: target.clone(),
+        current: target_claim.as_deref().cloned(),
+    };
+    target_source.verify_for(&stream.session_id)?;
+    require_unclaimed_target(&target_source)?;
+    let target_claim = AgentTargetClaimTransition::new(
+        &stream.session_id,
+        target,
+        target_source.current.as_ref(),
+        AgentTargetClaimPhase::Reserved {
+            stream_id: stream.stream_id.clone(),
+            reservation_id: reservation.reservation_id.clone(),
+        },
+        &command.command_id,
+    )?;
     let mut next = stream.clone();
     next.publication_reservation = Some(Box::new(reservation));
     next.verify()?;
     Ok(AgentStreamPublicationReservationPostcondition {
         stream: next,
         resource_pin_receipt,
+        target_claim,
     })
 }
 
@@ -8394,6 +9100,152 @@ pub fn mark_agent_stream_publication_not_applied(
     next.publication_reservation = Some(Box::new(reservation.mark_not_applied()?));
     next.verify()?;
     Ok(next)
+}
+
+/// Derive the exact independent target-claim mutation owned by one terminal
+/// stream receipt.
+///
+/// # Errors
+///
+/// Returns an error when the command, source reservation, target, or terminal
+/// postcondition does not close one legal claim successor.
+pub fn agent_stream_target_claim_transition(
+    command: &AgentCommand,
+    source: &AgentStreamSource,
+    postcondition: &AgentStreamPostcondition,
+) -> ProtocolResult<Option<AgentTargetClaimTransition>> {
+    command.verify()?;
+    let AgentCommandAction::Stream(stream_command) = &command.action else {
+        return Err(ProtocolError::Validation(
+            "Agent stream target claim requires a Stream command".to_owned(),
+        ));
+    };
+    match (stream_command, source, &postcondition.effect) {
+        (
+            AgentStreamCommand::Finalize {
+                session_id,
+                stream_id,
+            },
+            AgentStreamSource::Finalize {
+                stream,
+                target_claim,
+                ..
+            },
+            AgentStreamEffect::Finalized { session, .. },
+        ) => Ok(Some(finalized_stream_target_claim_transition(
+            &command.command_id,
+            session_id,
+            stream_id,
+            stream,
+            target_claim.as_deref(),
+            session,
+        )?)),
+        (
+            AgentStreamCommand::Abort {
+                session_id,
+                stream_id,
+                ..
+            },
+            AgentStreamSource::Abort {
+                stream,
+                target_claim,
+                ..
+            },
+            AgentStreamEffect::Aborted {
+                resource_release_receipt,
+                ..
+            },
+        ) => aborted_stream_target_claim_transition(
+            &command.command_id,
+            session_id,
+            stream_id,
+            stream,
+            target_claim.as_deref(),
+            resource_release_receipt.as_ref(),
+        ),
+        (
+            AgentStreamCommand::Open { .. } | AgentStreamCommand::AppendChunk { .. },
+            AgentStreamSource::Open { .. } | AgentStreamSource::AppendChunk { .. },
+            AgentStreamEffect::Opened { .. } | AgentStreamEffect::Chunk { .. },
+        ) => Ok(None),
+        _ => Err(ProtocolError::IdentityMismatch(
+            "Agent stream target claim does not match its command receipt".to_owned(),
+        )),
+    }
+}
+
+fn finalized_stream_target_claim_transition(
+    command_id: &str,
+    session_id: &str,
+    stream_id: &str,
+    stream: &AgentStreamCurrent,
+    target_claim: Option<&AgentTargetClaimCurrent>,
+    session: &AgentSessionPostcondition,
+) -> ProtocolResult<AgentTargetClaimTransition> {
+    if stream.session_id != session_id
+        || stream.stream_id != stream_id
+        || session.session.session_id != session_id
+    {
+        return Err(ProtocolError::IdentityMismatch(
+            "Agent stream finalization target claim changed its owner".to_owned(),
+        ));
+    }
+    let target = AgentTargetClaimTarget::from_stream_target(&stream.target);
+    let claim_source = AgentTargetClaimSource {
+        target: target.clone(),
+        current: target_claim.cloned(),
+    };
+    claim_source.verify_for(session_id)?;
+    materialize_target_claim(session_id, target, &claim_source, command_id)
+}
+
+fn aborted_stream_target_claim_transition(
+    command_id: &str,
+    session_id: &str,
+    stream_id: &str,
+    stream: &AgentStreamCurrent,
+    target_claim: Option<&AgentTargetClaimCurrent>,
+    resource_release_receipt: Option<&ResourceReleaseReceipt>,
+) -> ProtocolResult<Option<AgentTargetClaimTransition>> {
+    match (
+        stream.publication_reservation.as_deref(),
+        target_claim,
+        resource_release_receipt,
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(reservation), Some(source), Some(_)) => {
+            reservation.verify()?;
+            let target = AgentTargetClaimTarget::from_stream_target(&stream.target);
+            if stream.session_id != session_id
+                || stream.stream_id != stream_id
+                || source.session_id != session_id
+                || source.target != target
+                || source.admitted_by != reservation.intent.command_id()
+                || source.phase
+                    != (AgentTargetClaimPhase::Reserved {
+                        stream_id: stream_id.to_owned(),
+                        reservation_id: reservation.reservation_id.clone(),
+                    })
+            {
+                return Err(ProtocolError::IdentityMismatch(
+                    "Agent stream Abort changed its target reservation".to_owned(),
+                ));
+            }
+            Ok(Some(AgentTargetClaimTransition::new(
+                session_id,
+                target,
+                Some(source),
+                AgentTargetClaimPhase::Released {
+                    stream_id: stream_id.to_owned(),
+                    reservation_id: reservation.reservation_id.clone(),
+                },
+                command_id,
+            )?))
+        }
+        _ => Err(ProtocolError::IdentityMismatch(
+            "Agent stream Abort retained a partial target-claim transition".to_owned(),
+        )),
+    }
 }
 
 fn agent_stream_publication_source_digest(source: &AgentStreamSource) -> ProtocolResult<String> {
@@ -9565,6 +10417,47 @@ mod tests {
         format!("sha256:{}", digit.to_string().repeat(64))
     }
 
+    fn absent_message_claim(message_id: &str) -> Vec<AgentTargetClaimSource> {
+        vec![AgentTargetClaimSource {
+            target: AgentTargetClaimTarget::Message {
+                message_id: message_id.to_owned(),
+            },
+            current: None,
+        }]
+    }
+
+    fn absent_tool_claim(tool_call_id: &str) -> Vec<AgentTargetClaimSource> {
+        vec![AgentTargetClaimSource {
+            target: AgentTargetClaimTarget::Tool {
+                tool_call_id: tool_call_id.to_owned(),
+            },
+            current: None,
+        }]
+    }
+
+    fn absent_close_claims(
+        session_id: &str,
+        tools: &[AgentToolCurrent],
+    ) -> Vec<AgentTargetClaimSource> {
+        let mut claims = tools
+            .iter()
+            .map(|tool| {
+                let target = AgentTargetClaimTarget::Tool {
+                    tool_call_id: tool.tool.tool_call_id.clone(),
+                };
+                (
+                    agent_target_claim_key(session_id, &target).expect("claim key derives"),
+                    AgentTargetClaimSource {
+                        target,
+                        current: None,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        claims.sort_by(|left, right| left.0.cmp(&right.0));
+        claims.into_iter().map(|(_, claim)| claim).collect()
+    }
+
     #[test]
     fn tool_derived_id_accepts_maximal_unicode_and_binds_session_and_purpose() {
         let session = "界".repeat(512);
@@ -9604,6 +10497,115 @@ mod tests {
                 "session",
                 &"🧪".repeat(513),
                 AgentToolDerivedPurpose::PermissionRequest,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn target_claim_key_is_role_free_and_phase_generations_are_closed() {
+        let session_id = "session:target-claim";
+        let message_id = "message:target-claim";
+        let user = AgentTargetClaimTarget::from_stream_target(&AgentStreamTarget::Message {
+            message_id: message_id.to_owned(),
+            role: MessageRole::User,
+        });
+        let system = AgentTargetClaimTarget::from_stream_target(&AgentStreamTarget::Message {
+            message_id: message_id.to_owned(),
+            role: MessageRole::System,
+        });
+        assert_eq!(user, system);
+        assert_eq!(
+            agent_target_claim_key(session_id, &user).unwrap(),
+            agent_target_claim_key(session_id, &system).unwrap()
+        );
+
+        let finalize_command = revision('a');
+        let reservation_id = revision('b');
+        let reserved = AgentTargetClaimTransition::new(
+            session_id,
+            user.clone(),
+            None,
+            AgentTargetClaimPhase::Reserved {
+                stream_id: "stream:target-claim".to_owned(),
+                reservation_id: reservation_id.clone(),
+            },
+            &finalize_command,
+        )
+        .expect("absence admits one Reserved generation");
+        assert_eq!(reserved.current.generation, 1);
+        let materialized = AgentTargetClaimTransition::new(
+            session_id,
+            user.clone(),
+            Some(&reserved.current),
+            AgentTargetClaimPhase::Materialized,
+            &finalize_command,
+        )
+        .expect("the same Finalize reservation materializes exactly once");
+        assert_eq!(materialized.current.generation, 2);
+        assert!(
+            AgentTargetClaimTransition::new(
+                session_id,
+                user.clone(),
+                Some(&materialized.current),
+                AgentTargetClaimPhase::Materialized,
+                &revision('c'),
+            )
+            .is_err()
+        );
+
+        let released = AgentTargetClaimTransition::new(
+            session_id,
+            user.clone(),
+            Some(&reserved.current),
+            AgentTargetClaimPhase::Released {
+                stream_id: "stream:target-claim".to_owned(),
+                reservation_id,
+            },
+            &revision('d'),
+        )
+        .expect("NotApplied Abort releases the exact reservation");
+        let reused = AgentTargetClaimTransition::new(
+            session_id,
+            user,
+            Some(&released.current),
+            AgentTargetClaimPhase::Materialized,
+            &revision('e'),
+        )
+        .expect("released target admits one later materialization generation");
+        assert_eq!(reused.current.generation, released.current.generation + 1);
+    }
+
+    #[test]
+    fn target_claim_rejects_foreign_source_and_reserved_nonterminal_write() {
+        let target = AgentTargetClaimTarget::Tool {
+            tool_call_id: "tool:target-claim".to_owned(),
+        };
+        let reserved = AgentTargetClaimTransition::new(
+            "session:target-claim",
+            target.clone(),
+            None,
+            AgentTargetClaimPhase::Reserved {
+                stream_id: "stream:target-claim".to_owned(),
+                reservation_id: revision('1'),
+            },
+            &revision('2'),
+        )
+        .unwrap();
+        assert!(
+            require_unclaimed_target(&AgentTargetClaimSource {
+                target: target.clone(),
+                current: Some(reserved.current.clone()),
+            })
+            .is_err()
+        );
+        assert!(
+            AgentTargetClaimTransition::new(
+                "session:foreign",
+                target,
+                Some(&reserved.current),
+                AgentTargetClaimPhase::Materialized,
+                &revision('2'),
             )
             .is_err()
         );
@@ -9862,6 +10864,7 @@ mod tests {
             target: target_source,
             update: None,
             resource: None,
+            target_claim: None,
         };
         let mut providers = TestAgentProviders {
             publication: Some(forged_publication),
@@ -9924,6 +10927,7 @@ mod tests {
                     &AgentSessionUpdateSource {
                         update: None,
                         entry: AgentSessionEntrySource::Tool { current },
+                        target_claims: absent_tool_claim(&target_id),
                     },
                 )
                 .expect("near-limit Tool lifecycle advances");
@@ -10054,6 +11058,7 @@ mod tests {
             target: AgentStreamTargetSource::Message { current: None },
             update: None,
             resource: None,
+            target_claim: None,
         };
         (command, finalize, source)
     }
@@ -10098,6 +11103,7 @@ mod tests {
         let AgentStreamSource::Finalize {
             stream,
             resource: source_resource,
+            target_claim,
             ..
         } = &mut source
         else {
@@ -10108,6 +11114,7 @@ mod tests {
             retention: Some(resource.retention),
             pin: Some(resource.pin),
         }));
+        *target_claim = Some(Box::new(reserved.target_claim.current));
         (source, reservation)
     }
 
@@ -10349,6 +11356,7 @@ mod tests {
                     &AgentSessionUpdateSource {
                         update: None,
                         entry: AgentSessionEntrySource::Metadata,
+                        target_claims: Vec::new(),
                     },
                 )
                 .is_err()
@@ -10662,11 +11670,12 @@ mod tests {
         let source = AgentSessionUpdateSource {
             update: None,
             entry: AgentSessionEntrySource::Metadata,
+            target_claims: Vec::new(),
         };
         let postcondition = session
             .reduce_update(&command.command_id, &update, &source)
             .expect("update reduces");
-        AgentCommandReceipt::new(
+        let receipt = AgentCommandReceipt::new(
             &command,
             AgentCommandSource::Session {
                 session: session.clone(),
@@ -10675,6 +11684,9 @@ mod tests {
             AgentCommandOutcome::Session(postcondition.clone()),
         )
         .expect("exact receipt verifies");
+        let mut predecessor = receipt;
+        predecessor.receipt_version = "cymule.agent-command-receipt/3".to_owned();
+        assert!(predecessor.verify_for(&command).is_err());
 
         let mut unrelated = postcondition.clone();
         unrelated.session.plan = Some(AgentPlan {
@@ -10689,6 +11701,7 @@ mod tests {
                     update: AgentSessionUpdateSource {
                         update: None,
                         entry: AgentSessionEntrySource::Metadata,
+                        target_claims: Vec::new(),
                     },
                 },
                 AgentCommandOutcome::Session(unrelated),
@@ -10699,6 +11712,7 @@ mod tests {
         let duplicate_source = AgentSessionUpdateSource {
             update: Some(postcondition.update),
             entry: AgentSessionEntrySource::Metadata,
+            target_claims: Vec::new(),
         };
         assert!(
             postcondition
@@ -10714,6 +11728,7 @@ mod tests {
         let metadata = AgentSessionUpdateSource {
             update: None,
             entry: AgentSessionEntrySource::Metadata,
+            target_claims: Vec::new(),
         };
         let running = AgentUpdate::State {
             update_id: "update:no-op:running".to_owned(),
@@ -10821,6 +11836,7 @@ mod tests {
                     &AgentSessionUpdateSource {
                         update: None,
                         entry: AgentSessionEntrySource::Tool { current: None },
+                        target_claims: absent_tool_claim("tool:one"),
                     },
                 )
                 .is_err()
@@ -10844,6 +11860,7 @@ mod tests {
                 &AgentSessionUpdateSource {
                     update: None,
                     entry: AgentSessionEntrySource::Tool { current: None },
+                    target_claims: absent_tool_claim("tool:one"),
                 },
             )
             .expect("pending Tool enters the Session");
@@ -10872,6 +11889,7 @@ mod tests {
                         entry: AgentSessionEntrySource::Tool {
                             current: Some(current),
                         },
+                        target_claims: absent_tool_claim("tool:two"),
                     },
                 )
                 .is_err()
@@ -10907,6 +11925,7 @@ mod tests {
                 &AgentSessionUpdateSource {
                     update: None,
                     entry: AgentSessionEntrySource::Tool { current },
+                    target_claims: absent_tool_claim(tool_call_id),
                 },
             )
             .expect("Tool fixture transition reduces");
@@ -11018,6 +12037,7 @@ mod tests {
         .expect("close command seals");
         let source = AgentSessionUpdateSource {
             update: None,
+            target_claims: absent_close_claims(&terminal_session.session_id, &nonterminal_tools),
             entry: AgentSessionEntrySource::Close {
                 tools: nonterminal_tools,
             },
@@ -11087,6 +12107,7 @@ mod tests {
                         &AgentSessionUpdateSource {
                             update: None,
                             entry,
+                            target_claims: Vec::new(),
                         },
                     )
                     .is_err()
@@ -11105,6 +12126,7 @@ mod tests {
                         entry: AgentSessionEntrySource::Close {
                             tools: vec![mismatched, second.clone()],
                         },
+                        target_claims: Vec::new(),
                     },
                 )
                 .is_err()
@@ -11126,6 +12148,7 @@ mod tests {
                         entry: AgentSessionEntrySource::Close {
                             tools: vec![first, same_size_different_content],
                         },
+                        target_claims: Vec::new(),
                     },
                 )
                 .is_err()
@@ -11247,6 +12270,10 @@ mod tests {
         };
         let close_source = || AgentSessionUpdateSource {
             update: None,
+            target_claims: absent_close_claims(
+                &fixture.tool.session_id,
+                std::slice::from_ref(&fixture.tool),
+            ),
             entry: AgentSessionEntrySource::Close {
                 tools: vec![fixture.tool.clone()],
             },
@@ -11278,6 +12305,7 @@ mod tests {
             session: completed_session,
             stream: fixture.stream,
             resource: None,
+            target_claim: None,
         }
         .reduce(&revision('9'), &abort)
         .expect("stream abort reduces");
@@ -11344,6 +12372,7 @@ mod tests {
         let source = AgentSessionUpdateSource {
             update: None,
             entry: AgentSessionEntrySource::Metadata,
+            target_claims: Vec::new(),
         };
         let outcome = session
             .reduce_update(&command.command_id, &update, &source)
@@ -12080,6 +13109,7 @@ mod tests {
             session: open_session.clone(),
             stream: opened.stream,
             resource: None,
+            target_claim: None,
         }
         .reduce(&abort_command.command_id, &abort)
         .expect("stream aborts");
@@ -12118,6 +13148,7 @@ mod tests {
                 &AgentSessionUpdateSource {
                     update: None,
                     entry: AgentSessionEntrySource::Message { current: None },
+                    target_claims: absent_message_claim("message:stream"),
                 },
             )
             .expect("message admits");
@@ -12213,6 +13244,7 @@ mod tests {
             target: AgentStreamTargetSource::Message { current: None },
             update: None,
             resource: None,
+            target_claim: None,
         };
         let postcondition = source
             .reduce(&finalize_command.command_id, &finalize)
@@ -12361,6 +13393,7 @@ mod tests {
                         &AgentSessionUpdateSource {
                             update: None,
                             entry: AgentSessionEntrySource::Tool { current },
+                            target_claims: absent_tool_claim(&target_id),
                         },
                     )
                     .expect("legal Tool lifecycle advances");
@@ -12446,6 +13479,7 @@ mod tests {
             target,
             update: None,
             resource: None,
+            target_claim: None,
         }
         .reduce(&command.command_id, &finalize);
         assert!(
@@ -12519,6 +13553,7 @@ mod tests {
             target,
             update: None,
             resource: None,
+            target_claim: None,
         };
         let finalized = source
             .reduce(&command.command_id, &finalize)
@@ -12607,6 +13642,7 @@ mod tests {
                 &update,
                 &AgentSessionUpdateSource {
                     update: None,
+                    target_claims: absent_tool_claim(&current.tool.tool_call_id),
                     entry: AgentSessionEntrySource::Tool {
                         current: Some(current)
                     },
@@ -12695,6 +13731,7 @@ mod tests {
             target: AgentStreamTargetSource::Message { current: None },
             update: None,
             resource: None,
+            target_claim: None,
         };
         let postcondition = source
             .reduce(&command.command_id, &finalize)
@@ -12836,6 +13873,7 @@ mod tests {
             session,
             stream,
             resource: Some(resource),
+            target_claim: Some(target_claim),
             ..
         } = source
         else {
@@ -12853,6 +13891,7 @@ mod tests {
             session: session.clone(),
             stream: stream.clone(),
             resource: Some(resource.clone()),
+            target_claim: Some(target_claim.clone()),
         };
         assert!(matches!(
             claimed.reduce(&abort_command.command_id, &abort),
@@ -12866,6 +13905,7 @@ mod tests {
             session,
             stream,
             resource: Some(resource),
+            target_claim: Some(target_claim),
         };
         let postcondition = source
             .reduce(&abort_command.command_id, &abort)
@@ -13649,6 +14689,7 @@ mod tests {
                     &AgentSessionUpdateSource {
                         update: None,
                         entry: AgentSessionEntrySource::Message { current: None },
+                        target_claims: absent_message_claim(&format!("message:page:{index}")),
                     },
                 )
                 .expect("bounded message admits");
@@ -13758,6 +14799,7 @@ mod tests {
                 &AgentSessionUpdateSource {
                     update: None,
                     entry: AgentSessionEntrySource::Message { current: None },
+                    target_claims: absent_message_claim("message:page-budget"),
                 },
             )
             .expect("message enters the source prefix");
@@ -13996,6 +15038,7 @@ mod tests {
                 &AgentSessionUpdateSource {
                     update: None,
                     entry: AgentSessionEntrySource::Message { current: None },
+                    target_claims: absent_message_claim("message:context-message"),
                 },
             )
             .expect("message update reduces");

@@ -12,8 +12,8 @@ The terminal persistence boundary is intentionally closed:
 - ordinary reads are exact keyed lookups or revision/head/generation-pinned
   bounded pages;
 - Session current contains bounded metadata only—messages, tools,
-  elicitations, occurrences, streams, and chunks have independent keyed
-  authority;
+  elicitations, occurrences, streams, chunks, and role-free target claims have
+  independent keyed authority;
 - there is no public Agent journal, raw record, free StateRoot mutation, or
   all-history read API;
 - exact command replay returns the same semantic receipt. Its
@@ -24,8 +24,10 @@ The terminal persistence boundary is intentionally closed:
 
 External provider products are not serializable command input. An external
 stream records its pinned resolver plus expected media type, content digest,
-and byte size. Durable finalization derives a closed serializable intent binding
-the exact source revision/digest, Session, stream, Finalize command, target,
+and byte size. Before provider I/O, one generation-bearing target claim and the
+Resource reservation CAS exclude every ordinary Message/Tool writer for that
+exact Session-local target. Durable finalization derives a closed serializable
+intent binding the exact source revision/digest, Session, stream, Finalize command, target,
 resolver, and content; the provider product remains non-Serde. The provider
 must publish that intent idempotently and return an exact readback before one
 CAS commits the publication, catalog record, permanent Agent-stream Resource
@@ -40,9 +42,10 @@ authority-requiring paths.
 External media types use Resource `/4`'s lowercase ASCII type/subtype token
 grammar without parameters. A durably `NotApplied` publication may be aborted
 in one Agent/Resource CAS that closes the stream and releases its reserved pin;
-claimed or Unknown publication attempts remain reconciliation-only. Promotion
-uses the family's current pin count, so unrelated sibling releases do not block
-the exact reservation.
+that CAS also releases the exact target claim for later reuse. Claimed or
+Unknown publication attempts remain reconciliation-only. Promotion uses the
+family's current pin count, so unrelated sibling releases do not block the exact
+reservation.
 
 Production writers use the provider- and Clock-bound
 `cymule_durable::DurableAgentControl` borrowed from the owning Durable runtime;

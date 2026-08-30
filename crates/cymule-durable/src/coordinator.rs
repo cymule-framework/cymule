@@ -2743,6 +2743,9 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 });
             }
             receipt.verify_for(command)?;
+            self.read_current_state_root(|manifest, resolver| {
+                verify_agent_target_claim_receipt_graph(manifest, resolver, command, &receipt)
+            })?;
             if matches!(
                 &command.action,
                 agent_protocol::AgentCommandAction::Stream(
@@ -3058,6 +3061,9 @@ impl<S: DurableStore> DurableCoordinator<S> {
             DurableOperation::PutAgentStreamCurrent {
                 value: postcondition.stream,
             },
+            DurableOperation::ApplyAgentTargetClaim {
+                value: postcondition.target_claim,
+            },
             DurableOperation::PutResourceRetentionCurrent {
                 value: resource_post.retention,
             },
@@ -3168,7 +3174,11 @@ impl<S: DurableStore> DurableCoordinator<S> {
             agent_protocol::AgentCommandSource::Stream(Box::new(source)),
             agent_protocol::AgentCommandOutcome::Stream(postcondition.clone()),
         )?;
-        let mut operations = agent_stream_finalization_operations(postcondition)?;
+        let agent_protocol::AgentCommandSource::Stream(retained_source) = &receipt.source else {
+            unreachable!("stream finalization receipt retains its Stream source")
+        };
+        let mut operations =
+            agent_stream_finalization_operations(command, retained_source, postcondition)?;
         if let Some(resource_source) = resource_source {
             let pin_receipt = receipt.resource_pin_receipt_for(command)?.ok_or_else(|| {
                 DurableError::Integrity {
@@ -9577,70 +9587,13 @@ fn verify_agent_occurrence_origin<R: crate::StateRootResolver + ?Sized>(
     Ok(())
 }
 
-fn verify_agent_stream_origin<R: crate::StateRootResolver + ?Sized>(
+pub(crate) fn verify_agent_stream_origin<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     current: &agent_protocol::AgentStreamCurrent,
 ) -> DurableResult<()> {
-    current.verify()?;
     if let Some(reservation) = current.publication_reservation.as_ref() {
-        reservation.verify()?;
-        let mut base = current.clone();
-        base.publication_reservation = None;
-        base.verify()?;
-        let (_, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
-        let retained = match &receipt.outcome {
-            agent_protocol::AgentCommandOutcome::Stream(postcondition) => &postcondition.stream,
-            _ => {
-                return Err(DurableError::Integrity {
-                    code: "agent_stream_reservation_base_origin_mismatch".to_owned(),
-                    message: "Agent publication reservation base is not an admitted stream"
-                        .to_owned(),
-                });
-            }
-        };
-        if retained != &base {
-            return Err(DurableError::Integrity {
-                code: "agent_stream_reservation_base_mismatch".to_owned(),
-                message: "Agent publication reservation changed its exact open stream base"
-                    .to_owned(),
-            });
-        }
-        let finalize = crate::state_root::load_agent_command(
-            manifest,
-            resolver,
-            reservation.intent.command_id(),
-        )?
-        .ok_or_else(|| DurableError::Integrity {
-            code: "agent_stream_reservation_command_missing".to_owned(),
-            message: "Agent publication reservation lost its Finalize command".to_owned(),
-        })?;
-        finalize.verify()?;
-        if !matches!(
-            &finalize.action,
-            agent_protocol::AgentCommandAction::Stream(
-                agent_protocol::AgentStreamCommand::Finalize {
-                    session_id,
-                    stream_id,
-                }
-            ) if session_id == &current.session_id && stream_id == &current.stream_id
-        ) || finalize.command_id != reservation.intent.command_id()
-            || finalize.source_revision != reservation.intent.source_revision()
-            || crate::state_root::load_agent_command_receipt(
-                manifest,
-                resolver,
-                &finalize.command_id,
-            )?
-            .is_some()
-        {
-            return Err(DurableError::Integrity {
-                code: "agent_stream_reservation_command_mismatch".to_owned(),
-                message:
-                    "Agent publication reservation changed or terminalized its Finalize authority"
-                        .to_owned(),
-            });
-        }
-        return Ok(());
+        return verify_agent_stream_reservation_origin(manifest, resolver, current, reservation);
     }
     let (_, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
     let retained = match &receipt.outcome {
@@ -9655,6 +9608,228 @@ fn verify_agent_stream_origin<R: crate::StateRootResolver + ?Sized>(
             code: "agent_stream_origin_mismatch".to_owned(),
             message: "Agent stream does not equal its admitting receipt outcome".to_owned(),
         });
+    }
+    Ok(())
+}
+
+fn verify_agent_stream_reservation_origin<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    current: &agent_protocol::AgentStreamCurrent,
+    reservation: &agent_protocol::AgentStreamPublicationReservation,
+) -> DurableResult<()> {
+    let finalize = load_agent_stream_reservation_command(manifest, resolver, current, reservation)?;
+    verify_agent_stream_reservation_claim(manifest, resolver, current, reservation, &finalize)?;
+    verify_agent_stream_reservation_resource(manifest, resolver, current, reservation, &finalize)
+}
+
+fn load_agent_stream_reservation_command<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    current: &agent_protocol::AgentStreamCurrent,
+    reservation: &agent_protocol::AgentStreamPublicationReservation,
+) -> DurableResult<agent_protocol::AgentCommand> {
+    let mut base = current.clone();
+    base.publication_reservation = None;
+    let (_, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
+    if !matches!(
+        &receipt.outcome,
+        agent_protocol::AgentCommandOutcome::Stream(postcondition) if postcondition.stream == base
+    ) {
+        return Err(DurableError::Integrity {
+            code: "agent_stream_reservation_base_mismatch".to_owned(),
+            message: "Agent publication reservation changed its exact open stream base".to_owned(),
+        });
+    }
+    verify_reserved_agent_stream_target(manifest, resolver, current, &receipt)?;
+    let finalize =
+        crate::state_root::load_agent_command(manifest, resolver, reservation.intent.command_id())?
+            .ok_or_else(|| DurableError::Integrity {
+                code: "agent_stream_reservation_command_missing".to_owned(),
+                message: "Agent publication reservation lost its Finalize command".to_owned(),
+            })?;
+    finalize.verify()?;
+    if !matches!(
+        &finalize.action,
+        agent_protocol::AgentCommandAction::Stream(
+            agent_protocol::AgentStreamCommand::Finalize {
+                session_id,
+                stream_id,
+            }
+        ) if session_id == &current.session_id && stream_id == &current.stream_id
+    ) || finalize.command_id != reservation.intent.command_id()
+        || finalize.source_revision != reservation.intent.source_revision()
+        || crate::state_root::load_agent_command_receipt(manifest, resolver, &finalize.command_id)?
+            .is_some()
+    {
+        return Err(DurableError::Integrity {
+            code: "agent_stream_reservation_command_mismatch".to_owned(),
+            message: "Agent publication reservation changed or terminalized its Finalize authority"
+                .to_owned(),
+        });
+    }
+    Ok(finalize)
+}
+
+fn verify_agent_stream_reservation_claim<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    current: &agent_protocol::AgentStreamCurrent,
+    reservation: &agent_protocol::AgentStreamPublicationReservation,
+    finalize: &agent_protocol::AgentCommand,
+) -> DurableResult<()> {
+    let target = agent_protocol::AgentTargetClaimTarget::from_stream_target(&current.target);
+    let claim = crate::state_root::load_agent_target_claim_current(
+        manifest,
+        resolver,
+        &current.session_id,
+        &target,
+    )?
+    .ok_or_else(|| DurableError::Integrity {
+        code: "agent_stream_reservation_target_claim_missing".to_owned(),
+        message: "Agent publication reservation lost its exact target claim".to_owned(),
+    })?;
+    if claim.admitted_by != finalize.command_id
+        || claim.phase
+            != (agent_protocol::AgentTargetClaimPhase::Reserved {
+                stream_id: current.stream_id.clone(),
+                reservation_id: reservation.reservation_id.clone(),
+            })
+    {
+        return Err(DurableError::Integrity {
+            code: "agent_stream_reservation_target_claim_mismatch".to_owned(),
+            message: "Agent publication reservation changed its exact target claim".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn verify_agent_stream_reservation_resource<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    current: &agent_protocol::AgentStreamCurrent,
+    reservation: &agent_protocol::AgentStreamPublicationReservation,
+    finalize: &agent_protocol::AgentCommand,
+) -> DurableResult<()> {
+    let expected =
+        resource_protocol::ResourceLifecycleReceiptRef::from_agent_publication_reservation(
+            finalize.command_id.clone(),
+            current.session_id.clone(),
+            current.stream_id.clone(),
+            reservation.reservation_id.clone(),
+        )?;
+    let pin = crate::state_root::load_resource_pin_current(
+        manifest,
+        resolver,
+        &reservation.resource_pin_receipt.pin.pin_id,
+    )?
+    .ok_or_else(|| DurableError::Integrity {
+        code: "agent_stream_reservation_resource_pin_missing".to_owned(),
+        message: "Agent publication reservation lost its Reserved Resource pin".to_owned(),
+    })?;
+    verify_resource_pin_origin(manifest, resolver, &pin)?;
+    if pin.pin != reservation.resource_pin_receipt.pin
+        || pin.status != resource_protocol::ResourcePinStatus::Reserved
+        || pin.last_receipt != expected
+    {
+        return Err(DurableError::Integrity {
+            code: "agent_stream_reservation_resource_pin_mismatch".to_owned(),
+            message: "Agent publication reservation changed its Reserved Resource pin".to_owned(),
+        });
+    }
+    let retention = crate::state_root::load_resource_retention_current(
+        manifest,
+        resolver,
+        &pin.pin.subject.family.retention_key,
+    )?
+    .ok_or_else(|| DurableError::Integrity {
+        code: "agent_stream_reservation_retention_missing".to_owned(),
+        message: "Agent publication reservation lost its physical retention family".to_owned(),
+    })?;
+    verify_resource_retention_origin(manifest, resolver, &retention)?;
+    if retention.family != pin.pin.subject.family
+        || retention.active_pin_count == 0
+        || retention.disposition != resource_protocol::ResourceRetentionDisposition::Active
+        || (retention.last_receipt == expected
+            && retention.active_pin_count != reservation.resource_pin_receipt.active_pin_count)
+    {
+        return Err(DurableError::Integrity {
+            code: "agent_stream_reservation_retention_mismatch".to_owned(),
+            message: "Agent publication reservation changed its physical retention count"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn verify_reserved_agent_stream_target<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    stream: &agent_protocol::AgentStreamCurrent,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> DurableResult<()> {
+    let agent_protocol::AgentCommandSource::Stream(source) = &receipt.source else {
+        return Err(DurableError::Integrity {
+            code: "agent_stream_reservation_open_source_mismatch".to_owned(),
+            message: "Reserved Agent stream lost its exact Open source".to_owned(),
+        });
+    };
+    let agent_protocol::AgentStreamSource::Open { target, .. } = source.as_ref() else {
+        return Err(DurableError::Integrity {
+            code: "agent_stream_reservation_open_source_mismatch".to_owned(),
+            message: "Reserved Agent stream was not admitted by Open".to_owned(),
+        });
+    };
+    match (&stream.target, target) {
+        (
+            agent_protocol::AgentStreamTarget::Message { message_id, .. },
+            agent_protocol::AgentStreamTargetSource::Message { current: None },
+        ) => {
+            if crate::state_root::load_agent_message_current(
+                manifest,
+                resolver,
+                &stream.session_id,
+                message_id,
+            )?
+            .is_some()
+            {
+                return Err(DurableError::Integrity {
+                    code: "agent_stream_reserved_message_materialized".to_owned(),
+                    message: "Reserved Agent Message target was materialized before finalization"
+                        .to_owned(),
+                });
+            }
+        }
+        (
+            agent_protocol::AgentStreamTarget::Tool { tool_call_id },
+            agent_protocol::AgentStreamTargetSource::Tool {
+                current: Some(expected),
+            },
+        ) => {
+            let tool = crate::state_root::load_agent_tool_current(
+                manifest,
+                resolver,
+                &stream.session_id,
+                tool_call_id,
+            )?
+            .ok_or_else(|| DurableError::Integrity {
+                code: "agent_stream_reserved_tool_missing".to_owned(),
+                message: "Reserved Agent Tool target is missing".to_owned(),
+            })?;
+            if tool != *expected || tool.tool.status != agent_protocol::ToolCallStatus::InProgress {
+                return Err(DurableError::Integrity {
+                    code: "agent_stream_reserved_tool_changed".to_owned(),
+                    message: "Reserved Agent Tool target left its exact InProgress source"
+                        .to_owned(),
+                });
+            }
+        }
+        _ => {
+            return Err(DurableError::Integrity {
+                code: "agent_stream_reservation_target_source_mismatch".to_owned(),
+                message: "Reserved Agent stream changed its exact Open target source".to_owned(),
+            });
+        }
     }
     Ok(())
 }
@@ -9803,11 +9978,23 @@ fn prepare_agent_session_update<R: crate::StateRootResolver + ?Sized>(
     };
     let update_source = agent_protocol::AgentSessionUpdateSource {
         update: update_current,
+        target_claims: load_agent_session_target_claim_sources(
+            manifest, resolver, session_id, update, &entry,
+        )?,
         entry,
     };
     let postcondition = session.reduce_update(&command.command_id, update, &update_source)?;
     let mut operations = Vec::new();
     append_agent_session_postcondition(&mut operations, &postcondition);
+    operations.extend(
+        agent_protocol::agent_session_target_claim_transitions(
+            command,
+            &update_source,
+            &postcondition,
+        )?
+        .into_iter()
+        .map(|value| DurableOperation::ApplyAgentTargetClaim { value }),
+    );
     Ok((
         agent_protocol::AgentCommandSource::Session {
             session,
@@ -9816,6 +10003,74 @@ fn prepare_agent_session_update<R: crate::StateRootResolver + ?Sized>(
         agent_protocol::AgentCommandOutcome::Session(postcondition),
         operations,
     ))
+}
+
+fn load_agent_session_target_claim_sources<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    session_id: &str,
+    update: &agent_protocol::AgentUpdate,
+    entry: &agent_protocol::AgentSessionEntrySource,
+) -> DurableResult<Vec<agent_protocol::AgentTargetClaimSource>> {
+    let targets = match (update, entry) {
+        (
+            agent_protocol::AgentUpdate::Message { message, .. },
+            agent_protocol::AgentSessionEntrySource::Message { .. },
+        ) => vec![agent_protocol::AgentTargetClaimTarget::Message {
+            message_id: message.message_id.clone(),
+        }],
+        (
+            agent_protocol::AgentUpdate::Tool { tool, .. },
+            agent_protocol::AgentSessionEntrySource::Tool { .. },
+        ) => vec![agent_protocol::AgentTargetClaimTarget::Tool {
+            tool_call_id: tool.tool_call_id.clone(),
+        }],
+        (
+            agent_protocol::AgentUpdate::State {
+                state: agent_protocol::AgentState::Closed,
+                ..
+            },
+            agent_protocol::AgentSessionEntrySource::Close { tools },
+        ) => tools
+            .iter()
+            .map(|current| agent_protocol::AgentTargetClaimTarget::Tool {
+                tool_call_id: current.tool.tool_call_id.clone(),
+            })
+            .collect(),
+        (
+            agent_protocol::AgentUpdate::State { .. }
+            | agent_protocol::AgentUpdate::Plan { .. }
+            | agent_protocol::AgentUpdate::Usage { .. },
+            agent_protocol::AgentSessionEntrySource::Metadata,
+        ) => Vec::new(),
+        _ => {
+            return Err(DurableError::RuntimeDefect {
+                code: "agent_target_claim_source_shape_mismatch".to_owned(),
+                message: "Agent update and entry source disagree before target-claim loading"
+                    .to_owned(),
+            });
+        }
+    };
+    let mut keyed_targets = targets
+        .into_iter()
+        .map(|target| {
+            Ok((
+                agent_protocol::agent_target_claim_key(session_id, &target)?,
+                target,
+            ))
+        })
+        .collect::<DurableResult<Vec<_>>>()?;
+    keyed_targets.sort_by(|left, right| left.0.cmp(&right.0));
+    keyed_targets
+        .into_iter()
+        .map(|(_, target)| target)
+        .map(|target| {
+            let current = crate::state_root::load_agent_target_claim_current(
+                manifest, resolver, session_id, &target,
+            )?;
+            Ok(agent_protocol::AgentTargetClaimSource { target, current })
+        })
+        .collect()
 }
 
 fn prepare_agent_occurrence<R: crate::StateRootResolver + ?Sized>(
@@ -9916,10 +10171,19 @@ fn prepare_agent_stream<R: crate::StateRootResolver + ?Sized>(
             } else {
                 None
             };
+            let target_claim_target =
+                agent_protocol::AgentTargetClaimTarget::from_stream_target(&stream.target);
+            let target_claim = crate::state_root::load_agent_target_claim_current(
+                manifest,
+                resolver,
+                session_id,
+                &target_claim_target,
+            )?;
             agent_protocol::AgentStreamSource::Abort {
                 session: require_agent_session(manifest, resolver, session_id)?,
                 stream,
                 resource,
+                target_claim: target_claim.map(Box::new),
             }
         }
         agent_protocol::AgentStreamCommand::Finalize { .. } => {
@@ -9930,6 +10194,19 @@ fn prepare_agent_stream<R: crate::StateRootResolver + ?Sized>(
         }
     };
     let postcondition = source.reduce(&command.command_id, stream_command)?;
+    let operations = agent_local_stream_operations(command, &source, &postcondition)?;
+    Ok((
+        agent_protocol::AgentCommandSource::Stream(Box::new(source)),
+        agent_protocol::AgentCommandOutcome::Stream(postcondition),
+        operations,
+    ))
+}
+
+fn agent_local_stream_operations(
+    command: &agent_protocol::AgentCommand,
+    source: &agent_protocol::AgentStreamSource,
+    postcondition: &agent_protocol::AgentStreamPostcondition,
+) -> DurableResult<Vec<DurableOperation>> {
     let mut operations = vec![DurableOperation::PutAgentStreamCurrent {
         value: postcondition.stream.clone(),
     }];
@@ -9952,11 +10229,12 @@ fn prepare_agent_stream<R: crate::StateRootResolver + ?Sized>(
             });
         }
     }
-    Ok((
-        agent_protocol::AgentCommandSource::Stream(Box::new(source)),
-        agent_protocol::AgentCommandOutcome::Stream(postcondition),
-        operations,
-    ))
+    if let Some(value) =
+        agent_protocol::agent_stream_target_claim_transition(command, source, postcondition)?
+    {
+        operations.push(DurableOperation::ApplyAgentTargetClaim { value });
+    }
+    Ok(operations)
 }
 
 fn append_agent_abort_resource_postcondition(
@@ -10041,6 +10319,7 @@ fn load_agent_stream_finalization_source<R: crate::StateRootResolver + ?Sized>(
     };
     let session = require_agent_session(manifest, resolver, session_id)?;
     let stream = require_agent_stream(manifest, resolver, session_id, stream_id)?;
+    verify_agent_stream_origin(manifest, resolver, &stream)?;
     let mut chunks = Vec::with_capacity(
         usize::try_from(stream.next_chunk_sequence)
             .map_err(|error| DurableError::Validation(error.to_string()))?,
@@ -10059,6 +10338,14 @@ fn load_agent_stream_finalization_source<R: crate::StateRootResolver + ?Sized>(
     let update_id = agent_protocol::agent_stream_final_update_id(session_id, stream_id)?;
     let update =
         crate::state_root::load_agent_update_current(manifest, resolver, session_id, &update_id)?;
+    let target_claim_target =
+        agent_protocol::AgentTargetClaimTarget::from_stream_target(&stream.target);
+    let target_claim = crate::state_root::load_agent_target_claim_current(
+        manifest,
+        resolver,
+        session_id,
+        &target_claim_target,
+    )?;
     Ok(agent_protocol::AgentStreamSource::Finalize {
         session,
         stream,
@@ -10066,6 +10353,7 @@ fn load_agent_stream_finalization_source<R: crate::StateRootResolver + ?Sized>(
         target,
         update,
         resource: None,
+        target_claim: target_claim.map(Box::new),
     })
 }
 
@@ -10080,6 +10368,7 @@ fn attach_agent_stream_resource_source(
         target,
         update,
         resource,
+        target_claim,
     } = source
     else {
         return Err(DurableError::RuntimeDefect {
@@ -10100,6 +10389,7 @@ fn attach_agent_stream_resource_source(
         target,
         update,
         resource: Some(Box::new(resource_source)),
+        target_claim,
     })
 }
 
@@ -10126,6 +10416,8 @@ fn load_agent_stream_resource_source<R: crate::StateRootResolver + ?Sized>(
 }
 
 fn agent_stream_finalization_operations(
+    command: &agent_protocol::AgentCommand,
+    source: &agent_protocol::AgentStreamSource,
     postcondition: &agent_protocol::AgentStreamPostcondition,
 ) -> DurableResult<Vec<DurableOperation>> {
     let agent_protocol::AgentStreamEffect::Finalized {
@@ -10143,6 +10435,16 @@ fn agent_stream_finalization_operations(
         value: postcondition.stream.clone(),
     }];
     append_agent_session_postcondition(&mut operations, session);
+    let target_claim =
+        agent_protocol::agent_stream_target_claim_transition(command, source, postcondition)?
+            .ok_or_else(|| DurableError::RuntimeDefect {
+                code: "agent_finalize_target_claim_missing".to_owned(),
+                message: "Agent finalization reducer returned no target-claim transition"
+                    .to_owned(),
+            })?;
+    operations.push(DurableOperation::ApplyAgentTargetClaim {
+        value: target_claim,
+    });
     if let Some(record) = publication_record {
         operations.push(DurableOperation::PutResourceCatalogRecord {
             value: record.clone(),
@@ -10151,13 +10453,226 @@ fn agent_stream_finalization_operations(
     Ok(operations)
 }
 
-fn verify_agent_stream_finalization_graph<R: crate::StateRootResolver + ?Sized>(
+fn agent_receipt_target_claim_transitions(
+    command: &agent_protocol::AgentCommand,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> DurableResult<Vec<agent_protocol::AgentTargetClaimTransition>> {
+    receipt.verify_for(command)?;
+    match (&receipt.source, &receipt.outcome) {
+        (
+            agent_protocol::AgentCommandSource::Session { update, .. },
+            agent_protocol::AgentCommandOutcome::Session(postcondition),
+        ) => agent_protocol::agent_session_target_claim_transitions(command, update, postcondition)
+            .map_err(Into::into),
+        (
+            agent_protocol::AgentCommandSource::Stream(source),
+            agent_protocol::AgentCommandOutcome::Stream(postcondition),
+        ) => Ok(agent_protocol::agent_stream_target_claim_transition(
+            command,
+            source,
+            postcondition,
+        )?
+        .into_iter()
+        .collect()),
+        _ => Ok(Vec::new()),
+    }
+}
+
+pub(crate) fn verify_agent_target_claim_current_origin<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    current: &agent_protocol::AgentTargetClaimCurrent,
+) -> DurableResult<Option<agent_protocol::AgentTargetClaimCurrent>> {
+    current.verify()?;
+    if let agent_protocol::AgentTargetClaimPhase::Reserved {
+        stream_id,
+        reservation_id,
+    } = &current.phase
+    {
+        let stream = crate::state_root::load_agent_stream_current(
+            manifest,
+            resolver,
+            &current.session_id,
+            stream_id,
+        )?
+        .ok_or_else(|| DurableError::Integrity {
+            code: "agent_target_claim_stream_missing".to_owned(),
+            message: "Reserved Agent target claim lost its owning stream".to_owned(),
+        })?;
+        verify_agent_stream_origin(manifest, resolver, &stream)?;
+        let reservation =
+            stream
+                .publication_reservation
+                .as_ref()
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_target_claim_reservation_missing".to_owned(),
+                    message: "Reserved Agent target claim lost its publication reservation"
+                        .to_owned(),
+                })?;
+        if reservation.reservation_id != *reservation_id
+            || reservation.intent.command_id() != current.admitted_by
+            || agent_protocol::AgentTargetClaimTarget::from_stream_target(&stream.target)
+                != current.target
+        {
+            return Err(DurableError::Integrity {
+                code: "agent_target_claim_reservation_mismatch".to_owned(),
+                message: "Reserved Agent target claim changed its stream authority".to_owned(),
+            });
+        }
+        return Ok(None);
+    }
+    let (command, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
+    let transition = agent_receipt_target_claim_transitions(&command, &receipt)?
+        .into_iter()
+        .find(|transition| transition.current == *current)
+        .ok_or_else(|| DurableError::Integrity {
+            code: "agent_target_claim_origin_mismatch".to_owned(),
+            message: "Agent target claim is absent from its admitting receipt".to_owned(),
+        })?;
+    Ok(transition.source)
+}
+
+fn agent_target_claim_descends_from<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    current: &agent_protocol::AgentTargetClaimCurrent,
+    expected: &agent_protocol::AgentTargetClaimCurrent,
+) -> DurableResult<bool> {
+    let mut cursor = current.clone();
+    let mut authenticated_by_successor = false;
+    loop {
+        if cursor == *expected {
+            return Ok(true);
+        }
+        if cursor.session_id != expected.session_id
+            || cursor.target != expected.target
+            || cursor.generation <= expected.generation
+        {
+            return Ok(false);
+        }
+        if authenticated_by_successor
+            && matches!(
+                cursor.phase,
+                agent_protocol::AgentTargetClaimPhase::Reserved { .. }
+            )
+        {
+            return Ok(cursor.generation == expected.generation + 1);
+        }
+        let generation = cursor.generation;
+        let Some(source) = verify_agent_target_claim_current_origin(manifest, resolver, &cursor)?
+        else {
+            return Ok(generation == expected.generation + 1);
+        };
+        cursor = source;
+        authenticated_by_successor = true;
+    }
+}
+
+pub(crate) fn verify_agent_target_claim_receipt_graph<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    command: &agent_protocol::AgentCommand,
+    receipt: &agent_protocol::AgentCommandReceipt,
+) -> DurableResult<()> {
+    for transition in agent_receipt_target_claim_transitions(command, receipt)? {
+        let current = crate::state_root::load_agent_target_claim_current(
+            manifest,
+            resolver,
+            &transition.current.session_id,
+            &transition.current.target,
+        )?
+        .ok_or_else(|| DurableError::Integrity {
+            code: "agent_target_claim_current_missing".to_owned(),
+            message: "Agent command receipt lost its target-claim current".to_owned(),
+        })?;
+        let valid = match transition.current.phase {
+            agent_protocol::AgentTargetClaimPhase::Materialized => {
+                if current == transition.current {
+                    verify_materialized_agent_target(manifest, resolver, &transition.current)?;
+                    true
+                } else {
+                    false
+                }
+            }
+            agent_protocol::AgentTargetClaimPhase::Released { .. } => {
+                agent_target_claim_descends_from(manifest, resolver, &current, &transition.current)?
+            }
+            agent_protocol::AgentTargetClaimPhase::Reserved { .. } => false,
+        };
+        if !valid {
+            return Err(DurableError::Integrity {
+                code: "agent_target_claim_current_mismatch".to_owned(),
+                message: "Agent command receipt target claim changed without a legal successor"
+                    .to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn verify_materialized_agent_target<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    claim: &agent_protocol::AgentTargetClaimCurrent,
+) -> DurableResult<()> {
+    let admitted_by = match &claim.target {
+        agent_protocol::AgentTargetClaimTarget::Message { message_id } => {
+            crate::state_root::load_agent_message_current(
+                manifest,
+                resolver,
+                &claim.session_id,
+                message_id,
+            )?
+            .ok_or_else(|| DurableError::Integrity {
+                code: "agent_target_claim_message_missing".to_owned(),
+                message: "Materialized Agent target claim lost its Message".to_owned(),
+            })?
+            .order
+            .admitted_by
+        }
+        agent_protocol::AgentTargetClaimTarget::Tool { tool_call_id } => {
+            let current = crate::state_root::load_agent_tool_current(
+                manifest,
+                resolver,
+                &claim.session_id,
+                tool_call_id,
+            )?
+            .ok_or_else(|| DurableError::Integrity {
+                code: "agent_target_claim_tool_missing".to_owned(),
+                message: "Materialized Agent target claim lost its Tool".to_owned(),
+            })?;
+            if !matches!(
+                current.tool.status,
+                agent_protocol::ToolCallStatus::Completed
+                    | agent_protocol::ToolCallStatus::Failed
+                    | agent_protocol::ToolCallStatus::Cancelled
+            ) {
+                return Err(DurableError::Integrity {
+                    code: "agent_target_claim_tool_not_terminal".to_owned(),
+                    message: "Materialized Agent target claim points to a non-terminal Tool"
+                        .to_owned(),
+                });
+            }
+            current.admitted_by
+        }
+    };
+    if admitted_by != claim.admitted_by {
+        return Err(DurableError::Integrity {
+            code: "agent_target_claim_materialized_origin_mismatch".to_owned(),
+            message: "Materialized Agent target changed its admitting command".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_agent_stream_finalization_graph<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     command: &agent_protocol::AgentCommand,
     receipt: &agent_protocol::AgentCommandReceipt,
 ) -> DurableResult<()> {
     receipt.verify_for(command)?;
+    verify_agent_target_claim_receipt_graph(manifest, resolver, command, receipt)?;
     let agent_protocol::AgentCommandOutcome::Stream(agent_protocol::AgentStreamPostcondition {
         effect:
             agent_protocol::AgentStreamEffect::Finalized {
@@ -10174,7 +10689,7 @@ fn verify_agent_stream_finalization_graph<R: crate::StateRootResolver + ?Sized>(
         });
     };
     match (publication_record, resource_pin_receipt) {
-        (Some(record), Some(_)) => {
+        (Some(record), Some(pin_receipt)) => {
             let retained = crate::state_root::load_resource_catalog_record(
                 manifest,
                 resolver,
@@ -10201,6 +10716,46 @@ fn verify_agent_stream_finalization_graph<R: crate::StateRootResolver + ?Sized>(
                     code: "agent_finalize_resource_origin_mismatch".to_owned(),
                     message: "Agent finalization did not retain its exact Resource pin origin"
                         .to_owned(),
+                });
+            }
+            let pin = crate::state_root::load_resource_pin_current(
+                manifest,
+                resolver,
+                &pin_receipt.pin.pin_id,
+            )?
+            .ok_or_else(|| DurableError::Integrity {
+                code: "agent_finalize_resource_pin_current_missing".to_owned(),
+                message: "Agent finalization lost its Active Resource pin".to_owned(),
+            })?;
+            verify_resource_pin_origin(manifest, resolver, &pin)?;
+            if pin.pin != pin_receipt.pin
+                || pin.status != resource_protocol::ResourcePinStatus::Active
+                || pin.last_receipt != expected
+            {
+                return Err(DurableError::Integrity {
+                    code: "agent_finalize_resource_pin_current_mismatch".to_owned(),
+                    message: "Agent finalization changed its Active Resource pin".to_owned(),
+                });
+            }
+            let retention = crate::state_root::load_resource_retention_current(
+                manifest,
+                resolver,
+                &pin.pin.subject.family.retention_key,
+            )?
+            .ok_or_else(|| DurableError::Integrity {
+                code: "agent_finalize_resource_retention_current_missing".to_owned(),
+                message: "Agent finalization lost its physical retention family".to_owned(),
+            })?;
+            verify_resource_retention_origin(manifest, resolver, &retention)?;
+            if retention.family != pin.pin.subject.family
+                || retention.active_pin_count == 0
+                || retention.disposition != resource_protocol::ResourceRetentionDisposition::Active
+                || (retention.last_receipt == expected
+                    && retention.active_pin_count != pin_receipt.active_pin_count)
+            {
+                return Err(DurableError::Integrity {
+                    code: "agent_finalize_resource_retention_current_mismatch".to_owned(),
+                    message: "Agent finalization changed its physical retention count".to_owned(),
                 });
             }
         }
@@ -12945,8 +13500,9 @@ mod agent_stream_publication_reservation_tests {
     use cymule_profile_protocol::agent::{
         AgentCommand, AgentCommandAction, AgentProviders, AgentStreamCommand, AgentStreamDelivery,
         AgentStreamFinalizeOutcome, AgentStreamPublicationContent, AgentStreamPublicationIntent,
-        AgentStreamPublicationObservation, AgentStreamTarget, AgentWorkspaceCommand,
-        AgentWorkspaceObservation, AgentWorkspaceSubmission, MessageRole,
+        AgentStreamPublicationObservation, AgentStreamTarget, AgentUpdate, AgentWorkspaceCommand,
+        AgentWorkspaceObservation, AgentWorkspaceSubmission, ContentBlock, MessageRole, ToolCall,
+        ToolCallStatus,
     };
     use cymule_profile_protocol::resource::{
         RESOURCE_LOCATOR_VERSION, ResourceCommand, ResourceCommandOutcome, ResourceDeletionTarget,
@@ -12996,6 +13552,166 @@ mod agent_stream_publication_reservation_tests {
             .commit_agent_local(&command)
             .expect("external stream opens");
         coordinator
+    }
+
+    fn open_external_message_stream(
+        coordinator: &mut DurableCoordinator<crate::MemoryStore>,
+        stream_id: &str,
+        message_id: &str,
+    ) {
+        let command = AgentCommand::new(
+            coordinator.current_revision().unwrap().to_owned(),
+            AgentCommandAction::Stream(AgentStreamCommand::Open {
+                session_id: SESSION_ID.to_owned(),
+                stream_id: stream_id.to_owned(),
+                target: AgentStreamTarget::Message {
+                    message_id: message_id.to_owned(),
+                    role: MessageRole::Agent,
+                },
+                delivery: AgentStreamDelivery::ExternalResource {
+                    resolver_binding: RESOLVER.to_owned(),
+                    content: AgentStreamPublicationContent {
+                        media_type: "application/octet-stream".to_owned(),
+                        digest: DIGEST.to_owned(),
+                        size: 7,
+                    },
+                },
+            }),
+        )
+        .unwrap();
+        coordinator.commit_agent_local(&command).unwrap();
+    }
+
+    fn external_finalize_command(
+        coordinator: &DurableCoordinator<crate::MemoryStore>,
+        stream_id: &str,
+    ) -> AgentCommand {
+        AgentCommand::new(
+            coordinator.current_revision().unwrap().to_owned(),
+            AgentCommandAction::Stream(AgentStreamCommand::Finalize {
+                session_id: SESSION_ID.to_owned(),
+                stream_id: stream_id.to_owned(),
+            }),
+        )
+        .unwrap()
+    }
+
+    fn commit_tool_update(
+        coordinator: &mut DurableCoordinator<crate::MemoryStore>,
+        status: ToolCallStatus,
+    ) -> DurableResult<agent_protocol::AgentCommit> {
+        let command = AgentCommand::new(
+            coordinator.current_revision()?.to_owned(),
+            AgentCommandAction::SessionUpdate {
+                session_id: SESSION_ID.to_owned(),
+                update: AgentUpdate::Tool {
+                    update_id: format!("update:target-tool:{status:?}"),
+                    tool: ToolCall {
+                        tool_call_id: "tool:external-reservation".to_owned(),
+                        operation: "test.read".to_owned(),
+                        status,
+                        input: serde_json::json!({"path": "README.md"}),
+                        output: (status == ToolCallStatus::Completed).then(|| {
+                            vec![ContentBlock::Text {
+                                text: "complete".to_owned(),
+                            }]
+                        }),
+                        locations: Vec::new(),
+                    },
+                },
+            },
+        )?;
+        coordinator.commit_agent_local(&command)
+    }
+
+    fn open_external_tool_stream(
+        coordinator: &mut DurableCoordinator<crate::MemoryStore>,
+        stream_id: &str,
+    ) {
+        let command = AgentCommand::new(
+            coordinator.current_revision().unwrap().to_owned(),
+            AgentCommandAction::Stream(AgentStreamCommand::Open {
+                session_id: SESSION_ID.to_owned(),
+                stream_id: stream_id.to_owned(),
+                target: AgentStreamTarget::Tool {
+                    tool_call_id: "tool:external-reservation".to_owned(),
+                },
+                delivery: AgentStreamDelivery::ExternalResource {
+                    resolver_binding: RESOLVER.to_owned(),
+                    content: AgentStreamPublicationContent {
+                        media_type: "application/octet-stream".to_owned(),
+                        digest: DIGEST.to_owned(),
+                        size: 7,
+                    },
+                },
+            }),
+        )
+        .unwrap();
+        coordinator.commit_agent_local(&command).unwrap();
+    }
+
+    fn initialized_with_open_tool_stream() -> DurableCoordinator<crate::MemoryStore> {
+        let mut coordinator = DurableCoordinator::open(crate::MemoryStore::new())
+            .unwrap()
+            .initialize()
+            .unwrap();
+        commit_tool_update(&mut coordinator, ToolCallStatus::Pending).unwrap();
+        commit_tool_update(&mut coordinator, ToolCallStatus::InProgress).unwrap();
+        open_external_tool_stream(&mut coordinator, STREAM_ID);
+        coordinator
+    }
+
+    fn current_tool_target_claim(
+        coordinator: &mut DurableCoordinator<crate::MemoryStore>,
+    ) -> agent_protocol::AgentTargetClaimCurrent {
+        let target = agent_protocol::AgentTargetClaimTarget::Tool {
+            tool_call_id: "tool:external-reservation".to_owned(),
+        };
+        coordinator
+            .read_current_state_root(|manifest, resolver| {
+                crate::state_root::load_agent_target_claim_current(
+                    manifest, resolver, SESSION_ID, &target,
+                )
+            })
+            .unwrap()
+            .expect("Tool target claim remains current")
+    }
+
+    fn target_claim_value_id(
+        claim: &agent_protocol::AgentTargetClaimCurrent,
+    ) -> DurableResult<String> {
+        let canonical_json = String::from_utf8(cymule_core::canonical_bytes(claim)?)
+            .map_err(|error| DurableError::Encoding(error.to_string()))?;
+        cymule_core::content_id(
+            crate::STATE_ROOT_VALUE_VERSION,
+            &crate::StateRootValue::Leaf {
+                kind: crate::StateRootLeafKind::AgentTargetClaimCurrent,
+                canonical_json,
+            },
+        )
+        .map_err(Into::into)
+    }
+
+    fn assert_only_current_target_claim_value_reachable(
+        coordinator: DurableCoordinator<crate::MemoryStore>,
+        current: &agent_protocol::AgentTargetClaimCurrent,
+        historical: &[agent_protocol::AgentTargetClaimCurrent],
+    ) {
+        let mut store = coordinator.into_store();
+        let head = store.load_head().unwrap().expect("Agent head exists");
+        let manifest = store
+            .load_state_root_manifest(&head.state_root_manifest_id)
+            .unwrap()
+            .expect("Agent manifest exists");
+        let reachable = store
+            .with_state_root_resolver(&manifest, |resolver| {
+                crate::reachable_state_root_objects(&manifest, resolver)
+            })
+            .unwrap();
+        assert!(reachable.contains(&target_claim_value_id(current).unwrap()));
+        for claim in historical {
+            assert!(!reachable.contains(&target_claim_value_id(claim).unwrap()));
+        }
     }
 
     fn publication(intent: &AgentStreamPublicationIntent) -> ResourcePublication {
@@ -13205,6 +13921,199 @@ mod agent_stream_publication_reservation_tests {
         ) -> ProtocolResult<AgentWorkspaceObservation> {
             unreachable!("reservation tests do not observe workspaces")
         }
+    }
+
+    #[test]
+    fn same_target_streams_and_direct_message_converge_before_second_provider_call() {
+        let mut coordinator = initialized_with_open_stream();
+        open_external_message_stream(
+            &mut coordinator,
+            "stream:external-reservation:sibling",
+            "message:external-reservation",
+        );
+        let first_command = external_finalize_command(&coordinator, STREAM_ID);
+        let sibling_command =
+            external_finalize_command(&coordinator, "stream:external-reservation:sibling");
+        let shared = coordinator.into_store();
+        let mut first = DurableCoordinator::open(shared.clone()).unwrap();
+        let mut sibling = DurableCoordinator::open(shared).unwrap();
+        let mut first_provider = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([ProviderOutcome::Unknown]),
+            observe_outcome: ProviderOutcome::Published,
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        let unknown = first
+            .finalize_agent_stream(&first_command, &mut first_provider)
+            .unwrap();
+        let AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { intent } = unknown else {
+            panic!("first stream retains its unresolved publication")
+        };
+        assert_eq!(first_provider.publish_calls, 1);
+
+        let mut sibling_provider = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([ProviderOutcome::Published]),
+            observe_outcome: ProviderOutcome::Published,
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        assert!(matches!(
+            sibling.finalize_agent_stream(&sibling_command, &mut sibling_provider),
+            Err(DurableError::Conflict { .. })
+        ));
+        assert_eq!(sibling_provider.publish_calls, 0);
+
+        let direct = AgentCommand::new(
+            first.current_revision().unwrap().to_owned(),
+            AgentCommandAction::SessionUpdate {
+                session_id: SESSION_ID.to_owned(),
+                update: AgentUpdate::Message {
+                    update_id: "update:direct-reservation-race".to_owned(),
+                    message: agent_protocol::AgentMessage {
+                        message_id: "message:external-reservation".to_owned(),
+                        role: MessageRole::Agent,
+                        content: vec![ContentBlock::Text {
+                            text: "direct".to_owned(),
+                        }],
+                    },
+                },
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            first.commit_agent_local(&direct),
+            Err(DurableError::HistoryConflict { ref code, .. })
+                if code == "agent_target_already_claimed"
+        ));
+
+        let committed = first
+            .reconcile_agent_stream(&first_command, &intent, &mut first_provider)
+            .unwrap();
+        assert!(matches!(
+            committed,
+            AgentStreamFinalizeOutcome::Committed { .. }
+        ));
+        assert_eq!(first_provider.publish_calls, 1);
+        assert_eq!(first_provider.observe_calls, 1);
+
+        sibling.refresh_pinned_head().unwrap();
+        assert!(matches!(
+            sibling.finalize_agent_stream(&sibling_command, &mut sibling_provider),
+            Err(DurableError::Conflict { .. } | DurableError::HistoryConflict { .. })
+        ));
+        assert_eq!(sibling_provider.publish_calls, 0);
+    }
+
+    #[test]
+    fn not_applied_abort_releases_tool_target_for_one_later_materialization() {
+        let mut coordinator = initialized_with_open_tool_stream();
+        let finalize = finalize_command(&coordinator);
+        let mut provider = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([ProviderOutcome::Unknown]),
+            observe_outcome: ProviderOutcome::NotApplied,
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        let unknown = coordinator
+            .finalize_agent_stream(&finalize, &mut provider)
+            .unwrap();
+        let AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { intent } = unknown else {
+            panic!("Tool publication retains its exact reconciliation intent")
+        };
+        let reserved_first = current_tool_target_claim(&mut coordinator);
+        assert!(matches!(
+            commit_tool_update(&mut coordinator, ToolCallStatus::Completed),
+            Err(DurableError::HistoryConflict { ref code, .. })
+                if code == "agent_target_already_claimed"
+        ));
+        let not_applied = coordinator
+            .reconcile_agent_stream(&finalize, &intent, &mut provider)
+            .unwrap();
+        assert!(matches!(
+            not_applied,
+            AgentStreamFinalizeOutcome::PublicationNotApplied { .. }
+        ));
+        let abort = AgentCommand::new(
+            coordinator.current_revision().unwrap().to_owned(),
+            AgentCommandAction::Stream(AgentStreamCommand::Abort {
+                session_id: SESSION_ID.to_owned(),
+                stream_id: STREAM_ID.to_owned(),
+                reason: "caller:release-tool-target".to_owned(),
+            }),
+        )
+        .unwrap();
+        coordinator.commit_agent_local(&abort).unwrap();
+        let released_first = current_tool_target_claim(&mut coordinator);
+
+        let sibling_stream = "stream:external-reservation:second-tool";
+        open_external_tool_stream(&mut coordinator, sibling_stream);
+        let second_finalize = external_finalize_command(&coordinator, sibling_stream);
+        let mut second_provider = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([ProviderOutcome::NotApplied]),
+            observe_outcome: ProviderOutcome::NotApplied,
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        assert!(matches!(
+            coordinator
+                .finalize_agent_stream(&second_finalize, &mut second_provider)
+                .unwrap(),
+            AgentStreamFinalizeOutcome::PublicationNotApplied { .. }
+        ));
+        let reserved_second = current_tool_target_claim(&mut coordinator);
+        let second_abort = AgentCommand::new(
+            coordinator.current_revision().unwrap().to_owned(),
+            AgentCommandAction::Stream(AgentStreamCommand::Abort {
+                session_id: SESSION_ID.to_owned(),
+                stream_id: sibling_stream.to_owned(),
+                reason: "caller:release-tool-target-again".to_owned(),
+            }),
+        )
+        .unwrap();
+        coordinator.commit_agent_local(&second_abort).unwrap();
+        let released_second = current_tool_target_claim(&mut coordinator);
+        let old_replay = coordinator.commit_agent_local(&abort).unwrap();
+        assert!(old_replay.committed_revision.is_none());
+
+        commit_tool_update(&mut coordinator, ToolCallStatus::Completed)
+            .expect("released Tool target materializes through one later Session update");
+        let claim = current_tool_target_claim(&mut coordinator);
+        assert_eq!(claim.generation, 5);
+        assert!(matches!(
+            claim.phase,
+            agent_protocol::AgentTargetClaimPhase::Materialized
+        ));
+        assert_eq!(provider.publish_calls, 1);
+        assert_eq!(provider.observe_calls, 1);
+        assert_eq!(second_provider.publish_calls, 1);
+        assert_eq!(second_provider.observe_calls, 0);
+
+        assert_only_current_target_claim_value_reachable(
+            coordinator,
+            &claim,
+            &[
+                reserved_first,
+                released_first,
+                reserved_second,
+                released_second,
+            ],
+        );
     }
 
     #[test]

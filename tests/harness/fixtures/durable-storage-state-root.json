@@ -26,7 +26,7 @@
   "state_root_objects": [
     {
       "object": "manifest",
-      "manifest_version": "cymule.durable-state-root/4",
+      "manifest_version": "cymule.durable-state-root/5",
       "manifest_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "parent_manifest": null,
       "parent_revision": null,
@@ -108,6 +108,7 @@
         "agent_messages": { "node": null, "entries": 0 },
         "agent_message_indexes": { "node": null, "entries": 0 },
         "agent_tools": { "node": null, "entries": 0 },
+        "agent_target_claims": { "node": null, "entries": 0 },
         "agent_elicitations": { "node": null, "entries": 0 },
         "agent_occurrences": { "node": null, "entries": 0 },
         "agent_unresolved_occurrence_indexes": { "node": null, "entries": 0 },
@@ -159,7 +160,7 @@
     },
     {
       "object": "value",
-      "value_version": "cymule.durable-state-value/4",
+      "value_version": "cymule.durable-state-value/5",
       "object_id": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
       "value": {
         "value": "leaf",
@@ -169,7 +170,7 @@
     },
     {
       "object": "value",
-      "value_version": "cymule.durable-state-value/4",
+      "value_version": "cymule.durable-state-value/5",
       "object_id": "sha256:2626262626262626262626262626262626262626262626262626262626262626",
       "value": {
         "value": "machine_base_chunk",
@@ -179,7 +180,7 @@
     },
     {
       "object": "value",
-      "value_version": "cymule.durable-state-value/4",
+      "value_version": "cymule.durable-state-value/5",
       "object_id": "sha256:2727272727272727272727272727272727272727272727272727272727272727",
       "value": {
         "value": "machine_base_descriptor",
@@ -196,7 +197,7 @@
     },
     {
       "object": "value",
-      "value_version": "cymule.durable-state-value/4",
+      "value_version": "cymule.durable-state-value/5",
       "object_id": "sha256:2929292929292929292929292929292929292929292929292929292929292929",
       "value": {
         "value": "application_journal",
@@ -211,7 +212,7 @@
     },
     {
       "object": "value",
-      "value_version": "cymule.durable-state-value/4",
+      "value_version": "cymule.durable-state-value/5",
       "object_id": "sha256:3030303030303030303030303030303030303030303030303030303030303030",
       "value": {
         "value": "application_journal_record_manifests",
@@ -224,7 +225,7 @@
     },
     {
       "object": "value",
-      "value_version": "cymule.durable-state-value/4",
+      "value_version": "cymule.durable-state-value/5",
       "object_id": "sha256:3131313131313131313131313131313131313131313131313131313131313131",
       "value": {
         "value": "run_query_indexes",
@@ -242,7 +243,7 @@
     },
     {
       "object": "value",
-      "value_version": "cymule.durable-state-value/4",
+      "value_version": "cymule.durable-state-value/5",
       "object_id": "sha256:3232323232323232323232323232323232323232323232323232323232323232",
       "value": {
         "value": "pending_wait_source",

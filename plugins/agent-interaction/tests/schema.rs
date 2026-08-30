@@ -139,7 +139,7 @@ fn stream_current() -> Value {
 #[test]
 fn schema_accepts_terminal_currents_and_rejects_removed_aggregate_records() {
     let schema = agent_schema();
-    assert_eq!(schema["title"], "Cymule Agent Protocol cymule.agent/7");
+    assert_eq!(schema["title"], "Cymule Agent Protocol cymule.agent/8");
     assert_eq!(
         schema["$id"],
         "https://cymule.dev/schemas/agent-protocol.schema.json"
@@ -992,6 +992,7 @@ fn provider_products_cannot_enter_serialized_commands_or_sources() {
             retention: None,
             pin: None,
         })),
+        target_claim: None,
     };
     let mut serialized = serde_json::to_value(source).expect("stream source encodes");
     serialized
@@ -1024,7 +1025,7 @@ fn external_stream_delivery_requires_immutable_content() {
 #[test]
 fn publication_intent_wire_requires_source_and_content_authority() {
     let intent = json!({
-        "intent_version": "cymule.agent-stream-publication-intent/1",
+        "intent_version": "cymule.agent-stream-publication-intent/2",
         "intent_id": format!("sha256:{}", "a".repeat(64)),
         "source_revision": format!("sha256:{}", "b".repeat(64)),
         "source_digest": "c".repeat(64),
@@ -1048,6 +1049,16 @@ fn publication_intent_wire_requires_source_and_content_authority() {
         .expect("complete publication intent wire validates");
     serde_json::from_value::<AgentStreamPublicationIntent>(intent.clone())
         .expect("complete publication intent wire decodes");
+    let mut predecessor = intent.clone();
+    predecessor["intent_version"] =
+        Value::String("cymule.agent-stream-publication-intent/1".to_owned());
+    assert!(!schema_validator("agentStreamPublicationIntent").is_valid(&predecessor));
+    assert!(
+        serde_json::from_value::<AgentStreamPublicationIntent>(predecessor)
+            .unwrap()
+            .verify()
+            .is_err()
+    );
     for member in ["source_revision", "source_digest", "content"] {
         let mut missing = intent.clone();
         missing
@@ -1158,6 +1169,7 @@ fn publication_reservation_is_required_closed_and_schema_valid() {
             retention: None,
             pin: None,
         })),
+        target_claim: None,
     };
     let reserved = reserve_agent_stream_publication(&source, &command)
         .expect("reservation schema source reserves before I/O");
@@ -1174,6 +1186,7 @@ fn publication_reservation_is_required_closed_and_schema_valid() {
         .expect("reservation validates against its closed schema");
     serde_json::from_value::<AgentStreamPublicationReservation>(wire.clone())
         .expect("reservation decodes through strict Serde");
+    assert_reservation_predecessor_rejected(&wire);
     for field in [
         "reservation_version",
         "reservation_id",
@@ -1204,6 +1217,101 @@ fn publication_reservation_is_required_closed_and_schema_valid() {
         .remove("publication_reservation");
     assert!(serde_json::from_value::<AgentStreamCurrent>(missing.clone()).is_err());
     assert!(!schema_validator("agentStreamCurrent").is_valid(&missing));
+}
+
+fn assert_reservation_predecessor_rejected(wire: &Value) {
+    let mut predecessor = wire.clone();
+    predecessor["reservation_version"] =
+        Value::String("cymule.agent-stream-publication-reservation/1".to_owned());
+    assert!(!schema_validator("agentStreamPublicationReservation").is_valid(&predecessor));
+    assert!(
+        serde_json::from_value::<AgentStreamPublicationReservation>(predecessor)
+            .unwrap()
+            .verify()
+            .is_err()
+    );
+}
+
+#[test]
+fn target_claim_current_is_role_free_required_and_phase_closed() {
+    let open = AgentStreamCommand::Open {
+        session_id: "session:target-claim-schema".to_owned(),
+        stream_id: "stream:target-claim-schema".to_owned(),
+        target: AgentStreamTarget::Message {
+            message_id: "message:target-claim-schema".to_owned(),
+            role: MessageRole::Agent,
+        },
+        delivery: AgentStreamDelivery::ExternalResource {
+            resolver_binding: "resolver:target-claim-schema/1".to_owned(),
+            content: AgentStreamPublicationContent {
+                media_type: "application/octet-stream".to_owned(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                size: 1,
+            },
+        },
+    };
+    let opened = AgentStreamSource::Open {
+        session: AgentSessionCurrent::new("session:target-claim-schema").unwrap(),
+        stream: None,
+        target: AgentStreamTargetSource::Message { current: None },
+    }
+    .reduce(&format!("sha256:{}", "b".repeat(64)), &open)
+    .unwrap();
+    let command = AgentCommand::new(
+        format!("sha256:{}", "c".repeat(64)),
+        AgentCommandAction::Stream(AgentStreamCommand::Finalize {
+            session_id: "session:target-claim-schema".to_owned(),
+            stream_id: "stream:target-claim-schema".to_owned(),
+        }),
+    )
+    .unwrap();
+    let source = AgentStreamSource::Finalize {
+        session: match opened.effect {
+            AgentStreamEffect::Opened { session } => session,
+            _ => panic!("Open returns its Session"),
+        },
+        stream: opened.stream,
+        chunks: Vec::new(),
+        target: AgentStreamTargetSource::Message { current: None },
+        update: None,
+        resource: Some(Box::new(AgentStreamResourceSource {
+            retention: None,
+            pin: None,
+        })),
+        target_claim: None,
+    };
+    let reserved = reserve_agent_stream_publication(&source, &command).unwrap();
+    let wire = serde_json::to_value(&reserved.target_claim.current).unwrap();
+    schema_validator("agentTargetClaimCurrent")
+        .validate(&wire)
+        .expect("framework Reserved target claim validates");
+    assert!(wire["target"].get("role").is_none());
+    for field in [
+        "current_version",
+        "claim_id",
+        "session_id",
+        "target",
+        "generation",
+        "phase",
+        "admitted_by",
+    ] {
+        let mut missing = wire.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(!schema_validator("agentTargetClaimCurrent").is_valid(&missing));
+    }
+    let mut legacy = wire.clone();
+    legacy["current_version"] = Value::String("cymule.agent-target-claim-current/0".to_owned());
+    assert!(!schema_validator("agentTargetClaimCurrent").is_valid(&legacy));
+    let mut materialized = wire.clone();
+    materialized["phase"] = json!({"phase": "materialized"});
+    assert!(schema_validator("agentTargetClaimCurrent").is_valid(&materialized));
+    let mut released = wire;
+    released["phase"] = json!({
+        "phase": "released",
+        "stream_id": "stream:target-claim-schema",
+        "reservation_id": format!("sha256:{}", "d".repeat(64))
+    });
+    assert!(schema_validator("agentTargetClaimCurrent").is_valid(&released));
 }
 
 #[test]

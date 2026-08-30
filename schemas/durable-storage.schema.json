@@ -1296,7 +1296,7 @@
         "resource_handoff_index", "resource_handoff_activation_index", "agent_command",
         "agent_command_receipt", "agent_input_suspension_receipt",
         "agent_input_completion_receipt", "agent_session_current", "agent_update_current",
-        "agent_message_current", "agent_tool_current", "agent_elicitation_current",
+        "agent_message_current", "agent_tool_current", "agent_target_claim_current", "agent_elicitation_current",
         "agent_occurrence_current", "agent_stream_current", "agent_stream_chunk_current",
         "evolution_current", "evolution_command_alias", "evolution_persistence_receipt",
         "evolution_mutation", "virtual_current", "virtual_persistence_receipt",
@@ -1750,7 +1750,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["value_version", "object_id", "value"],
       "properties": {
-        "value_version": { "const": "cymule.durable-state-value/4" },
+        "value_version": { "const": "cymule.durable-state-value/5" },
         "object_id": { "$ref": "#/$defs/content_id" },
         "value": { "$ref": "#/$defs/state_root_value" }
       }
@@ -1862,7 +1862,7 @@
         "resource_handoff_indexes", "resource_handoff_activation_indexes", "agent_commands",
         "agent_command_receipts", "agent_input_suspension_receipts",
         "agent_input_completion_receipts", "agent_sessions", "agent_updates", "agent_messages",
-        "agent_message_indexes", "agent_tools", "agent_elicitations", "agent_occurrences",
+        "agent_message_indexes", "agent_tools", "agent_target_claims", "agent_elicitations", "agent_occurrences",
         "agent_unresolved_occurrence_indexes", "agent_streams", "agent_stream_chunks",
         "agent_open_stream_indexes", "evolution", "virtual_work", "resource_catalog_records"
       ],
@@ -1931,6 +1931,7 @@
         "agent_messages": { "$ref": "#/$defs/state_map_root" },
         "agent_message_indexes": { "$ref": "#/$defs/state_map_root" },
         "agent_tools": { "$ref": "#/$defs/state_map_root" },
+        "agent_target_claims": { "$ref": "#/$defs/state_map_root" },
         "agent_elicitations": { "$ref": "#/$defs/state_map_root" },
         "agent_occurrences": { "$ref": "#/$defs/state_map_root" },
         "agent_unresolved_occurrence_indexes": { "$ref": "#/$defs/state_map_root" },
@@ -1951,7 +1952,7 @@
       ],
       "allOf": [{ "$ref": "#/$defs/state_root_manifest_lineage" }],
       "properties": {
-        "manifest_version": { "const": "cymule.durable-state-root/4" },
+        "manifest_version": { "const": "cymule.durable-state-root/5" },
         "manifest_id": { "$ref": "#/$defs/content_id" },
         "parent_manifest": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
         "parent_revision": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
@@ -1993,7 +1994,7 @@
           "required": ["object", "value_version", "object_id", "value"],
           "properties": {
             "object": { "const": "value" },
-            "value_version": { "const": "cymule.durable-state-value/4" },
+            "value_version": { "const": "cymule.durable-state-value/5" },
             "object_id": { "$ref": "#/$defs/content_id" },
             "value": { "$ref": "#/$defs/state_root_value" }
           }
@@ -2028,7 +2029,7 @@
           "allOf": [{ "$ref": "#/$defs/state_root_manifest_lineage" }],
           "properties": {
             "object": { "const": "manifest" },
-            "manifest_version": { "const": "cymule.durable-state-root/4" },
+            "manifest_version": { "const": "cymule.durable-state-root/5" },
             "manifest_id": { "$ref": "#/$defs/content_id" },
             "parent_manifest": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
             "parent_revision": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },

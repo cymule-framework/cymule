@@ -52,13 +52,19 @@ Use this precedence order when guidance conflicts:
   Resource commands may release only explicit pins. Virtual archive retirement
   owns its profile release in the same CAS as terminal profile state. External
   Agent streams first persist one physical-family publication reservation and
-  reserved profile pin before provider I/O; only a freshly acknowledged
+  reserved profile pin before provider I/O. That CAS also acquires the sole
+  generation-bearing Agent target claim keyed by Session, target kind, and
+  local identity. Ordinary Message writes, every Tool lifecycle write, Session
+  Close, staged Finalize, and external Finalize all exact-read that same claim;
+  no stream scan or second target authority exists. Only a freshly acknowledged
   reservation or rearm may publish. Finalization atomically promotes that exact
+  claim from `Reserved` to terminal `Materialized` while promoting the exact
   reservation to the permanent pin, catalog, and terminal stream state. After
   a provider-proved durable `NotApplied`, stream Abort is the sole reservation
-  abandonment authority and atomically closes the stream/Session while moving
-  that exact pin from `Reserved` to `Released`; an unresolved attempt cannot be
-  aborted.
+  abandonment authority and atomically advances the target claim to `Released`,
+  closes the stream/Session, and moves that exact pin from `Reserved` to
+  `Released`; an unresolved attempt cannot be aborted. Released claim tombstones
+  advance generation on later reuse, preventing ABA.
 - Every Run-to-Run Resource transfer has one exact keyed current authority, one
   target-Run slot map, and one payload-free entry in that target owner's
   persistent-log index. Exact lookup addresses the keyed authority directly;

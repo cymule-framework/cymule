@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-  "title": "Cymule Agent Protocol cymule.agent/7",
+  "title": "Cymule Agent Protocol cymule.agent/8",
   "oneOf": [
     { "$ref": "#/$defs/agentSessionCurrent" },
     { "$ref": "#/$defs/agentUpdate" },
@@ -12,6 +12,7 @@
     { "$ref": "#/$defs/occurrenceResolution" },
     { "$ref": "#/$defs/agentStreamCommand" },
     { "$ref": "#/$defs/agentStreamCurrent" },
+    { "$ref": "#/$defs/agentTargetClaimCurrent" },
     { "$ref": "#/$defs/agentStreamPublicationIntent" },
     { "$ref": "#/$defs/agentStreamPublicationReservation" },
     { "$ref": "#/$defs/workspaceScopeRequest" }
@@ -1314,6 +1315,86 @@
         }
       ]
     },
+    "agentTargetClaimTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "message_id"],
+          "properties": {
+            "kind": { "const": "message" },
+            "message_id": { "$ref": "#/$defs/nonEmpty" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "tool_call_id"],
+          "properties": {
+            "kind": { "const": "tool" },
+            "tool_call_id": { "$ref": "#/$defs/nonEmpty" }
+          }
+        }
+      ]
+    },
+    "agentTargetClaimPhase": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["phase", "stream_id", "reservation_id"],
+          "properties": {
+            "phase": { "const": "reserved" },
+            "stream_id": { "$ref": "#/$defs/nonEmpty" },
+            "reservation_id": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["phase"],
+          "properties": {
+            "phase": { "const": "materialized" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["phase", "stream_id", "reservation_id"],
+          "properties": {
+            "phase": { "const": "released" },
+            "stream_id": { "$ref": "#/$defs/nonEmpty" },
+            "reservation_id": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      ]
+    },
+    "agentTargetClaimCurrent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current_version",
+        "claim_id",
+        "session_id",
+        "target",
+        "generation",
+        "phase",
+        "admitted_by"
+      ],
+      "properties": {
+        "current_version": { "const": "cymule.agent-target-claim-current/1" },
+        "claim_id": { "$ref": "#/$defs/sha256" },
+        "session_id": { "$ref": "#/$defs/nonEmpty" },
+        "target": { "$ref": "#/$defs/agentTargetClaimTarget" },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "phase": { "$ref": "#/$defs/agentTargetClaimPhase" },
+        "admitted_by": { "$ref": "#/$defs/sha256" }
+      }
+    },
     "agentStreamPublicationIntent": {
       "type": "object",
       "additionalProperties": false,
@@ -1331,7 +1412,7 @@
       ],
       "properties": {
         "intent_version": {
-          "const": "cymule.agent-stream-publication-intent/1"
+          "const": "cymule.agent-stream-publication-intent/2"
         },
         "intent_id": { "$ref": "#/$defs/sha256" },
         "source_revision": { "$ref": "#/$defs/sha256" },
@@ -1440,7 +1521,7 @@
       ],
       "properties": {
         "reservation_version": {
-          "const": "cymule.agent-stream-publication-reservation/1"
+          "const": "cymule.agent-stream-publication-reservation/2"
         },
         "reservation_id": { "$ref": "#/$defs/sha256" },
         "intent": { "$ref": "#/$defs/agentStreamPublicationIntent" },
