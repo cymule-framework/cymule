@@ -558,8 +558,9 @@ streams. A terminal target advances to `Materialized`. External publication
 advances absence or `Released` to `Reserved` before provider I/O, then the same
 Finalize command advances its exact reservation to `Materialized`. Durable
 `NotApplied` Abort advances it to `Released`; later reuse MUST increment the
-generation, preventing ABA. `Materialized` has no successor. That CAS and
-`BeginDelete` mutate the same
+generation and bind the immediate predecessor claim plus its admitting receipt,
+preventing ABA and generation jumps. `Materialized` has no successor. That CAS
+and `BeginDelete` mutate the same
 physical-family current, so exactly one can win before provider I/O. Only a
 fresh reservation or NotApplied rearm acknowledgement MAY invoke publish.
 Published reconciliation MUST promote the exact reserved pin to `Active` in the

@@ -15384,6 +15384,7 @@ fn validate_coupled_checkpoint_retained_history<R: StateRootResolver + ?Sized>(
     let Some(checkpoint) = ResourceHandoffCheckpoint::from_receipt(receipt) else {
         return Ok(());
     };
+    checkpoint.verify_wait(roots, overlay)?;
     checkpoint.verify_command_receipts(roots, overlay)
 }
 
@@ -15438,13 +15439,21 @@ impl<'a> ResourceHandoffCheckpoint<'a> {
         roots: &StateRoots,
         overlay: &mut ObjectOverlay<'_, R>,
     ) -> DurableResult<()> {
+        self.verify_wait(roots, overlay)?;
+        self.verify_continuation(roots, overlay)
+    }
+
+    fn verify_wait<R: StateRootResolver + ?Sized>(
+        &self,
+        roots: &StateRoots,
+        overlay: &mut ObjectOverlay<'_, R>,
+    ) -> DurableResult<()> {
         let Self {
             activation_id,
             run_id,
             owner,
             wait_id,
             result,
-            continuation_digest,
             ..
         } = *self;
         let wait: crate::WaitCondition = map_get(&roots.waits, wait_id, overlay)?
@@ -15468,6 +15477,21 @@ impl<'a> ResourceHandoffCheckpoint<'a> {
                 ),
             });
         }
+        Ok(())
+    }
+
+    fn verify_continuation<R: StateRootResolver + ?Sized>(
+        &self,
+        roots: &StateRoots,
+        overlay: &mut ObjectOverlay<'_, R>,
+    ) -> DurableResult<()> {
+        let Self {
+            activation_id,
+            run_id,
+            wait_id,
+            continuation_digest,
+            ..
+        } = *self;
         let continuation: crate::Continuation = map_get(&roots.continuations, run_id, overlay)?
             .ok_or_else(|| DurableError::HistoryConflict {
                 code: "state_root_resource_activation_continuation_missing".to_owned(),
@@ -15564,6 +15588,27 @@ impl<'a> ResourceHandoffCheckpoint<'a> {
                 ),
             });
         }
+        let transfer = Self::load_transfer_receipt(
+            roots,
+            overlay,
+            activation_id,
+            source_receipt_id,
+            transfer_id,
+            run_id,
+            result,
+        )?;
+        Self::verify_handoff_currents_and_indexes(roots, overlay, &transfer, activation)
+    }
+
+    fn load_transfer_receipt<R: StateRootResolver + ?Sized>(
+        roots: &StateRoots,
+        overlay: &mut ObjectOverlay<'_, R>,
+        activation_id: &str,
+        source_receipt_id: &str,
+        transfer_id: &str,
+        run_id: &str,
+        result: &cymule_core::ArtifactRef,
+    ) -> DurableResult<cymule_profile_protocol::resource::ResourceHandoffReceipt> {
         let source: cymule_profile_protocol::resource::ResourceCommandReceipt = map_get(
             &roots.resource_command_receipts,
             source_receipt_id,
@@ -15577,20 +15622,126 @@ impl<'a> ResourceHandoffCheckpoint<'a> {
         })?
         .decode(StateRootLeafKind::ResourceCommandReceipt)?;
         source.verify()?;
-        if !matches!(
-            source.outcome,
+        match &source.outcome {
             cymule_profile_protocol::resource::ResourceCommandOutcome::Transfer {
-                receipt: source
-            } if source.receipt_id == *source_receipt_id
-                && source.handoff.transfer_id == *transfer_id
-                && source.handoff.to_run == *run_id
-                && source.handoff.resource == *result
-        ) {
-            return Err(DurableError::HistoryConflict {
+                receipt: source,
+            } if source.receipt_id == source_receipt_id
+                && source.handoff.transfer_id == transfer_id
+                && source.handoff.to_run == run_id
+                && source.handoff.resource == *result =>
+            {
+                Ok(source.clone())
+            }
+            _ => Err(DurableError::HistoryConflict {
                 code: "state_root_resource_activation_source_mismatch".to_owned(),
                 message: format!(
                     "Resource activation {activation_id} does not consume its exact transfer receipt"
                 ),
+            }),
+        }
+    }
+
+    fn verify_handoff_currents_and_indexes<R: StateRootResolver + ?Sized>(
+        roots: &StateRoots,
+        overlay: &mut ObjectOverlay<'_, R>,
+        transfer: &cymule_profile_protocol::resource::ResourceHandoffReceipt,
+        activation: &cymule_profile_protocol::resource::ResourceHandoffActivationReceipt,
+    ) -> DurableResult<()> {
+        let transfer_current: cymule_profile_protocol::resource::ResourceHandoffCurrent = map_get(
+            &roots.resource_handoff_current,
+            &transfer.handoff.transfer_id,
+            overlay,
+        )?
+        .ok_or_else(|| DurableError::HistoryConflict {
+            code: "state_root_resource_handoff_current_missing".to_owned(),
+            message: "Resource handoff lost its exact transfer current".to_owned(),
+        })?
+        .decode(StateRootLeafKind::ResourceHandoffCurrent)?;
+        if transfer_current.receipt != *transfer {
+            return Err(DurableError::HistoryConflict {
+                code: "state_root_resource_handoff_current_mismatch".to_owned(),
+                message: "Resource handoff current differs from its transfer receipt".to_owned(),
+            });
+        }
+        let by_transfer: cymule_profile_protocol::resource::ResourceHandoffActivationCurrent =
+            map_get(
+                &roots.resource_handoff_activations_by_transfer,
+                &transfer.handoff.transfer_id,
+                overlay,
+            )?
+            .ok_or_else(|| DurableError::HistoryConflict {
+                code: "state_root_resource_activation_transfer_missing".to_owned(),
+                message: "Resource handoff lost its activation-by-transfer authority".to_owned(),
+            })?
+            .decode(StateRootLeafKind::ResourceHandoffActivationCurrent)?;
+        if by_transfer.receipt != *activation {
+            return Err(DurableError::HistoryConflict {
+                code: "state_root_resource_activation_transfer_mismatch".to_owned(),
+                message: "Resource activation-by-transfer differs from its receipt".to_owned(),
+            });
+        }
+        Self::verify_handoff_index(roots, overlay, &transfer.index)?;
+        Self::verify_activation_index(roots, overlay, &activation.index)
+    }
+
+    fn verify_handoff_index<R: StateRootResolver + ?Sized>(
+        roots: &StateRoots,
+        overlay: &mut ObjectOverlay<'_, R>,
+        expected: &cymule_profile_protocol::resource::ResourceHandoffIndexEntry,
+    ) -> DurableResult<()> {
+        let descriptor = map_get(&roots.resource_handoff_indexes, &expected.to_run, overlay)?
+            .ok_or_else(|| DurableError::HistoryConflict {
+                code: "state_root_resource_handoff_index_missing".to_owned(),
+                message: "Resource handoff lost its target index".to_owned(),
+            })?;
+        let index = descriptor.decode_resource_handoff_index_root(&expected.to_run)?;
+        let retained: cymule_profile_protocol::resource::ResourceHandoffIndexEntry =
+            log_value_at(&index, expected.target_index, overlay)?
+                .decode(StateRootLeafKind::ResourceHandoffIndex)?;
+        let slots = map_get(&roots.resource_handoff_slots, &expected.to_run, overlay)?
+            .ok_or_else(|| DurableError::HistoryConflict {
+                code: "state_root_resource_handoff_slot_missing".to_owned(),
+                message: "Resource handoff lost its target slot directory".to_owned(),
+            })?
+            .decode_resource_handoff_slots_root(&expected.to_run)?;
+        let slot: cymule_profile_protocol::resource::ResourceHandoffIndexEntry =
+            map_get(&slots, &expected.slot, overlay)?
+                .ok_or_else(|| DurableError::HistoryConflict {
+                    code: "state_root_resource_handoff_slot_missing".to_owned(),
+                    message: "Resource handoff lost its exact target slot".to_owned(),
+                })?
+                .decode(StateRootLeafKind::ResourceHandoffIndex)?;
+        if retained != *expected || slot != *expected {
+            return Err(DurableError::HistoryConflict {
+                code: "state_root_resource_handoff_index_mismatch".to_owned(),
+                message: "Resource handoff index or slot differs from its receipt".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn verify_activation_index<R: StateRootResolver + ?Sized>(
+        roots: &StateRoots,
+        overlay: &mut ObjectOverlay<'_, R>,
+        expected: &cymule_profile_protocol::resource::ResourceHandoffActivationIndexEntry,
+    ) -> DurableResult<()> {
+        let descriptor = map_get(
+            &roots.resource_handoff_activation_indexes,
+            &expected.to_run,
+            overlay,
+        )?
+        .ok_or_else(|| DurableError::HistoryConflict {
+            code: "state_root_resource_activation_index_missing".to_owned(),
+            message: "Resource handoff lost its activation index".to_owned(),
+        })?;
+        let index = descriptor.decode_resource_handoff_activation_index_root(&expected.to_run)?;
+        let retained: cymule_profile_protocol::resource::ResourceHandoffActivationIndexEntry =
+            log_value_at(&index, expected.activation_index, overlay)?
+                .decode(StateRootLeafKind::ResourceHandoffActivationIndex)?;
+        if retained != *expected {
+            return Err(DurableError::HistoryConflict {
+                code: "state_root_resource_activation_index_mismatch".to_owned(),
+                message: "Resource activation index differs from its receipt".to_owned(),
             });
         }
         Ok(())

@@ -338,7 +338,9 @@
   reservation; orphan commands are invalid at CAS and audit boundaries.
   Provider results retain and exact-match the complete DispatchClaimed
   reservation, so a late NotApplied or Published result cannot settle a later
-  rearmed attempt. Full audit also exact-matches every keyed Agent current and
+  rearmed attempt. Duplicate NotApplied evidence for that same attempt matches
+  the retained NotApplied successor and performs no second CAS. Full audit also
+  exact-matches every keyed Agent current and
   fully loads every coupled-checkpoint receipt from its physical map key,
   including journal, AgentWorkspace Artifact, and immutable ResourceHandoff
   command-receipt closure. Resource catalog records are
@@ -349,8 +351,10 @@
   and never compares that historical checkpoint with newer mutable currents.
   The target claim's exact-key current and monotonic generation are its bounded
   lineage authority: `ApplyAgentTargetClaim` is the sole writer, exact-compares
-  the retained source, and advances by one. Do not add a predecessor journal or
-  scan claim history to replay an older Released receipt. A reservation-phase
+  the retained source, and advances by one. Each non-genesis claim retains its
+  immediate predecessor claim and admitting command IDs; replay resolves that
+  edge through the already retained Agent receipt, without a separate journal
+  or global history scan. A reservation-phase
   stream read authenticates its original Open receipt plus
   exact retained unterminated Finalize command, not equality with the old Open
   projection alone. It also rejects a self-consistent reservation whose intent

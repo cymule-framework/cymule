@@ -240,6 +240,8 @@ durable `NotApplied` phase before provider I/O. Only an ambiguous final Store
 acknowledgement becomes
 `PublicationOutcomeUnknown`, while known source/reducer/CAS conflicts remain
 their typed errors.
+`PublicationNotApplied` carries the exact durable NotApplied reservation
+generation; an intent alone is not absence proof.
 
 A public Abort can retire an external reservation only after the provider's
 latest `NotApplied` observation is durable. That Agent command carries the

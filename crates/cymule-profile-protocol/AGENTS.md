@@ -94,6 +94,8 @@
   update byte counter remains nonzero. The independent Agent target-claim
   current is keyed by Session plus role-free Message/Tool target and advances
   through `Reserved`, `Materialized`, or `Released` with a monotonic generation.
+  Every non-genesis generation binds its immediate predecessor claim and
+  admitting command IDs, so higher generation alone is never lineage proof.
   Direct Message and terminal Tool writes materialize it; non-terminal Tool
   writes reject Reserved/Materialized; Session Close materializes every
   Cancelled Tool in claim-key order. Before provider I/O, an external Finalize
@@ -103,7 +105,9 @@
   reopen observes a claimed attempt. Every provider publication result retains
   the complete DispatchClaimed reservation it observed, including attempt; a
   late result cannot settle a rearmed attempt, and reconciliation rejects a
-  durable NotApplied phase before provider I/O. The reservation intent's
+  durable NotApplied phase before provider I/O. A public NotApplied outcome
+  carries that exact durable reservation generation, not an intent-only claim.
+  The reservation intent's
   immutable target must equal the stream current target exactly, in addition to
   matching Session, stream, resolver, and content. Terminal finalization
   promotes that exact reservation without changing the family obligation count.

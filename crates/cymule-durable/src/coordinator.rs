@@ -2958,6 +2958,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         if reservation.phase == agent_protocol::AgentStreamPublicationReservationPhase::NotApplied {
             return Ok(
                 agent_protocol::AgentStreamFinalizeOutcome::PublicationNotApplied {
+                    dispatch: reservation.clone(),
                     intent: expected_intent.clone(),
                 },
             );
@@ -3020,8 +3021,14 @@ impl<S: DurableStore> DurableCoordinator<S> {
     ) -> DurableResult<agent_protocol::AgentStreamFinalizeOutcome> {
         match result {
             agent_protocol::AgentStreamPublicationResult::NotApplied { dispatch, intent } => {
-                self.mark_agent_stream_publication_not_applied(command, &dispatch, &intent)?;
-                Ok(agent_protocol::AgentStreamFinalizeOutcome::PublicationNotApplied { intent })
+                let retained =
+                    self.mark_agent_stream_publication_not_applied(command, &dispatch, &intent)?;
+                Ok(
+                    agent_protocol::AgentStreamFinalizeOutcome::PublicationNotApplied {
+                        dispatch: Box::new(retained),
+                        intent,
+                    },
+                )
             }
             agent_protocol::AgentStreamPublicationResult::Unknown { intent, .. } => Ok(
                 agent_protocol::AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { intent },
@@ -3130,7 +3137,7 @@ impl<S: DurableStore> DurableCoordinator<S> {
         command: &agent_protocol::AgentCommand,
         dispatch: &agent_protocol::AgentStreamPublicationReservation,
         intent: &agent_protocol::AgentStreamPublicationIntent,
-    ) -> DurableResult<()> {
+    ) -> DurableResult<agent_protocol::AgentStreamPublicationReservation> {
         let agent_protocol::AgentCommandAction::Stream(
             agent_protocol::AgentStreamCommand::Finalize {
                 session_id,
@@ -3150,24 +3157,38 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 "Agent publication observation lost its durable reservation".to_owned(),
             )
         })?;
-        if &reservation.intent != intent || reservation.as_ref() != dispatch {
+        if &reservation.intent != intent {
             return Err(DurableError::HistoryConflict {
                 code: "agent_stream_publication_dispatch_conflict".to_owned(),
                 message: "Agent publication observation changed its exact dispatch attempt"
                     .to_owned(),
             });
         }
-        if reservation.phase == agent_protocol::AgentStreamPublicationReservationPhase::NotApplied {
-            return Ok(());
+        let mut dispatch_source = stream.clone();
+        dispatch_source.publication_reservation = Some(Box::new(dispatch.clone()));
+        let expected =
+            agent_protocol::mark_agent_stream_publication_not_applied(&dispatch_source, command)?;
+        if stream == expected {
+            return Ok(reservation.as_ref().clone());
         }
-        let next = agent_protocol::mark_agent_stream_publication_not_applied(&stream, command)?;
+        if reservation.as_ref() != dispatch {
+            return Err(DurableError::HistoryConflict {
+                code: "agent_stream_publication_dispatch_conflict".to_owned(),
+                message: "Agent publication observation changed its exact dispatch attempt"
+                    .to_owned(),
+            });
+        }
         self.commit_profile_operations(vec![
             DurableOperation::ApplyAgentStreamPublicationTransition {
                 source: stream,
-                current: next,
+                current: expected.clone(),
             },
         ])?;
-        Ok(())
+        Ok(expected
+            .publication_reservation
+            .expect("NotApplied reducer retains the reservation")
+            .as_ref()
+            .clone())
     }
 
     fn finish_reserved_agent_stream_publication(
@@ -10984,7 +11005,7 @@ pub(crate) fn verify_agent_target_claim_current_origin<R: crate::StateRootResolv
                 message: "Reserved Agent target claim changed its stream authority".to_owned(),
             });
         }
-        return Ok(None);
+        return load_agent_target_claim_predecessor(manifest, resolver, current);
     }
     let (command, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
     let transition = agent_receipt_target_claim_transitions(&command, &receipt)?
@@ -11003,17 +11024,49 @@ pub(crate) fn verify_agent_target_claim_current_origin<R: crate::StateRootResolv
     Ok(transition.source)
 }
 
+fn load_agent_target_claim_predecessor<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    current: &agent_protocol::AgentTargetClaimCurrent,
+) -> DurableResult<Option<agent_protocol::AgentTargetClaimCurrent>> {
+    let Some(predecessor_command) = current.predecessor_admitted_by.as_deref() else {
+        return Ok(None);
+    };
+    let predecessor_claim_id =
+        current
+            .predecessor_claim_id
+            .as_deref()
+            .ok_or_else(|| DurableError::Integrity {
+                code: "agent_target_claim_predecessor_missing".to_owned(),
+                message: "Agent target claim lost its predecessor identity".to_owned(),
+            })?;
+    let (command, receipt) = load_verified_agent_origin(manifest, resolver, predecessor_command)?;
+    let predecessor = agent_receipt_target_claim_transitions(&command, &receipt)?
+        .into_iter()
+        .map(|transition| transition.current)
+        .find(|claim| claim.claim_id == predecessor_claim_id)
+        .ok_or_else(|| DurableError::Integrity {
+            code: "agent_target_claim_predecessor_mismatch".to_owned(),
+            message: "Agent target claim predecessor is absent from its receipt".to_owned(),
+        })?;
+    if predecessor.session_id != current.session_id
+        || predecessor.target != current.target
+        || predecessor.generation.checked_add(1) != Some(current.generation)
+    {
+        return Err(DurableError::Integrity {
+            code: "agent_target_claim_predecessor_mismatch".to_owned(),
+            message: "Agent target claim changed its exact predecessor".to_owned(),
+        });
+    }
+    Ok(Some(predecessor))
+}
+
 fn agent_target_claim_descends_from<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     current: &agent_protocol::AgentTargetClaimCurrent,
     expected: &agent_protocol::AgentTargetClaimCurrent,
 ) -> DurableResult<bool> {
-    // This exact-key current is the lineage authority: ApplyAgentTargetClaim is
-    // the sole writer, exact-compares the retained source, and advances the
-    // generation by exactly one. After authenticating the current origin, any
-    // higher generation for the same key is therefore a causal successor; no
-    // separate predecessor journal or history scan is an authority.
     let mut cursor = current.clone();
     let mut authenticated_by_successor = false;
     loop {
@@ -11026,19 +11079,17 @@ fn agent_target_claim_descends_from<R: crate::StateRootResolver + ?Sized>(
         {
             return Ok(false);
         }
-        if authenticated_by_successor
+        let source = if authenticated_by_successor
             && matches!(
                 cursor.phase,
                 agent_protocol::AgentTargetClaimPhase::Reserved { .. }
-            )
-        {
-            return Ok(true);
-        }
-        let generation = cursor.generation;
-        let Some(source) = verify_agent_target_claim_current_origin(manifest, resolver, &cursor)?
-        else {
-            debug_assert!(generation > expected.generation);
-            return Ok(true);
+            ) {
+            load_agent_target_claim_predecessor(manifest, resolver, &cursor)?
+        } else {
+            verify_agent_target_claim_current_origin(manifest, resolver, &cursor)?
+        };
+        let Some(source) = source else {
+            return Ok(false);
         };
         cursor = source;
         authenticated_by_successor = true;
@@ -14868,6 +14919,18 @@ mod agent_stream_publication_reservation_tests {
         coordinator
             .mark_agent_stream_publication_not_applied(&finalize, &attempt_one, &intent)
             .expect("attempt one receives exact NotApplied evidence");
+        let not_applied_revision = coordinator.current_revision().unwrap().to_owned();
+        let duplicate = coordinator
+            .mark_agent_stream_publication_not_applied(&finalize, &attempt_one, &intent)
+            .expect("duplicate attempt-one evidence replays without a write");
+        assert_eq!(
+            coordinator.current_revision().unwrap(),
+            not_applied_revision
+        );
+        assert_eq!(
+            duplicate.phase,
+            agent_protocol::AgentStreamPublicationReservationPhase::NotApplied
+        );
         assert!(matches!(
             coordinator
                 .reconcile_agent_stream(&finalize, &intent, &mut provider)

@@ -1378,6 +1378,8 @@
         "session_id",
         "target",
         "generation",
+        "predecessor_claim_id",
+        "predecessor_admitted_by",
         "phase",
         "admitted_by"
       ],
@@ -1390,6 +1392,18 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991
+        },
+        "predecessor_claim_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "predecessor_admitted_by": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
         },
         "phase": { "$ref": "#/$defs/agentTargetClaimPhase" },
         "admitted_by": { "$ref": "#/$defs/sha256" }

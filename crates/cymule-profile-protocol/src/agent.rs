@@ -4482,6 +4482,8 @@ struct AgentTargetClaimIdentity<'a> {
     session_id: &'a str,
     target: &'a AgentTargetClaimTarget,
     generation: u64,
+    predecessor_claim_id: Option<&'a str>,
+    predecessor_admitted_by: Option<&'a str>,
     phase: &'a AgentTargetClaimPhase,
     admitted_by: &'a str,
 }
@@ -4500,6 +4502,12 @@ pub struct AgentTargetClaimCurrent {
     pub target: AgentTargetClaimTarget,
     /// Monotonic one-based generation preventing release/reuse ABA.
     pub generation: u64,
+    /// Exact immediate predecessor claim identity, absent only at generation one.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub predecessor_claim_id: Option<String>,
+    /// Command receipt which retains the immediate predecessor, absent at genesis.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub predecessor_admitted_by: Option<String>,
     /// Closed reservation/materialization lifecycle.
     pub phase: AgentTargetClaimPhase,
     /// Exact Agent command admitting this generation.
@@ -4511,6 +4519,8 @@ impl AgentTargetClaimCurrent {
         session_id: &str,
         target: AgentTargetClaimTarget,
         generation: u64,
+        predecessor_claim_id: Option<&str>,
+        predecessor_admitted_by: Option<&str>,
         phase: AgentTargetClaimPhase,
         admitted_by: &str,
     ) -> ProtocolResult<Self> {
@@ -4521,6 +4531,8 @@ impl AgentTargetClaimCurrent {
                 session_id,
                 target: &target,
                 generation,
+                predecessor_claim_id,
+                predecessor_admitted_by,
                 phase: &phase,
                 admitted_by,
             },
@@ -4531,6 +4543,8 @@ impl AgentTargetClaimCurrent {
             session_id: session_id.to_owned(),
             target,
             generation,
+            predecessor_claim_id: predecessor_claim_id.map(str::to_owned),
+            predecessor_admitted_by: predecessor_admitted_by.map(str::to_owned),
             phase,
             admitted_by: admitted_by.to_owned(),
         };
@@ -4557,6 +4571,23 @@ impl AgentTargetClaimCurrent {
                 "Agent target-claim generation is outside the exact integer range".to_owned(),
             ));
         }
+        if (self.generation == 1)
+            != (self.predecessor_claim_id.is_none() && self.predecessor_admitted_by.is_none())
+            || self.predecessor_claim_id.is_some() != self.predecessor_admitted_by.is_some()
+        {
+            return Err(ProtocolError::Validation(
+                "Agent target-claim predecessor does not match its generation".to_owned(),
+            ));
+        }
+        if let Some(predecessor_claim_id) = &self.predecessor_claim_id {
+            validate_sha256("Agent target-claim predecessor", predecessor_claim_id)?;
+        }
+        if let Some(predecessor_admitted_by) = &self.predecessor_admitted_by {
+            validate_sha256(
+                "Agent target-claim predecessor command",
+                predecessor_admitted_by,
+            )?;
+        }
         self.phase.verify()?;
         validate_sha256("Agent target-claim command", &self.admitted_by)?;
         let expected = content_id(
@@ -4566,6 +4597,8 @@ impl AgentTargetClaimCurrent {
                 session_id: &self.session_id,
                 target: &self.target,
                 generation: self.generation,
+                predecessor_claim_id: self.predecessor_claim_id.as_deref(),
+                predecessor_admitted_by: self.predecessor_admitted_by.as_deref(),
                 phase: &self.phase,
                 admitted_by: &self.admitted_by,
             },
@@ -4644,6 +4677,8 @@ impl AgentTargetClaimTransition {
                 session_id,
                 target,
                 generation,
+                source.map(|current| current.claim_id.as_str()),
+                source.map(|current| current.admitted_by.as_str()),
                 phase,
                 admitted_by,
             )?,
@@ -4665,12 +4700,18 @@ impl AgentTargetClaimTransition {
             if source.session_id != self.current.session_id
                 || source.target != self.current.target
                 || source.generation.checked_add(1) != Some(self.current.generation)
+                || self.current.predecessor_claim_id.as_deref() != Some(source.claim_id.as_str())
+                || self.current.predecessor_admitted_by.as_deref()
+                    != Some(source.admitted_by.as_str())
             {
                 return Err(ProtocolError::IdentityMismatch(
                     "Agent target-claim transition changed its key or generation".to_owned(),
                 ));
             }
-        } else if self.current.generation != 1 {
+        } else if self.current.generation != 1
+            || self.current.predecessor_claim_id.is_some()
+            || self.current.predecessor_admitted_by.is_some()
+        {
             return Err(ProtocolError::IdentityMismatch(
                 "Agent target-claim genesis must use generation one".to_owned(),
             ));
@@ -9992,6 +10033,8 @@ pub enum AgentStreamFinalizeOutcome {
     },
     /// Provider evidence proves that the publication intent did not apply.
     PublicationNotApplied {
+        /// Exact durable `NotApplied` reservation generation.
+        dispatch: Box<AgentStreamPublicationReservation>,
         /// Exact intent which remains safe to invoke idempotently.
         intent: AgentStreamPublicationIntent,
     },
@@ -10040,7 +10083,29 @@ impl AgentStreamFinalizeOutcome {
         };
         match self {
             Self::Committed { commit } => commit.verify_for(command),
-            Self::PublicationNotApplied { intent } | Self::PublicationOutcomeUnknown { intent } => {
+            Self::PublicationNotApplied { dispatch, intent } => {
+                dispatch.verify()?;
+                intent.verify()?;
+                if dispatch.phase != AgentStreamPublicationReservationPhase::NotApplied
+                    || dispatch.intent != *intent
+                {
+                    return Err(ProtocolError::IdentityMismatch(
+                        "Agent stream NotApplied outcome changed its durable dispatch proof"
+                            .to_owned(),
+                    ));
+                }
+                if intent.source_revision() != command.source_revision
+                    || intent.command_id() != command.command_id
+                    || intent.session_id() != session_id
+                    || intent.stream_id() != stream_id
+                {
+                    return Err(ProtocolError::IdentityMismatch(
+                        "Agent stream outcome changed its exact Finalize owner".to_owned(),
+                    ));
+                }
+                Ok(())
+            }
+            Self::PublicationOutcomeUnknown { intent } => {
                 intent.verify()?;
                 if intent.source_revision() != command.source_revision
                     || intent.command_id() != command.command_id
@@ -10070,7 +10135,8 @@ impl AgentStreamFinalizeOutcome {
         self.verify_for(command)?;
         expected_intent.verify()?;
         match self {
-            Self::PublicationNotApplied { intent } | Self::PublicationOutcomeUnknown { intent } => {
+            Self::PublicationNotApplied { intent, .. }
+            | Self::PublicationOutcomeUnknown { intent } => {
                 if intent != expected_intent {
                     return Err(ProtocolError::IdentityMismatch(
                         "Agent stream reconciliation changed its exact intent".to_owned(),
@@ -14094,6 +14160,8 @@ mod tests {
             &stream.session_id,
             AgentTargetClaimTarget::from_stream_target(&stream.target),
             target_claim.generation,
+            target_claim.predecessor_claim_id.as_deref(),
+            target_claim.predecessor_admitted_by.as_deref(),
             AgentTargetClaimPhase::Reserved {
                 stream_id: stream.stream_id.clone(),
                 reservation_id: revision('e'),
