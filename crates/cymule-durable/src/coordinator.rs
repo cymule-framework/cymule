@@ -9582,12 +9582,9 @@ fn verify_agent_stream_origin<R: crate::StateRootResolver + ?Sized>(
     resolver: &mut R,
     current: &agent_protocol::AgentStreamCurrent,
 ) -> DurableResult<()> {
-    current.verify()?;
     if let Some(reservation) = current.publication_reservation.as_ref() {
-        reservation.verify()?;
         let mut base = current.clone();
         base.publication_reservation = None;
-        base.verify()?;
         let (_, receipt) = load_verified_agent_origin(manifest, resolver, &current.admitted_by)?;
         let retained = match &receipt.outcome {
             agent_protocol::AgentCommandOutcome::Stream(postcondition) => &postcondition.stream,
@@ -12942,6 +12939,11 @@ mod evolution_pinned_commit_tests {
 #[cfg(test)]
 mod agent_stream_publication_reservation_tests {
     use super::*;
+    use crate::state_root::{
+        DURABLE_REVISION_VERSION, STATE_ROOT_VALUE_VERSION, StateRootLeafKind,
+        StateRootManifestMetadata, StateRootObject, StateRootValue, StateRoots, StateValueObject,
+    };
+    use cymule_authenticated_collections::build_map;
     use cymule_profile_protocol::agent::{
         AgentCommand, AgentCommandAction, AgentProviders, AgentStreamCommand, AgentStreamDelivery,
         AgentStreamFinalizeOutcome, AgentStreamPublicationContent, AgentStreamPublicationIntent,
@@ -12954,7 +12956,7 @@ mod agent_stream_publication_reservation_tests {
         ResourcePublication, ResourceRetentionDisposition, ResourceRetentionFamily,
     };
     use cymule_profile_protocol::{ProtocolResult, agent as agent_protocol};
-    use std::collections::VecDeque;
+    use std::collections::{BTreeMap, VecDeque};
 
     const SESSION_ID: &str = "session:external-reservation";
     const STREAM_ID: &str = "stream:external-reservation";
@@ -13085,6 +13087,117 @@ mod agent_stream_publication_reservation_tests {
                 require_agent_stream(manifest, resolver, SESSION_ID, STREAM_ID)
             })
             .expect("reserved stream current reads")
+    }
+
+    struct PersistedStreamResolver {
+        pinned: String,
+        objects: BTreeMap<String, StateRootObject>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct PersistedStreamRevisionState<'a> {
+        durable_version: &'a str,
+        machine_snapshot_version: &'a str,
+        machine_frontier: &'a cymule_core::durable_internal::MachineAuthorityFrontier,
+        machine_base_anchor: Option<&'a cymule_core::MachineBaseAnchor>,
+        roots: &'a StateRoots,
+    }
+
+    #[derive(serde::Serialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum PersistedStreamRevisionPreimage<'a> {
+        Genesis {
+            sequence: u64,
+            state: PersistedStreamRevisionState<'a>,
+        },
+    }
+
+    impl crate::StateRootResolver for PersistedStreamResolver {
+        fn pinned_manifest_id(&self) -> &str {
+            &self.pinned
+        }
+
+        fn load_state_root_object(
+            &mut self,
+            object_id: &str,
+        ) -> DurableResult<Option<StateRootObject>> {
+            Ok(self.objects.get(object_id).cloned())
+        }
+    }
+
+    fn persisted_stream_fixture(
+        current: &agent_protocol::AgentStreamCurrent,
+    ) -> (crate::StateRootManifest, PersistedStreamResolver) {
+        let value = StateRootValue::Leaf {
+            kind: StateRootLeafKind::AgentStreamCurrent,
+            canonical_json: String::from_utf8(
+                cymule_core::canonical_bytes(current).expect("stream current canonicalizes"),
+            )
+            .expect("canonical stream current is UTF-8"),
+        };
+        let value_id = cymule_core::content_id(STATE_ROOT_VALUE_VERSION, &value)
+            .expect("stream value identity derives");
+        let value_object = StateRootObject::Value(StateValueObject {
+            value_version: STATE_ROOT_VALUE_VERSION.to_owned(),
+            object_id: value_id.clone(),
+            value,
+        });
+        value_object
+            .verify()
+            .expect("semantic stream corruption remains a closed physical value object");
+
+        let stream_key = agent_protocol::agent_stream_key(&current.session_id, &current.stream_id)
+            .expect("stream key derives");
+        let (agent_streams, nodes) = build_map(vec![(stream_key, value_id)])
+            .expect("stream map builds")
+            .into_parts();
+        let mut objects = BTreeMap::from([(value_object.object_id().to_owned(), value_object)]);
+        for node in nodes {
+            let object = StateRootObject::MapNode(node);
+            objects.insert(object.object_id().to_owned(), object);
+        }
+
+        let mut roots = StateRoots::empty();
+        roots.agent_streams = agent_streams;
+        let frontier = cymule_core::durable_internal::MachineAuthorityFrontier::genesis(
+            MapRoot::empty(),
+            MapRoot::empty(),
+            MapRoot::empty(),
+            MapRoot::empty(),
+        )
+        .expect("empty Machine frontier derives");
+        let revision = cymule_core::content_id(
+            DURABLE_REVISION_VERSION,
+            &PersistedStreamRevisionPreimage::Genesis {
+                sequence: 0,
+                state: PersistedStreamRevisionState {
+                    durable_version: crate::DURABLE_STATE_VERSION,
+                    machine_snapshot_version: cymule_core::MachineSnapshot::VERSION,
+                    machine_frontier: &frontier,
+                    machine_base_anchor: None,
+                    roots: &roots,
+                },
+            },
+        )
+        .expect("test revision derives");
+        let manifest = crate::StateRootManifest::new(
+            StateRootManifestMetadata {
+                durable_version: crate::DURABLE_STATE_VERSION.to_owned(),
+                revision,
+                sequence: 0,
+                parent_manifest: None,
+                parent_revision: None,
+                delta_digest: None,
+                machine_snapshot_version: cymule_core::MachineSnapshot::VERSION.to_owned(),
+            },
+            frontier,
+            None,
+            roots,
+        )
+        .expect("tampered stream manifest closes physically");
+        let pinned = manifest.manifest_id().to_owned();
+        objects.insert(pinned.clone(), StateRootObject::Manifest(manifest.clone()));
+        (manifest, PersistedStreamResolver { pinned, objects })
     }
 
     fn gc_and_delete(
@@ -13531,7 +13644,7 @@ mod agent_stream_publication_reservation_tests {
     }
 
     #[test]
-    fn foreign_target_reservation_is_integrity_at_durable_origin() {
+    fn persisted_stream_loader_rejects_foreign_target_before_origin_lookup() {
         let mut coordinator_a = initialized_with_open_stream_target("message:target-a");
         let mut current_a = retain_unknown_publication(&mut coordinator_a);
         let mut coordinator_b = initialized_with_open_stream_target("message:target-b");
@@ -13552,12 +13665,25 @@ mod agent_stream_publication_reservation_tests {
         ));
         current_a.publication_reservation = Some(reservation_b);
 
-        let error = coordinator_a
-            .read_current_state_root(|manifest, resolver| {
-                verify_agent_stream_origin(manifest, resolver, &current_a)
-            })
-            .expect_err("Durable origin must reject a cross-target reservation");
-        assert!(matches!(error, DurableError::Integrity { .. }));
+        let (manifest, mut resolver) = persisted_stream_fixture(&current_a);
+        let error = (|| -> DurableResult<()> {
+            let current = crate::state_root::load_agent_stream_current(
+                &manifest,
+                &mut resolver,
+                SESSION_ID,
+                STREAM_ID,
+            )?
+            .expect("tampered stream key remains present");
+            verify_agent_stream_origin(&manifest, &mut resolver, &current)
+        })()
+        .expect_err("the persisted stream loader must reject a cross-target reservation");
+        assert!(matches!(
+            error,
+            DurableError::Integrity { code, message }
+                if code == "profile_protocol_identity_mismatch"
+                    && message
+                        == "Agent stream publication reservation changed its owner, target, or delivery"
+        ));
     }
 
     #[test]

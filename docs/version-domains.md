@@ -4,8 +4,8 @@ Status: generated from `versioning/version-domains.json`; do not edit by hand.
 
 | Exact version | Kind | Owner | Compatibility | Schema | Conformance |
 | --- | --- | --- | --- | --- | --- |
-| `cymule.activation-http-spool/1` | persistence | `cymule-activation-http` | exact-reject | — | `rust-activation-http` |
-| `cymule.activation-timer-store/2` | persistence | `cymule-activation-timer` | exact-reject | — | `rust-activation-timer` |
+| `cymule.activation-http-spool/2` | persistence | `cymule-activation-http` | exact-reject | — | `rust-activation-http` |
+| `cymule.activation-timer-store/3` | persistence | `cymule-activation-timer` | exact-reject | — | `rust-activation-timer` |
 | `cymule.agent-command-id/1` | semantic | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-command-receipt-id/1` | receipt | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |
 | `cymule.agent-command-receipt/3` | receipt | `cymule-profile-protocol` | exact-reject | — | `rust-profile-protocol` |

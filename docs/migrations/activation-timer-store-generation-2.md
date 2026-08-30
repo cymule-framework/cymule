@@ -1,18 +1,20 @@
 # Timer Activation Store Generation 2
 
-Status: exact `/1` rejection is implemented; compatibility migration is
-unsupported. No environment migration has been executed by this source change.
+Status: historical predecessor runbook. This records the former `/1` to `/2`
+hard cut; no environment migration was executed by that source change.
+Generation `/3` is current and is governed by
+[`activation-timer-store-generation-3.md`](activation-timer-store-generation-3.md).
 
 ## Authority and decision
 
-`cymule.activation-timer-store/2` is the sole current timer-store generation.
+`cymule.activation-timer-store/2` was the then-current timer-store generation.
 It adds the mandatory `schedule_digest`, derived from the complete activation
 ID, timer ID, due observation, and typed value. Every schedule replay, fresh
 selection, retained delivery, and acknowledgement revalidates the complete row
 and digest before a delivery can reach M1.
 
 The `/1` shape cannot authenticate those four fields as one schedule. The
-current runtime therefore has no `/1` reader, importer, dual writer, or
+historical `/2` runtime therefore had no `/1` reader, importer, dual writer, or
 decode-failure fallback. Copying `/1` rows into `/2` or synthesizing their
 missing digest would manufacture authority and is forbidden. This hard cut is
 permitted because the retained stores are internal-test state with no public
@@ -25,7 +27,7 @@ owns reconstruction of any timer that must remain pending. Before resetting a
 retained `/1` database, record and verify:
 
 1. the exact environment, host, absolute database path, old runtime commit, and
-   current runtime commit;
+   then-current `/2` runtime commit;
 2. the exact `/1` singleton and fixed `/1` table/index shape, with no partial,
    mixed, or foreign authority;
 3. that every consumer is internal-test only and no external compatibility or
@@ -52,18 +54,19 @@ old row to bypass a stop condition.
 3. Preserve a byte-for-byte backup of the `/1` database and the exact old
    runtime that can inspect it; verify the backup before proceeding.
 4. Detach the `/1` database as one unit. Do not edit or upgrade it in place.
-5. Let the current runtime initialize one new empty database and read back the
-   exact `cymule.activation-timer-store/2` singleton, table, and index set.
+5. Let the exact historical `/2` runtime initialize one new empty database and
+   read back the exact `cymule.activation-timer-store/2` singleton, table, and
+   index set.
 6. Recreate only timers proven pending and still required, using the normal
-   current `schedule` API and the independently authoritative reconstruction
-   source. Do not copy target selections or acknowledgements.
+   historical `/2` `schedule` API and the independently authoritative
+   reconstruction source. Do not copy target selections or acknowledgements.
 7. Resume polling and scheduling only after all verification passes.
 
 ## Rollback
 
-Before a `/2` schedule or M1 activation is admitted, rollback may detach the
+Before a `/2` schedule or M1 activation is admitted, rollback could detach the
 new empty database and restore the matched `/1` backup together with the exact
-old runtime. The current runtime must never open that backup.
+old runtime. The `/2` runtime must never open that backup.
 
 After `/2` scheduling or activation begins, swapping `/1` back is not a valid
 rollback because the authorities have diverged. Fence the embedding again,
@@ -90,7 +93,7 @@ reseed inventory, verification results, rollback use, and final disposition.
 | Operator and workload owner | Pending a real internal-test reset |
 | Environment and database path | None |
 | Old runtime and `/1` evidence | None retained by this source change |
-| Current runtime and `/2` evidence | Source and focused tests only; deployment pending |
+| Historical `/2` runtime evidence | Then-current source and focused tests only; no environment execution recorded |
 | Drain and M1 correlation | Not executed |
 | Backup and reseed inventory | Not executed |
 | Verification | Focused source validation; environment verification pending |

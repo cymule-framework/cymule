@@ -22,11 +22,14 @@ producer retries the same activation ID rather than the server polling in the
 background.
 
 Request bodies have an explicit 2 MiB limit and are recursively decoded before
-authorization so duplicate JSON members are rejected at every depth. SQLite is
-the acknowledgement authority: in-process waiter notifications reduce latency,
-but every success is confirmed by durable acknowledgement readback and cannot
-be lost if acknowledgement races waiter registration or is committed by an
-independently opened driver.
+authorization so duplicate JSON members are rejected at every depth. A legal
+raw body whose value expands beyond 2 MiB under canonical JSON is rejected with
+413 before persistence. Other persistence and substrate failures remain 503;
+they are not relabeled as producer size errors. SQLite is the acknowledgement
+authority: in-process waiter notifications reduce latency, but every success is
+confirmed by durable acknowledgement readback and cannot be lost if
+acknowledgement races waiter registration or is committed by an independently
+opened driver.
 
 Every SQLite read that can replay ingress, select targets, acknowledge, or
 classify an identical producer retry loads the complete retained row. The
@@ -40,9 +43,9 @@ SQLite length metadata gates every variable column before Rust allocation.
 Activation and signal keys use the 512-scalar/2,048-byte identity ceiling,
 request digests use exactly 64 lowercase hexadecimal bytes, values use the
 2 MiB ingress contract, and selected-target JSON uses the exact framework
-target-count formula. Queries return only capped TEXT projections or in-bound
-BLOBs; oversized corruption remains `Integrity` across hot, replay,
-durable-readback, and acknowledgement paths.
+target-count formula. Queries return capped BLOB projections for TEXT and
+decode UTF-8 explicitly; oversized or invalid UTF-8 corruption remains
+`Integrity` across hot, replay, durable-readback, and acknowledgement paths.
 
 The durable driver redelivers retained selections first. A new target set is
 checked against the bound of the exact call that selected it before SQLite can
@@ -67,12 +70,14 @@ retained identity is row corruption and returns `Integrity` before an M1
 delivery.
 
 The spool has one physical generation,
-`cymule.activation-http-spool/1`. A completely empty database is initialized
-atomically; every router, ingress, and acknowledgement connection otherwise
-requires the exact singleton generation and fixed table/index DDL before any
-configuration or data access. Older, partial, foreign, or modified databases
-fail with `unsupported_store_generation` and are not altered. This crate has no
-in-place upgrade or importer.
+`cymule.activation-http-spool/2`. A completely empty UTF-8 database is
+initialized atomically; every router, ingress, and acknowledgement connection
+otherwise requires UTF-8 plus the exact singleton generation and fixed
+table/index DDL before any configuration or data access. Metadata and
+`sqlite_master` validation reads only bounded prefixes and at most the expected
+object count plus one. Generation 1, UTF-16, partial, foreign, modified, or
+oversized-metadata databases fail with `unsupported_store_generation` and are
+not altered. This crate has no in-place upgrade or importer.
 
 The SQLite spool is the only ingress, selection, and acknowledgement
 authority. The crate exposes no process-local alternate router or driver.

@@ -82,6 +82,11 @@
   Provider publication may add only resolver-bound locations; its semantic
   Resource must equal that prederived Handle exactly. Finalized current and
   receipt reads recompute the full update byte count for both delivery modes.
+  A finalized current also proves that its Message or completed Tool update
+  matches the immutable stream target exactly and recomputes `content_digest`
+  from that update's exact content array. This digest uses the canonical raw
+  64-character lowercase hexadecimal grammar, never the `sha256:` content-ID
+  grammar.
   External streams keep staged bytes and content blocks zero, while their final
   update byte counter remains nonzero. Before provider I/O, an external Finalize
   persists its content-derived publication reservation plus a `Reserved` profile

@@ -1,4 +1,6 @@
 {
+  "activation_http_spool": "cymule.activation-http-spool/1",
+  "activation_timer_store": "cymule.activation-timer-store/2",
   "command_archive_segment": "cymule.command-archive-segment/3",
   "component_occurrence": "cymule.component-occurrence/3",
   "coupled_checkpoint_receipt": "cymule.coupled-checkpoint-receipt/2",
