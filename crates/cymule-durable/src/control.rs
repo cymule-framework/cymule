@@ -2155,6 +2155,16 @@ pub struct DurableWaitSummary {
 }
 
 impl DurableWaitSummary {
+    /// Derive the bounded query projection from one already verified complete Wait.
+    pub(crate) fn from_wait(wait: &WaitCondition) -> Self {
+        Self {
+            wait_id: wait.wait_id.clone(),
+            run_id: wait.run_id.clone(),
+            state: wait.state,
+            result: wait.result.clone(),
+        }
+    }
+
     /// Validate one bounded wait summary.
     ///
     /// # Errors
@@ -2210,6 +2220,11 @@ impl DurableEffectSummary {
             result
                 .validate()
                 .map_err(|error| DurableError::Validation(error.to_string()))?;
+            if result.kind != crate::model::EFFECT_RESULT_ARTIFACT_KIND {
+                return Err(DurableError::Validation(
+                    "Effect summary result has the wrong Artifact kind".to_owned(),
+                ));
+            }
         }
         let reconciliation_matches = match self.state {
             OutboxState::Pending | OutboxState::Claimed => {
@@ -4671,6 +4686,12 @@ mod query_protocol_tests {
             b"null",
         )?);
         summary.verify()?;
+        let mut wrong_kind = summary.clone();
+        wrong_kind.result = Some(cymule_core::artifact_ref(
+            "cymule.test.wrong-effect-result/1",
+            b"null",
+        )?);
+        assert!(wrong_kind.verify().is_err());
         let encoded = cymule_core::canonical_bytes(&summary)?;
         let reopened: DurableEffectSummary = cymule_core::decode_json(&encoded)?;
         reopened.verify()?;

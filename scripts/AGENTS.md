@@ -265,9 +265,11 @@
 - Immediately before terminal npm, crates.io, or GitHub Release mutation, the
   privileged job reads the remote annotated tag's peeled commit and requires it
   to equal the frozen release SHA. A prior-job check or local checkout is not
-  terminal tag authority. It also exact-matches the invoked controller and
-  version-domain modules to the frozen current-main commit after every external
-  Action and before execution.
+  terminal tag authority. The workflow verify job separately linearizes
+  controller admission once against current public main; every later job
+  exact-matches the invoked controller and version-domain modules to that
+  immutable admitted commit. A later mirror generation does not revoke the
+  running non-cancelled controller.
 - `finalize_release.py` additionally freezes the annotated tag object as the
   distinct 40-hex `release_tag_sha`. Its closed finalization manifest has exact
   `stage_version: cymule.release-finalization-stage/3` and additionally binds the private source SHA, raw
@@ -302,10 +304,12 @@
   selectors. Public controllers import those constants; the private mirror
   writer remains outside the public source inventory and is admitted only when
   the static release verifier exact-matches its wire literal to that source.
-- Multi-write controllers repeat the authority fence at each real external
-  mutation: every missing-crate PUT and rate-limit retry re-read current main
-  plus the peeled tag, and Release draft creation, BOM upload, and publication
-  do the same. A failed npm tag push always proceeds to exact remote readback;
+- Multi-write controllers repeat immutable release authority at each real
+  external mutation: every missing-crate PUT and rate-limit retry re-read the
+  peeled tag, and Release draft creation, BOM upload, and publication re-read
+  the raw/peeled tag, mirror receipt, attestation, and control-plane receipt.
+  Current-main admission occurs only once before the run. A failed npm tag push
+  always proceeds to exact remote readback;
   both the raw annotated-tag object and peeled commit must equal the locally
   frozen values before response loss converges.
 - `npm_release.py` requires npm tarball SHA-1/SHA-512 equality, a fully verified
@@ -324,7 +328,7 @@
   current public main with that controller file, and carries both into release
   evidence. A historical signer SHA is publisher identity, not the later
   finalizer controller SHA. Its `publish` command alone owns the registry observation-to-
-  mutation transition and repeats the remote main/tag fence after a missing
+  mutation transition and repeats the remote immutable-tag fence after a missing
   result; workflow shell must never invoke `npm publish` directly.
 - npm packages close `publishConfig` to the official registry, public access,
   provenance, and `latest`, with no additional key. The terminal repeats those
@@ -373,7 +377,7 @@
   keep the Python entry points on the same closed grammar; do not normalize or
   recover malformed, prerelease, multiline, or leading-zero input.
 - `finalize_release.py` runs its stage and publish commands only from the exact
-  current-main controller. The read-only verify job emits authenticated package
+  controller admitted against current main at workflow start. The read-only verify job emits authenticated package
   stages; a separate fresh read-only freeze job reruns npm and crates.io
   registry byte/provenance readback and creates `cymule.release-bom/3`. Every
   source package record has a required `publication`: closed registry evidence

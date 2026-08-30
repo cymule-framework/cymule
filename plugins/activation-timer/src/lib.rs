@@ -9,12 +9,14 @@ use cymule_durable::{
 };
 use cymule_durable_protocol::{MAX_WAIT_DELIVERY_TARGETS, WaitActivationSource};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 const TIMER_SOURCE_SCAN_LIMIT: usize = 256;
 
 /// Exact physical generation accepted by the durable timer source.
-pub const TIMER_STORE_SCHEMA_VERSION: &str = "cymule.activation-timer-store/1";
+pub const TIMER_STORE_SCHEMA_VERSION: &str = "cymule.activation-timer-store/2";
 /// Stable code returned before mutation for every unsupported timer generation.
 pub const UNSUPPORTED_STORE_GENERATION_CODE: &str = "unsupported_store_generation";
 
@@ -37,6 +39,7 @@ const TIMER_SCHEMA: [(&str, &str, &str, &str); 3] = [
             timer_id TEXT NOT NULL,
             due_unix_ms INTEGER NOT NULL,
             value_json BLOB NOT NULL,
+            schedule_digest TEXT NOT NULL,
             selected_wait_ids BLOB,
             acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged IN (0, 1))
          ) STRICT",
@@ -57,11 +60,23 @@ pub struct SqliteTimerDriver<C = SystemClock> {
     scan_cursor: Option<TimerScanCursor>,
 }
 
-struct RetainedTimer {
+struct StoredTimer {
     activation_id: String,
     timer_id: String,
+    due_unix_ms: i64,
     value: Vec<u8>,
-    wait_ids: Vec<u8>,
+    schedule_digest: String,
+    wait_ids: Option<Vec<u8>>,
+    acknowledged: i64,
+}
+
+struct VerifiedTimer {
+    activation_id: String,
+    timer_id: String,
+    due_unix_ms: u64,
+    value: Value,
+    wait_ids: Option<std::collections::BTreeSet<String>>,
+    acknowledged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,10 +85,12 @@ struct TimerScanCursor {
     activation_id: String,
 }
 
-struct PendingTimer {
-    due_unix_ms: i64,
-    activation_id: String,
-    timer_id: String,
+#[derive(Serialize)]
+struct TimerSchedule<'a> {
+    activation_id: &'a str,
+    timer_id: &'a str,
+    due_unix_ms: u64,
+    value: &'a Value,
 }
 
 impl SqliteTimerDriver<SystemClock> {
@@ -161,21 +178,28 @@ impl<C: Clock> SqliteTimerDriver<C> {
         let due = i64::try_from(due_unix_ms)
             .map_err(|error| DurableError::Validation(error.to_string()))?;
         let bytes = cymule_core::canonical_bytes(value)?;
+        let digest = timer_schedule_digest(activation_id, timer_id, due_unix_ms, value)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(contention)?;
-        let existing: Option<(String, i64, Vec<u8>, bool)> = transaction
+        let existing: Option<StoredTimer> = transaction
             .query_row(
-                "SELECT timer_id, due_unix_ms, value_json, acknowledged
+                "SELECT activation_id, timer_id, due_unix_ms, value_json,
+                        schedule_digest, selected_wait_ids, acknowledged
                  FROM cymule_timers WHERE activation_id = ?1",
                 [activation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                stored_timer_from_row,
             )
             .optional()
             .map_err(contention)?;
-        if let Some((current_timer, current_due, current_value, _acknowledged)) = existing {
-            if current_timer == timer_id && current_due == due && current_value == bytes {
+        if let Some(existing) = existing {
+            let existing = verify_stored_timer(existing)?;
+            if existing.activation_id == activation_id
+                && existing.timer_id == timer_id
+                && existing.due_unix_ms == due_unix_ms
+                && existing.value == *value
+            {
                 transaction.commit().map_err(contention)?;
                 return Ok(());
             }
@@ -187,15 +211,16 @@ impl<C: Clock> SqliteTimerDriver<C> {
         transaction
             .execute(
                 "INSERT INTO cymule_timers(
-                    activation_id, timer_id, due_unix_ms, value_json, acknowledged
-                 ) VALUES (?1, ?2, ?3, ?4, 0)",
-                params![activation_id, timer_id, due, bytes],
+                    activation_id, timer_id, due_unix_ms, value_json,
+                    schedule_digest, selected_wait_ids, acknowledged
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0)",
+                params![activation_id, timer_id, due, bytes, digest],
             )
             .map_err(contention)?;
         transaction.commit().map_err(contention)
     }
 
-    fn pending_timer_page(&self, now: i64) -> DurableResult<Vec<PendingTimer>> {
+    fn pending_timer_page(&self, now: i64) -> DurableResult<Vec<VerifiedTimer>> {
         let (cursor_due, cursor_activation) =
             self.scan_cursor.as_ref().map_or((i64::MIN, ""), |cursor| {
                 (cursor.due_unix_ms, cursor.activation_id.as_str())
@@ -205,9 +230,10 @@ impl<C: Clock> SqliteTimerDriver<C> {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT due_unix_ms, activation_id, timer_id
+                "SELECT activation_id, timer_id, due_unix_ms, value_json,
+                        schedule_digest, selected_wait_ids, acknowledged
                  FROM cymule_timers
-                 WHERE acknowledged = 0 AND due_unix_ms <= ?1
+                 WHERE acknowledged != 1 AND due_unix_ms <= ?1
                    AND selected_wait_ids IS NULL
                    AND (due_unix_ms, activation_id) > (?2, ?3)
                  ORDER BY due_unix_ms, activation_id
@@ -217,17 +243,14 @@ impl<C: Clock> SqliteTimerDriver<C> {
         statement
             .query_map(
                 params![now, cursor_due, cursor_activation, scan_limit],
-                |row| {
-                    Ok(PendingTimer {
-                        due_unix_ms: row.get(0)?,
-                        activation_id: row.get(1)?,
-                        timer_id: row.get(2)?,
-                    })
-                },
+                stored_timer_from_row,
             )
             .map_err(contention)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(contention)
+            .map_err(contention)?
+            .into_iter()
+            .map(verify_stored_timer)
+            .collect()
     }
 
     fn receive_fresh_due(
@@ -242,13 +265,23 @@ impl<C: Clock> SqliteTimerDriver<C> {
             return Ok(None);
         }
         let terminal_page = pending.len() < TIMER_SOURCE_SCAN_LIMIT;
+        let now_unix_ms =
+            u64::try_from(now).expect("wall Clock u64 converted to nonnegative SQLite INTEGER");
         for timer in pending {
+            if timer.wait_ids.is_some() || timer.acknowledged || timer.due_unix_ms > now_unix_ms {
+                return Err(timer_row_integrity(
+                    "timer_fresh_row_mismatch",
+                    "fresh timer query returned a row outside its exact predicate",
+                ));
+            }
             let cursor = TimerScanCursor {
-                due_unix_ms: timer.due_unix_ms,
+                due_unix_ms: i64::try_from(timer.due_unix_ms).map_err(|error| {
+                    timer_row_integrity("timer_schedule_due_invalid", error.to_string())
+                })?,
                 activation_id: timer.activation_id.clone(),
             };
             let source = WaitActivationSource::Timer {
-                timer_id: timer.timer_id,
+                timer_id: timer.timer_id.clone(),
             };
             let selection = view.select(&source, max_targets)?;
             if selection.wait_ids.is_empty() {
@@ -256,58 +289,93 @@ impl<C: Clock> SqliteTimerDriver<C> {
                 continue;
             }
             validate_new_targets(&selection.wait_ids, max_targets)?;
-            let target_bytes = cymule_core::canonical_bytes(&selection.wait_ids)?;
-            let selected_now = self
-                .connection
-                .execute(
-                    "UPDATE cymule_timers SET selected_wait_ids = ?1
-                     WHERE activation_id = ?2 AND selected_wait_ids IS NULL
-                       AND acknowledged = 0",
-                    params![target_bytes, timer.activation_id],
-                )
-                .map_err(contention)?;
-            let retained: Option<(Vec<u8>, Vec<u8>)> = self
-                .connection
-                .query_row(
-                    "SELECT selected_wait_ids, value_json FROM cymule_timers
-                     WHERE activation_id = ?1 AND acknowledged = 0",
-                    [&timer.activation_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .map_err(contention)?;
-            let Some((retained, value)) = retained else {
-                self.scan_cursor = Some(cursor);
-                continue;
-            };
-            let wait_ids = cymule_core::decode_json(&retained)?;
-            validate_retained_targets(&wait_ids)?;
-            let value = cymule_core::decode_json(&value)?;
+            let delivery = self.retain_fresh_selection(&timer, source, &selection.wait_ids)?;
             self.scan_cursor = Some(cursor);
-            let delivery = WaitDelivery {
-                activation_id: timer.activation_id,
-                source,
-                wait_ids,
-                value,
-            };
-            if selected_now == 1 {
-                if delivery.wait_ids != selection.wait_ids {
-                    return Err(DurableError::Integrity {
-                        code: "timer_selected_targets_changed".to_owned(),
-                        message: format!(
-                            "timer activation {} did not retain the target set selected by this receive call",
-                            delivery.activation_id
-                        ),
-                    });
-                }
-                return Ok(Some(WaitSourceDelivery::Selected(delivery)));
+            if let Some(delivery) = delivery {
+                return Ok(Some(delivery));
             }
-            return Ok(Some(WaitSourceDelivery::Retained(delivery)));
         }
         if terminal_page {
             self.scan_cursor = None;
         }
         Ok(None)
+    }
+
+    fn retain_fresh_selection(
+        &self,
+        timer: &VerifiedTimer,
+        source: WaitActivationSource,
+        selected_wait_ids: &std::collections::BTreeSet<String>,
+    ) -> DurableResult<Option<WaitSourceDelivery>> {
+        let target_bytes = cymule_core::canonical_bytes(selected_wait_ids)?;
+        let selected_now = self
+            .connection
+            .execute(
+                "UPDATE cymule_timers SET selected_wait_ids = ?1
+                 WHERE activation_id = ?2 AND selected_wait_ids IS NULL
+                   AND acknowledged = 0",
+                params![target_bytes, timer.activation_id],
+            )
+            .map_err(contention)?;
+        let retained = self
+            .connection
+            .query_row(
+                "SELECT activation_id, timer_id, due_unix_ms, value_json,
+                        schedule_digest, selected_wait_ids, acknowledged
+                 FROM cymule_timers WHERE activation_id = ?1",
+                [&timer.activation_id],
+                stored_timer_from_row,
+            )
+            .optional()
+            .map_err(contention)?;
+        let Some(retained) = retained else {
+            return Ok(None);
+        };
+        let retained = verify_stored_timer(retained)?;
+        if retained.activation_id != timer.activation_id
+            || retained.timer_id != timer.timer_id
+            || retained.due_unix_ms != timer.due_unix_ms
+            || retained.value != timer.value
+        {
+            return Err(timer_row_integrity(
+                "timer_selection_schedule_changed",
+                format!(
+                    "timer activation {} changed schedule during target selection",
+                    timer.activation_id
+                ),
+            ));
+        }
+        if retained.acknowledged {
+            return Ok(None);
+        }
+        let wait_ids = retained.wait_ids.ok_or_else(|| {
+            timer_row_integrity(
+                "timer_selection_missing",
+                format!(
+                    "timer activation {} has no retained target set",
+                    timer.activation_id
+                ),
+            )
+        })?;
+        let delivery = WaitDelivery {
+            activation_id: retained.activation_id,
+            source,
+            wait_ids,
+            value: retained.value,
+        };
+        if selected_now == 1 {
+            if delivery.wait_ids != *selected_wait_ids {
+                return Err(DurableError::Integrity {
+                    code: "timer_selected_targets_changed".to_owned(),
+                    message: format!(
+                        "timer activation {} did not retain the target set selected by this receive call",
+                        delivery.activation_id
+                    ),
+                });
+            }
+            return Ok(Some(WaitSourceDelivery::Selected(delivery)));
+        }
+        Ok(Some(WaitSourceDelivery::Retained(delivery)))
     }
 }
 
@@ -332,36 +400,43 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
                 code: "timer_clock_value_out_of_range".to_owned(),
                 message: error.to_string(),
             })?;
-        let retained = self
+        let retained: Option<StoredTimer> = self
             .connection
             .query_row(
-                "SELECT activation_id, timer_id, value_json, selected_wait_ids
+                "SELECT activation_id, timer_id, due_unix_ms, value_json,
+                        schedule_digest, selected_wait_ids, acknowledged
                  FROM cymule_timers
-                 WHERE acknowledged = 0 AND due_unix_ms <= ?1
+                 WHERE acknowledged != 1 AND due_unix_ms <= ?1
                    AND selected_wait_ids IS NOT NULL
                  ORDER BY due_unix_ms, activation_id LIMIT 1",
                 [now],
-                |row| {
-                    Ok(RetainedTimer {
-                        activation_id: row.get(0)?,
-                        timer_id: row.get(1)?,
-                        value: row.get(2)?,
-                        wait_ids: row.get(3)?,
-                    })
-                },
+                stored_timer_from_row,
             )
             .optional()
             .map_err(contention)?;
         if let Some(retained) = retained {
-            let wait_ids = cymule_core::decode_json(&retained.wait_ids)?;
-            validate_retained_targets(&wait_ids)?;
+            let retained = verify_stored_timer(retained)?;
+            let wait_ids = retained.wait_ids.ok_or_else(|| {
+                timer_row_integrity(
+                    "timer_selection_missing",
+                    "retained timer query returned a row without selected targets",
+                )
+            })?;
+            let now_unix_ms =
+                u64::try_from(now).expect("wall Clock u64 converted to nonnegative SQLite INTEGER");
+            if retained.acknowledged || retained.due_unix_ms > now_unix_ms {
+                return Err(timer_row_integrity(
+                    "timer_retained_row_mismatch",
+                    "retained timer query returned a row outside its exact predicate",
+                ));
+            }
             return Ok(Some(WaitSourceDelivery::Retained(WaitDelivery {
                 activation_id: retained.activation_id,
                 source: WaitActivationSource::Timer {
                     timer_id: retained.timer_id,
                 },
                 wait_ids,
-                value: cymule_core::decode_json(&retained.value)?,
+                value: retained.value,
             })));
         }
         self.receive_fresh_due(view, max_targets, now)
@@ -373,26 +448,28 @@ impl<C: Clock> WaitSourceDriver for SqliteTimerDriver<C> {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(contention)?;
-        let existing: Option<(bool, Option<Vec<u8>>)> = transaction
+        let existing: Option<StoredTimer> = transaction
             .query_row(
-                "SELECT acknowledged, selected_wait_ids
+                "SELECT activation_id, timer_id, due_unix_ms, value_json,
+                        schedule_digest, selected_wait_ids, acknowledged
                  FROM cymule_timers WHERE activation_id = ?1",
                 [activation_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                stored_timer_from_row,
             )
             .optional()
             .map_err(contention)?;
-        let Some((acknowledged, selected)) = existing else {
+        let Some(existing) = existing else {
             return Err(DurableError::NotFound(format!(
                 "timer activation {activation_id} is missing"
             )));
         };
-        if selected.is_none() {
+        let existing = verify_stored_timer(existing)?;
+        if existing.wait_ids.is_none() {
             return Err(DurableError::Validation(format!(
                 "timer activation {activation_id} has not selected durable targets"
             )));
         }
-        if !acknowledged {
+        if !existing.acknowledged {
             transaction
                 .execute(
                     "UPDATE cymule_timers SET acknowledged = 1
@@ -416,6 +493,9 @@ fn validate_new_targets(
             wait_ids.len()
         )));
     }
+    for wait_id in wait_ids {
+        validate_identity("wait", wait_id)?;
+    }
     Ok(())
 }
 
@@ -435,11 +515,134 @@ fn validate_retained_targets(wait_ids: &std::collections::BTreeSet<String>) -> D
             wait_ids.len()
         )));
     }
+    for wait_id in wait_ids {
+        validate_identity("wait", wait_id)?;
+    }
     Ok(())
 }
 
 fn validate_identity(kind: &str, identity: &str) -> DurableResult<()> {
     cymule_core::validate_identity(&format!("timer {kind} identity"), identity).map_err(Into::into)
+}
+
+fn timer_schedule_digest(
+    activation_id: &str,
+    timer_id: &str,
+    due_unix_ms: u64,
+    value: &Value,
+) -> DurableResult<String> {
+    cymule_core::canonical_digest(&TimerSchedule {
+        activation_id,
+        timer_id,
+        due_unix_ms,
+        value,
+    })
+    .map_err(DurableError::from)
+}
+
+fn verify_stored_timer(stored: StoredTimer) -> DurableResult<VerifiedTimer> {
+    validate_identity("activation", &stored.activation_id).map_err(|error| {
+        timer_row_integrity("timer_schedule_activation_invalid", error.to_string())
+    })?;
+    validate_identity("timer", &stored.timer_id)
+        .map_err(|error| timer_row_integrity("timer_schedule_timer_invalid", error.to_string()))?;
+    let due_unix_ms = u64::try_from(stored.due_unix_ms)
+        .map_err(|error| timer_row_integrity("timer_schedule_due_invalid", error.to_string()))?;
+    let value = decode_canonical_timer_row(&stored.value, "value_json")?;
+    let digest =
+        timer_schedule_digest(&stored.activation_id, &stored.timer_id, due_unix_ms, &value)
+            .map_err(|error| {
+                timer_row_integrity("timer_schedule_digest_invalid", error.to_string())
+            })?;
+    if stored.schedule_digest != digest {
+        return Err(timer_row_integrity(
+            "timer_schedule_digest_mismatch",
+            format!(
+                "timer activation {} does not match its retained schedule digest",
+                stored.activation_id
+            ),
+        ));
+    }
+    let wait_ids = stored
+        .wait_ids
+        .map(
+            |bytes| -> DurableResult<std::collections::BTreeSet<String>> {
+                let wait_ids = decode_canonical_timer_row(&bytes, "selected_wait_ids")?;
+                validate_retained_targets(&wait_ids).map_err(|error| {
+                    timer_row_integrity("timer_selected_targets_invalid", error.to_string())
+                })?;
+                Ok(wait_ids)
+            },
+        )
+        .transpose()?;
+    let acknowledged = match stored.acknowledged {
+        0 => false,
+        1 => true,
+        value => {
+            return Err(timer_row_integrity(
+                "timer_acknowledgement_invalid",
+                format!("timer acknowledgement flag is {value}, expected 0 or 1"),
+            ));
+        }
+    };
+    if acknowledged && wait_ids.is_none() {
+        return Err(timer_row_integrity(
+            "timer_acknowledgement_without_selection",
+            "acknowledged timer has no retained target set",
+        ));
+    }
+    Ok(VerifiedTimer {
+        activation_id: stored.activation_id,
+        timer_id: stored.timer_id,
+        due_unix_ms,
+        value,
+        wait_ids,
+        acknowledged,
+    })
+}
+
+fn stored_timer_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredTimer> {
+    Ok(StoredTimer {
+        activation_id: row.get(0)?,
+        timer_id: row.get(1)?,
+        due_unix_ms: row.get(2)?,
+        value: row.get(3)?,
+        schedule_digest: row.get(4)?,
+        wait_ids: row.get(5)?,
+        acknowledged: row.get(6)?,
+    })
+}
+
+fn decode_canonical_timer_row<T>(bytes: &[u8], field: &str) -> DurableResult<T>
+where
+    T: DeserializeOwned + Serialize,
+{
+    let value = cymule_core::decode_json(bytes).map_err(|error| {
+        timer_row_integrity(
+            "timer_row_json_invalid",
+            format!("timer {field} is malformed: {error}"),
+        )
+    })?;
+    let canonical = cymule_core::canonical_bytes(&value).map_err(|error| {
+        timer_row_integrity(
+            "timer_row_json_invalid",
+            format!("timer {field} cannot be canonically encoded: {error}"),
+        )
+    })?;
+    if canonical != bytes {
+        return Err(timer_row_integrity(
+            "timer_row_json_noncanonical",
+            format!("timer {field} is not strict canonical JSON"),
+        ));
+    }
+    Ok(value)
+}
+
+fn timer_row_integrity(code: &'static str, message: impl Into<String>) -> DurableError {
+    DurableError::Integrity {
+        code: code.to_owned(),
+        message: message.into(),
+    }
 }
 
 fn initialize_or_require_timer_store(connection: &mut Connection) -> DurableResult<()> {

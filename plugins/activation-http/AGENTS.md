@@ -26,6 +26,12 @@
   duplicate-rejecting decoder before authorization, digesting, or persistence.
   Reopened values use the same decoder; never let `serde_json::Value` collapse
   duplicate members first.
+- Every retained, fresh, duplicate-ingress, acknowledgement, and selection
+  read loads the complete signal row. Decode `value_json` and selected targets
+  as strict canonical JSON, reconstruct the exact `HttpSignalRequest`, and
+  recompute `request_digest` before target selection or delivery. A malformed,
+  noncanonical, invalid, or mismatched retained field is stable `Integrity`;
+  it must not call parked-wait selection or expose a delivery to M1.
 - Duplicate IDs with identical source/value replay the original acceptance.
   Reuse with different semantics returns conflict and never reaches M1.
 - Persist/classify one activation ID inside an immediate SQLite transaction.

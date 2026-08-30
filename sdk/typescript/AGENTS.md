@@ -8,6 +8,9 @@
   canonicalization and sealing.
 - Keep Resource unions closed and dependency-free. Never normalize URLs or hash
   Resource Candidates in TypeScript; `CliEngine.sealResource` is authoritative.
+- Resource `/4` builders and response validation share the exact lowercase
+  ASCII type/subtype token grammar and exact-reject `/3`; parameters are not
+  normalized or stripped.
 - `cymule.resource-handoff/5` carries the producer's exact typed result Artifact
   to a distinct target Run. The builder validates closed Artifact references
   and exact equality; it never substitutes or hashes a Resource locally.
@@ -30,7 +33,9 @@
 - Region migration DTOs preserve opaque cursors and coverage evidence.
   Migration Plans and requests retain their explicit immutable provider
   revision. Never parse cursor positions or synthesize coverage in the SDK.
-- `DurableEngine` depends on the structural `EngineTransport` interface.
+- `DurableEngine` depends on the structural `EngineTransport.exchange`
+  interface. Success carries the complete accepted request plus response;
+  operation-specific transport methods and bare inner payloads are retired.
   `CliEngine` is the default implementation, not a high-level semantic
   authority; custom transports and Store-provider strings reach Engine ingress
   without SDK-side provider allowlists.
@@ -159,15 +164,22 @@
 - Reject a mathematically fractional numeric lexeme whenever JavaScript Number
   conversion would underflow or round it to an integer; it must never compare
   equal to an integer request echo.
-- CLI Engine methods are asynchronous. The transport owns the live PID and an
-  isolated Unix process group, applies a finite default deadline, bounds stdout
-  and stderr as bytes, and performs fatal UTF-8 decoding. Timeout or an
-  in-flight `AbortSignal` latches termination, sends one group `SIGKILL`, and
-  rejects only after direct-child close has reaped that child and every inherited
-  transport pipe has reached EOF. A zombie descendant is already unable to run
-  external effects and cannot be reaped by the SDK; do not use `kill(pid, 0)` as
-  its liveness authority or resend a group signal after PID/PGID reuse becomes
-  possible. Natural close that wins the state transition remains authoritative.
+- Retain a canonical exact-decimal token for every non-integral response number
+  through echo and typed admission. Distinct fractions that round to the same
+  JavaScript Number remain unequal. Request and response parsing reject nesting
+  beyond 128 levels, number tokens above 256 bytes, and exponents above six
+  digits before any `BigInt` conversion.
+- CLI Engine methods are asynchronous. The transport owns one direct Child
+  handle, applies a finite default deadline, bounds stdout and stderr as bytes,
+  and performs fatal UTF-8 decoding. Timeout or an in-flight `AbortSignal`
+  kills that Child only when its exit gate has not fired, destroys all three
+  local pipe endpoints, and rejects immediately. The Engine must close every
+  internal provider/process authority before its direct Child exits; the SDK
+  never probes or signals a raw PID or PGID.
+- Stdout uses the 128 MiB plus 32-byte framing response-envelope bound plus one overflow byte;
+  diagnostic stderr uses its independent 1 MiB bound plus one byte. A valid
+  failure is admitted before nonzero exit status, while success requires the
+  complete request write and zero status.
 - A completed execution result carries an exact lowercase Plan content ID, a
   raw 64-character lowercase projection digest, strictly ordered lowercase
   effect content IDs, and one closed

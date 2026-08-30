@@ -1102,15 +1102,17 @@ def required_publish_authority(version: str, release_sha: str) -> tuple[str, str
     return controller_sha, release_tag
 
 
-def verify_remote_release_authority(
-    controller_sha: str, release_sha: str, release_tag: str
-) -> None:
-    """Re-read the exact remote main and peeled tag before one npm write."""
+def verify_remote_release_authority(release_sha: str, release_tag: str) -> None:
+    """Re-read the immutable peeled tag before one npm write.
 
-    main_ref = "refs/heads/main"
+    Current-main admission is linearized once by the non-cancelled controller
+    workflow. This publisher remains bound to that immutable checked-out
+    controller SHA even if a later mirror generation advances public main.
+    """
+
     tag_ref = f"refs/tags/{release_tag}^{{}}"
     result = subprocess.run(
-        ["git", "ls-remote", "origin", main_ref, tag_ref],
+        ["git", "ls-remote", "origin", tag_ref],
         cwd=CONTROL_ROOT,
         check=True,
         text=True,
@@ -1126,7 +1128,7 @@ def verify_remote_release_authority(
         ):
             raise ValueError("remote npm release authority returned malformed refs")
         observed[fields[1]] = fields[0]
-    if observed != {main_ref: controller_sha, tag_ref: release_sha}:
+    if observed != {tag_ref: release_sha}:
         raise ValueError("remote npm release authority moved before publication")
 
 
@@ -1159,7 +1161,7 @@ def publish(manifest_path: pathlib.Path, release_sha: str) -> str:
     if admission != "missing":
         raise ValueError(f"unknown npm publication admission {admission}")
     manifest, archive = load_stage(manifest_path, release_sha)
-    controller_sha, release_tag = required_publish_authority(
+    _controller_sha, release_tag = required_publish_authority(
         manifest["version"], release_sha
     )
     latest_status = latest_publish_status(manifest["package"], manifest["version"])
@@ -1168,7 +1170,7 @@ def publish(manifest_path: pathlib.Path, release_sha: str) -> str:
         return "retained"
     if latest_status != "missing":
         raise ValueError(f"unknown npm latest publication status {latest_status}")
-    verify_remote_release_authority(controller_sha, release_sha, release_tag)
+    verify_remote_release_authority(release_sha, release_tag)
     try:
         run_npm_publish(archive)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):

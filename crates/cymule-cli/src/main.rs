@@ -37,8 +37,10 @@ use cymule_runtime::{
     EmbeddedRuntime, EngineClockTarget, EngineContractSide, EngineDurableTarget, EngineFailure,
     EngineFailureCategory, EngineIssue, EnginePhase, EnginePluginTarget, EngineRequestEnvelope,
     EngineResponseEnvelope, EngineRetryDisposition, ExecutionBinding, ExecutionBindingAdmission,
-    ExecutionOutcome, MAX_ENGINE_REQUEST_BYTES, PluginHost, decode_strict_json_value,
-    validate_json_typed_roundtrip, verify_execution_request, verify_plan,
+    ExecutionOutcome, MAX_ENGINE_REQUEST_BYTES, MAX_ENGINE_REQUEST_ECHO_BYTES,
+    MAX_ENGINE_RESPONSE_BYTES, MAX_ENGINE_RESPONSE_PAYLOAD_BYTES, PluginHost,
+    decode_strict_json_value, validate_json_typed_roundtrip, validate_json_typed_roundtrip_bytes,
+    verify_execution_request, verify_plan,
 };
 use cymule_store_sqlite::SqliteStore;
 use serde::{Deserialize, Serialize};
@@ -185,15 +187,79 @@ fn rpc() -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => Err(error),
     };
     let (response, response_is_failure) = match response {
-        Ok((request, response)) => (EngineResponseEnvelope::success(request, response), false),
+        Ok((request, response)) => {
+            let payload = serde_json::to_vec(&response)?;
+            let projected_envelope =
+                serde_json::to_vec(&EngineResponseEnvelope::success(&request, &response))?;
+            if payload.len() <= MAX_ENGINE_RESPONSE_PAYLOAD_BYTES
+                && projected_envelope.len() <= MAX_ENGINE_RESPONSE_BYTES
+            {
+                (EngineResponseEnvelope::success(request, response), false)
+            } else {
+                (
+                    EngineResponseEnvelope::<Value, EngineResponse>::failure(
+                        rpc_response_too_large(&request).into_wire_failure(),
+                    ),
+                    true,
+                )
+            }
+        }
         Err(error) => (
             EngineResponseEnvelope::<Value, EngineResponse>::failure(error.into_wire_failure()),
             true,
         ),
     };
+    let bytes = serde_json::to_vec(&response)?;
+    if bytes.len() > MAX_ENGINE_RESPONSE_BYTES {
+        return Err("Engine response envelope exceeded its fixed byte bound".into());
+    }
     let output_cancellation =
         (!(response_is_failure && cancellation.is_cancelled())).then_some(&cancellation);
-    write_rpc_response(&response, output_cancellation)
+    write_rpc_response(&bytes, output_cancellation)
+}
+
+fn rpc_response_too_large(request: &Value) -> EngineFailure {
+    if request_value_can_mutate(request) {
+        let mut failure = EngineFailure::new(
+            EngineFailureCategory::UnknownWorldOutcome,
+            EnginePhase::Transport,
+            "engine_response_too_large",
+            "the Engine completed a mutating request but its response exceeded the fixed payload bound",
+        );
+        failure.retry_disposition = Some(EngineRetryDisposition::Reconcile);
+        failure
+    } else {
+        let mut failure = EngineFailure::new(
+            EngineFailureCategory::PluginDefect,
+            EnginePhase::Transport,
+            "engine_response_too_large",
+            "the Engine response exceeded the fixed payload bound",
+        );
+        failure.retry_disposition = Some(EngineRetryDisposition::Never);
+        failure
+    }
+}
+
+fn request_value_can_mutate(request: &Value) -> bool {
+    match request.get("type").and_then(Value::as_str) {
+        Some("run" | "observe_clock" | "execute_live_evolution") => true,
+        Some("execute_durable") => !matches!(
+            request
+                .get("command")
+                .and_then(|command| command.get("type"))
+                .and_then(Value::as_str),
+            Some(
+                "run_index_page"
+                    | "run_current"
+                    | "run_wait_page"
+                    | "run_effect_page"
+                    | "run_occurrence_page"
+                    | "run_attempt_page"
+                    | "run_item"
+            )
+        ),
+        _ => false,
+    }
 }
 
 #[cfg(unix)]
@@ -309,13 +375,11 @@ fn rpc_read_invariant_failure() -> EngineFailure {
     )
 }
 
-fn write_rpc_response<T: Serialize>(
-    value: &T,
+fn write_rpc_response(
+    bytes: &[u8],
     cancellation: Option<&ProcessCancellation>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut bytes = serde_json::to_vec_pretty(value)?;
-    bytes.push(b'\n');
-    write_rpc_bytes(&io::stdout(), &bytes, cancellation)?;
+    write_rpc_bytes(&io::stdout(), bytes, cancellation)?;
     Ok(())
 }
 
@@ -408,6 +472,14 @@ fn decode_and_execute_request_with_cancellation(
     input: &[u8],
     cancellation: Option<&ProcessCancellation>,
 ) -> Result<(Value, EngineResponse), EngineFailure> {
+    decode_and_execute_request_with_echo_limit(input, cancellation, MAX_ENGINE_REQUEST_ECHO_BYTES)
+}
+
+fn decode_and_execute_request_with_echo_limit(
+    input: &[u8],
+    cancellation: Option<&ProcessCancellation>,
+    max_echo_bytes: usize,
+) -> Result<(Value, EngineResponse), EngineFailure> {
     let raw_envelope = decode_strict_json_value(input).map_err(|error| {
         let mut failure = EngineFailure::new(
             EngineFailureCategory::Validation,
@@ -418,8 +490,8 @@ fn decode_and_execute_request_with_cancellation(
         failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
         failure
     })?;
-    let envelope: EngineRequestEnvelope<Value> =
-        serde_json::from_value(raw_envelope).map_err(|error| {
+    let envelope: EngineRequestEnvelope<Value> = serde_json::from_value(raw_envelope.clone())
+        .map_err(|error| {
             let mut failure = EngineFailure::new(
                 EngineFailureCategory::Validation,
                 EnginePhase::DecodeRequest,
@@ -465,18 +537,48 @@ fn decode_and_execute_request_with_cancellation(
         failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
         failure
     })?;
-    validate_json_typed_roundtrip(&retained_request, &normalized_request).map_err(|error| {
+    validate_normalized_engine_request(input, &raw_envelope, &normalized_request, max_echo_bytes)?;
+    let response = execute_engine_request(request, cancellation)?;
+    Ok((normalized_request, response))
+}
+
+fn validate_normalized_engine_request(
+    input: &[u8],
+    raw_envelope: &Value,
+    normalized_request: &Value,
+    max_echo_bytes: usize,
+) -> Result<(), EngineFailure> {
+    let validation_failure = |message: String| {
         let mut failure = EngineFailure::new(
             EngineFailureCategory::Validation,
             EnginePhase::ValidateRequest,
             "invalid_engine_request",
-            error,
+            message,
         );
         failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
         failure
-    })?;
-    let response = execute_engine_request(request, cancellation)?;
-    Ok((normalized_request, response))
+    };
+    let normalized_envelope =
+        serde_json::to_value(EngineRequestEnvelope::new(normalized_request.clone()))
+            .map_err(|error| validation_failure(error.to_string()))?;
+    validate_json_typed_roundtrip_bytes(input, raw_envelope, &normalized_envelope)
+        .map_err(validation_failure)?;
+    let echo_bytes = serde_json::to_vec(normalized_request)
+        .map_err(|error| validation_failure(error.to_string()))?;
+    if echo_bytes.len() <= max_echo_bytes {
+        return Ok(());
+    }
+    let mut failure = EngineFailure::new(
+        EngineFailureCategory::Validation,
+        EnginePhase::ValidateRequest,
+        "engine_request_echo_too_large",
+        format!(
+            "normalized Engine request echo has {} compact bytes; maximum is {max_echo_bytes}",
+            echo_bytes.len()
+        ),
+    );
+    failure.retry_disposition = Some(EngineRetryDisposition::CorrectAndRetry);
+    Err(failure)
 }
 
 fn execute_engine_request(
@@ -3419,6 +3521,49 @@ mod tests {
         );
         assert!(failure.message.contains("/target/executor"));
         assert!(!path.exists(), "request rejection performs no store I/O");
+    }
+
+    #[test]
+    fn normalized_echo_bound_rejects_before_engine_or_store_dispatch() {
+        let path = test_path("normalized-echo-bound-store");
+        let request = serde_json::json!({
+            "type": "execute_durable",
+            "target": {
+                "store": {
+                    "provider": "cymule.directory-store/5",
+                    "location": path.to_string_lossy(),
+                },
+            },
+            "command": {
+                "type": "run_index_page",
+                "control_version": DURABLE_CONTROL_VERSION,
+                "expected_revision": null,
+                "cursor": null,
+                "limit": 1,
+                "max_canonical_bytes": 1000,
+            },
+        });
+        let normalized_inner = serde_json::to_string(&request).expect("request serializes");
+        let raw_inner = normalized_inner.replace(
+            "\"max_canonical_bytes\":1000",
+            "\"max_canonical_bytes\":1e3",
+        );
+        assert!(raw_inner.len() < normalized_inner.len());
+        let input = format!("{{\"engine_protocol\":\"cymule.engine/5\",\"request\":{raw_inner}}}");
+        let failure = super::decode_and_execute_request_with_echo_limit(
+            input.as_bytes(),
+            None,
+            raw_inner.len(),
+        )
+        .expect_err("normalized echo overflow rejects before dispatch");
+        assert_eq!(failure.category, EngineFailureCategory::Validation);
+        assert_eq!(failure.phase, EnginePhase::ValidateRequest);
+        assert_eq!(failure.code.as_ref(), "engine_request_echo_too_large");
+        assert_eq!(
+            failure.retry_disposition,
+            Some(EngineRetryDisposition::CorrectAndRetry)
+        );
+        assert!(!path.exists(), "echo-bound rejection performs no Store I/O");
     }
 
     #[cfg(unix)]

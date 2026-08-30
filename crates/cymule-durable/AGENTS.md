@@ -45,6 +45,10 @@
   validates the complete leaf before projection, and then binds the authenticated
   map key to that leaf's primary identity. Never discard the range proof result
   and repeat an exact-key proof per item.
+- The Run Wait page indexes a small `DurableWaitSummary`, derived in the same CAS
+  as the complete global Wait. Paging loads only that summary leaf and never
+  recompiles an Input schema; exact item, activation, and offline audit retain
+  the complete Wait. Full audit closes both key sets and exact summary equality.
 - Typed DurableOperation::Put* values are complete normalized postconditions.
   An unchanged projection is valid when Core events or sibling fields advance.
   StateRoot alone compares exact encoded values and lowers only real physical
@@ -268,6 +272,10 @@
   Missing JSON means JSON null, which must first satisfy the original pinned
   output schema. Invalid dispatch output commits Unknown; invalid reconciliation
   output leaves the original Unknown settlement unchanged.
+- Every persisted Effect dispatch has a result exactly when its outbox state is
+  `Applied`, and that result has kind `cymule.effect-result/1`. The StateRoot
+  value decoder, exact lookup, page summary, receipt closure, and full audit use
+  this one invariant; no terminal path accepts a missing or foreign-kind result.
 - After dispatch begins, wrong variants, wrong attempt echoes, transport loss,
   cancellation, defects, and invalid outputs never grant redispatch authority.
   Preserve the original claim for reconciliation. Only framework-owned binding
@@ -280,7 +288,12 @@
   neighborhoods and commit their complete normalized postconditions through the
   owning facade. No profile accepts a caller-authored target Continuation,
   generic journal callback, or arbitrary Machine write.
-- Agent publication reconciliation retains its expected original intent and
+- Agent external publication reserves its physical family and dispatch attempt
+  before I/O. The reservation CAS is the sole fresh publish authority; reopen
+  observes `DispatchClaimed`, durable NotApplied may be rearmed by one later CAS,
+  and published reconciliation promotes the reserved pin in the final Agent CAS.
+  Known post-publication conflicts remain typed conflicts rather than world
+  Unknown. Agent publication reconciliation retains its expected original intent and
   rechecks semantic touched keys. Unknown evidence is append-only; identical
   Unknown workspace observation is Unchanged with zero CAS.
 - Agent context message pages pin an immutable append-only prefix by exact

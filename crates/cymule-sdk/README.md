@@ -84,14 +84,21 @@ while both provider members remain explicit nullable wire fields. Each non-null
 provider binds its semantic identity and revision to an exact process target
 with the same pinned revision, even when the client has both providers
 configured.
-Use `EngineStoreTarget::sqlite` or a custom `Engine` transport for other stores;
-queries need no executor. Migration and shadow variants accept exact-revision
+Use `EngineStoreTarget::sqlite` or a custom `Engine` transport for other stores.
+Custom transports implement one `exchange` over `EngineRequestSnapshot` and
+return `EngineTransportSuccess` with the complete accepted request echo plus
+raw response; operation-specific bare payload methods are not transport
+authority. Queries need no executor. Migration and shadow variants accept exact-revision
 process targets.
 
-`CliEngine` gives the child an isolated process group and keeps one absolute
-deadline across process exit plus bounded stdin/stdout/stderr completion. A
-descendant cannot retain a transport pipe beyond that deadline: timeout or
-cancellation kills the group before the direct child is reaped. Completed
+`CliEngine` owns one direct Child handle and keeps one absolute deadline across
+process exit plus bounded stdin/stdout/stderr completion. Timeout or
+cancellation closes local pipes and kills the direct child if it is still
+unreaped. The official Engine/executor watchdog owns descendant closure. Stdout uses the
+Runtime-owned 128 MiB plus 32-byte framing response-envelope bound and stderr its independent 1 MiB
+diagnostic bound. `EngineCancellation` linearizes preflight, launch,
+cancellation and admitted completion; there is no public atomic-flag launch
+race. Completed
 boundaries are admitted only with an exact Plan content ID, lowercase
 projection digest, ordered effect content IDs, and the closed
 `pre:<safe-epoch>:<event-content-id>` token.

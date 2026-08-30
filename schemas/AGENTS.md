@@ -85,7 +85,7 @@
 - `execution-binding.schema.json` freezes `cymule.execution-binding/2`. Rust
   additionally enforces normalized provider order, exact service ownership,
   Plan requirements, manifest equality, and content identities.
-- `resource.schema.json` owns `cymule.resource/3` candidates/handles, separate
+- `resource.schema.json` owns `cymule.resource/4` candidates/handles, separate
   locator sets/publications, `cymule.resource-manifest/3` descriptors,
   `cymule.resource-list-proof/5` proofs with a required-nullable predecessor,
   `cymule.resource-list-cursor/3` cursors with a required last entry name, and
@@ -95,6 +95,9 @@
   and index records belong to Durable storage schemas and never widen the
   three public language SDKs. Public shape or integrity changes require Rust
   semantic validation, all SDKs, fixtures, and cross-language Resource ID tests.
+  Candidate and Handle `media_type` uses the exact shared lowercase ASCII
+  type/subtype token pattern; parameters, whitespace, controls, uppercase, and
+  additional slashes are shape failures. Resource `/3` is exact-rejected.
 - Resource page proofs admit at most 1000 inclusions and 53 Merkle steps per
   inclusion, including the predecessor. Artifact-type schema admission has
   separate aggregate Rust budgets of one encoded MiB, 16384 JSON value nodes,
@@ -176,7 +179,7 @@
   greater than `9007199254740991`.
 - `durable-storage.schema.json` freezes the exact provider-neutral physical
   union: `cymule.durable-head/2`, the
-  `cymule.durable-state-root/3` immutable object graph and fixed manifest,
+  `cymule.durable-state-root/4` immutable object graph and fixed manifest,
   `cymule.durable-gc-receipt/2`, and Core `MachineCommandArchiveObject`s.
   StateRoot is the sole persisted semantic projection authority. The closed
   `cymule.machine-delta/6`, `cymule.durable-state/7`, and
@@ -201,6 +204,9 @@
   map/log nodes. Rust derives and verifies every content identity, revision,
   ordered commitment, count relationship, canonical typed leaf, and encoded-
   size bound.
+  Run query indexes use `cymule.run-query-indexes/3`; their Wait page root stores
+  only closed `wait_summary` leaves. Complete `wait` leaves remain in the global
+  exact/audit root, and Rust full audit proves the two projections agree.
   `StateRootValue::Leaf.canonical_json` is exact UTF-8 JSON text, not a numeric
   byte array. Rust enforces its twelve-MiB byte bound and typed canonical round
   trip; schema string length is only a necessary scalar ceiling. Machine-base

@@ -2773,9 +2773,9 @@ impl<S: DurableStore> DurableCoordinator<S> {
 
     /// Finalize one exact Agent stream through its retained delivery authority.
     ///
-    /// Staged streams reduce locally. External streams invoke only the resolver
-    /// binding retained by the stream current, then reload the derived Resource
-    /// family and pin keys from the same pinned `StateRoot` before the single CAS.
+    /// Staged streams reduce locally. External streams first reserve their exact
+    /// physical retention family and provider-dispatch attempt in one Store CAS.
+    /// Only a freshly acknowledged reservation or rearm may invoke the provider.
     pub(crate) fn finalize_agent_stream(
         &mut self,
         command: &agent_protocol::AgentCommand,
@@ -2795,14 +2795,6 @@ impl<S: DurableStore> DurableCoordinator<S> {
                 commit: Box::new(commit),
             });
         }
-        if self.current_revision()? != command.source_revision {
-            return Err(DurableError::Conflict {
-                expected: Some(command.source_revision.clone()),
-                current: Some(self.current_revision()?.to_owned()),
-            });
-        }
-
-        self.verify_agent_workspace_source_session(command)?;
         let source = self.read_current_state_root(|manifest, resolver| {
             load_agent_stream_finalization_source(manifest, resolver, stream_command)
         })?;
@@ -2817,10 +2809,52 @@ impl<S: DurableStore> DurableCoordinator<S> {
             }
         );
         if external {
-            let result =
-                agent_protocol::execute_agent_stream_publication(&source, command, providers)?;
-            return Ok(self.finish_agent_stream_publication_result(command, source, result));
+            let agent_protocol::AgentStreamSource::Finalize { stream, .. } = &source else {
+                unreachable!("finalization source loader returned another transition")
+            };
+            let reservation = match &stream.publication_reservation {
+                None => {
+                    if self.current_revision()? != command.source_revision {
+                        return Err(DurableError::Conflict {
+                            expected: Some(command.source_revision.clone()),
+                            current: Some(self.current_revision()?.to_owned()),
+                        });
+                    }
+                    self.verify_agent_workspace_source_session(command)?;
+                    self.reserve_agent_stream_publication(command, source)?
+                }
+                Some(reservation) => {
+                    reservation.verify()?;
+                    if reservation.intent.command_id() != command.command_id {
+                        return Err(DurableError::HistoryConflict {
+                            code: "agent_stream_publication_command_conflict".to_owned(),
+                            message: "Agent stream is reserved by another Finalize command"
+                                .to_owned(),
+                        });
+                    }
+                    match reservation.phase {
+                        agent_protocol::AgentStreamPublicationReservationPhase::DispatchClaimed => {
+                            return Ok(agent_protocol::AgentStreamFinalizeOutcome::PublicationOutcomeUnknown {
+                                intent: reservation.intent.clone(),
+                            });
+                        }
+                        agent_protocol::AgentStreamPublicationReservationPhase::NotApplied => {
+                            self.rearm_agent_stream_publication(command, stream)?
+                        }
+                    }
+                }
+            };
+            let result = agent_protocol::execute_agent_stream_publication(&reservation, providers)?;
+            return self.finish_agent_stream_publication_result(command, result);
         }
+
+        if self.current_revision()? != command.source_revision {
+            return Err(DurableError::Conflict {
+                expected: Some(command.source_revision.clone()),
+                current: Some(self.current_revision()?.to_owned()),
+            });
+        }
+        self.verify_agent_workspace_source_session(command)?;
 
         let postcondition = source.reduce(&command.command_id, stream_command)?;
         let commit =
@@ -2859,7 +2893,6 @@ impl<S: DurableStore> DurableCoordinator<S> {
                     .to_owned(),
             ));
         }
-        self.verify_agent_workspace_source_session(command)?;
         let source = self.read_current_state_root(|manifest, resolver| {
             load_agent_stream_finalization_source(manifest, resolver, stream_command)
         })?;
@@ -2878,23 +2911,29 @@ impl<S: DurableStore> DurableCoordinator<S> {
                     .to_owned(),
             ));
         }
-        let result = match agent_protocol::reconcile_agent_stream_publication(
-            &source,
-            command,
+        let reservation = match &source {
+            agent_protocol::AgentStreamSource::Finalize { stream, .. } => {
+                stream.publication_reservation.as_ref().ok_or_else(|| {
+                    DurableError::IllegalTransition(
+                        "Agent stream reconciliation requires its durable publication reservation"
+                            .to_owned(),
+                    )
+                })?
+            }
+            _ => unreachable!("finalization source loader returned another transition"),
+        };
+        if reservation.intent.command_id() != command.command_id {
+            return Err(DurableError::HistoryConflict {
+                code: "agent_stream_publication_command_conflict".to_owned(),
+                message: "Agent stream is reserved by another Finalize command".to_owned(),
+            });
+        }
+        let result = agent_protocol::reconcile_agent_stream_publication(
+            reservation,
             expected_intent,
             providers,
-        ) {
-            Ok(result) => result,
-            Err(cymule_profile_protocol::ProtocolError::Conflict { .. }) => {
-                return Ok(
-                    agent_protocol::AgentStreamFinalizeOutcome::PublicationOutcomeUnknown {
-                        intent: expected_intent.clone(),
-                    },
-                );
-            }
-            Err(error) => return Err(error.into()),
-        };
-        Ok(self.finish_agent_stream_publication_result(command, source, result))
+        )?;
+        self.finish_agent_stream_publication_result(command, result)
     }
 
     fn replay_agent_stream_finalization(
@@ -2943,61 +2982,168 @@ impl<S: DurableStore> DurableCoordinator<S> {
     fn finish_agent_stream_publication_result(
         &mut self,
         command: &agent_protocol::AgentCommand,
-        source: agent_protocol::AgentStreamSource,
         result: agent_protocol::AgentStreamPublicationResult,
-    ) -> agent_protocol::AgentStreamFinalizeOutcome {
+    ) -> DurableResult<agent_protocol::AgentStreamFinalizeOutcome> {
         match result {
             agent_protocol::AgentStreamPublicationResult::NotApplied { intent } => {
-                agent_protocol::AgentStreamFinalizeOutcome::PublicationNotApplied { intent }
+                self.mark_agent_stream_publication_not_applied(command, &intent)?;
+                Ok(agent_protocol::AgentStreamFinalizeOutcome::PublicationNotApplied { intent })
             }
-            agent_protocol::AgentStreamPublicationResult::Unknown { intent } => {
-                agent_protocol::AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { intent }
-            }
+            agent_protocol::AgentStreamPublicationResult::Unknown { intent } => Ok(
+                agent_protocol::AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { intent },
+            ),
             agent_protocol::AgentStreamPublicationResult::Published { product } => {
                 let intent = product.intent().clone();
-                let committed = (|| {
-                    let profile_pin = product.resource_profile_pin();
-                    let resource_source = self.read_current_state_root(|manifest, resolver| {
-                        let retention = crate::state_root::load_resource_retention_current(
-                            manifest,
-                            resolver,
-                            &profile_pin.pin.subject.family.retention_key,
-                        )?;
-                        if let Some(current) = &retention {
-                            verify_resource_retention_origin(manifest, resolver, current)?;
-                        }
-                        let pin = crate::state_root::load_resource_pin_current(
-                            manifest,
-                            resolver,
-                            &profile_pin.pin.pin_id,
-                        )?;
-                        if let Some(current) = &pin {
-                            verify_resource_pin_origin(manifest, resolver, current)?;
-                        }
-                        Ok(agent_protocol::AgentStreamResourceSource { retention, pin })
-                    })?;
-                    let source =
-                        attach_agent_stream_resource_source(source, resource_source.clone())?;
-                    let postcondition = source.reduce_with_publication(command, &product)?;
-                    self.commit_agent_stream_postcondition(
-                        command,
-                        source,
-                        &postcondition,
-                        Some(resource_source),
-                    )
-                })();
+                let committed = self.finish_reserved_agent_stream_publication(command, &product);
                 match committed {
-                    Ok(commit) => agent_protocol::AgentStreamFinalizeOutcome::Committed {
+                    Ok(commit) => Ok(agent_protocol::AgentStreamFinalizeOutcome::Committed {
                         commit: Box::new(commit),
-                    },
-                    Err(_) => {
+                    }),
+                    Err(DurableError::CommitOutcomeUnknown { .. }) => Ok(
                         agent_protocol::AgentStreamFinalizeOutcome::PublicationOutcomeUnknown {
                             intent,
-                        }
-                    }
+                        },
+                    ),
+                    Err(error) => Err(error),
                 }
             }
         }
+    }
+
+    fn reserve_agent_stream_publication(
+        &mut self,
+        command: &agent_protocol::AgentCommand,
+        source: agent_protocol::AgentStreamSource,
+    ) -> DurableResult<agent_protocol::AgentStreamPublicationReservation> {
+        let (_, profile_pin) = agent_protocol::prepare_agent_stream_publication(&source, command)?;
+        let resource_source = self.read_current_state_root(|manifest, resolver| {
+            load_agent_stream_resource_source(manifest, resolver, &profile_pin)
+        })?;
+        let source = attach_agent_stream_resource_source(source, resource_source.clone())?;
+        let postcondition = agent_protocol::reserve_agent_stream_publication(&source, command)?;
+        let reservation = postcondition
+            .stream
+            .publication_reservation
+            .as_ref()
+            .ok_or_else(|| DurableError::RuntimeDefect {
+                code: "agent_publication_reservation_missing".to_owned(),
+                message: "Agent publication reservation reducer returned no reservation".to_owned(),
+            })?
+            .as_ref()
+            .clone();
+        let origin =
+            resource_protocol::ResourceLifecycleReceiptRef::from_agent_publication_reservation(
+                command.command_id.clone(),
+                reservation.intent.session_id().to_owned(),
+                reservation.intent.stream_id().to_owned(),
+                reservation.reservation_id.clone(),
+            )?;
+        let resource_post = resource_protocol::project_resource_pin_reservation_receipt(
+            &postcondition.resource_pin_receipt,
+            origin,
+            resource_source.retention.as_ref(),
+            resource_source.pin.as_ref(),
+        )?;
+        self.commit_profile_operations(vec![
+            DurableOperation::PutAgentStreamCurrent {
+                value: postcondition.stream,
+            },
+            DurableOperation::PutResourceRetentionCurrent {
+                value: resource_post.retention,
+            },
+            DurableOperation::PutResourcePinCurrent {
+                value: resource_post.pin,
+            },
+            DurableOperation::PutAgentCommand {
+                value: command.clone(),
+            },
+        ])?;
+        Ok(reservation)
+    }
+
+    fn rearm_agent_stream_publication(
+        &mut self,
+        command: &agent_protocol::AgentCommand,
+        stream: &agent_protocol::AgentStreamCurrent,
+    ) -> DurableResult<agent_protocol::AgentStreamPublicationReservation> {
+        let next = agent_protocol::rearm_agent_stream_publication(stream, command)?;
+        let reservation = next
+            .publication_reservation
+            .as_ref()
+            .expect("rearm reducer retains the verified reservation")
+            .as_ref()
+            .clone();
+        self.commit_profile_operations(vec![DurableOperation::PutAgentStreamCurrent {
+            value: next,
+        }])?;
+        Ok(reservation)
+    }
+
+    fn mark_agent_stream_publication_not_applied(
+        &mut self,
+        command: &agent_protocol::AgentCommand,
+        intent: &agent_protocol::AgentStreamPublicationIntent,
+    ) -> DurableResult<()> {
+        let agent_protocol::AgentCommandAction::Stream(
+            agent_protocol::AgentStreamCommand::Finalize {
+                session_id,
+                stream_id,
+            },
+        ) = &command.action
+        else {
+            return Err(DurableError::Validation(
+                "Agent publication observation requires a Finalize command".to_owned(),
+            ));
+        };
+        let stream = self.read_current_state_root(|manifest, resolver| {
+            require_agent_stream(manifest, resolver, session_id, stream_id)
+        })?;
+        let reservation = stream.publication_reservation.as_ref().ok_or_else(|| {
+            DurableError::IllegalTransition(
+                "Agent publication observation lost its durable reservation".to_owned(),
+            )
+        })?;
+        if &reservation.intent != intent {
+            return Err(DurableError::HistoryConflict {
+                code: "agent_stream_publication_intent_conflict".to_owned(),
+                message: "Agent publication observation changed its reserved intent".to_owned(),
+            });
+        }
+        if reservation.phase == agent_protocol::AgentStreamPublicationReservationPhase::NotApplied {
+            return Ok(());
+        }
+        let next = agent_protocol::mark_agent_stream_publication_not_applied(&stream, command)?;
+        self.commit_profile_operations(vec![DurableOperation::PutAgentStreamCurrent {
+            value: next,
+        }])?;
+        Ok(())
+    }
+
+    fn finish_reserved_agent_stream_publication(
+        &mut self,
+        command: &agent_protocol::AgentCommand,
+        product: &agent_protocol::AgentStreamPublicationProduct,
+    ) -> DurableResult<agent_protocol::AgentCommit> {
+        let agent_protocol::AgentCommandAction::Stream(stream_command) = &command.action else {
+            return Err(DurableError::Validation(
+                "Agent publication completion requires a Stream command".to_owned(),
+            ));
+        };
+        let source = self.read_current_state_root(|manifest, resolver| {
+            load_agent_stream_finalization_source(manifest, resolver, stream_command)
+        })?;
+        let profile_pin = product.resource_profile_pin();
+        let resource_source = self.read_current_state_root(|manifest, resolver| {
+            load_agent_stream_resource_source(manifest, resolver, profile_pin)
+        })?;
+        let source = attach_agent_stream_resource_source(source, resource_source.clone())?;
+        let postcondition = source.reduce_with_publication(command, product)?;
+        self.commit_agent_stream_postcondition(
+            command,
+            source,
+            &postcondition,
+            Some(resource_source),
+        )
     }
 
     fn commit_agent_stream_postcondition(
@@ -3022,11 +3168,28 @@ impl<S: DurableStore> DurableCoordinator<S> {
             })?;
             let origin =
                 resource_protocol::ResourceLifecycleReceiptRef::from_agent(command, &receipt)?;
-            let resource_post = resource_protocol::project_resource_pin_receipt(
+            let retention =
+                resource_source
+                    .retention
+                    .as_ref()
+                    .ok_or_else(|| DurableError::Integrity {
+                        code: "agent_finalize_resource_retention_missing".to_owned(),
+                        message: "external Agent finalization lost reserved retention authority"
+                            .to_owned(),
+                    })?;
+            let pin = resource_source
+                .pin
+                .as_ref()
+                .ok_or_else(|| DurableError::Integrity {
+                    code: "agent_finalize_resource_pin_missing".to_owned(),
+                    message: "external Agent finalization lost its reserved Resource pin"
+                        .to_owned(),
+                })?;
+            let resource_post = resource_protocol::project_resource_reserved_pin_receipt(
                 pin_receipt,
                 origin,
-                resource_source.retention.as_ref(),
-                resource_source.pin.as_ref(),
+                retention,
+                pin,
             )?;
             operations.push(DurableOperation::PutResourceRetentionCurrent {
                 value: resource_post.retention,
@@ -7832,20 +7995,14 @@ fn query_run_wait_page(
         &root,
         request,
         |key, value_id, resolver| {
-            let value = load_required_query_leaf::<WaitCondition>(
+            load_required_query_leaf::<crate::DurableWaitSummary>(
                 key,
                 value_id,
-                crate::StateRootLeafKind::Wait,
+                crate::StateRootLeafKind::WaitSummary,
                 resolver,
-                WaitCondition::verify_wire,
-                |wait| wait.wait_id.as_str(),
-            )?;
-            Ok(crate::DurableWaitSummary {
-                wait_id: value.wait_id,
-                run_id: value.run_id,
-                state: value.state,
-                result: value.result,
-            })
+                crate::DurableWaitSummary::verify,
+                |summary| summary.wait_id.as_str(),
+            )
         },
         |page| crate::DurableResponse::RunWaitPage {
             run_id: run_id.to_owned(),
@@ -8214,10 +8371,27 @@ mod query_page_leaf_closure_tests {
     #[derive(Default)]
     struct QueryLeafResolver {
         objects: BTreeMap<String, StateRootObject>,
+        pinned: String,
         loads: usize,
+        loaded_canonical_bytes: usize,
+        wait_loads: usize,
+        wait_summary_loads: usize,
     }
 
     impl QueryLeafResolver {
+        fn insert_all(&mut self, objects: impl IntoIterator<Item = StateRootObject>) {
+            for object in objects {
+                self.objects.insert(object.object_id().to_owned(), object);
+            }
+        }
+
+        fn reset_loads(&mut self) {
+            self.loads = 0;
+            self.loaded_canonical_bytes = 0;
+            self.wait_loads = 0;
+            self.wait_summary_loads = 0;
+        }
+
         fn insert<T: serde::Serialize>(&mut self, kind: StateRootLeafKind, value: &T) -> String {
             let value = StateRootValue::Leaf {
                 kind,
@@ -8273,8 +8447,12 @@ mod query_page_leaf_closure_tests {
     }
 
     impl crate::StateRootResolver for QueryLeafResolver {
-        fn pinned_manifest_id(&self) -> &'static str {
-            "query-page-leaf-closure-test"
+        fn pinned_manifest_id(&self) -> &str {
+            if self.pinned.is_empty() {
+                "query-page-leaf-closure-test"
+            } else {
+                &self.pinned
+            }
         }
 
         fn load_state_root_object(
@@ -8282,7 +8460,29 @@ mod query_page_leaf_closure_tests {
             object_id: &str,
         ) -> DurableResult<Option<StateRootObject>> {
             self.loads += 1;
-            Ok(self.objects.get(object_id).cloned())
+            let object = self.objects.get(object_id).cloned();
+            if let Some(object) = &object {
+                self.loaded_canonical_bytes = self
+                    .loaded_canonical_bytes
+                    .checked_add(cymule_core::canonical_bytes(object)?.len())
+                    .ok_or_else(|| {
+                        DurableError::Validation(
+                            "query test resolver byte counter overflowed".to_owned(),
+                        )
+                    })?;
+                if let StateRootObject::Value(crate::state_root::StateValueObject {
+                    value: crate::state_root::StateRootValue::Leaf { kind, .. },
+                    ..
+                }) = object
+                {
+                    match kind {
+                        StateRootLeafKind::Wait => self.wait_loads += 1,
+                        StateRootLeafKind::WaitSummary => self.wait_summary_loads += 1,
+                        _ => {}
+                    }
+                }
+            }
+            Ok(object)
         }
     }
 
@@ -8523,22 +8723,28 @@ mod query_page_leaf_closure_tests {
             |value| value.run_id.as_str(),
         );
 
-        let wait = wait();
+        let wait = crate::DurableWaitSummary::from_wait(&wait());
         assert_key_mismatch(
-            "Wait",
+            "Wait summary",
             &wait,
-            StateRootLeafKind::Wait,
-            WaitCondition::verify_wire,
+            StateRootLeafKind::WaitSummary,
+            crate::DurableWaitSummary::verify,
             |value| value.wait_id.as_str(),
         );
         let mut corrupt_wait = wait;
-        corrupt_wait.owner.site_id.clear();
-        assert_hidden_corruption_precedes_key_binding(
-            "Wait",
-            &corrupt_wait,
-            StateRootLeafKind::Wait,
-            WaitCondition::verify_wire,
-            |value| value.wait_id.as_str(),
+        corrupt_wait.run_id.clear();
+        assert!(
+            crate::state_root::StateRootValue::Leaf {
+                kind: StateRootLeafKind::WaitSummary,
+                canonical_json: String::from_utf8(
+                    cymule_core::canonical_bytes(&corrupt_wait)
+                        .expect("corrupt Wait summary canonicalizes"),
+                )
+                .expect("canonical Wait summary is UTF-8"),
+            }
+            .verify()
+            .is_err(),
+            "the StateRoot summary leaf itself must reject hidden corruption"
         );
 
         let effect = effect();
@@ -8551,12 +8757,18 @@ mod query_page_leaf_closure_tests {
         );
         let mut corrupt_effect = effect;
         corrupt_effect.origin_plan_id.clear();
-        assert_hidden_corruption_precedes_key_binding(
-            "Effect dispatch",
-            &corrupt_effect,
-            StateRootLeafKind::Outbox,
-            EffectDispatch::verify_wire,
-            |value| value.intent_id.as_str(),
+        assert!(
+            crate::state_root::StateRootValue::Leaf {
+                kind: StateRootLeafKind::Outbox,
+                canonical_json: String::from_utf8(
+                    cymule_core::canonical_bytes(&corrupt_effect)
+                        .expect("corrupt Effect dispatch canonicalizes"),
+                )
+                .expect("canonical Effect dispatch is UTF-8"),
+            }
+            .verify()
+            .is_err(),
+            "the StateRoot Effect leaf itself must reject hidden corruption"
         );
 
         let (occurrence, attempt) = component_frontier();
@@ -8592,6 +8804,99 @@ mod query_page_leaf_closure_tests {
             StateRootLeafKind::OperationAttempt,
             OperationAttempt::verify,
             |value| value.attempt_id.as_str(),
+        );
+    }
+
+    #[test]
+    fn maximum_input_wait_page_reads_only_bounded_summaries_without_compilation() {
+        let genesis = crate::StateRootManifest::genesis(&crate::DurableState::new(
+            cymule_core::Machine::new().snapshot(),
+        ))
+        .expect("empty query test genesis builds");
+        let mut manifest = genesis.manifest().clone();
+        let mut resolver = QueryLeafResolver {
+            pinned: manifest.manifest_id().to_owned(),
+            ..QueryLeafResolver::default()
+        };
+        resolver.insert_all(genesis.objects().iter().cloned());
+
+        let schema_description = "x".repeat(4 * 1024);
+        let operations = (0..crate::MAX_DURABLE_QUERY_PAGE_ITEMS)
+            .map(|index| {
+                let wait = WaitCondition {
+                    wait_id: cymule_core::content_id(
+                        "cymule.test.maximum-input-wait-page/1",
+                        &index,
+                    )
+                    .expect("Input Wait identity derives"),
+                    run_id: "run:maximum-input-wait-page".to_owned(),
+                    kind: WaitKind::Input {
+                        correlation: format!("input:{index}"),
+                        schema: serde_json::json!({
+                            "type": "object",
+                            "description": schema_description.clone(),
+                        }),
+                    },
+                    consume_once: true,
+                    owner: WaitOwner {
+                        invocation_id: "invocation:maximum-input-wait-page".to_owned(),
+                        definition_id: "definition:maximum-input-wait-page".to_owned(),
+                        region_path: Vec::new(),
+                        site_id: format!("wait:{index}"),
+                        step_index: usize::try_from(index).expect("query bound fits usize"),
+                        bind: None,
+                    },
+                    state: WaitState::Pending,
+                    result: None,
+                };
+                crate::DurableOperation::PutWait { value: wait }
+            })
+            .collect::<Vec<_>>();
+        let delta = crate::DurableDelta::new(operations).expect("maximum Wait delta seals");
+        let transition = manifest
+            .apply(&delta, &mut resolver)
+            .expect("maximum Wait index transition applies");
+        transition
+            .verify(Some(&manifest))
+            .expect("maximum Wait index transition closes");
+        resolver.insert_all(transition.objects().iter().cloned());
+        manifest = transition.manifest().clone();
+        resolver.pinned = manifest.manifest_id().to_owned();
+
+        crate::model::reset_input_wait_schema_compilations();
+        resolver.reset_loads();
+        let command = crate::DurableCommand::RunWaitPage {
+            control_version: crate::DURABLE_CONTROL_VERSION.to_owned(),
+            run_id: "run:maximum-input-wait-page".to_owned(),
+            expected_revision: None,
+            cursor: None,
+            limit: crate::MAX_DURABLE_QUERY_PAGE_ITEMS,
+            max_canonical_bytes: crate::MAX_DURABLE_QUERY_PAGE_BYTES,
+        };
+        let response = query_command_at_manifest(&manifest, &mut resolver, &command)
+            .expect("maximum Wait summary page resolves");
+        let crate::DurableResponse::RunWaitPage { page, .. } = response else {
+            panic!("maximum Wait query returned another response")
+        };
+        assert_eq!(
+            page.items.len(),
+            usize::try_from(crate::MAX_DURABLE_QUERY_PAGE_ITEMS)
+                .expect("query item bound fits usize")
+        );
+        assert_eq!(crate::model::input_wait_schema_compilations(), 0);
+        assert_eq!(resolver.wait_loads, 0);
+        assert_eq!(resolver.wait_summary_loads, page.items.len());
+        assert!(
+            resolver.loads <= 3 * page.items.len() + 4,
+            "maximum summary page performed {} object loads",
+            resolver.loads
+        );
+        assert!(
+            resolver.loaded_canonical_bytes
+                <= crate::MAX_DURABLE_QUERY_SUMMARY_BYTES * page.items.len()
+                    + 2 * crate::state_root::MAX_STATE_MAP_KEY_PAGE_BYTES,
+            "maximum summary page loaded {} canonical bytes",
+            resolver.loaded_canonical_bytes
         );
     }
 }
@@ -9640,6 +9945,28 @@ fn attach_agent_stream_resource_source(
     })
 }
 
+fn load_agent_stream_resource_source<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    profile_pin: &resource_protocol::ResourceProfilePin,
+) -> DurableResult<agent_protocol::AgentStreamResourceSource> {
+    profile_pin.verify()?;
+    let retention = crate::state_root::load_resource_retention_current(
+        manifest,
+        resolver,
+        &profile_pin.pin.subject.family.retention_key,
+    )?;
+    if let Some(current) = &retention {
+        verify_resource_retention_origin(manifest, resolver, current)?;
+    }
+    let pin =
+        crate::state_root::load_resource_pin_current(manifest, resolver, &profile_pin.pin.pin_id)?;
+    if let Some(current) = &pin {
+        verify_resource_pin_origin(manifest, resolver, current)?;
+    }
+    Ok(agent_protocol::AgentStreamResourceSource { retention, pin })
+}
+
 fn agent_stream_finalization_operations(
     postcondition: &agent_protocol::AgentStreamPostcondition,
 ) -> DurableResult<Vec<DurableOperation>> {
@@ -9814,6 +10141,7 @@ fn append_agent_session_postcondition(
 }
 
 enum ResolvedResourceLifecycleOrigin {
+    Reservation(resource_protocol::ResourcePinReceipt),
     Pin(resource_protocol::ResourcePinReceipt),
     Release(resource_protocol::ResourceReleaseReceipt),
     BeginDelete(resource_protocol::ResourceDeleteIntent),
@@ -9826,6 +10154,12 @@ fn resource_lifecycle_origin<R: crate::StateRootResolver + ?Sized>(
     reference: &resource_protocol::ResourceLifecycleReceiptRef,
 ) -> DurableResult<ResolvedResourceLifecycleOrigin> {
     reference.verify()?;
+    if matches!(
+        &reference.locator,
+        resource_protocol::ResourceLifecycleReceiptLocator::AgentPublicationReservation { .. }
+    ) {
+        return agent_publication_reservation_lifecycle_origin(manifest, resolver, reference);
+    }
     match reference.profile() {
         resource_protocol::ResourceLifecycleProfile::Resource => {
             let receipt = crate::state_root::load_resource_command_receipt(
@@ -9886,6 +10220,61 @@ fn resource_lifecycle_origin<R: crate::StateRootResolver + ?Sized>(
             virtual_resource_lifecycle_origin(manifest, resolver, reference)
         }
     }
+}
+
+fn agent_publication_reservation_lifecycle_origin<R: crate::StateRootResolver + ?Sized>(
+    manifest: &crate::StateRootManifest,
+    resolver: &mut R,
+    reference: &resource_protocol::ResourceLifecycleReceiptRef,
+) -> DurableResult<ResolvedResourceLifecycleOrigin> {
+    let resource_protocol::ResourceLifecycleReceiptLocator::AgentPublicationReservation {
+        command_id,
+        session_id,
+        stream_id,
+        reservation_id,
+    } = &reference.locator
+    else {
+        unreachable!("reservation origin helper requires its exact locator")
+    };
+    let command = crate::state_root::load_agent_command(manifest, resolver, command_id)?
+        .ok_or_else(|| lifecycle_origin_missing(reference))?;
+    if command.command_id != *command_id {
+        return Err(DurableError::Integrity {
+            code: "resource_lifecycle_reservation_command_mismatch".to_owned(),
+            message: "Agent publication reservation changed its retained command".to_owned(),
+        });
+    }
+    let stream =
+        crate::state_root::load_agent_stream_current(manifest, resolver, session_id, stream_id)?
+            .ok_or_else(|| lifecycle_origin_missing(reference))?;
+    let reservation =
+        stream
+            .publication_reservation
+            .as_ref()
+            .ok_or_else(|| DurableError::Integrity {
+                code: "resource_lifecycle_reservation_missing".to_owned(),
+                message: "Agent stream current lost its publication reservation".to_owned(),
+            })?;
+    reservation.verify()?;
+    if reservation.reservation_id != *reservation_id
+        || reservation.intent.command_id() != command_id
+    {
+        return Err(DurableError::Integrity {
+            code: "resource_lifecycle_reservation_identity_mismatch".to_owned(),
+            message: "Agent stream current changed its publication reservation".to_owned(),
+        });
+    }
+    let expected =
+        resource_protocol::ResourceLifecycleReceiptRef::from_agent_publication_reservation(
+            command_id.clone(),
+            session_id.clone(),
+            stream_id.clone(),
+            reservation_id.clone(),
+        )?;
+    ensure_lifecycle_reference(reference, &expected)?;
+    Ok(ResolvedResourceLifecycleOrigin::Reservation(
+        reservation.resource_pin_receipt.clone(),
+    ))
 }
 
 fn virtual_resource_lifecycle_origin<R: crate::StateRootResolver + ?Sized>(
@@ -9973,7 +10362,8 @@ fn verify_resource_retention_origin<R: crate::StateRootResolver + ?Sized>(
     current.verify()?;
     let origin = resource_lifecycle_origin(manifest, resolver, &current.last_receipt)?;
     let matches = match &origin {
-        ResolvedResourceLifecycleOrigin::Pin(receipt) => {
+        ResolvedResourceLifecycleOrigin::Reservation(receipt)
+        | ResolvedResourceLifecycleOrigin::Pin(receipt) => {
             current.family == receipt.pin.subject.family
                 && current.active_pin_count == receipt.active_pin_count
                 && current.disposition == resource_protocol::ResourceRetentionDisposition::Active
@@ -10021,6 +10411,10 @@ fn verify_resource_pin_origin<R: crate::StateRootResolver + ?Sized>(
     let origin = resource_lifecycle_origin(manifest, resolver, &current.last_receipt)?;
     let matches = match (&origin, current.status) {
         (
+            ResolvedResourceLifecycleOrigin::Reservation(receipt),
+            resource_protocol::ResourcePinStatus::Reserved,
+        )
+        | (
             ResolvedResourceLifecycleOrigin::Pin(receipt),
             resource_protocol::ResourcePinStatus::Active,
         ) => current.pin == receipt.pin,
@@ -12274,6 +12668,446 @@ mod evolution_pinned_commit_tests {
             .expect("retained semantic shadow commits a new alias without provider I/O");
         assert!(retained.committed_revision.is_some());
         assert_eq!(fixture.providers.provider_calls(), (0, 0, 1, 1, 1));
+    }
+}
+
+#[cfg(test)]
+mod agent_stream_publication_reservation_tests {
+    use super::*;
+    use cymule_profile_protocol::agent::{
+        AgentCommand, AgentCommandAction, AgentProviders, AgentStreamCommand, AgentStreamDelivery,
+        AgentStreamFinalizeOutcome, AgentStreamPublicationContent, AgentStreamPublicationIntent,
+        AgentStreamPublicationObservation, AgentStreamTarget, AgentWorkspaceCommand,
+        AgentWorkspaceObservation, AgentWorkspaceSubmission, MessageRole,
+    };
+    use cymule_profile_protocol::resource::{
+        RESOURCE_LOCATOR_VERSION, ResourceCommand, ResourceCommandOutcome, ResourceDeletionTarget,
+        ResourceLocation, ResourceLocatorSet, ResourceOperation, ResourcePin, ResourcePinStatus,
+        ResourcePublication, ResourceRetentionDisposition, ResourceRetentionFamily,
+    };
+    use cymule_profile_protocol::{ProtocolResult, agent as agent_protocol};
+    use std::collections::VecDeque;
+
+    const SESSION_ID: &str = "session:external-reservation";
+    const STREAM_ID: &str = "stream:external-reservation";
+    const RESOLVER: &str = "resolver:external-reservation/1";
+    const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn initialized_with_open_stream() -> DurableCoordinator<crate::MemoryStore> {
+        let mut coordinator = DurableCoordinator::open(crate::MemoryStore::new())
+            .expect("reservation coordinator opens")
+            .initialize()
+            .expect("reservation coordinator initializes");
+        let command = AgentCommand::new(
+            coordinator.current_revision().unwrap().to_owned(),
+            AgentCommandAction::Stream(AgentStreamCommand::Open {
+                session_id: SESSION_ID.to_owned(),
+                stream_id: STREAM_ID.to_owned(),
+                target: AgentStreamTarget::Message {
+                    message_id: "message:external-reservation".to_owned(),
+                    role: MessageRole::Agent,
+                },
+                delivery: AgentStreamDelivery::ExternalResource {
+                    resolver_binding: RESOLVER.to_owned(),
+                    content: AgentStreamPublicationContent {
+                        media_type: "application/octet-stream".to_owned(),
+                        digest: DIGEST.to_owned(),
+                        size: 7,
+                    },
+                },
+            }),
+        )
+        .expect("external stream Open command seals");
+        coordinator
+            .commit_agent_local(&command)
+            .expect("external stream opens");
+        coordinator
+    }
+
+    fn publication(intent: &AgentStreamPublicationIntent) -> ResourcePublication {
+        let resource = intent
+            .resource_handle()
+            .expect("intent derives Resource handle");
+        ResourcePublication {
+            locators: ResourceLocatorSet {
+                locator_version: RESOURCE_LOCATOR_VERSION.to_owned(),
+                resource_id: resource.resource_id.clone(),
+                resolver_binding: RESOLVER.to_owned(),
+                locations: vec![ResourceLocation::Opaque {
+                    reference: "object:external-reservation".to_owned(),
+                }],
+            },
+            resource,
+        }
+    }
+
+    fn family_and_target() -> (ResourceRetentionFamily, ResourceDeletionTarget) {
+        let resource = cymule_profile_protocol::resource::ResourceCandidate {
+            resource_version: cymule_profile_protocol::resource::RESOURCE_VERSION.to_owned(),
+            shape: cymule_profile_protocol::resource::ResourceShape::Object,
+            media_type: "application/octet-stream".to_owned(),
+            inline: None,
+            integrity: cymule_profile_protocol::resource::ResourceIntegrity::Content {
+                digest: DIGEST.to_owned(),
+                size: 7,
+            },
+            manifest: None,
+            annotations: BTreeMap::new(),
+        }
+        .seal()
+        .expect("reservation Resource seals");
+        let publication = ResourcePublication {
+            locators: ResourceLocatorSet {
+                locator_version: RESOURCE_LOCATOR_VERSION.to_owned(),
+                resource_id: resource.resource_id.clone(),
+                resolver_binding: RESOLVER.to_owned(),
+                locations: vec![ResourceLocation::Opaque {
+                    reference: "object:external-reservation".to_owned(),
+                }],
+            },
+            resource,
+        };
+        (
+            ResourceRetentionFamily::from_publication(&publication)
+                .expect("retention family derives"),
+            ResourceDeletionTarget::from_publication(&publication)
+                .expect("deletion target derives"),
+        )
+    }
+
+    fn finalize_command(coordinator: &DurableCoordinator<crate::MemoryStore>) -> AgentCommand {
+        AgentCommand::new(
+            coordinator.current_revision().unwrap().to_owned(),
+            AgentCommandAction::Stream(AgentStreamCommand::Finalize {
+                session_id: SESSION_ID.to_owned(),
+                stream_id: STREAM_ID.to_owned(),
+            }),
+        )
+        .expect("Finalize command seals")
+    }
+
+    fn gc_and_delete(
+        coordinator: &mut DurableCoordinator<crate::MemoryStore>,
+        delete_id: &str,
+    ) -> ResourceCommand {
+        let (family, target) = family_and_target();
+        let gc = ResourceCommand::new(ResourceOperation::GarbageCollect {
+            gc_id: format!("gc:{delete_id}"),
+            family,
+        })
+        .expect("GC command seals");
+        let receipt = coordinator
+            .commit_resource(&gc)
+            .expect("eligible GC commits");
+        let ResourceCommandOutcome::GarbageCollect {
+            receipt: gc_receipt,
+        } = receipt.outcome
+        else {
+            panic!("GC returns its exact receipt")
+        };
+        ResourceCommand::new(ResourceOperation::BeginDelete {
+            delete_id: delete_id.to_owned(),
+            gc_command_id: gc.command_id,
+            gc_receipt_id: gc_receipt.receipt_id,
+            target,
+        })
+        .expect("BeginDelete command seals")
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ProviderOutcome {
+        Published,
+        NotApplied,
+        Unknown,
+    }
+
+    struct CountingProvider<'a> {
+        publish_calls: usize,
+        observe_calls: usize,
+        publish_outcomes: VecDeque<ProviderOutcome>,
+        observe_outcome: ProviderOutcome,
+        race: Option<(
+            &'a mut DurableCoordinator<crate::MemoryStore>,
+            ResourceCommand,
+        )>,
+        refresh_racer: bool,
+        race_conflicted: bool,
+        race_committed: bool,
+    }
+
+    fn provider_observation(
+        outcome: ProviderOutcome,
+        intent: &AgentStreamPublicationIntent,
+    ) -> AgentStreamPublicationObservation {
+        match outcome {
+            ProviderOutcome::Published => AgentStreamPublicationObservation::Published {
+                publication: Box::new(publication(intent)),
+            },
+            ProviderOutcome::NotApplied => AgentStreamPublicationObservation::NotApplied,
+            ProviderOutcome::Unknown => AgentStreamPublicationObservation::Unknown,
+        }
+    }
+
+    impl AgentProviders for CountingProvider<'_> {
+        fn publish_agent_stream(
+            &mut self,
+            intent: &AgentStreamPublicationIntent,
+        ) -> ProtocolResult<AgentStreamPublicationObservation> {
+            self.publish_calls += 1;
+            if let Some((coordinator, command)) = self.race.take() {
+                if self.refresh_racer {
+                    coordinator
+                        .refresh_pinned_head()
+                        .expect("racing coordinator refreshes exact shared head");
+                }
+                match coordinator.commit_resource(&command) {
+                    Ok(_) => self.race_committed = true,
+                    Err(DurableError::Conflict { .. }) => self.race_conflicted = true,
+                    Err(error) => panic!("unexpected racing Resource outcome: {error}"),
+                }
+            }
+            Ok(provider_observation(
+                self.publish_outcomes
+                    .pop_front()
+                    .unwrap_or(ProviderOutcome::Published),
+                intent,
+            ))
+        }
+
+        fn observe_agent_stream_publication(
+            &mut self,
+            intent: &AgentStreamPublicationIntent,
+        ) -> ProtocolResult<AgentStreamPublicationObservation> {
+            self.observe_calls += 1;
+            Ok(provider_observation(self.observe_outcome, intent))
+        }
+
+        fn bind_agent_workspace(
+            &mut self,
+            _: &AgentWorkspaceCommand,
+        ) -> ProtocolResult<agent_protocol::AgentHostBinding> {
+            unreachable!("reservation tests do not bind workspaces")
+        }
+
+        fn dispatch_agent_workspace(
+            &mut self,
+            _: &AgentWorkspaceCommand,
+            _: &agent_protocol::AgentHostOccurrence,
+        ) -> ProtocolResult<AgentWorkspaceSubmission> {
+            unreachable!("reservation tests do not dispatch workspaces")
+        }
+
+        fn observe_agent_workspace(
+            &mut self,
+            _: &AgentWorkspaceCommand,
+            _: &agent_protocol::AgentHostOccurrence,
+        ) -> ProtocolResult<AgentWorkspaceObservation> {
+            unreachable!("reservation tests do not observe workspaces")
+        }
+    }
+
+    #[test]
+    fn publication_reservation_wins_delete_cas_and_replay_never_republishes() {
+        let mut coordinator = initialized_with_open_stream();
+        let delete = gc_and_delete(&mut coordinator, "delete:reservation-loser");
+        let command = finalize_command(&coordinator);
+        let shared = coordinator.into_store();
+        let mut publisher = DurableCoordinator::open(shared.clone()).expect("publisher reopens");
+        let mut deleter = DurableCoordinator::open(shared).expect("deleter reopens");
+        let mut providers = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::new(),
+            observe_outcome: ProviderOutcome::Published,
+            race: Some((&mut deleter, delete)),
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        let outcome = publisher
+            .finalize_agent_stream(&command, &mut providers)
+            .expect("reserved publication finalizes");
+        let AgentStreamFinalizeOutcome::Committed { commit } = outcome else {
+            panic!("reserved publication must commit")
+        };
+        let pin_id = commit
+            .receipt
+            .resource_pin_receipt_for(&command)
+            .expect("pin receipt resolves")
+            .expect("external finalization retains a pin receipt")
+            .pin
+            .pin_id
+            .clone();
+        assert_eq!(providers.publish_calls, 1);
+        assert!(providers.race_conflicted);
+
+        let replay = publisher
+            .finalize_agent_stream(&command, &mut providers)
+            .expect("exact finalization replays");
+        assert!(matches!(
+            replay,
+            AgentStreamFinalizeOutcome::Committed { .. }
+        ));
+        assert_eq!(providers.publish_calls, 1);
+        assert_eq!(providers.observe_calls, 0);
+
+        let (family, _) = family_and_target();
+        let retention = publisher
+            .resource_retention_current(&family.retention_key)
+            .expect("retention reads")
+            .expect("retention exists");
+        assert_eq!(retention.disposition, ResourceRetentionDisposition::Active);
+        assert_eq!(retention.active_pin_count, 1);
+        let pin = publisher
+            .resource_pin_current(&pin_id)
+            .expect("pin reads")
+            .expect("pin exists");
+        assert_eq!(pin.status, ResourcePinStatus::Active);
+    }
+
+    #[test]
+    fn deletion_fence_wins_before_reservation_and_provider_is_never_called() {
+        let mut coordinator = initialized_with_open_stream();
+        let delete = gc_and_delete(&mut coordinator, "delete:reservation-winner");
+        coordinator
+            .commit_resource(&delete)
+            .expect("deletion fence commits first");
+        let command = finalize_command(&coordinator);
+        let mut providers = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::new(),
+            observe_outcome: ProviderOutcome::Published,
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        let error = coordinator
+            .finalize_agent_stream(&command, &mut providers)
+            .expect_err("fenced physical family rejects publication reservation");
+        assert!(matches!(error, DurableError::HistoryConflict { .. }));
+        assert_eq!(providers.publish_calls, 0);
+        assert_eq!(providers.observe_calls, 0);
+    }
+
+    #[test]
+    fn reopen_observes_claimed_attempt_and_not_applied_rearm_grants_one_new_call() {
+        let coordinator = initialized_with_open_stream();
+        let command = finalize_command(&coordinator);
+        let store = coordinator.into_store();
+        let mut first = DurableCoordinator::open(store.clone()).expect("first coordinator opens");
+        let mut providers = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::from([
+                ProviderOutcome::Unknown,
+                ProviderOutcome::Published,
+            ]),
+            observe_outcome: ProviderOutcome::NotApplied,
+            race: None,
+            refresh_racer: false,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        let unknown = first
+            .finalize_agent_stream(&command, &mut providers)
+            .expect("first ambiguous publication returns its intent");
+        let AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { intent } = unknown else {
+            panic!("first publication must remain unknown")
+        };
+        assert_eq!(providers.publish_calls, 1);
+
+        let mut reopened = DurableCoordinator::open(store).expect("reservation reopens");
+        let replay = reopened
+            .finalize_agent_stream(&command, &mut providers)
+            .expect("reopened Finalize does not redispatch a claimed attempt");
+        assert!(matches!(
+            replay,
+            AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { .. }
+        ));
+        assert_eq!(providers.publish_calls, 1);
+        assert_eq!(providers.observe_calls, 0);
+
+        let not_applied = reopened
+            .reconcile_agent_stream(&command, &intent, &mut providers)
+            .expect("read-only reconciliation proves NotApplied");
+        assert!(matches!(
+            not_applied,
+            AgentStreamFinalizeOutcome::PublicationNotApplied { .. }
+        ));
+        assert_eq!(providers.publish_calls, 1);
+        assert_eq!(providers.observe_calls, 1);
+
+        let committed = reopened
+            .finalize_agent_stream(&command, &mut providers)
+            .expect("fresh NotApplied rearm publishes exactly once");
+        assert!(matches!(
+            committed,
+            AgentStreamFinalizeOutcome::Committed { .. }
+        ));
+        assert_eq!(providers.publish_calls, 2);
+        assert_eq!(providers.observe_calls, 1);
+    }
+
+    #[test]
+    fn known_post_publication_cas_conflict_is_not_relabelled_world_unknown() {
+        let coordinator = initialized_with_open_stream();
+        let command = finalize_command(&coordinator);
+        let (_, target) = family_and_target();
+        let unrelated = ResourceCommand::new(ResourceOperation::Pin {
+            pin: ResourcePin::explicit(
+                "pin:post-publication-conflict",
+                target.subject,
+                "owner:post-publication-conflict",
+            )
+            .expect("concurrent explicit pin seals"),
+        })
+        .expect("unrelated retained pin command seals");
+        let shared = coordinator.into_store();
+        let mut publisher = DurableCoordinator::open(shared.clone()).expect("publisher reopens");
+        let mut racer = DurableCoordinator::open(shared).expect("racer reopens");
+        let mut providers = CountingProvider {
+            publish_calls: 0,
+            observe_calls: 0,
+            publish_outcomes: VecDeque::new(),
+            observe_outcome: ProviderOutcome::Published,
+            race: Some((&mut racer, unrelated)),
+            refresh_racer: true,
+            race_conflicted: false,
+            race_committed: false,
+        };
+        let error = publisher
+            .finalize_agent_stream(&command, &mut providers)
+            .expect_err("intervening known head advance conflicts finalization CAS");
+        assert!(matches!(error, DurableError::Conflict { .. }));
+        assert_eq!(providers.publish_calls, 1);
+        assert!(providers.race_committed);
+
+        let store = publisher.into_store();
+        let mut reopened = DurableCoordinator::open(store).expect("conflicted publisher reopens");
+        let retry = reopened
+            .finalize_agent_stream(&command, &mut providers)
+            .expect("retry returns retained reconciliation intent without redispatch");
+        let AgentStreamFinalizeOutcome::PublicationOutcomeUnknown { intent } = retry else {
+            panic!("retry must retain the publication reconciliation intent")
+        };
+        assert_eq!(providers.publish_calls, 1);
+        let finalized = reopened
+            .reconcile_agent_stream(&command, &intent, &mut providers)
+            .expect("Published reconciliation closes over the concurrent family pin");
+        assert!(matches!(
+            finalized,
+            AgentStreamFinalizeOutcome::Committed { .. }
+        ));
+        let (family, _) = family_and_target();
+        let retention = reopened
+            .resource_retention_current(&family.retention_key)
+            .expect("retention reads")
+            .expect("retention exists");
+        assert_eq!(retention.active_pin_count, 2);
+        assert_eq!(providers.publish_calls, 1);
+        assert_eq!(providers.observe_calls, 1);
     }
 }
 

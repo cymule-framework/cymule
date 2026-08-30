@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -170,7 +171,7 @@ func TestEngineRequestLimitIsPreSpawnAndPreservesEarlyFailure(t *testing.T) {
 	marker := filepath.Join(directory, "spawned")
 	executable := filepath.Join(directory, "engine")
 	failureEnvelope := `{"engine_protocol":"cymule.engine/5","outcome":"failure","error":{"category":"validation","phase":"validate_request","code":"fixture_rejected","message":"fixture rejected the request","retry_disposition":"correct_and_retry"}}`
-	script := fmt.Sprintf("#!/bin/sh\n: > %q\nprintf '%%s' %q\n", marker, failureEnvelope)
+	script := fmt.Sprintf("#!/bin/sh\n: > %q\nprintf '%%s' %q\nexit 23\n", marker, failureEnvelope)
 	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +245,7 @@ func TestEngineRequestLimitIsPreSpawnAndPreservesEarlyFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(readOutput) >= maxEngineOutputBytes {
+	if len(readOutput) >= maxEngineResponseBytes {
 		t.Fatalf("forged read success exceeds the response fixture bound: %d", len(readOutput))
 	}
 	readEngine := CliEngine{Executable: writeSuccessEngine("forged-read", readOutput), Timeout: 5 * time.Second}
@@ -282,7 +283,7 @@ func TestEngineRequestLimitIsPreSpawnAndPreservesEarlyFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runOutput) >= maxEngineOutputBytes {
+	if len(runOutput) >= maxEngineResponseBytes {
 		t.Fatalf("forged mutation success exceeds the response fixture bound: %d", len(runOutput))
 	}
 	runEngine := CliEngine{Executable: writeSuccessEngine("forged-mutation", runOutput), Timeout: 5 * time.Second}
@@ -291,6 +292,31 @@ func TestEngineRequestLimitIsPreSpawnAndPreservesEarlyFailure(t *testing.T) {
 	if !ok || failure.Category != "unknown_world_outcome" ||
 		failure.Code != "engine_request_incomplete" || failure.RetryDisposition != "reconcile" {
 		t.Fatalf("early-close mutation success was not reconciled: %#v, %v", failure, err)
+	}
+
+	largeEngine := filepath.Join(directory, "large-success-engine")
+	largeScript := `#!/usr/bin/env python3
+import json
+import sys
+request = json.load(sys.stdin)["request"]
+json.dump({
+    "engine_protocol": "cymule.engine/5",
+    "outcome": "success",
+    "request": request,
+    "response": {
+        "type": "sealed",
+        "plan": {"plan_id": "sha256:` + strings.Repeat("c", 64) + `", "candidate": request["candidate"]},
+    },
+}, sys.stdout, separators=(",", ":"))
+`
+	if err := os.WriteFile(largeEngine, []byte(largeScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	largeCandidate := fixedCandidate()
+	largeCandidate.Metadata["padding"] = strings.Repeat("x", 9*1024*1024)
+	sealed, err := (CliEngine{Executable: largeEngine, Timeout: 10 * time.Second}).Seal(largeCandidate)
+	if err != nil || sealed.Candidate.Metadata["padding"] != largeCandidate.Metadata["padding"] {
+		t.Fatalf("valid Engine success above 16 MiB was rejected: %#v, %v", sealed, err)
 	}
 }
 
@@ -509,11 +535,13 @@ func engineWithOversizedOutput(t *testing.T, stream string) CliEngine {
 	t.Helper()
 	executable := filepath.Join(t.TempDir(), "engine")
 	redirect := ""
+	count := 129
 	if stream == "stderr" {
 		redirect = " 1>&2"
+		count = 2
 	}
 	script := []byte("#!/bin/sh\n/bin/cat >/dev/null\n" +
-		"dd if=/dev/zero bs=1048576 count=17" + redirect + " 2>/dev/null\n" +
+		fmt.Sprintf("dd if=/dev/zero bs=1048576 count=%d", count) + redirect + " 2>/dev/null\n" +
 		"exit 0\n")
 	if err := os.WriteFile(executable, script, 0o700); err != nil {
 		t.Fatal(err)
@@ -529,82 +557,6 @@ func blockingEngine(t *testing.T, ctx context.Context) (CliEngine, string) {
 		t.Fatal(err)
 	}
 	return CliEngine{Executable: executable, Context: ctx}, executable + ".started"
-}
-
-func termIgnoringDescendantEngine(t *testing.T, ctx context.Context) (CliEngine, string, string, string) {
-	t.Helper()
-	executable := filepath.Join(t.TempDir(), "engine")
-	script := []byte("#!/bin/sh\n" +
-		"trap '' TERM\n" +
-		"/bin/cat >/dev/null\n" +
-		": > \"$0.started\"\n" +
-		"printf '%s\\n' \"$$\" > \"$0.pgid\"\n" +
-		"(\n" +
-		"  trap '' TERM\n" +
-		"  /bin/sleep 0.6\n" +
-		"  printf late > \"$0.late\"\n" +
-		"  /bin/sleep 10\n" +
-		") &\n" +
-		"wait\n")
-	if err := os.WriteFile(executable, script, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return CliEngine{Executable: executable, Context: ctx},
-		executable + ".started", executable + ".pgid", executable + ".late"
-}
-
-func successfulEngineWithLingeringDescendant(t *testing.T, response map[string]any) (CliEngine, string, string) {
-	t.Helper()
-	executable := filepath.Join(t.TempDir(), "engine")
-	encodedResponse, err := json.Marshal(response)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(executable+".response", encodedResponse, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	script := []byte("#!/bin/sh\n" +
-		"payload=$(/bin/cat)\n" +
-		"printf '%s\\n' \"$$\" > \"$0.pgid\"\n" +
-		"(\n" +
-		"  trap '' TERM HUP\n" +
-		"  /bin/sleep 0.7\n" +
-		"  printf late > \"$0.late\"\n" +
-		"  /bin/sleep 10\n" +
-		") >/dev/null 2>&1 &\n" +
-		"request=${payload#*\\\"request\\\":}\n" +
-		"request=${request%?}\n" +
-		"printf '%s' '{\"outcome\":\"success\",\"engine_protocol\":\"" + EngineProtocolVersion + "\",\"request\":'\n" +
-		"printf '%s' \"$request\"\n" +
-		"printf '%s' ',\"response\":'\n" +
-		"/bin/cat \"$0.response\"\n" +
-		"printf '%s' '}'\n")
-	if err := os.WriteFile(executable, script, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return CliEngine{Executable: executable}, executable + ".pgid", executable + ".late"
-}
-
-func readProcessGroupID(t *testing.T, path string) int {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		encoded, err := os.ReadFile(path)
-		if err == nil {
-			processGroupID, parseErr := strconv.Atoi(strings.TrimSpace(string(encoded)))
-			if parseErr != nil {
-				t.Fatalf("invalid process group marker: %v", parseErr)
-			}
-			return processGroupID
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatal(err)
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("Engine process group marker was not created")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
 }
 
 func waitForEngineStart(t *testing.T, marker string) {
@@ -1095,136 +1047,46 @@ func TestCliEngineClassifiesPostStartInterruptionByMutation(t *testing.T) {
 	}
 }
 
-func TestCliEngineTerminatesTermIgnoringProcessGroupsBeforeReturning(t *testing.T) {
-	tests := []struct {
-		name        string
-		deadline    bool
-		category    string
-		disposition string
-	}{
-		{name: "cancellation", category: "cancelled", disposition: "never"},
-		{name: "timeout", deadline: true, category: "timed_out", disposition: "retry_same_request"},
-	}
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			var ctx context.Context
-			trigger := func() {}
-			if testCase.deadline {
-				deadline := make(chan struct{})
-				ctx = controlledDeadlineContext{done: deadline}
-				trigger = func() { close(deadline) }
-			} else {
-				var cancelContext context.CancelFunc
-				ctx, cancelContext = context.WithCancel(context.Background())
-				trigger = cancelContext
-				defer cancelContext()
-			}
-			engine, started, processGroupMarker, lateMarker := termIgnoringDescendantEngine(
-				t, ctx,
-			)
-			result := make(chan error, 1)
-			go func() {
-				_, err := engine.Seal(fixedCandidate())
-				result <- err
-			}()
-			waitForEngineStart(t, started)
-			processGroupID := readProcessGroupID(t, processGroupMarker)
-			trigger()
-			select {
-			case err := <-result:
-				requireFailure(
-					t, err, testCase.category, "engine_response_"+testCase.category,
-					testCase.disposition,
-				)
-			case <-time.After(3 * time.Second):
-				t.Fatal("Engine process group termination did not complete")
-			}
-			exists, err := engineProcessGroupExists(processGroupID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if exists {
-				t.Fatal("Engine API returned while its process group was still alive")
-			}
-			time.Sleep(700 * time.Millisecond)
-			if _, err := os.Stat(lateMarker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("terminated Engine descendant produced a late side effect: %v", err)
-			}
-		})
-	}
-}
-
-func TestCliEngineRejectsNaturalExitWithLingeringProcessGroup(t *testing.T) {
-	clockTarget := SQLiteClock("unused", "clock:lingering", fixedContentID("8"))
-	tests := []struct {
-		name     string
-		response map[string]any
-		invoke   func(CliEngine) error
-		category string
-		retry    string
-	}{
-		{
-			name: "read",
-			response: map[string]any{
-				"type": "sealed", "plan": fixedPlan(),
-			},
-			invoke: func(engine CliEngine) error {
-				_, err := engine.Seal(fixedCandidate())
-				return err
-			},
-			category: "transport_failure",
-		},
-		{
-			name: "mutation",
-			response: map[string]any{
-				"type": "clock_observed",
-				"result": ClockObservationResult{
-					RunID: "run:lingering",
-					Observation: ClockObservationRef{
-						ClockVersion: "cymule.clock-observation/2", ObservationID: fixedContentID("7"),
-						SourceID: clockTarget.SourceID, SourceGeneration: clockTarget.SourceGeneration,
-						Scope: "run:lingering",
-					},
-				},
-			},
-			invoke: func(engine CliEngine) error {
-				_, err := engine.ObserveClock(clockTarget, "run:lingering")
-				return err
-			},
-			category: "unknown_world_outcome", retry: "reconcile",
-		},
-	}
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			engine, processGroupMarker, lateMarker := successfulEngineWithLingeringDescendant(t, testCase.response)
-			err := testCase.invoke(engine)
-			requireFailure(t, err, testCase.category, "engine_process_group_leaked", testCase.retry)
-			processGroupID := readProcessGroupID(t, processGroupMarker)
-			exists, groupErr := engineProcessGroupExists(processGroupID)
-			if groupErr != nil {
-				t.Fatal(groupErr)
-			}
-			if exists {
-				t.Fatal("Engine API returned while a natural-exit process group remained alive")
-			}
-			time.Sleep(800 * time.Millisecond)
-			if _, statErr := os.Stat(lateMarker); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("residual Engine descendant produced a late side effect: %v", statErr)
-			}
-		})
-	}
-}
-
 func TestAwaitEngineProcessPrefersAnAlreadyCompletedNaturalExit(t *testing.T) {
-	waitDone := make(chan error, 1)
-	waitDone <- nil
+	command := exec.Command("/usr/bin/true")
+	stdinPipe, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutPipe, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderrPipe, err := command.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	stdoutDone := make(chan error, 1)
+	stderrDone := make(chan error, 1)
+	go func() { _, err := io.Copy(io.Discard, stdoutPipe); stdoutDone <- err }()
+	go func() { _, err := io.Copy(io.Discard, stderrPipe); stderrDone <- err }()
+	for {
+		exited, err := engineProcessExitedWithoutReaping(command.Process.Pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exited {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	waitErr, interrupted, residualGroup, terminationErr := awaitEngineProcess(ctx, 999_999, waitDone)
-	if waitErr != nil || interrupted || residualGroup || terminationErr != nil {
+	waitErr, stdoutErr, stderrErr, interrupted, terminationErr := awaitEngineProcess(
+		ctx, command, stdinPipe, stdoutPipe, stderrPipe, stdoutDone, stderrDone,
+	)
+	if waitErr != nil || stdoutErr != nil || stderrErr != nil || interrupted || terminationErr != nil {
 		t.Fatalf(
-			"completed Engine process was reclassified: wait=%v interrupted=%t residual=%t termination=%v",
-			waitErr, interrupted, residualGroup, terminationErr,
+			"completed Engine process was reclassified: wait=%v interrupted=%t termination=%v",
+			waitErr, interrupted, terminationErr,
 		)
 	}
 }
@@ -1303,8 +1165,43 @@ func TestCliEngineBoundsAndDrainsBothProcessStreams(t *testing.T) {
 	for _, stream := range []string{"stdout", "stderr"} {
 		t.Run(stream, func(t *testing.T) {
 			_, err := engineWithOversizedOutput(t, stream).ObserveClock(target, "run:output-limit")
-			requireFailure(t, err, "unknown_world_outcome", "engine_output_limit_exceeded", "reconcile")
+			code := "engine_output_limit_exceeded"
+			if stream == "stderr" {
+				code = "engine_diagnostic_limit_exceeded"
+			}
+			requireFailure(t, err, "unknown_world_outcome", code, "reconcile")
 		})
+	}
+}
+
+func TestStrictJSONBoundsNumberTokenAndExponentComplexity(t *testing.T) {
+	for _, input := range []string{
+		`{"value":1e9999999}`,
+		`{"value":` + strings.Repeat("1", 257) + `}`,
+		strings.Repeat("[", 129) + "0" + strings.Repeat("]", 129),
+	} {
+		if _, err := decodeUniqueJSON([]byte(input)); err == nil {
+			t.Fatalf("oversized JSON number token was accepted: %s", input[:20])
+		}
+	}
+	decode := func(input string) any {
+		value, err := decodeUniqueJSON([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	if !decodedWireValuesEqual(decode(`{"value":0.10}`), decode(`{"value":1e-1}`)) {
+		t.Fatal("mathematically equal fractions were not normalized equally")
+	}
+	if decodedWireValuesEqual(
+		decode(`{"value":0.1}`),
+		decode(`{"value":0.100000000000000005}`),
+	) {
+		t.Fatal("distinct fractions collided through binary float")
+	}
+	if !decodedWireValuesEqual(decode(`{"value":-0}`), decode(`{"value":0}`)) {
+		t.Fatal("negative zero did not normalize to integer zero")
 	}
 }
 
@@ -3230,6 +3127,39 @@ func TestContentResourceIntegrityPreservesRequiredZeroSize(t *testing.T) {
 	}
 }
 
+func TestResourceMediaTypeGrammarIsClosedInBuilders(t *testing.T) {
+	vendor, err := ExternalResource(
+		"object",
+		"application/vnd.cymule.resource+json",
+		ResourceIntegrity{Kind: "content", Digest: fixedContentID("1"), Size: 0},
+		nil,
+		nil,
+	)
+	if err != nil || vendor.MediaType != "application/vnd.cymule.resource+json" {
+		t.Fatalf("valid vendor media type was rejected: %#v %v", vendor, err)
+	}
+	for _, mediaType := range []string{
+		"text/\x00plain",
+		"text/",
+		"/plain",
+		"a/b/c",
+		"Text/plain",
+		"text/Plain",
+		"text/plain;charset=utf-8",
+		"text/ plain",
+	} {
+		if _, err := ExternalResource(
+			"object",
+			mediaType,
+			ResourceIntegrity{Kind: "content", Digest: fixedContentID("1"), Size: 0},
+			nil,
+			nil,
+		); err == nil {
+			t.Fatalf("invalid media type %q was accepted", mediaType)
+		}
+	}
+}
+
 func TestResourceHandleValidationIsClosedAndComplete(t *testing.T) {
 	emptyAnnotations, err := json.Marshal(TextResource("value", nil))
 	if err != nil {
@@ -3239,8 +3169,8 @@ func TestResourceHandleValidationIsClosedAndComplete(t *testing.T) {
 		t.Fatalf("empty Resource annotations were not omitted: %s", emptyAnnotations)
 	}
 	valid := map[string]any{
-		"resource_id": fixedContentID("1"), "resource_version": "cymule.resource/3",
-		"shape": "inline", "media_type": "text/plain;charset=utf-8",
+		"resource_id": fixedContentID("1"), "resource_version": "cymule.resource/4",
+		"shape": "inline", "media_type": "text/plain",
 		"inline":    map[string]any{"encoding": "utf8", "text": "value"},
 		"integrity": map[string]any{"kind": "inline"},
 	}
@@ -3264,6 +3194,12 @@ func TestResourceHandleValidationIsClosedAndComplete(t *testing.T) {
 			name: "non-canonical media type",
 			mutate: func(resource map[string]any) {
 				resource["media_type"] = "Text/Plain"
+			},
+		},
+		{
+			name: "predecessor Resource generation",
+			mutate: func(resource map[string]any) {
+				resource["resource_version"] = "cymule.resource/3"
 			},
 		},
 		{
@@ -4534,6 +4470,23 @@ func TestResourceSealsThroughRustEngine(t *testing.T) {
 	if resource.Integrity.Kind != "inline" {
 		t.Fatalf("unexpected integrity kind %q", resource.Integrity.Kind)
 	}
+	vendor, err := ExternalResource(
+		"object",
+		"application/vnd.cymule.resource+json",
+		ResourceIntegrity{Kind: "content", Digest: fixedContentID("1"), Size: 0},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedVendor, err := (CliEngine{Executable: enginePath}).SealResource(vendor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealedVendor.ResourceVersion != "cymule.resource/4" || sealedVendor.MediaType != vendor.MediaType {
+		t.Fatalf("unexpected vendor Resource: %#v", sealedVendor)
+	}
 }
 
 func TestWaitActivationValidatesThroughRustEngine(t *testing.T) {
@@ -4703,7 +4656,7 @@ func TestVirtualCompactionCertificatePreservesRequiredNullableWire(t *testing.T)
 		RehydrationManifest: ResourceHandle{
 			ResourceID: fixedContentID("b"),
 			ResourceCandidate: ResourceCandidate{
-				ResourceVersion: "cymule.resource/3",
+				ResourceVersion: "cymule.resource/4",
 				Shape:           "object",
 				MediaType:       "application/octet-stream",
 				Integrity:       ResourceIntegrity{Kind: "content", Digest: fixedDigest("c")},

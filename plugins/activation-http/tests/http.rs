@@ -561,35 +561,13 @@ fn durable_ingress_matches_beyond_an_unrelated_1024_record_prefix() {
         .unchecked_transaction()
         .expect("fixture transaction begins");
     for index in 0..1_024 {
-        transaction
-            .execute(
-                "INSERT INTO cymule_http_signals(
-                    activation_id, signal_key, value_json, request_digest,
-                    selected_wait_ids, acknowledged
-                 ) VALUES (?1, ?2, ?3, ?4, NULL, 0)",
-                params![
-                    format!("activation:prefix:{index:04}"),
-                    "signal:unmatched",
-                    br#"{"prefix":true}"#,
-                    format!("digest:{index:04}"),
-                ],
-            )
-            .expect("unmatched fixture inserts");
+        insert_signal_fixture(
+            &transaction,
+            &format!("activation:prefix:{index:04}"),
+            "signal:unmatched",
+        );
     }
-    transaction
-        .execute(
-            "INSERT INTO cymule_http_signals(
-                activation_id, signal_key, value_json, request_digest,
-                selected_wait_ids, acknowledged
-             ) VALUES (?1, ?2, ?3, ?4, NULL, 0)",
-            params![
-                "activation:target",
-                "signal:target",
-                br#"{"matched":true}"#,
-                "digest:target",
-            ],
-        )
-        .expect("matching fixture inserts");
+    insert_signal_fixture(&transaction, "activation:target", "signal:target");
     transaction.commit().expect("fixture transaction commits");
 
     let delivery = driver
@@ -616,15 +594,7 @@ fn durable_ingress_resets_stale_cursor_and_rotates_across_signal_keys() {
         ("activation:alpha", "signal:alpha"),
         ("activation:beta", "signal:beta"),
     ] {
-        connection
-            .execute(
-                "INSERT INTO cymule_http_signals(
-                    activation_id, signal_key, value_json, request_digest,
-                    selected_wait_ids, acknowledged
-                 ) VALUES (?1, ?2, ?3, ?4, NULL, 0)",
-                params![activation_id, signal_key, b"true", activation_id],
-            )
-            .expect("signal fixture inserts");
+        insert_signal_fixture(&connection, activation_id, signal_key);
     }
     let mut view = ObservedWaitView {
         waits: index_for_signals(&[("wait:alpha", "signal:alpha"), ("wait:beta", "signal:beta")]),
@@ -882,4 +852,95 @@ fn retained_selected_value_rejects_nested_duplicate_members() {
         driver.receive(&mut index(), 1),
         Err(cymule_durable::DurableError::Integrity { .. })
     ));
+}
+
+#[test]
+fn fresh_and_retained_signal_row_tamper_fails_before_target_selection() {
+    for retained in [false, true] {
+        for (name, mutation, source_key) in [
+            (
+                "activation",
+                "UPDATE cymule_http_signals SET activation_id = 'activation:tampered'",
+                "signal:http",
+            ),
+            (
+                "signal-key",
+                "UPDATE cymule_http_signals SET signal_key = 'signal:tampered'",
+                "signal:tampered",
+            ),
+            (
+                "value",
+                "UPDATE cymule_http_signals SET value_json = X'66616c7365'",
+                "signal:http",
+            ),
+            (
+                "noncanonical-value",
+                "UPDATE cymule_http_signals SET value_json = X'2074727565'",
+                "signal:http",
+            ),
+            (
+                "request-digest",
+                "UPDATE cymule_http_signals SET request_digest = 'sha256:tampered'",
+                "signal:http",
+            ),
+            (
+                "selected-targets",
+                "UPDATE cymule_http_signals
+                 SET selected_wait_ids = CAST(' [\"wait:http\"]' AS BLOB)",
+                "signal:http",
+            ),
+            (
+                "selected-target-identity",
+                "UPDATE cymule_http_signals
+                 SET selected_wait_ids = CAST('[\"\"]' AS BLOB)",
+                "signal:http",
+            ),
+            (
+                "acknowledgement",
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE cymule_http_signals SET acknowledged = 2",
+                "signal:http",
+            ),
+        ] {
+            let directory = tempdir().expect("temporary directory creates");
+            let database = directory.path().join(format!(
+                "http-{name}-{}.sqlite",
+                if retained { "retained" } else { "fresh" }
+            ));
+            let (_router, mut driver) =
+                durable_signal_router(&database, 4, AllowAll).expect("durable router builds");
+            let connection = Connection::open(&database).expect("spool opens for tamper");
+            insert_signal_fixture(&connection, "activation:http", "signal:http");
+            if retained {
+                let selected =
+                    cymule_core::canonical_bytes(&BTreeSet::from(["wait:http".to_owned()]))
+                        .expect("selected targets encode");
+                connection
+                    .execute(
+                        "UPDATE cymule_http_signals SET selected_wait_ids = ?1",
+                        [selected],
+                    )
+                    .expect("retained selection installs");
+            }
+            connection
+                .execute_batch(mutation)
+                .expect("test tampers one retained field");
+
+            let mut view = ObservedWaitView {
+                waits: index_for_signal(source_key),
+                ..ObservedWaitView::default()
+            };
+            let error = driver
+                .receive(&mut view, 1)
+                .expect_err("tampered row cannot become a delivery");
+            assert!(
+                matches!(error, DurableError::Integrity { .. }),
+                "{name} {retained:?} produced {error:?}"
+            );
+            assert!(
+                view.selection_requests.is_empty(),
+                "{name} {retained:?} reached parked-wait selection"
+            );
+        }
+    }
 }

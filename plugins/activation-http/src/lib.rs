@@ -18,6 +18,7 @@ use cymule_durable::{
 };
 use cymule_durable_protocol::{MAX_WAIT_DELIVERY_TARGETS, WaitActivationSource};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::oneshot;
@@ -131,23 +132,47 @@ struct StoredSignal {
     activation_id: String,
     key: String,
     value: Vec<u8>,
-    selected: Vec<u8>,
+    request_digest: String,
+    selected: Option<Vec<u8>>,
+    acknowledged: i64,
+}
+
+struct VerifiedSignal {
+    request: HttpSignalRequest,
+    selected: Option<BTreeSet<String>>,
+    acknowledged: bool,
 }
 
 enum TargetSelection {
-    Selected(BTreeSet<String>),
-    Retained(BTreeSet<String>),
+    Selected(VerifiedSignal),
+    Retained(VerifiedSignal),
 }
 
 impl TargetSelection {
-    fn into_delivery(
-        self,
-        delivery: impl FnOnce(BTreeSet<String>) -> WaitDelivery,
-    ) -> WaitSourceDelivery {
-        match self {
-            Self::Selected(wait_ids) => WaitSourceDelivery::Selected(delivery(wait_ids)),
-            Self::Retained(wait_ids) => WaitSourceDelivery::Retained(delivery(wait_ids)),
-        }
+    fn into_delivery(self) -> DurableResult<WaitSourceDelivery> {
+        let (selected, signal) = match self {
+            Self::Selected(signal) => (true, signal),
+            Self::Retained(signal) => (false, signal),
+        };
+        let wait_ids = signal.selected.ok_or_else(|| {
+            http_row_integrity(
+                "http_signal_selection_missing",
+                "selected HTTP signal row has no retained target set",
+            )
+        })?;
+        let delivery = WaitDelivery {
+            activation_id: signal.request.activation_id,
+            source: WaitActivationSource::Signal {
+                key: signal.request.key,
+            },
+            wait_ids,
+            value: signal.request.value,
+        };
+        Ok(if selected {
+            WaitSourceDelivery::Selected(delivery)
+        } else {
+            WaitSourceDelivery::Retained(delivery)
+        })
     }
 }
 
@@ -298,33 +323,23 @@ impl SqliteHttpSignalDriver {
         let retained: Option<StoredSignal> = self
             .connection
             .query_row(
-                "SELECT activation_id, signal_key, value_json, selected_wait_ids
+                "SELECT activation_id, signal_key, value_json, request_digest,
+                        selected_wait_ids, acknowledged
                  FROM cymule_http_signals
-                 WHERE acknowledged = 0 AND selected_wait_ids IS NOT NULL
+                 WHERE acknowledged != 1 AND selected_wait_ids IS NOT NULL
                  ORDER BY activation_id LIMIT 1",
                 [],
-                |row| {
-                    Ok(StoredSignal {
-                        activation_id: row.get(0)?,
-                        key: row.get(1)?,
-                        value: row.get(2)?,
-                        selected: row.get(3)?,
-                    })
-                },
+                stored_signal_from_row,
             )
             .optional()
             .map_err(contention)?;
         let Some(retained) = retained else {
             return Ok(None);
         };
-        let wait_ids = cymule_core::decode_json(&retained.selected)?;
-        validate_retained_targets(&wait_ids)?;
-        Ok(Some(WaitSourceDelivery::Retained(WaitDelivery {
-            activation_id: retained.activation_id,
-            source: WaitActivationSource::Signal { key: retained.key },
-            wait_ids,
-            value: cymule_core::decode_json(&retained.value)?,
-        })))
+        let retained = verify_stored_signal(retained)?;
+        TargetSelection::Retained(retained)
+            .into_delivery()
+            .map(Some)
     }
 
     fn select_new_targets(
@@ -349,19 +364,42 @@ impl SqliteHttpSignalDriver {
                 params![bytes, activation_id],
             )
             .map_err(contention)?;
-        let retained: Vec<u8> = self
+        let retained: StoredSignal = self
             .connection
             .query_row(
-                "SELECT selected_wait_ids FROM cymule_http_signals
-                 WHERE activation_id = ?1 AND acknowledged = 0",
+                "SELECT activation_id, signal_key, value_json, request_digest,
+                        selected_wait_ids, acknowledged
+                 FROM cymule_http_signals WHERE activation_id = ?1",
                 [activation_id],
-                |row| row.get(0),
+                stored_signal_from_row,
             )
             .map_err(contention)?;
-        let targets = cymule_core::decode_json(&retained)?;
-        validate_retained_targets(&targets)?;
+        let retained = verify_stored_signal(retained)?;
+        let WaitActivationSource::Signal { key } = source else {
+            return Err(http_row_integrity(
+                "http_signal_selection_source_mismatch",
+                "HTTP signal driver received a non-signal source",
+            ));
+        };
+        if retained.request.activation_id != activation_id || retained.request.key != *key {
+            return Err(http_row_integrity(
+                "http_signal_selection_source_mismatch",
+                format!(
+                    "HTTP activation {activation_id} changed identity or source during target selection"
+                ),
+            ));
+        }
+        if retained.acknowledged {
+            return Ok(None);
+        }
+        let targets = retained.selected.as_ref().ok_or_else(|| {
+            http_row_integrity(
+                "http_signal_selection_missing",
+                format!("HTTP activation {activation_id} has no retained target set"),
+            )
+        })?;
         if selected_now == 1 {
-            if targets != selection.wait_ids {
+            if *targets != selection.wait_ids {
                 return Err(DurableError::Integrity {
                     code: "http_selected_targets_changed".to_owned(),
                     message: format!(
@@ -369,9 +407,9 @@ impl SqliteHttpSignalDriver {
                     ),
                 });
             }
-            Ok(Some(TargetSelection::Selected(targets)))
+            Ok(Some(TargetSelection::Selected(retained)))
         } else {
-            Ok(Some(TargetSelection::Retained(targets)))
+            Ok(Some(TargetSelection::Retained(retained)))
         }
     }
 }
@@ -409,40 +447,47 @@ impl WaitSourceDriver for SqliteHttpSignalDriver {
             let Some(key) = page.keys.into_iter().next() else {
                 return Ok(None);
             };
-            let row: Option<(String, Vec<u8>)> = self
+            let row: Option<StoredSignal> = self
                 .connection
                 .query_row(
-                    "SELECT activation_id, value_json
+                    "SELECT activation_id, signal_key, value_json, request_digest,
+                            selected_wait_ids, acknowledged
                      FROM cymule_http_signals
-                     WHERE acknowledged = 0 AND selected_wait_ids IS NULL
+                     WHERE acknowledged != 1 AND selected_wait_ids IS NULL
                        AND signal_key = ?1
                      ORDER BY activation_id LIMIT 1",
                     [&key],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    stored_signal_from_row,
                 )
                 .optional()
                 .map_err(contention)?;
-            let Some((activation_id, value)) = row else {
+            let Some(row) = row else {
                 if exhausted {
                     return Ok(None);
                 }
                 continue;
             };
-            let source = WaitActivationSource::Signal { key };
-            let targets = self
-                .select_new_targets(&activation_id, &source, view, max_targets)?
-                .ok_or_else(|| {
-                    DurableError::Validation(format!(
-                        "indexed HTTP activation {activation_id} has no selectable target"
-                    ))
-                })?;
-            let value = cymule_core::decode_json(&value)?;
-            return Ok(Some(targets.into_delivery(|wait_ids| WaitDelivery {
-                activation_id,
-                source,
-                wait_ids,
-                value,
-            })));
+            let signal = verify_stored_signal(row)?;
+            if signal.request.key != key || signal.selected.is_some() || signal.acknowledged {
+                return Err(http_row_integrity(
+                    "http_signal_fresh_row_mismatch",
+                    "fresh HTTP signal query returned a row outside its exact predicate",
+                ));
+            }
+            let activation_id = signal.request.activation_id;
+            let source = WaitActivationSource::Signal {
+                key: signal.request.key,
+            };
+            let Some(targets) =
+                self.select_new_targets(&activation_id, &source, view, max_targets)?
+            else {
+                // The pinned parked view may lose the race to another driver
+                // that retained, activated, and acknowledged this exact row.
+                // That durable completion is not malformed source authority;
+                // end this receive so the caller can open the next pinned view.
+                return Ok(None);
+            };
+            return targets.into_delivery().map(Some);
         }
         Ok(None)
     }
@@ -453,26 +498,29 @@ impl WaitSourceDriver for SqliteHttpSignalDriver {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(contention)?;
-        let existing: Option<(bool, Option<Vec<u8>>)> = transaction
+        let existing: Option<StoredSignal> = transaction
             .query_row(
-                "SELECT acknowledged, selected_wait_ids FROM cymule_http_signals
+                "SELECT activation_id, signal_key, value_json, request_digest,
+                        selected_wait_ids, acknowledged
+                 FROM cymule_http_signals
                  WHERE activation_id = ?1",
                 [activation_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                stored_signal_from_row,
             )
             .optional()
             .map_err(contention)?;
-        let Some((acknowledged, selected)) = existing else {
+        let Some(existing) = existing else {
             return Err(DurableError::NotFound(format!(
                 "HTTP activation {activation_id} is missing"
             )));
         };
-        if selected.is_none() {
+        let existing = verify_stored_signal(existing)?;
+        if existing.selected.is_none() {
             return Err(DurableError::Validation(format!(
                 "HTTP activation {activation_id} has not selected durable targets"
             )));
         }
-        if !acknowledged {
+        if !existing.acknowledged {
             transaction
                 .execute(
                     "UPDATE cymule_http_signals SET acknowledged = 1
@@ -580,11 +628,13 @@ async fn read_acknowledged_async(
 
 fn read_acknowledged(path: &Path, activation_id: &str) -> DurableResult<bool> {
     let connection = open_spool(path, false)?;
-    connection
+    let stored = connection
         .query_row(
-            "SELECT acknowledged FROM cymule_http_signals WHERE activation_id = ?1",
+            "SELECT activation_id, signal_key, value_json, request_digest,
+                    selected_wait_ids, acknowledged
+             FROM cymule_http_signals WHERE activation_id = ?1",
             [activation_id],
-            |row| row.get(0),
+            stored_signal_from_row,
         )
         .optional()
         .map_err(contention)?
@@ -592,7 +642,8 @@ fn read_acknowledged(path: &Path, activation_id: &str) -> DurableResult<bool> {
             DurableError::NotFound(format!(
                 "HTTP activation {activation_id} disappeared before acknowledgement"
             ))
-        })
+        })?;
+    verify_stored_signal(stored).map(|signal| signal.acknowledged)
 }
 
 fn decode_request(headers: &HeaderMap, body: &[u8]) -> Result<HttpSignalRequest, StatusCode> {
@@ -632,6 +683,103 @@ fn request_digest(request: &HttpSignalRequest) -> DurableResult<String> {
     cymule_core::canonical_digest(request).map_err(DurableError::from)
 }
 
+fn verify_stored_signal(stored: StoredSignal) -> DurableResult<VerifiedSignal> {
+    let value = decode_canonical_http_row(&stored.value, "value_json")?;
+    let request = HttpSignalRequest {
+        activation_id: stored.activation_id,
+        key: stored.key,
+        value,
+    };
+    validate_request(&request)
+        .map_err(|error| http_row_integrity("http_signal_request_invalid", error.to_string()))?;
+    let digest = request_digest(&request).map_err(|error| {
+        http_row_integrity("http_signal_request_digest_invalid", error.to_string())
+    })?;
+    if stored.request_digest != digest {
+        return Err(http_row_integrity(
+            "http_signal_request_digest_mismatch",
+            format!(
+                "HTTP activation {} does not match its retained request digest",
+                request.activation_id
+            ),
+        ));
+    }
+    let selected = stored
+        .selected
+        .map(|bytes| -> DurableResult<BTreeSet<String>> {
+            let wait_ids = decode_canonical_http_row(&bytes, "selected_wait_ids")?;
+            validate_retained_targets(&wait_ids).map_err(|error| {
+                http_row_integrity("http_signal_selected_targets_invalid", error.to_string())
+            })?;
+            Ok(wait_ids)
+        })
+        .transpose()?;
+    let acknowledged = match stored.acknowledged {
+        0 => false,
+        1 => true,
+        value => {
+            return Err(http_row_integrity(
+                "http_signal_acknowledgement_invalid",
+                format!("HTTP acknowledgement flag is {value}, expected 0 or 1"),
+            ));
+        }
+    };
+    if acknowledged && selected.is_none() {
+        return Err(http_row_integrity(
+            "http_signal_acknowledgement_without_selection",
+            "acknowledged HTTP signal has no retained target set",
+        ));
+    }
+    Ok(VerifiedSignal {
+        request,
+        selected,
+        acknowledged,
+    })
+}
+
+fn stored_signal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSignal> {
+    Ok(StoredSignal {
+        activation_id: row.get(0)?,
+        key: row.get(1)?,
+        value: row.get(2)?,
+        request_digest: row.get(3)?,
+        selected: row.get(4)?,
+        acknowledged: row.get(5)?,
+    })
+}
+
+fn decode_canonical_http_row<T>(bytes: &[u8], field: &str) -> DurableResult<T>
+where
+    T: DeserializeOwned + Serialize,
+{
+    let value = cymule_core::decode_json(bytes).map_err(|error| {
+        http_row_integrity(
+            "http_signal_row_json_invalid",
+            format!("HTTP signal {field} is malformed: {error}"),
+        )
+    })?;
+    let canonical = cymule_core::canonical_bytes(&value).map_err(|error| {
+        http_row_integrity(
+            "http_signal_row_json_invalid",
+            format!("HTTP signal {field} cannot be canonically encoded: {error}"),
+        )
+    })?;
+    if canonical != bytes {
+        return Err(http_row_integrity(
+            "http_signal_row_json_noncanonical",
+            format!("HTTP signal {field} is not strict canonical JSON"),
+        ));
+    }
+    Ok(value)
+}
+
+fn http_row_integrity(code: &'static str, message: impl Into<String>) -> DurableError {
+    DurableError::Integrity {
+        code: code.to_owned(),
+        message: message.into(),
+    }
+}
+
 fn validate_identity(kind: &str, identity: &str) -> DurableResult<()> {
     cymule_core::validate_identity(&format!("HTTP {kind} identity"), identity).map_err(Into::into)
 }
@@ -642,6 +790,9 @@ fn validate_new_targets(wait_ids: &BTreeSet<String>, max_targets: usize) -> Dura
             "new HTTP delivery has {} targets outside requested bound {max_targets}",
             wait_ids.len()
         )));
+    }
+    for wait_id in wait_ids {
+        validate_identity("wait", wait_id)?;
     }
     Ok(())
 }
@@ -661,6 +812,9 @@ fn validate_retained_targets(wait_ids: &BTreeSet<String>) -> DurableResult<()> {
             "retained HTTP delivery has {} targets outside framework bound {MAX_WAIT_DELIVERY_TARGETS}",
             wait_ids.len()
         )));
+    }
+    for wait_id in wait_ids {
+        validate_identity("wait", wait_id)?;
     }
     Ok(())
 }
@@ -835,21 +989,24 @@ fn persist_request(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(contention)?;
-    let existing: Option<(String, bool)> = transaction
+    let existing: Option<StoredSignal> = transaction
         .query_row(
-            "SELECT request_digest, acknowledged FROM cymule_http_signals
+            "SELECT activation_id, signal_key, value_json, request_digest,
+                    selected_wait_ids, acknowledged
+             FROM cymule_http_signals
              WHERE activation_id = ?1",
             [&request.activation_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            stored_signal_from_row,
         )
         .optional()
         .map_err(contention)?;
-    if let Some((existing, acknowledged)) = existing {
-        if existing != digest {
+    if let Some(existing) = existing {
+        let existing = verify_stored_signal(existing)?;
+        if existing.request != *request {
             return Ok(PersistRequestOutcome::IdentityConflict);
         }
         transaction.commit().map_err(contention)?;
-        return Ok(if acknowledged {
+        return Ok(if existing.acknowledged {
             PersistRequestOutcome::Acknowledged
         } else {
             PersistRequestOutcome::Pending

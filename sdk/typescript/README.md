@@ -50,12 +50,17 @@ const resource = await new CliEngine().sealResource(
 ```
 
 `DurableEngine(store, plugin, clock)` uses `CliEngine` by default and accepts
-any structurally complete `EngineTransport`; the high-level facade therefore
+any `EngineTransport` implementing the single complete
+`exchange(request) -> { request, response }` seam; the high-level facade therefore
 does not make the CLI or either official Store provider part of domain
 semantics. It exposes real
 `start`, `runIndexPage`, `runCurrent`, bounded Run child pages, exact `runItem`,
 `resume`, `signal`, `release`, `resolveEffect`, `cancel`, and
 `evolve` operations. There is no separate generic control-submit interface.
+The complete accepted request echo is checked before the response, including
+for custom transports. Compact stdout is bounded to the 128 MiB plus 32-byte framing Engine response
+envelope and diagnostic stderr independently to 1 MiB; a valid failure remains
+authoritative over nonzero process status.
 Cancellation and claimed-Effect resolution return complete
 Rust-issued receipts; the client checks exact request identity/fence evidence
 and accepts the provider's actual terminal outcome without hashing reason or
@@ -95,16 +100,12 @@ await durable.start(runId, candidate, input, {
 });
 ```
 
-CLI methods are asynchronous because the client owns the live Engine PID and
-its isolated process group. The transport applies a finite 30-second default
-deadline, drains bounded byte streams, decodes stdout as fatal UTF-8, and kills
-the whole group once on timeout or `AbortSignal` cancellation. The interrupted
-request rejects only after the direct child is reaped and inherited response
-pipes close. A descendant that has reached POSIX zombie state is already unable
-to execute a late side effect and is left for its owning system reaper; the SDK
-does not mistake `kill(pid, 0)` success for executable liveness or risk a second
-signal after PID/PGID reuse. A natural close that wins the lifecycle race keeps
-its response authority.
+CLI methods are asynchronous because the client owns one direct Engine Child
+handle. The transport applies a finite 30-second default deadline, drains
+bounded byte streams, decodes stdout as fatal UTF-8, and on interruption kills
+that Child only if its exit gate has not fired. It destroys all local pipe
+endpoints and rejects immediately. The Engine/executor watchdog owns every
+internal provider/process; the SDK never probes or signals a raw PID or PGID.
 
 The SDK never seals or hashes a future Clock receipt locally. A deadline or
 cancellation after a mutating request begins returns a structured

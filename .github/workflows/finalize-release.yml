@@ -84,8 +84,6 @@ jobs:
             scripts/npm_release.py \
             scripts/crates_release.py \
             scripts/version_domains.py
-          git fetch --no-tags origin main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
           test "$(git -C release-payload rev-parse HEAD)" = "$RELEASE_SHA"
           git -C release-payload fetch --force origin \
             "refs/tags/v$RELEASE_VERSION:refs/tags/v$RELEASE_VERSION"
@@ -264,8 +262,6 @@ jobs:
             scripts/npm_release.py \
             scripts/crates_release.py \
             scripts/version_domains.py
-          git fetch --no-tags origin main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
           remote_refs=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
           test "$(printf '%s\n' "$remote_refs" | grep -c .)" -eq 2
           remote_tag_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
@@ -401,8 +397,6 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/verify_github_release_settings.py
-          git fetch --no-tags origin main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
           remote_refs=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
           test "$(printf '%s\n' "$remote_refs" | grep -c .)" -eq 2
           remote_tag_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
@@ -469,8 +463,6 @@ jobs:
           PUBLIC_SOURCE_SNAPSHOT_DIGEST: ${{ needs.verify.outputs.public_source_snapshot_digest }}
         run: |
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
-          git fetch --no-tags origin main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
           remote_refs=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
           test "$(printf '%s\n' "$remote_refs" | grep -c .)" -eq 2
           remote_tag_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
@@ -557,8 +549,6 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/verify_github_release_settings.py
-          git fetch --no-tags origin main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
           remote_refs=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
           test "$(printf '%s\n' "$remote_refs" | grep -c .)" -eq 2
           remote_tag_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
@@ -650,8 +640,6 @@ jobs:
           export CYMULE_RELEASE_WORKSPACE="$authority_dir"
           cd "$controller_dir"
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
-          remote_main=$(git ls-remote origin refs/heads/main | cut -f1)
-          test "$remote_main" = "$CONTROLLER_SHA"
           remote_refs=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
           test "$(printf '%s\n' "$remote_refs" | grep -c .)" -eq 2
           remote_tag_sha=$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')

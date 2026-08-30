@@ -266,7 +266,7 @@ async function withSuccessEngine<T>(
   response: unknown,
   invoke: (engine: CliEngine) => T | Promise<T>,
   sealedPlanId?: string,
-  engineProtocol = "cymule.engine/5",
+  engineProtocol: unknown = "cymule.engine/5",
   echoRequest?: unknown,
 ): Promise<T> {
   const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-"));
@@ -339,7 +339,7 @@ process.stdin.on("end", () => {
 async function withFailureEngine<T>(
   failure: unknown,
   invoke: (engine: CliEngine) => T | Promise<T>,
-  engineProtocol = "cymule.engine/5",
+  engineProtocol: unknown = "cymule.engine/5",
 ): Promise<T> {
   const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-"));
   const executable = join(directory, "failure-engine");
@@ -397,7 +397,7 @@ test("TypeScript classifies post-spawn output overflow as response loss", async 
     `#!/usr/bin/env node
 process.stdin.resume();
 process.stdin.on("end", () => {
-  process.stdout.write("x".repeat(17 * 1024 * 1024));
+  process.stdout.write("x".repeat(129 * 1024 * 1024));
 });
 `,
   );
@@ -414,7 +414,7 @@ process.stdin.on("end", () => {
       ),
       (error: unknown) => error instanceof EngineError
         && error.failure.category === "unknown_world_outcome"
-        && error.failure.code === "engine_response_too_large"
+        && error.failure.code === "engine_output_limit_exceeded"
         && error.failure.retry_disposition === "reconcile",
     );
 
@@ -424,6 +424,51 @@ process.stdin.on("end", () => {
       (error: unknown) => error instanceof EngineError
         && error.failure.category === "transport_failure"
         && error.failure.code === "engine_start_failed",
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("TypeScript admits success above 16 MiB and preserves a valid failure from nonzero exit", async () => {
+  const candidate = new FlowBuilder("large-success", {}, {}).finish({ kind: "input" });
+  candidate.metadata = { padding: "x".repeat(9 * 1024 * 1024) };
+  const sealed = await withSuccessEngine(
+    { type: "unused" },
+    (engine) => engine.seal(candidate),
+    `sha256:${"d".repeat(64)}`,
+  );
+  assert.equal(sealed.candidate.metadata.padding, candidate.metadata.padding);
+
+  const directory = mkdtempSync(join(tmpdir(), "cymule-nonzero-failure-"));
+  const executable = join(directory, "engine");
+  writeFileSync(executable, `#!/usr/bin/env node
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({
+    engine_protocol: "cymule.engine/5",
+    outcome: "failure",
+    error: {
+      category: "validation",
+      phase: "validate_request",
+      code: "nonzero_failure",
+      message: "validated failure wins over process status",
+      retry_disposition: "correct_and_retry",
+    },
+  }));
+  process.exitCode = 23;
+});
+`);
+  chmodSync(executable, 0o700);
+  try {
+    await assert.rejects(
+      () => new CliEngine(executable).seal(
+        new FlowBuilder("nonzero-failure", {}, {}).finish({ kind: "input" }),
+      ),
+      (error: unknown) => error instanceof EngineError
+        && error.failure.code === "nonzero_failure"
+        && error.failure.category === "validation"
+        && error.failure.retry_disposition === "correct_and_retry",
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -681,158 +726,47 @@ process.stdin.on("end", () => {
   }
 });
 
-test("TypeScript cancellation terminates descendants after the direct child exits", async (context) => {
+test("TypeScript timeout closes local pipes held by a setsid descendant", async (context) => {
   if (process.platform === "win32") {
     context.skip("POSIX process-group conformance is unavailable on Windows");
     return;
   }
-  const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-"));
-  const executable = join(directory, "descendant-pipe-engine");
-  const pidPath = join(directory, "descendant.pid");
-  const readyPath = join(directory, "descendant.ready");
-  const markerPath = join(directory, "late-marker");
-  writeFileSync(
-    executable,
-    `#!/bin/sh
-printf '%s\n' "$$" >${JSON.stringify(pidPath)}
-parent_pid="$$"
-(
-  trap '' TERM
-  while kill -0 "$parent_pid" 2>/dev/null; do /bin/sleep 0.01; done
-  printf 'ready' >${JSON.stringify(readyPath)}
-  /bin/sleep 5
-  printf 'late' >${JSON.stringify(markerPath)}
-  /bin/sleep 30
-) &
-exit 0
-`,
-  );
+  const directory = mkdtempSync(join(tmpdir(), "cymule-setsid-pipe-"));
+  const executable = join(directory, "engine");
+  const pidFile = join(directory, "descendant.pid");
+  writeFileSync(executable, `#!/usr/bin/env python3
+import os
+import sys
+import time
+sys.stdin.buffer.read()
+pid = os.fork()
+if pid == 0:
+    os.setsid()
+    with open(${JSON.stringify(pidFile)}, "w", encoding="utf-8") as target:
+        target.write(str(os.getpid()))
+        target.flush()
+        os.fsync(target.fileno())
+    time.sleep(60)
+    os._exit(0)
+os._exit(0)
+`);
   chmodSync(executable, 0o700);
-  const cancelled = new AbortController();
+  const started = Date.now();
   try {
-    const request = new CliEngine(executable, {
-      timeoutMs: 5_000,
-      signal: cancelled.signal,
-    }).seal(
-      new FlowBuilder("descendant-pipe", {}, {}).finish({ kind: "input" }),
-    );
-    const rejection = assert.rejects(
-      request,
+    await assert.rejects(
+      () => new CliEngine(executable, { timeoutMs: 1_000 }).seal(
+        new FlowBuilder("setsid-pipe", {}, {}).finish({ kind: "input" }),
+      ),
       (error: unknown) => error instanceof EngineError
-        && error.failure.category === "cancelled"
-        && error.failure.retry_disposition === "never",
+        && error.failure.category === "timed_out"
+        && error.failure.retry_disposition === "retry_same_request",
     );
-    const processGroupId = await readPid(pidPath);
-    await waitForText(readyPath);
-    cancelled.abort();
-    await rejection;
-    assertProcessGroupCannotExecute(processGroupId);
-    assert.equal(existsSync(markerPath), false, "terminated descendant wrote a late marker");
+    assert.ok(Date.now() - started < 2_000, "escaped pipe exceeded the SDK deadline");
   } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("TypeScript cancellation kills the in-flight Engine process group", async (context) => {
-  if (process.platform === "win32") {
-    context.skip("POSIX process-group conformance is unavailable on Windows");
-    return;
-  }
-  const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-"));
-  const executable = join(directory, "cancellable-engine");
-  const descendantScript = join(directory, "descendant.js");
-  const pidPath = join(directory, "descendant.pid");
-  const markerPath = join(directory, "late-marker");
-  writeFileSync(
-    descendantScript,
-    `const { writeFileSync } = require("node:fs");
-process.on("SIGTERM", () => {});
-writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
-setTimeout(() => writeFileSync(${JSON.stringify(markerPath)}, "late"), 5_000);
-setInterval(() => {}, 30_000);
-`,
-  );
-  writeFileSync(
-    executable,
-    `#!/usr/bin/env node
-const { spawn } = require("node:child_process");
-spawn(process.execPath, [${JSON.stringify(descendantScript)}], {
-  stdio: ["ignore", "inherit", "inherit"],
-});
-setInterval(() => {}, 30_000);
-`,
-  );
-  chmodSync(executable, 0o700);
-  const cancelled = new AbortController();
-  try {
-    const request = new CliEngine(executable, {
-      timeoutMs: 5_000,
-      signal: cancelled.signal,
-    }).seal(new FlowBuilder("cancel-process-group", {}, {}).finish({ kind: "input" }));
-    const rejection = assert.rejects(
-      request,
-      (error: unknown) => error instanceof EngineError
-        && error.failure.category === "cancelled"
-        && error.failure.retry_disposition === "never",
-    );
-    const descendant = await readPid(pidPath);
-    cancelled.abort();
-    await rejection;
-    assertProcessCannotExecute(descendant);
-    assert.equal(existsSync(markerPath), false, "terminated descendant wrote a late marker");
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("TypeScript cancellation prevents detached-pipe descendant side effects", async (context) => {
-  if (process.platform === "win32") {
-    context.skip("POSIX process-group conformance is unavailable on Windows");
-    return;
-  }
-  const directory = mkdtempSync(join(tmpdir(), "cymule-sdk-"));
-  const executable = join(directory, "cancellable-engine");
-  const descendantScript = join(directory, "detached-pipe-descendant.js");
-  const pidPath = join(directory, "descendant.pid");
-  const markerPath = join(directory, "late-marker");
-  writeFileSync(
-    descendantScript,
-    `const { writeFileSync } = require("node:fs");
-process.on("SIGTERM", () => {});
-writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
-setTimeout(() => writeFileSync(${JSON.stringify(markerPath)}, "late"), 100);
-setInterval(() => {}, 30_000);
-`,
-  );
-  writeFileSync(
-    executable,
-    `#!/usr/bin/env node
-const { spawn } = require("node:child_process");
-spawn(process.execPath, [${JSON.stringify(descendantScript)}], {
-  stdio: "ignore",
-});
-setInterval(() => {}, 30_000);
-`,
-  );
-  chmodSync(executable, 0o700);
-  const cancelled = new AbortController();
-  try {
-    const request = new CliEngine(executable, {
-      timeoutMs: 5_000,
-      signal: cancelled.signal,
-    }).seal(new FlowBuilder("cancel-detached-pipe", {}, {}).finish({ kind: "input" }));
-    const rejection = assert.rejects(
-      request,
-      (error: unknown) => error instanceof EngineError
-        && error.failure.category === "cancelled"
-        && error.failure.retry_disposition === "never",
-    );
-    const descendant = await readPid(pidPath);
-    cancelled.abort();
-    await rejection;
-    assertProcessCannotExecute(descendant);
-    assert.equal(existsSync(markerPath), false, "terminated descendant wrote a late marker");
-  } finally {
+    if (existsSync(pidFile)) {
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      try { process.kill(pid, "SIGKILL"); } catch {}
+    }
     rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -3021,6 +2955,76 @@ test("TypeScript classifies wrong success tags by request mutation authority", a
   );
 });
 
+test("TypeScript rejects non-string Engine protocol generations before outcome admission", async () => {
+  const contentId = (digit: string) => `sha256:${digit.repeat(64)}`;
+  const candidate = new FlowBuilder("invalid-protocol-type", {}, {})
+    .finish({ kind: "input" });
+  const clockTarget = sqliteClock(
+    "/tmp/cymule-invalid-protocol-type-clock.sqlite",
+    "clock:invalid-protocol-type",
+    contentId("1"),
+  );
+  const clockResponse = {
+    type: "clock_observed",
+    result: {
+      run_id: "run:invalid-protocol-type",
+      observation: {
+        clock_version: "cymule.clock-observation/2",
+        observation_id: contentId("2"),
+        source_id: clockTarget.source_id,
+        source_generation: clockTarget.source_generation,
+        scope: "scope:invalid-protocol-type",
+      },
+    },
+  };
+  const failure = {
+    category: "validation",
+    phase: "validate_request",
+    code: "synthetic_protocol_type_failure",
+    message: "synthetic Engine failure",
+    retry_disposition: "correct_and_retry",
+  };
+
+  for (const protocol of [null, 5, { generation: "cymule.engine/5" }]) {
+    for (const outcome of ["success", "failure"] as const) {
+      await assert.rejects(
+        () => outcome === "success"
+          ? withSuccessEngine(
+            { type: "verified" },
+            (engine) => engine.seal(candidate),
+            contentId("3"),
+            protocol,
+          )
+          : withFailureEngine(failure, (engine) => engine.seal(candidate), protocol),
+        (error: unknown) => error instanceof EngineError
+          && error.failure.category === "transport_failure"
+          && error.failure.code === "invalid_engine_response"
+          && error.failure.retry_disposition === undefined,
+        `read ${outcome} accepted protocol ${JSON.stringify(protocol)}`,
+      );
+      await assert.rejects(
+        () => outcome === "success"
+          ? withSuccessEngine(
+            clockResponse,
+            (engine) => engine.observeClock(clockTarget, "run:invalid-protocol-type"),
+            undefined,
+            protocol,
+          )
+          : withFailureEngine(
+            failure,
+            (engine) => engine.observeClock(clockTarget, "run:invalid-protocol-type"),
+            protocol,
+          ),
+        (error: unknown) => error instanceof EngineError
+          && error.failure.category === "unknown_world_outcome"
+          && error.failure.code === "invalid_engine_response"
+          && error.failure.retry_disposition === "reconcile",
+        `mutation ${outcome} accepted protocol ${JSON.stringify(protocol)}`,
+      );
+    }
+  }
+});
+
 test("TypeScript real client classifies an unsupported Engine by mutation authority", async (context) => {
   const executable = process.env.CYMULE_UNSUPPORTED_ENGINE;
   if (executable === undefined) {
@@ -3482,21 +3486,24 @@ test("TypeScript durable Clock rejects a typed result bound to another Run", asy
     `sha256:${"1".repeat(64)}`,
   );
   const transport: EngineTransport = {
-    async seal(): Promise<never> { throw new Error("unused"); },
-    async observeClock() {
+    async exchange(request) {
       return {
-        run_id: "run:foreign",
-        observation: {
-          clock_version: "cymule.clock-observation/2",
-          observation_id: `sha256:${"2".repeat(64)}`,
-          source_id: clock.source_id,
-          source_generation: clock.source_generation,
-          scope: `sha256:${"3".repeat(64)}`,
+        request,
+        response: {
+          type: "clock_observed",
+          result: {
+            run_id: "run:foreign",
+            observation: {
+              clock_version: "cymule.clock-observation/2",
+              observation_id: `sha256:${"2".repeat(64)}`,
+              source_id: clock.source_id,
+              source_generation: clock.source_generation,
+              scope: `sha256:${"3".repeat(64)}`,
+            },
+          },
         },
       };
     },
-    async executeDurable(): Promise<never> { throw new Error("unused"); },
-    async executeLiveEvolution(): Promise<never> { throw new Error("unused"); },
   };
   const durable = new DurableEngine(directoryStore("unused"), undefined, clock, transport);
   await assert.rejects(
@@ -3506,6 +3513,80 @@ test("TypeScript durable Clock rejects a typed result bound to another Run", asy
       && error.failure.code === "invalid_engine_response"
       && error.failure.retry_disposition === "reconcile",
   );
+});
+
+test("TypeScript custom transport success requires the complete request echo", async () => {
+  const transport: EngineTransport = {
+    async exchange(request) {
+      if (request.type !== "execute_durable") throw new Error("unexpected custom request");
+      return {
+        request: { ...request, type: "verify_durable_command" } as never,
+        response: {
+          type: "durable_executed",
+          response: {
+            type: "run_current",
+            observed_revision: `sha256:${"1".repeat(64)}`,
+            source_root: "2".repeat(64),
+            current: null,
+          },
+        },
+      };
+    },
+  };
+  await assert.rejects(
+    () => new DurableEngine(directoryStore("unused"), undefined, undefined, transport)
+      .runCurrent("run:custom-echo", null),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "transport_failure"
+      && error.failure.code === "invalid_engine_response",
+  );
+});
+
+test("TypeScript custom transport receives ordinary fractional JSON", async () => {
+  const planId = `sha256:${"3".repeat(64)}`;
+  const candidate = new FlowBuilder("custom-fraction", {}, {}).finish({ kind: "input" });
+  const transport: EngineTransport = {
+    async exchange(request) {
+      assert.doesNotThrow(() => JSON.stringify(request));
+      if (request.type === "seal") {
+        return {
+          request,
+          response: { type: "sealed", plan: { plan_id: planId, candidate: request.candidate } },
+        };
+      }
+      if (request.type !== "execute_durable") throw new Error("unexpected Engine request");
+      if (request.command.type !== "start_run") throw new Error("unexpected durable command");
+      assert.equal(typeof request.command.input, "number");
+      assert.equal(request.command.input, 0.1);
+      return {
+        request,
+        response: {
+          type: "durable_executed",
+          response: {
+            type: "run_boundary",
+            boundary: {
+              status: "completed",
+              result: {
+                run_id: request.command.run_id,
+                plan_id: planId,
+                value: null,
+                projection_digest: "4".repeat(64),
+                precondition_token: `pre:0:sha256:${"5".repeat(64)}`,
+                effects: [],
+              },
+            },
+          },
+        },
+      };
+    },
+  };
+  const response = await new DurableEngine(
+    directoryStore("unused"),
+    processTarget(process.execPath),
+    sqliteClock("unused", "clock:custom-fraction", `sha256:${"6".repeat(64)}`),
+    transport,
+  ).start("run:custom-fraction", candidate, 0.1, fixtureExecution());
+  assert.equal(response.type, "run_boundary");
 });
 
 test("TypeScript DurableEngine closes custom transport validation and response-loss boundaries", async () => {
@@ -3534,23 +3615,37 @@ test("TypeScript DurableEngine closes custom transport validation and response-l
   let evolutionResult: unknown;
   let evolutionRejection: Error | undefined;
   const transport: EngineTransport = {
-    async seal(): Promise<never> {
-      calls.seal += 1;
-      throw new Error("unexpected custom seal call");
-    },
-    async observeClock(): Promise<never> {
-      calls.observeClock += 1;
-      throw new Error("unexpected custom Clock call");
-    },
-    async executeDurable() {
-      calls.executeDurable += 1;
-      if (durableRejection !== undefined) throw durableRejection;
-      return structuredClone(durableResult) as never;
-    },
-    async executeLiveEvolution() {
-      calls.executeLiveEvolution += 1;
-      if (evolutionRejection !== undefined) throw evolutionRejection;
-      return structuredClone(evolutionResult) as never;
+    async exchange(request) {
+      switch (request.type) {
+        case "seal":
+          calls.seal += 1;
+          throw new Error("unexpected custom seal call");
+        case "observe_clock":
+          calls.observeClock += 1;
+          throw new Error("unexpected custom Clock call");
+        case "execute_durable":
+          calls.executeDurable += 1;
+          if (durableRejection !== undefined) throw durableRejection;
+          return {
+            request,
+            response: {
+              type: "durable_executed",
+              response: structuredClone(durableResult),
+            },
+          } as never;
+        case "execute_live_evolution":
+          calls.executeLiveEvolution += 1;
+          if (evolutionRejection !== undefined) throw evolutionRejection;
+          return {
+            request,
+            response: {
+              type: "live_evolution_executed",
+              commit: structuredClone(evolutionResult),
+            },
+          } as never;
+        default:
+          throw new Error(`unexpected custom request ${request.type}`);
+      }
     },
   };
   const store = directoryStore("unused");
@@ -3734,21 +3829,9 @@ test("TypeScript DurableEngine closes custom transport validation and response-l
 test("TypeScript rejects every legacy or uppercase Evolution Plan identity before transport", async () => {
   let calls = 0;
   const transport: EngineTransport = {
-    async seal(): Promise<never> {
+    async exchange(): Promise<never> {
       calls += 1;
-      throw new Error("invalid Evolution command reached seal");
-    },
-    async observeClock(): Promise<never> {
-      calls += 1;
-      throw new Error("invalid Evolution command reached Clock");
-    },
-    async executeDurable(): Promise<never> {
-      calls += 1;
-      throw new Error("invalid Evolution command reached durable transport");
-    },
-    async executeLiveEvolution(): Promise<never> {
-      calls += 1;
-      throw new Error("invalid Evolution command reached live transport");
+      throw new Error("invalid Evolution command reached transport");
     },
   };
   const durable = new DurableEngine(
@@ -3851,6 +3934,25 @@ test("TypeScript rejects malformed Resource integrity relationships", async () =
   };
   const inline = ResourceBuilder.text("value");
   assert.equal("annotations" in inline, false);
+  for (const mediaType of [
+    "text/\0plain",
+    "text/",
+    "/plain",
+    "a/b/c",
+    "Text/plain",
+    "text/Plain",
+    "text/plain;charset=utf-8",
+    "text/ plain",
+  ]) {
+    assert.throws(
+      () => ResourceBuilder.external(
+        "object",
+        mediaType,
+        { kind: "content", digest: contentId("1"), size: 0 },
+      ),
+      /media type/,
+    );
+  }
   const emptyDigest = "sha256:936574b81c099aaf0318e91b80912c958a0527ee271eabd62da35fed55607928";
   const emptyRoot = "sha256:6a754fadbb296b87040c37dab30caea63de1bd1a85142bc82a03a7cf82e64dfc";
   const emptyManifest = {
@@ -3905,6 +4007,7 @@ test("TypeScript rejects malformed Resource integrity relationships", async () =
   );
   const invalid = [
     { ...inline, annotations: {} },
+    { ...inline, resource_version: "cymule.resource/3" },
     {
       ...emptyCandidate,
       manifest: {
@@ -3915,7 +4018,7 @@ test("TypeScript rejects malformed Resource integrity relationships", async () =
     },
     { ...inline, inline: { encoding: "utf8" } },
     {
-      resource_version: "cymule.resource/3",
+      resource_version: "cymule.resource/4",
       shape: "object",
       media_type: "application/octet-stream",
       inline: { encoding: "utf8", text: "forged" },
@@ -3923,7 +4026,7 @@ test("TypeScript rejects malformed Resource integrity relationships", async () =
       annotations: {},
     },
     {
-      resource_version: "cymule.resource/3",
+      resource_version: "cymule.resource/4",
       shape: "collection",
       media_type: "application/octet-stream",
       integrity: { kind: "content", digest: contentId("1"), size: 10 },
@@ -3947,8 +4050,13 @@ test("TypeScript rejects malformed Resource integrity relationships", async () =
       manifest: { ...emptyManifest, root_digest: contentId("8") },
     },
     { ...inline, media_type: "Text/Plain" },
+    { ...inline, media_type: "text/\0plain" },
+    { ...inline, media_type: "text/" },
+    { ...inline, media_type: "/plain" },
+    { ...inline, media_type: "a/b/c" },
+    { ...inline, media_type: "text/plain;charset=utf-8" },
     {
-      resource_version: "cymule.resource/3",
+      resource_version: "cymule.resource/4",
       shape: "object",
       media_type: "application/octet-stream",
       integrity: { kind: "version", authority: "", version: "v1" },
@@ -3962,7 +4070,7 @@ test("TypeScript rejects malformed Resource integrity relationships", async () =
       () => withSuccessEngine(
         {
           type: "sealed_resource",
-          resource: { resource_id: contentId(String((index % 9) + 1)), ...candidate },
+          resource: { resource_id: contentId(String((index % 9) + 1)), ...candidate } as never,
         },
         (engine) => engine.sealResource(candidate as never),
       ),
@@ -4260,6 +4368,14 @@ test("TypeScript resource seals through the Rust engine", async (context) => {
   );
   assert.equal(resource.resource_id, expectedResourceId);
   assert.equal(resource.integrity.kind, "inline");
+  const vendor = ResourceBuilder.external(
+    "object",
+    "application/vnd.cymule.resource+json",
+    { kind: "content", digest: `sha256:${"1".repeat(64)}`, size: 0 },
+  );
+  const sealedVendor = await new CliEngine(enginePath).sealResource(vendor);
+  assert.equal(sealedVendor.resource_version, "cymule.resource/4");
+  assert.equal(sealedVendor.media_type, vendor.media_type);
   assert.equal(
     (await new CliEngine(enginePath).sealResource(ResourceBuilder.text("empty annotations"))).shape,
     "inline",
@@ -4979,7 +5095,7 @@ test("TypeScript preserves the complete virtual compaction certificate wire", ()
     }],
     replay_availability: { status: "exact" },
     rehydration_manifest: {
-      resource_version: "cymule.resource/3",
+      resource_version: "cymule.resource/4",
       resource_id: `sha256:${"b".repeat(64)}`,
       shape: "object",
       media_type: "application/octet-stream",
@@ -5429,7 +5545,12 @@ test("TypeScript normalizes mathematical integers before typed response validati
       `mathematical integer token ${lexeme} was not normalized`,
     );
   }
-  for (const lexeme of ["1.5", "9007199254740991.1"]) {
+  for (const lexeme of [
+    "1.5",
+    "9007199254740991.1",
+    "1e9999999",
+    "1".repeat(257),
+  ]) {
     const fractionalTyped = JSON.stringify(typedResponse).replace(
       '"min_target_observations":1',
       `"min_target_observations":${lexeme}`,
@@ -5646,6 +5767,40 @@ process.stdin.on("end", () => {
         && error.failure.retry_disposition === "reconcile",
       "a mathematically fractional request echo compared equal to integer zero",
     );
+
+    writeFileSync(echoEngine, `#!/usr/bin/env node
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const request = JSON.parse(input).request;
+  const rawRequest = JSON.stringify(request).replace(
+    '"input":0.1',
+    '"input":0.100000000000000005',
+  );
+  process.stdout.write(
+    '{"engine_protocol":"cymule.engine/5","outcome":"success","request":'
+      + rawRequest
+      + ',"response":'
+      + ${JSON.stringify(JSON.stringify(echoResponse))}
+      + '}',
+  );
+});
+`);
+    chmodSync(echoEngine, 0o700);
+    await assert.rejects(
+      () => new CliEngine(echoEngine).run(
+        outputPlan,
+        0.1,
+        processTarget(process.execPath),
+        "run:rounded-echo",
+      ),
+      (error: unknown) => error instanceof EngineError
+        && error.failure.category === "unknown_world_outcome"
+        && error.failure.code === "invalid_engine_response"
+        && error.failure.retry_disposition === "reconcile",
+      "distinct fractional decimal request tokens collided through Number",
+    );
   } finally {
     rmSync(echoDirectory, { recursive: true, force: true });
   }
@@ -5657,6 +5812,19 @@ test("TypeScript rejects unsafe JSON and preserves pre-cancellation", async () =
     ...candidate,
     ir_version: "cymule.ir/2",
   } as unknown as PlanCandidate;
+  let deepInput: unknown = 0;
+  for (let depth = 0; depth < 129; depth += 1) deepInput = [deepInput];
+  await assert.rejects(
+    () => new CliEngine(join(tmpdir(), "missing-depth-engine")).run(
+      { plan_id: `sha256:${"0".repeat(64)}`, candidate },
+      deepInput as never,
+      processTarget(process.execPath),
+      "run:deep-json",
+    ),
+    (error: unknown) => error instanceof EngineError
+      && error.failure.category === "validation"
+      && error.failure.code === "request_encoding_failed",
+  );
   await assert.rejects(
     () => withSuccessEngine(
       {

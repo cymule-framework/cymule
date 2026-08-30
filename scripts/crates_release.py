@@ -1161,15 +1161,17 @@ def new_crate_rate_limit_delay(output: str, *, now: float | None = None) -> int 
     return delay
 
 
-def verify_remote_release_authority(
-    controller_sha: str, release_sha: str, release_tag: str
-) -> None:
-    """Re-read the exact remote main and peeled release tag before one write."""
+def verify_remote_release_authority(release_sha: str, release_tag: str) -> None:
+    """Re-read the immutable peeled tag before one crates.io write.
 
-    main_ref = "refs/heads/main"
+    The workflow admits current main once and then runs to completion from that
+    immutable controller SHA. A later public-main advance is another admitted
+    generation, not revocation of this in-flight publication.
+    """
+
     tag_ref = f"refs/tags/{release_tag}^{{}}"
     result = run(
-        ["git", "ls-remote", "origin", main_ref, tag_ref],
+        ["git", "ls-remote", "origin", tag_ref],
         cwd=CONTROL_ROOT,
         capture=True,
     )
@@ -1183,7 +1185,7 @@ def verify_remote_release_authority(
         ):
             raise ValueError("remote release authority returned malformed refs")
         observed[fields[1]] = fields[0]
-    expected = {main_ref: controller_sha, tag_ref: release_sha}
+    expected = {tag_ref: release_sha}
     if observed != expected:
         raise ValueError(
             "remote release authority moved before crates.io publication"
@@ -1277,7 +1279,9 @@ def publish(version: str) -> None:
         ["git", "rev-parse", "HEAD"], cwd=CONTROL_ROOT, capture=True
     ).stdout.strip()
     if local_controller_sha != controller_sha:
-        raise ValueError("crate publication controller checkout does not match main authority")
+        raise ValueError(
+            "crate publication controller checkout does not match admitted authority"
+        )
     stage_directory = os.environ.get("CYMULE_CRATES_STAGE")
     if stage_directory is None or not pathlib.Path(stage_directory).is_absolute():
         raise ValueError("CYMULE_CRATES_STAGE must name the absolute no-OIDC stage")
@@ -1296,7 +1300,7 @@ def publish(version: str) -> None:
                 closed[crate.name].upload,
                 token,
                 lambda: verify_remote_release_authority(
-                    controller_sha, release_sha, release_tag
+                    release_sha, release_tag
                 ),
             )
             outcome = "published"

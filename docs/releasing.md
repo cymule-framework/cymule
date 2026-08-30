@@ -228,17 +228,18 @@ closed archives, re-observes the remote annotated tag, and repeats the strict
 stable-frontier admission for both packages after the environment wait when
 that tag is absent. An existing exact tag instead uses historical recovery
 admission, which accepts exact retained bytes without moving `latest` backward.
-Only after that branch is fixed does the writer recheck current main, mint a
-repository-scoped GitHub App installation token with only `contents: write`,
-construct the annotated tag locally, freeze its raw object SHA, and push that
-exact object. A concurrent tag is accepted only when both its raw tag-object
-SHA and peeled commit equal the local values. A lost push response converges
-only after the same two exact identities are read back. The workflow's built-in
-`GITHUB_TOKEN` remains `contents: read`; the
-earlier credential-free preflight is not treated as a terminal mutation fence. Run
-`publish-crates.yml` only after that tag exists. Crates recovery continues to
-use tag-owned package payload, but its OIDC job executes the exact current-main
-controller from a separate checkout.
+Only after that branch is fixed does the writer reassert its immutable admitted
+controller and payload identities, mint a repository-scoped GitHub App
+installation token with only `contents: write`, construct the annotated tag
+locally, freeze its raw object SHA, and push that exact object. A concurrent tag
+is accepted only when both its raw tag-object SHA and peeled commit equal the
+local values. A lost push response converges only after the same two exact
+identities are read back. The workflow's built-in `GITHUB_TOKEN` remains
+`contents: read`; the earlier credential-free preflight is not treated as a
+terminal mutation fence. Run `publish-crates.yml` only after that tag exists.
+Crates recovery continues to use tag-owned package payload, but its OIDC job
+executes the exact once-admitted current-main controller from a separate
+checkout.
 
 For an npm-only partial recovery after main has advanced, dispatch the immutable
 tag explicitly:
@@ -303,20 +304,19 @@ split into terminal authorities:
    environment as publication, downloads both closed archives, freshly reads
    the remote tag, and repeats the selected pair of admissions before it
    creates or verifies the immutable annotated tag. Only the single-purpose
-   GitHub App can bypass the tag-creation rule. It re-reads current main
-   immediately before a missing-tag push and resolves a failed or lost push
+   GitHub App can bypass the tag-creation rule. It remains bound to the
+   controller/release SHAs admitted from current main at Verify and resolves a failed or lost push
    response only through exact equality of the local raw tag-object SHA, the
    remote raw tag-object SHA, and the peeled release commit.
 5. **Publish** runs in that protected environment with `id-token: write`. It
    re-reads the remote annotated tag's peeled commit against the frozen release
-   SHA and current public main against the resolved controller SHA immediately
-   inside the mutation step, exact-matches the invoked controller files to that
-   commit, downloads only the closed artifact, and uploads a
-   missing immutable version. npm and crates both execute current-main
+   SHA, exact-matches the invoked controller files to the immutable controller
+   admitted at Verify, downloads only the closed artifact, and uploads a
+   missing immutable version. npm and crates both execute that admitted
    controller code while a separate exact-tag workspace supplies only catalog,
    version registry, and payload data. Neither terminal job builds, tests,
-   packages, or executes tag- or artifact-carried code. Crates re-read current
-   main and the peeled tag immediately before every actual crate PUT, including
+   packages, or executes tag- or artifact-carried code. Crates re-read the
+   peeled tag immediately before every actual crate PUT, including
    each bounded rate-limit retry.
 6. **Verify published** has no OIDC permission. npm executes the resolved
    current-main verifier against the separate exact-tag payload; it reads
@@ -326,7 +326,7 @@ split into terminal authorities:
 For npm, Close independently rebuilds both package names and compares SHA-1,
 SHA-512, and archive bytes. The terminal runs the current-main
 `npm_release.py publish` controller, which reads registry state and repeats the
-main/tag fence after a missing result immediately before invoking npm. It points
+immutable tag fence after a missing result immediately before invoking npm. It points
 its read-only payload root at the exact tag and never executes a script from
 that payload or artifact. Every stable-version controller shares one global,
 non-cancelling concurrency group because npm exposes no conditional dist-tag
@@ -378,7 +378,7 @@ attempt, and an unavailable readback reports an ambiguous outcome while
 preserving the same crate/version/archive retry identity. The only automatic
 PUT retry is an exact new-crate-name 429 response whose readback proves absence
 and whose server retry time is parseable and bounded; the next PUT repeats the
-main/tag fence. A new crate name still requires a separate reviewed, temporary
+immutable tag fence under the same admitted controller. A new crate name still requires a separate reviewed, temporary
 ownership bootstrap and trusted-publisher configuration; the normal workflow
 has no token fallback.
 
@@ -410,7 +410,7 @@ evidence never substitutes one authority for another.
 
 Before any terminal BOM attestation is issued, a protected `contents: read`
 pre-attestation job mints a repository-scoped App token with only Administration
-read and Actions read, rebinds current main plus both raw tag objects, and runs
+read and Actions read, rebinds the admitted controller plus both raw tag objects, and runs
 the complete live settings verifier. It emits no receipt or cross-job artifact.
 A failed immutable-Release, ruleset, environment, Actions-default, or
 default-branch gate therefore prevents `actions/attest` from creating authority.
@@ -418,7 +418,7 @@ default-branch gate therefore prevents `actions/attest` from creating authority.
 The protected attestation job depends on that successful live gate, has
 `contents: read`, uses a full-history
 `release-authority` checkout, rechecks that controller
-SHA is still public `main`, re-reads the raw remote tag ref against
+SHA equals the immutable controller admitted at workflow start, re-reads the raw remote tag ref against
 `release_tag_sha` and its peeled commit against `release_sha`, and revalidates
 the complete BOM/3 projection:
 release generation, registry digest, every schema/domain/migration edge, every
@@ -454,9 +454,9 @@ only then checks the already-attested registry/package projection; the complete
 workspace-derived semantic validator runs in both the credential-free freeze
 and protected read-only attestor, never as an unpinned dependency install in
 the mutation job. `finalize_release.py` re-verifies the bundle against the
-current-main finalizer workflow and controller SHA before every Release
+admitted finalizer workflow and immutable controller SHA before every Release
 mutation. Immediately before draft creation, BOM upload, draft publication, or
-Latest correction, after attestation and the current-main/raw-tag fence, its
+Latest correction, after attestation and the controller/raw-tag admission, its
 final fail-before-write check revalidates the receipt digest, same-run/attempt
 and Git identities, exact safe settings snapshot, and expiry. In particular,
 owner-enforced immutable Releases are proven before `--draft=false`; a
@@ -470,13 +470,14 @@ Release is accepted only when its tag, title, notes, draft state, prerelease
 state, immutable state, exact one-BOM asset set, and BOM bytes match. REST asset
 readback must preserve the exact asset database ID, name, byte size, server
 SHA-256 digest, and `uploaded` state across publication. If main advances after
-the first run uploads the BOM, the next current controller rebuilds the same
-immutable BOM, creates a fresh stage and attestation, and completes the draft
-without deleting or replacing its asset. The old run's stage is not accepted
-under the new controller. The controller re-reads
+workflow admission, the already-running non-cancelled controller remains
+authoritative and completes against its frozen stage. If that run terminates, a
+newly admitted controller may rebuild the same immutable BOM, create a fresh
+stage and attestation, and recover the draft without deleting or replacing its
+asset; artifacts never cross controller identities. The controller re-reads
 the complete REST-paginated Release inventory and its exact `isLatest`
-projection before and after every mutation, then re-reads current main, the raw
-annotated tag object, and its peeled commit immediately before draft creation,
+projection before and after every mutation, then re-reads the raw annotated tag
+object and its peeled commit immediately before draft creation,
 BOM upload, publication, or Latest correction and after the final metadata and
 asset readback. Retagging the same commit with a different annotation or
 signature is therefore a tag-authority change and fails

@@ -27,7 +27,7 @@ fn assert_blocked_rpc_output_is_interrupted(signal: nix::sys::signal::Signal) {
         "request": {
             "type": "seal_resource",
             "candidate": {
-                "resource_version": "cymule.resource/3",
+                "resource_version": "cymule.resource/4",
                 "shape": "inline",
                 "media_type": "application/json",
                 "inline": {
@@ -231,7 +231,7 @@ fn rpc_rejects_typed_decoding_that_collapses_array_elements() {
 #[test]
 fn direct_cli_uses_the_lossless_strict_typed_json_gate() {
     let base = r#"{
-      "resource_version":"cymule.resource/3",
+      "resource_version":"cymule.resource/4",
       "shape":"inline",
       "media_type":"application/json",
       "inline":{"encoding":"json","value":null},
@@ -257,8 +257,8 @@ fn direct_cli_uses_the_lossless_strict_typed_json_gate() {
         (
             "duplicate member",
             base.replacen(
-                "\"resource_version\":\"cymule.resource/3\"",
-                "\"resource_version\":\"cymule.resource/3\",\"resource_version\":\"cymule.resource/3\"",
+                "\"resource_version\":\"cymule.resource/4\"",
+                "\"resource_version\":\"cymule.resource/4\",\"resource_version\":\"cymule.resource/4\"",
                 1,
             ),
             "duplicate JSON object",
@@ -293,5 +293,58 @@ fn direct_cli_uses_the_lossless_strict_typed_json_gate() {
     assert!(
         !output.status.success(),
         "fractional typed integer is rejected"
+    );
+}
+
+#[test]
+fn direct_cli_hard_cuts_resource_media_type_and_predecessor_generation() {
+    let candidate = |resource_version: &str, media_type: &str| {
+        serde_json::to_vec(&serde_json::json!({
+            "resource_version": resource_version,
+            "shape": "inline",
+            "media_type": media_type,
+            "inline": {"encoding": "utf8", "text": "value"},
+            "integrity": {"kind": "inline"}
+        }))
+        .expect("Resource candidate serializes")
+    };
+
+    let vendor = run_direct(
+        &["resource", "seal", "--input", "-"],
+        &candidate("cymule.resource/4", "application/vnd.cymule.resource+json"),
+    );
+    assert!(
+        vendor.status.success(),
+        "valid vendor media type was rejected: {}",
+        String::from_utf8_lossy(&vendor.stderr)
+    );
+
+    for media_type in [
+        "text/\0plain",
+        "text/",
+        "/plain",
+        "a/b/c",
+        "Text/plain",
+        "text/Plain",
+        "text/plain;charset=utf-8",
+        "text/ plain",
+    ] {
+        let output = run_direct(
+            &["resource", "seal", "--input", "-"],
+            &candidate("cymule.resource/4", media_type),
+        );
+        assert!(
+            !output.status.success(),
+            "invalid media type {media_type:?} was accepted"
+        );
+    }
+
+    let predecessor = run_direct(
+        &["resource", "seal", "--input", "-"],
+        &candidate("cymule.resource/3", "text/plain"),
+    );
+    assert!(
+        !predecessor.status.success(),
+        "predecessor Resource generation was accepted"
     );
 }

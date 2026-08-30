@@ -30,12 +30,12 @@ pub(crate) mod pinned_machine;
 pub(crate) mod pinned_wait;
 
 /// Fixed-shape durable root manifest schema.
-pub const STATE_ROOT_MANIFEST_VERSION: &str = "cymule.durable-state-root/3";
+pub const STATE_ROOT_MANIFEST_VERSION: &str = "cymule.durable-state-root/4";
 /// Immutable canonical JSON value object schema.
-pub const STATE_ROOT_VALUE_VERSION: &str = "cymule.durable-state-value/3";
+pub const STATE_ROOT_VALUE_VERSION: &str = "cymule.durable-state-value/4";
 /// Domain-separated revision chain over exact persistent roots.
 pub const DURABLE_REVISION_VERSION: &str = "cymule.durable-revision/3";
-pub const RUN_QUERY_INDEXES_VERSION: &str = "cymule.run-query-indexes/2";
+pub const RUN_QUERY_INDEXES_VERSION: &str = "cymule.run-query-indexes/3";
 pub const PENDING_WAIT_SOURCE_VERSION: &str = "cymule.pending-wait-source/1";
 /// Maximum canonical byte size of one root manifest.
 pub const MAX_STATE_ROOT_MANIFEST_BYTES: usize = 32 * 1024;
@@ -82,6 +82,8 @@ pub enum StateRootLeafKind {
     RunCurrent,
     /// Durable wait.
     Wait,
+    /// Bounded Run-query summary derived from one complete durable wait.
+    WaitSummary,
     /// Identified wait activation.
     WaitActivation,
     /// Exact immutable Run cancellation receipt.
@@ -1596,17 +1598,7 @@ fn verify_leaf_bytes(kind: StateRootLeafKind, bytes: &[u8]) -> DurableResult<()>
 
     match kind {
         Kind::MachinePlan => verify_typed_leaf::<cymule_core::SealedPlan>(bytes),
-        Kind::MachineArtifact => {
-            let artifact = cymule_core::ArtifactRecord::decode(bytes)?;
-            if cymule_core::canonical_bytes(&artifact)? != bytes {
-                return Err(DurableError::Integrity {
-                    code: "state_root_machine_artifact_canonical_mismatch".to_owned(),
-                    message: "Machine Artifact leaf changes under its strict canonical round trip"
-                        .to_owned(),
-                });
-            }
-            Ok(())
-        }
+        Kind::MachineArtifact => verify_machine_artifact_leaf(bytes),
         Kind::MachineEvent => verify_typed_leaf::<cymule_core::Event>(bytes),
         Kind::MachineAdmission => verify_typed_leaf::<cymule_core::CommandAdmission>(bytes),
         Kind::MachineCommandBatch => {
@@ -1619,11 +1611,12 @@ fn verify_leaf_bytes(kind: StateRootLeafKind, bytes: &[u8]) -> DurableResult<()>
         Kind::Continuation => verify_typed_leaf::<crate::Continuation>(bytes),
         Kind::RunCurrent => verify_typed_leaf::<crate::DurableRunCurrent>(bytes),
         Kind::Wait => verify_typed_leaf::<crate::WaitCondition>(bytes),
+        Kind::WaitSummary => verify_wait_summary_leaf(bytes),
         Kind::WaitActivation => verify_typed_leaf::<crate::WaitActivationReceipt>(bytes),
         Kind::CancellationReceipt => verify_typed_leaf::<crate::CancellationReceipt>(bytes),
         Kind::EffectResolutionReceipt => verify_typed_leaf::<crate::EffectResolutionReceipt>(bytes),
         Kind::Lease => verify_typed_leaf::<crate::CoordinationLease>(bytes),
-        Kind::Outbox => verify_typed_leaf::<crate::EffectDispatch>(bytes),
+        Kind::Outbox => verify_effect_dispatch_leaf(bytes),
         Kind::OutboxOwner => verify_outbox_owner_leaf(bytes),
         Kind::ComponentOccurrence => verify_typed_leaf::<crate::ComponentOccurrence>(bytes),
         Kind::OperationAttempt => verify_typed_leaf::<crate::OperationAttempt>(bytes),
@@ -1690,6 +1683,26 @@ fn verify_leaf_bytes(kind: StateRootLeafKind, bytes: &[u8]) -> DurableResult<()>
         Kind::VirtualStateLeaf => verify_typed_leaf::<virtual_work::VirtualStateLeaf>(bytes),
         Kind::ResourceCatalogRecord => verify_typed_leaf::<resource::ResourceCatalogRecord>(bytes),
     }
+}
+
+fn verify_machine_artifact_leaf(bytes: &[u8]) -> DurableResult<()> {
+    let artifact = cymule_core::ArtifactRecord::decode(bytes)?;
+    if cymule_core::canonical_bytes(&artifact)? != bytes {
+        return Err(DurableError::Integrity {
+            code: "state_root_machine_artifact_canonical_mismatch".to_owned(),
+            message: "Machine Artifact leaf changes under its strict canonical round trip"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn verify_wait_summary_leaf(bytes: &[u8]) -> DurableResult<()> {
+    verify_checked_typed_leaf::<crate::DurableWaitSummary>(bytes, crate::DurableWaitSummary::verify)
+}
+
+fn verify_effect_dispatch_leaf(bytes: &[u8]) -> DurableResult<()> {
+    verify_checked_typed_leaf::<crate::EffectDispatch>(bytes, crate::EffectDispatch::verify_wire)
 }
 
 fn validate_resource_target(to_run: &str) -> DurableResult<()> {
@@ -1807,6 +1820,16 @@ fn verify_typed_leaf<T>(bytes: &[u8]) -> DurableResult<()>
 where
     T: DeserializeOwned + Serialize,
 {
+    verify_checked_typed_leaf::<T>(bytes, |_| Ok(()))
+}
+
+fn verify_checked_typed_leaf<T>(
+    bytes: &[u8],
+    verify: impl FnOnce(&T) -> DurableResult<()>,
+) -> DurableResult<()>
+where
+    T: DeserializeOwned + Serialize,
+{
     let decoded = cymule_core::decode_json::<T>(bytes)?;
     if cymule_core::canonical_bytes(&decoded)? != bytes {
         return Err(DurableError::Integrity {
@@ -1814,7 +1837,7 @@ where
             message: "state-root leaf changes under its typed canonical round trip".to_owned(),
         });
     }
-    Ok(())
+    verify(&decoded)
 }
 
 fn verify_outbox_owner_leaf(bytes: &[u8]) -> DurableResult<()> {
@@ -6779,9 +6802,11 @@ fn audit_run_current_memberships<R: StateRootResolver + ?Sized>(
     resolver: &mut R,
 ) -> DurableResult<()> {
     let mut overlay = ObjectOverlay::new(resolver);
+    let mut owned_waits = BTreeSet::new();
     let mut owned_intents = BTreeSet::new();
     for (run_id, descriptor) in materialize_map(&manifest.roots.run_query_indexes, &mut overlay)? {
         let roots = descriptor.decode_run_query_indexes(&run_id)?;
+        audit_run_wait_memberships(manifest, &run_id, &roots, &mut owned_waits, &mut overlay)?;
         audit_run_pending_wait_members(manifest, &run_id, &roots, &mut overlay)?;
         let (effects, active_effects) = audit_run_effect_memberships(
             manifest,
@@ -6823,12 +6848,56 @@ fn audit_run_current_memberships<R: StateRootResolver + ?Sized>(
             )?;
         }
     }
+    if u64::try_from(owned_waits.len()).ok() != Some(manifest.roots.waits.entries) {
+        return Err(DurableError::Integrity {
+            code: "state_root_wait_summary_set_mismatch".to_owned(),
+            message: "global Waits and Run-local query summaries have different key sets"
+                .to_owned(),
+        });
+    }
     if u64::try_from(owned_intents.len()).ok() != Some(manifest.roots.outbox.entries) {
         return Err(DurableError::Integrity {
             code: "state_root_outbox_owner_set_mismatch".to_owned(),
             message: "immutable Effect owners and Run-local outboxes have different key sets"
                 .to_owned(),
         });
+    }
+    Ok(())
+}
+
+fn audit_run_wait_memberships<R: StateRootResolver + ?Sized>(
+    manifest: &StateRootManifest,
+    run_id: &str,
+    roots: &RunQueryIndexRoots,
+    owned_waits: &mut BTreeSet<String>,
+    overlay: &mut ObjectOverlay<'_, R>,
+) -> DurableResult<()> {
+    for (wait_id, value) in materialize_map(&roots.waits, overlay)? {
+        let summary: crate::DurableWaitSummary = value.decode(StateRootLeafKind::WaitSummary)?;
+        summary.verify()?;
+        let wait: crate::WaitCondition = map_get(&manifest.roots.waits, &wait_id, overlay)?
+            .ok_or_else(|| DurableError::Integrity {
+                code: "state_root_wait_summary_current_missing".to_owned(),
+                message: format!(
+                    "Run {run_id} Wait summary {wait_id} has no complete global current"
+                ),
+            })?
+            .decode(StateRootLeafKind::Wait)?;
+        wait.verify_wire()?;
+        if summary.wait_id != wait_id
+            || summary.run_id != run_id
+            || wait.wait_id != wait_id
+            || wait.run_id != run_id
+            || summary != crate::DurableWaitSummary::from_wait(&wait)
+            || !owned_waits.insert(wait_id.clone())
+        {
+            return Err(DurableError::Integrity {
+                code: "state_root_wait_summary_mismatch".to_owned(),
+                message: format!(
+                    "Run {run_id} Wait summary {wait_id} changed its key, owner, or current projection"
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -8574,6 +8643,8 @@ impl<R: StateRootResolver + ?Sized> StateRootSidecarWriter<'_, '_, R> {
 
     fn put_wait(&mut self, value: &crate::WaitCondition) -> DurableResult<()> {
         value.verify_wire()?;
+        let summary = crate::DurableWaitSummary::from_wait(value);
+        summary.verify()?;
         let previous = map_get(&self.roots.waits, &value.wait_id, self.overlay)?
             .map(|retained| retained.decode::<crate::WaitCondition>(StateRootLeafKind::Wait))
             .transpose()?;
@@ -8611,8 +8682,8 @@ impl<R: StateRootResolver + ?Sized> StateRootSidecarWriter<'_, '_, R> {
             &value.run_id,
             RunQueryIndexKind::Waits,
             &value.wait_id,
-            StateRootLeafKind::Wait,
-            value,
+            StateRootLeafKind::WaitSummary,
+            &summary,
             self.overlay,
         )?;
         sync_run_query_item(
@@ -11470,8 +11541,12 @@ fn build_genesis_run_query_indexes<R: StateRootResolver + ?Sized>(
         .waits
         .iter()
         .filter(|(_, value)| value.run_id == run_id)
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
+        .map(|(key, value)| {
+            let summary = crate::DurableWaitSummary::from_wait(value);
+            summary.verify()?;
+            Ok((key.clone(), summary))
+        })
+        .collect::<DurableResult<BTreeMap<_, _>>>()?;
     let effects = state
         .outbox
         .iter()
@@ -11514,7 +11589,7 @@ fn build_genesis_run_query_indexes<R: StateRootResolver + ?Sized>(
     StateRootValue::run_query_indexes(
         run_id,
         RunQueryIndexRoots {
-            waits: build_typed_map(StateRootLeafKind::Wait, waits, overlay)?,
+            waits: build_typed_map(StateRootLeafKind::WaitSummary, waits, overlay)?,
             effects: build_typed_map(StateRootLeafKind::Outbox, effects, overlay)?,
             occurrences: build_typed_map(
                 StateRootLeafKind::ComponentOccurrence,
@@ -14544,6 +14619,224 @@ mod tests {
         dispatch
     }
 
+    fn insert_raw_value(
+        resolver: &mut TestResolver,
+        value: StateRootValue,
+    ) -> (String, StateRootObject) {
+        let object_id = state_root_value_id(&value).expect("raw test value identity derives");
+        let object = StateRootObject::Value(StateValueObject {
+            value_version: STATE_ROOT_VALUE_VERSION.to_owned(),
+            object_id: object_id.clone(),
+            value,
+        });
+        resolver.objects.insert(object_id.clone(), object.clone());
+        (object_id, object)
+    }
+
+    fn insert_raw_map(resolver: &mut TestResolver, entries: Vec<(String, String)>) -> MapRoot {
+        let (root, nodes) = cymule_authenticated_collections::build_map(entries)
+            .expect("raw test map builds")
+            .into_parts();
+        for node in nodes {
+            let object = StateRootObject::MapNode(node);
+            resolver
+                .objects
+                .insert(object.object_id().to_owned(), object);
+        }
+        root
+    }
+
+    fn tampered_effect_manifest(
+        dispatch: &crate::EffectDispatch,
+    ) -> (StateRootManifest, TestResolver, StateRootObject) {
+        let mut resolver = TestResolver::default();
+        let malformed = StateRootValue::Leaf {
+            kind: StateRootLeafKind::Outbox,
+            canonical_json: String::from_utf8(
+                cymule_core::canonical_bytes(dispatch).expect("tampered dispatch canonicalizes"),
+            )
+            .expect("canonical dispatch is UTF-8"),
+        };
+        let (dispatch_value_id, malformed_object) = insert_raw_value(&mut resolver, malformed);
+        let effects = insert_raw_map(
+            &mut resolver,
+            vec![(dispatch.intent_id.clone(), dispatch_value_id)],
+        );
+
+        let descriptor = StateRootValue::run_query_indexes(
+            &dispatch.run_id,
+            RunQueryIndexRoots {
+                effects,
+                ..RunQueryIndexRoots::default()
+            },
+        )
+        .expect("tampered Effect query descriptor closes");
+        let (descriptor_id, _) = insert_raw_value(&mut resolver, descriptor);
+        let run_query_indexes = insert_raw_map(
+            &mut resolver,
+            vec![(dispatch.run_id.clone(), descriptor_id)],
+        );
+
+        let owner = OutboxOwner {
+            intent_id: dispatch.intent_id.clone(),
+            run_id: dispatch.run_id.clone(),
+        };
+        owner.verify().expect("tampered Effect owner verifies");
+        let owner_value = StateRootValue::encode(StateRootLeafKind::OutboxOwner, &owner)
+            .expect("Effect owner value closes");
+        let (owner_id, _) = insert_raw_value(&mut resolver, owner_value);
+        let outbox = insert_raw_map(&mut resolver, vec![(dispatch.intent_id.clone(), owner_id)]);
+
+        let mut roots = StateRoots::empty();
+        roots.run_query_indexes = run_query_indexes;
+        roots.outbox = outbox;
+        let frontier = empty_machine_frontier();
+        let revision =
+            derive_genesis_revision(revision_state(&frontier, &roots)).expect("revision derives");
+        let manifest = StateRootManifest::new(
+            StateRootManifestMetadata {
+                durable_version: crate::DURABLE_STATE_VERSION.to_owned(),
+                revision,
+                sequence: 0,
+                parent_manifest: None,
+                parent_revision: None,
+                delta_digest: None,
+                machine_snapshot_version: cymule_core::MachineSnapshot::VERSION.to_owned(),
+            },
+            frontier,
+            None,
+            roots,
+        )
+        .expect("tampered Effect manifest shape closes");
+        resolver.pinned = manifest.manifest_id.clone();
+        resolver.objects.insert(
+            manifest.manifest_id.clone(),
+            StateRootObject::Manifest(manifest.clone()),
+        );
+        (manifest, resolver, malformed_object)
+    }
+
+    #[test]
+    fn effect_result_tamper_fails_leaf_reopen_exact_read_and_full_audit() {
+        let mut missing = claimed_dispatch("run:effect-result-missing", "worker:effect", 1);
+        missing.state = crate::OutboxState::Applied;
+        let mut wrong_kind = missing.clone();
+        wrong_kind.run_id = "run:effect-result-wrong-kind".to_owned();
+        wrong_kind.intent_id = cymule_core::content_id(
+            "cymule.test.state-root-effect-wrong-kind/1",
+            &wrong_kind.run_id,
+        )
+        .expect("wrong-kind Effect identity derives");
+        wrong_kind.result = Some(
+            cymule_core::artifact_ref("cymule.test.wrong-effect-result/1", b"null")
+                .expect("wrong-kind result reference derives"),
+        );
+
+        for dispatch in [missing, wrong_kind] {
+            let (manifest, mut resolver, malformed_object) = tampered_effect_manifest(&dispatch);
+            let encoded = cymule_core::canonical_bytes(&malformed_object)
+                .expect("malformed value object serializes");
+            assert!(decode_state_root_object(&encoded).is_err());
+            assert!(
+                load_effect_dispatch(
+                    &manifest,
+                    &mut resolver,
+                    Some(&dispatch.run_id),
+                    &dispatch.intent_id,
+                )
+                .is_err()
+            );
+            assert!(reachable_state_root_objects(&manifest, &mut resolver).is_err());
+        }
+    }
+
+    #[test]
+    fn full_audit_rejects_wait_summary_that_differs_from_complete_wait() {
+        let wait = crate::WaitCondition {
+            wait_id: cymule_core::content_id("cymule.test.wait-summary-audit/1", &())
+                .expect("Wait identity derives"),
+            run_id: "run:wait-summary-audit".to_owned(),
+            kind: crate::WaitKind::Input {
+                correlation: "input:wait-summary-audit".to_owned(),
+                schema: serde_json::json!(true),
+            },
+            consume_once: true,
+            owner: crate::WaitOwner {
+                invocation_id: "invocation:wait-summary-audit".to_owned(),
+                definition_id: "definition:wait-summary-audit".to_owned(),
+                region_path: Vec::new(),
+                site_id: "site:wait-summary-audit".to_owned(),
+                step_index: 0,
+                bind: None,
+            },
+            state: crate::WaitState::Cancelled,
+            result: None,
+        };
+        wait.verify_wire().expect("complete Wait verifies");
+        let mut summary = crate::DurableWaitSummary::from_wait(&wait);
+        summary.state = crate::WaitState::Pending;
+        summary
+            .verify()
+            .expect("tampered summary is independently valid");
+
+        let mut resolver = TestResolver::default();
+        let (wait_id, _) = insert_raw_value(
+            &mut resolver,
+            StateRootValue::encode(StateRootLeafKind::Wait, &wait)
+                .expect("complete Wait leaf encodes"),
+        );
+        let waits = insert_raw_map(&mut resolver, vec![(wait.wait_id.clone(), wait_id)]);
+        let (summary_id, _) = insert_raw_value(
+            &mut resolver,
+            StateRootValue::encode(StateRootLeafKind::WaitSummary, &summary)
+                .expect("Wait summary leaf encodes"),
+        );
+        let summary_root = insert_raw_map(&mut resolver, vec![(wait.wait_id.clone(), summary_id)]);
+        let descriptor = StateRootValue::run_query_indexes(
+            &wait.run_id,
+            RunQueryIndexRoots {
+                waits: summary_root,
+                ..RunQueryIndexRoots::default()
+            },
+        )
+        .expect("Wait query descriptor closes");
+        let (descriptor_id, _) = insert_raw_value(&mut resolver, descriptor);
+        let run_query_indexes =
+            insert_raw_map(&mut resolver, vec![(wait.run_id.clone(), descriptor_id)]);
+
+        let mut roots = StateRoots::empty();
+        roots.waits = waits;
+        roots.run_query_indexes = run_query_indexes;
+        let frontier = empty_machine_frontier();
+        let revision =
+            derive_genesis_revision(revision_state(&frontier, &roots)).expect("revision derives");
+        let manifest = StateRootManifest::new(
+            StateRootManifestMetadata {
+                durable_version: crate::DURABLE_STATE_VERSION.to_owned(),
+                revision,
+                sequence: 0,
+                parent_manifest: None,
+                parent_revision: None,
+                delta_digest: None,
+                machine_snapshot_version: cymule_core::MachineSnapshot::VERSION.to_owned(),
+            },
+            frontier,
+            None,
+            roots,
+        )
+        .expect("Wait summary tamper manifest closes");
+        resolver.pinned = manifest.manifest_id.clone();
+        resolver.objects.insert(
+            manifest.manifest_id.clone(),
+            StateRootObject::Manifest(manifest.clone()),
+        );
+        assert!(matches!(
+            reachable_state_root_objects(&manifest, &mut resolver),
+            Err(DurableError::Integrity { code, .. })
+                if code == "state_root_wait_summary_mismatch"
+        ));
+    }
+
     fn agent_message_fixture(
         count: u64,
     ) -> (
@@ -16756,6 +17049,37 @@ mod tests {
             Err(DurableError::Integrity { code, .. })
                 if code == "state_root_reachable_object_missing"
         ));
+    }
+
+    #[test]
+    fn predecessor_state_root_value_manifest_and_query_index_generations_are_rejected() {
+        let leaf = StateRootValue::encode(StateRootLeafKind::JournalRecord, &record(0))
+            .expect("current value leaf encodes");
+        let mut value = StateValueObject {
+            value_version: "cymule.durable-state-value/3".to_owned(),
+            object_id: state_root_value_id(&leaf).expect("current value identity derives"),
+            value: leaf,
+        };
+        assert!(value.verify().is_err());
+        value.value_version = STATE_ROOT_VALUE_VERSION.to_owned();
+        value.verify().expect("current value verifies");
+
+        let state = crate::DurableState::new(cymule_core::Machine::new().snapshot());
+        let transition = StateRootManifest::genesis(&state).expect("current genesis builds");
+        let mut manifest = transition.manifest().clone();
+        manifest.manifest_version = "cymule.durable-state-root/3".to_owned();
+        assert!(manifest.verify().is_err());
+
+        let mut query = StateRootValue::run_query_indexes(
+            "run:predecessor-query-index",
+            RunQueryIndexRoots::default(),
+        )
+        .expect("current query index encodes");
+        let StateRootValue::RunQueryIndexes { index_version, .. } = &mut query else {
+            panic!("query constructor returned another value kind")
+        };
+        *index_version = "cymule.run-query-indexes/2".to_owned();
+        assert!(query.verify().is_err());
     }
 
     #[test]

@@ -7,13 +7,15 @@ use cymule_agent::{
 };
 use cymule_core::decode_json;
 use cymule_profile_protocol::agent::{
-    AgentContextScanLimits, AgentHostOccurrenceState, AgentHostRequest, AgentMessagePage,
-    AgentMessagePageQuery, AgentOccurrenceSource, AgentSessionCurrent, AgentStreamChunk,
-    AgentStreamCommand, AgentStreamCurrent, AgentStreamDelivery, AgentStreamEffect,
-    AgentStreamPublicationContent, AgentStreamPublicationIntent, AgentStreamResourceSource,
+    AgentCommand, AgentCommandAction, AgentContextScanLimits, AgentHostOccurrenceState,
+    AgentHostRequest, AgentMessagePage, AgentMessagePageQuery, AgentOccurrenceSource,
+    AgentSessionCurrent, AgentStreamChunk, AgentStreamCommand, AgentStreamCurrent,
+    AgentStreamDelivery, AgentStreamEffect, AgentStreamPublicationContent,
+    AgentStreamPublicationIntent, AgentStreamPublicationReservation, AgentStreamResourceSource,
     AgentStreamSource, AgentStreamState, AgentStreamTarget, AgentStreamTargetSource,
     AgentWorkspaceCommand, AgentWorkspaceSource, ContextRequest, ContextSnapshot,
     MAX_AGENT_RECOVERY_OBSERVATIONS, MAX_AGENT_VALUE_ENTRIES, MessageRole, ModelRequest,
+    reserve_agent_stream_publication,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -137,7 +139,7 @@ fn stream_current() -> Value {
 #[test]
 fn schema_accepts_terminal_currents_and_rejects_removed_aggregate_records() {
     let schema = agent_schema();
-    assert_eq!(schema["title"], "Cymule Agent Protocol cymule.agent/6");
+    assert_eq!(schema["title"], "Cymule Agent Protocol cymule.agent/7");
     assert_eq!(
         schema["$id"],
         "https://cymule.dev/schemas/agent-protocol.schema.json"
@@ -1055,6 +1057,102 @@ fn publication_intent_wire_requires_source_and_content_authority() {
         assert!(!schema_validator("agentStreamPublicationIntent").is_valid(&missing));
         assert!(serde_json::from_value::<AgentStreamPublicationIntent>(missing).is_err());
     }
+}
+
+#[test]
+fn publication_reservation_is_required_closed_and_schema_valid() {
+    let open = AgentStreamCommand::Open {
+        session_id: "session:reservation-schema".to_owned(),
+        stream_id: "stream:reservation-schema".to_owned(),
+        target: AgentStreamTarget::Message {
+            message_id: "message:reservation-schema".to_owned(),
+            role: MessageRole::Agent,
+        },
+        delivery: AgentStreamDelivery::ExternalResource {
+            resolver_binding: "resolver:reservation-schema/1".to_owned(),
+            content: AgentStreamPublicationContent {
+                media_type: "application/octet-stream".to_owned(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                size: 1,
+            },
+        },
+    };
+    let opened = AgentStreamSource::Open {
+        session: AgentSessionCurrent::new("session:reservation-schema")
+            .expect("reservation schema Session constructs"),
+        stream: None,
+        target: AgentStreamTargetSource::Message { current: None },
+    }
+    .reduce(&format!("sha256:{}", "b".repeat(64)), &open)
+    .expect("reservation schema stream opens");
+    let AgentStreamEffect::Opened { session } = opened.effect else {
+        panic!("Open returns its Session current")
+    };
+    let finalize = AgentStreamCommand::Finalize {
+        session_id: "session:reservation-schema".to_owned(),
+        stream_id: "stream:reservation-schema".to_owned(),
+    };
+    let command = AgentCommand::new(
+        format!("sha256:{}", "c".repeat(64)),
+        AgentCommandAction::Stream(finalize),
+    )
+    .expect("reservation schema Finalize command seals");
+    let source = AgentStreamSource::Finalize {
+        session,
+        stream: opened.stream,
+        chunks: Vec::new(),
+        target: AgentStreamTargetSource::Message { current: None },
+        update: None,
+        resource: Some(Box::new(AgentStreamResourceSource {
+            retention: None,
+            pin: None,
+        })),
+    };
+    let reserved = reserve_agent_stream_publication(&source, &command)
+        .expect("reservation schema source reserves before I/O");
+    let wire = serde_json::to_value(
+        reserved
+            .stream
+            .publication_reservation
+            .as_ref()
+            .expect("reservation persists in stream current"),
+    )
+    .expect("reservation encodes");
+    schema_validator("agentStreamPublicationReservation")
+        .validate(&wire)
+        .expect("reservation validates against its closed schema");
+    serde_json::from_value::<AgentStreamPublicationReservation>(wire.clone())
+        .expect("reservation decodes through strict Serde");
+    for field in [
+        "reservation_version",
+        "reservation_id",
+        "intent",
+        "resource_pin_receipt",
+        "attempt",
+        "phase",
+    ] {
+        let mut missing = wire.clone();
+        missing
+            .as_object_mut()
+            .expect("reservation wire is an object")
+            .remove(field);
+        assert!(
+            serde_json::from_value::<AgentStreamPublicationReservation>(missing.clone()).is_err()
+        );
+        assert!(!schema_validator("agentStreamPublicationReservation").is_valid(&missing));
+    }
+
+    let current = serde_json::to_value(reserved.stream).expect("reserved stream encodes");
+    schema_validator("agentStreamCurrent")
+        .validate(&current)
+        .expect("reserved stream validates");
+    let mut missing = current;
+    missing
+        .as_object_mut()
+        .expect("stream current is an object")
+        .remove("publication_reservation");
+    assert!(serde_json::from_value::<AgentStreamCurrent>(missing.clone()).is_err());
+    assert!(!schema_validator("agentStreamCurrent").is_valid(&missing));
 }
 
 #[test]

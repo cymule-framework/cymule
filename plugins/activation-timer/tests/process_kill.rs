@@ -555,6 +555,66 @@ fn timer_selection_activation_and_ack_survive_real_process_death() {
     }
 }
 
+#[test]
+fn corrupt_timer_schedule_reaches_neither_selection_delivery_nor_m1_cas() {
+    let world = TestWorld::new(7).expect("timer test world creates");
+    let state_database = world
+        .domain()
+        .path("state.sqlite")
+        .expect("state path resolves");
+    let timer_database = world
+        .domain()
+        .path("timer.sqlite")
+        .expect("timer path resolves");
+    let clock_database = world
+        .domain()
+        .path("clock.sqlite")
+        .expect("Clock path resolves");
+    let store_domain = "domain:timer-corrupt-schedule";
+    let mut runtime = open_runtime(
+        SqliteStore::open(&state_database, store_domain).expect("durable store opens"),
+        &clock_database,
+    );
+    start_waiting_run(
+        &mut runtime,
+        json!({"case": "corrupt-schedule"}),
+        execution_request(&clock_database),
+    );
+    let mut timer = SqliteTimerDriver::open_with_clock(&timer_database, FixedClock(100))
+        .expect("timer driver opens");
+    timer
+        .schedule(ACTIVATION_ID, TIMER_ID, 100, &json!({"due": true}))
+        .expect("timer schedules");
+    Connection::open(&timer_database)
+        .expect("timer store opens for corruption")
+        .execute(
+            "UPDATE cymule_timers SET value_json = X'66616c7365'
+             WHERE activation_id = ?1",
+            [ACTIVATION_ID],
+        )
+        .expect("timer value is corrupted without changing its schedule digest");
+    let before = physical_head(&state_database, store_domain);
+
+    assert!(matches!(
+        runtime.drive_wait_source(&mut timer, 1),
+        Err(cymule_durable::DurableError::Integrity { ref code, .. })
+            if code == "timer_schedule_digest_mismatch"
+    ));
+    assert_eq!(physical_head(&state_database, store_domain), before);
+    assert_eq!(
+        run_current(&mut runtime).continuation_status,
+        ContinuationStatus::Waiting
+    );
+}
+
+fn physical_head(path: &Path, domain: &str) -> StoreHead {
+    let mut observer = SqliteStore::open_read_only(path, domain).expect("store observer opens");
+    observer
+        .load_head()
+        .expect("store head reads")
+        .expect("store head exists")
+}
+
 fn run_timer_kill_scenario(seed: u64, mode: &str) {
     let scenario = prepare_timer_scenario(seed, mode);
     kill_timer_worker(&scenario, mode);

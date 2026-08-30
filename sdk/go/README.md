@@ -58,11 +58,15 @@ failures, including `unknown_world_outcome` for a lost mutating response.
 Every query carries explicit revision/cursor and item/byte bounds and returns
 one revision/StateRoot-pinned response; there is no query ID or full
 Run/domain mirror.
-Interruption terminates the CLI's entire isolated process group through a
-bounded TERM-to-KILL sequence and reaps it before returning, including when a
-descendant ignores TERM or retains an output pipe.
-Even after a natural Engine exit, residual process-group descendants are
-terminated and the response is treated as lost.
+Interruption immediately kills the official direct Child, closes all three
+parent pipe endpoints, and reaps that child. The Engine/executor watchdog owns
+descendant closure; the SDK never signals a raw PID or PGID after reaping.
+Natural Engine exit is observed with `waitid(WNOWAIT)` and `Cmd.Wait` is the
+single reaper after local stdout/stderr EOF.
+Compact Engine stdout is bounded to the 128 MiB plus 32-byte framing response envelope while
+diagnostic stderr has its independent 1 MiB bound. A complete valid failure is
+decoded before nonzero exit status; success still requires a complete request
+write and zero status.
 Cancellation and effect reconciliation return request-bound typed receipts;
 the SDK validates Rust-issued Artifact references without recomputing them.
 Effect-resolution receipts do not duplicate Run world settlement, and a

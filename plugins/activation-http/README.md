@@ -28,6 +28,14 @@ but every success is confirmed by durable acknowledgement readback and cannot
 be lost if acknowledgement races waiter registration or is committed by an
 independently opened driver.
 
+Every SQLite read that can replay ingress, select targets, acknowledge, or
+classify an identical producer retry loads the complete retained row. The
+driver requires strict canonical bytes for the value and target set, rebuilds
+the original `HttpSignalRequest`, and recomputes its `request_digest` before it
+can call parked-wait selection or return a delivery. Direct row corruption is
+therefore an `Integrity` failure rather than a new signal interpretation or an
+M1 activation candidate.
+
 The durable driver redelivers retained selections first. A new target set is
 checked against the bound of the exact call that selected it before SQLite can
 retain it. After that point the complete retained set is the selection

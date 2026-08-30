@@ -31,7 +31,7 @@ Use this precedence order when guidance conflicts:
   is the core length-prefixed helper. Typed JSON references additionally pin the
   exact content-addressed Artifact type contract in their kind. Opaque Artifact
   bytes remain schema-free. Do not retain v1 identity or snapshot fallback paths.
-- Cross-Run resources use provider-neutral `cymule.resource/3` semantic
+- Cross-Run resources use provider-neutral `cymule.resource/4` semantic
   descriptors. Locator sets are separate replaceable records; signed URLs,
   access grants, and credential revisions never enter Resource identity. Exact
   list operations require a content-addressed manifest descriptor and verified
@@ -50,8 +50,11 @@ Use this precedence order when guidance conflicts:
   command receipt plus keyed retention, pin, and deletion current maps; there
   is no global lifecycle journal or normal-operation history replay. Generic
   Resource commands may release only explicit pins. Virtual archive retirement
-  and Agent stream finalization own their profile pins in the same CAS as their
-  terminal profile state.
+  owns its profile release in the same CAS as terminal profile state. External
+  Agent streams first persist one physical-family publication reservation and
+  reserved profile pin before provider I/O; only a freshly acknowledged
+  reservation or rearm may publish. Finalization atomically promotes that exact
+  reservation to the permanent pin, catalog, and terminal stream state.
 - Every Run-to-Run Resource transfer has one exact keyed current authority, one
   target-Run slot map, and one payload-free entry in that target owner's
   persistent-log index. Exact lookup addresses the keyed authority directly;
@@ -127,6 +130,11 @@ Use this precedence order when guidance conflicts:
   legacy fallback. Pre-StateRoot `state.json`, `cymule_state`, and checkpoint/
   segment physical generations fail with `unsupported_store_generation`; no
   current-type legacy importer exists.
+- A Run Wait page reads only the same-CAS `DurableWaitSummary` leaf retained in
+  that Run's query index. It never loads or compiles the complete Wait or its
+  Input schema. The complete Wait remains authoritative only in the global
+  exact-item, activation, and explicit full-audit paths; full audit proves the
+  summary and complete Wait projections agree in both directions.
 - Machine history compaction replaces only a causally closed Event prefix with
   an authenticated base projection and exact identities. Retain the complete
   suffix and command receipts; CAS lineage and replay must survive stale writes
@@ -258,6 +266,21 @@ Use this precedence order when guidance conflicts:
   mismatched echo after a mutating request begins is
   `unknown_world_outcome/reconcile`; for a non-mutating request it is an invalid
   response with no inferred replay permission.
+- Public custom transports expose one complete exchange seam: the SDK supplies
+  the strict normalized inner Engine request, and success returns that complete
+  accepted request plus the closed response. Operation-specific bare payloads,
+  selected identifiers, or command subsets are not a transport result.
+- The compact Engine request envelope is bounded to 64 MiB, a success payload
+  to 64 MiB, and the complete response envelope to 128 MiB plus its exact
+  32-byte compact-framing delta. SDK stdout retains
+  only that response bound plus one overflow byte; diagnostic-only stderr has
+  its independent 1 MiB bound. A complete valid failure is admitted before
+  process exit status, while success requires a complete request write and zero
+  exit status.
+- The Engine charges the actual compact normalized request echo before any
+  dispatch against `64 MiB - 48 bytes`, then separately charges the actual
+  response payload and final envelope after execution. Raw input length is not
+  proof that normalized or escaped echo bytes fit.
 - The public `DurableEngine` is a transport facade over stateful Rust
   `execute_durable` and `execute_live_evolution` requests. `start`, `get`,
   `resume`, `signal`, `release`, and `evolve` must never fall back to local SDK
@@ -272,6 +295,12 @@ Use this precedence order when guidance conflicts:
   integers in the shared exact range `-9007199254740991..=9007199254740991`.
   A lost deadline or cancellation response after mutation begins is an
   `unknown_world_outcome` requiring reconciliation.
+- Strict JSON parsing has one explicit 128-level nesting limit. Non-integral
+  decimal/exponent tokens retain exact decimal evidence through request echo
+  and typed admission; two distinct mathematical fractions must never compare
+  equal merely because a host binary float rounds them to the same value.
+  Every number token is at most 256 bytes and its exponent at most six digits;
+  this bounded raw scan precedes host parsing or big-integer allocation.
 - `cymule.plugin/3` is the only process-plugin protocol. Every dispatch and
   reconciliation carries one exact `cymule.effect-provider-attempt/1` derived
   from the semantic intent plus retained claim owner/fence, and the provider
@@ -282,6 +311,11 @@ Use this precedence order when guidance conflicts:
   execution-binding revision covers executable bytes, arguments, explicit
   environment, working tree, runtime closure, deadline, and limits. Plugin
   stderr never enters an Engine failure.
+- An Engine process must close every internal provider/process authority before
+  its direct Child exits. SDKs own only that Child handle and their local pipes;
+  they never probe or signal a raw PID/PGID. Deadline handling kills the direct
+  Child if still live and closes local transport descriptors. The official
+  Engine/executor watchdog remains the sole descendant-closure authority.
 - `cymule.ir/3` reusable definition calls resolve inside one immutable Plan.
   Logical latest-compatible references are linked by M4 into a new parent Plan;
   a sealed Plan never dereferences a mutable `latest` alias at runtime.
@@ -417,6 +451,9 @@ Use this precedence order when guidance conflicts:
   fence. Otherwise recovery records `Unknown` before live provider admission;
   a subsequent framework-owned manifest mismatch marks that retained claim
   unavailable for governance.
+- An Effect dispatch has a result if and only if its state is `Applied`, and
+  that reference has exact kind `cymule.effect-result/1`. StateRoot leaf reopen,
+  exact reads, query summaries, and full audit all enforce the same invariant.
 - New behavior is provider-neutral by default. Concrete persistence, activation,
   execution, model, tool, and effect integrations belong behind plugin or
   substrate interfaces.
@@ -451,10 +488,14 @@ Use this precedence order when guidance conflicts:
   frozen release SHA. The terminal controller resolves a failed write response
   through bounded exact readback in the same run; a later job repeats registry
   verification without OIDC.
-- A release controller that can perform multiple external writes repeats the
-  current-main and peeled-tag fence immediately before every mutation. The
-  GitHub Release owns exactly its frozen BOM asset and rejects every additional
-  asset; npm tag push response loss is resolved only by exact remote readback.
+- A non-cancelling release workflow linearizes controller admission exactly
+  once by proving its workflow SHA is current public main before release work
+  begins. Every later job executes that immutable controller SHA; a subsequent
+  mirror advance is a new generation and does not revoke the admitted run.
+  Terminal writes still re-read every immutable release/tag/receipt authority.
+  The GitHub Release owns exactly its frozen BOM asset and rejects every
+  additional asset; npm tag push response loss is resolved only by exact remote
+  readback.
 - GitHub Release finalization additionally binds the annotated tag object itself.
   Verification requires object type `tag`, records its exact 40-hex
   `release_tag_sha` separately from the peeled `release_sha`, and rejects the two
@@ -499,9 +540,10 @@ Use this precedence order when guidance conflicts:
   can acquire a token or issue a PUT.
 - npm trusts only the inert `publish-npm-release.yml` caller generation `/1`.
   That caller delegates to `publish-npm-controller.yml@main`; the called
-  contents-write and OIDC jobs require GitHub's resolved job workflow SHA to
-  equal freshly fetched public main, exact-match their invoked controller files
-  to that commit, execute only that controller, and treat
+  verify job requires GitHub's resolved workflow SHA to equal freshly fetched
+  public main and freezes that immutable controller for the non-cancelling run.
+  Every contents-write and OIDC job exact-matches and executes only that
+  admitted controller while treating
   the exact calling tag as payload/provenance data. The retired
   `publish-npm.yml`, tags without caller `/1`, and direct controller dispatch
   have no publication authority.
@@ -532,7 +574,7 @@ Use this precedence order when guidance conflicts:
   current-main controller can therefore revalidate and attest the same BOM
   before completing an interrupted draft without replacing its asset.
 - Stable GitHub Release finalization is globally serialized in one
-  non-cancelling group. Its current-main controller reads every REST page and an
+  non-cancelling group. Its once-admitted immutable controller reads every REST page and an
   exact `isLatest` projection around each mutation, orders only canonical
   published stable tags by numeric SemVer, and explicitly marks historical
   recovery non-Latest. Completion requires exactly one Latest equal to the
@@ -558,7 +600,8 @@ Use this precedence order when guidance conflicts:
   Validation uses one deterministic dependency-first sort and rejects every
   cycle before staging or terminal publication. Every PUT result receives
   bounded exact-checksum readback; only an exact new-name 429 plus confirmed
-  absence may retry, after repeating the current-main/tag fence.
+  absence may retry, after repeating the immutable tag fence under the same
+  admitted controller.
 
 ## Change discipline
 

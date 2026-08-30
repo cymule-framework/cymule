@@ -42,8 +42,8 @@ RUST_WIRE_BOUNDARIES = {
     "PlanCandidate": "cymule.ir/3",
     "RegionMigrationCommand": "cymule.virtual-region-migration-control/3",
     "RegionMigrationPlan": "cymule.virtual-region-migration/3",
-    "ResourceCandidate": "cymule.resource/3",
-    "ResourceHandle": "cymule.resource/3",
+    "ResourceCandidate": "cymule.resource/4",
+    "ResourceHandle": "cymule.resource/4",
     "ResourceLocatorSet": "cymule.resource-locators/2",
     "ResourceManifestDescriptor": "cymule.resource-manifest/3",
     "ResourcePinReceipt": "cymule.resource-pin-receipt/3",
@@ -821,8 +821,8 @@ suites = ["protocol"]
             for domain in malformed["domains"]
             if domain["version"] == "cymule.engine/5"
         )
-        engine["depends_on"].remove("cymule.resource/3")
-        engine["embeds"].remove("cymule.resource/3")
+        engine["depends_on"].remove("cymule.resource/4")
+        engine["embeds"].remove("cymule.resource/4")
         with self.assertRaisesRegex(ValueError, "schema contract drift"):
             version_domains.verify_registry(malformed)
 
@@ -852,10 +852,10 @@ suites = ["protocol"]
         by_version = {domain["version"]: domain for domain in self.registry["domains"]}
         self.assertIn(
             "cymule.resource-manifest/3",
-            by_version["cymule.resource/3"]["depends_on"],
+            by_version["cymule.resource/4"]["depends_on"],
         )
         self.assertIn(
-            "cymule.resource/3",
+            "cymule.resource/4",
             by_version["cymule.resource-manifest-leaf/2"]["depends_on"],
         )
         malformed = copy.deepcopy(self.registry)
@@ -874,7 +874,7 @@ suites = ["protocol"]
         self.assertIn("cymule.component-occurrence/4", production)
         self.assertIn("cymule.virtual-archive-command-proof/2", production)
         self.assertIn("cymule.authenticated-map-node/1", production)
-        self.assertIn("cymule.run-query-indexes/2", production)
+        self.assertIn("cymule.run-query-indexes/3", production)
         self.assertNotIn("cymule.artifact/1", production)
         self.assertNotIn("cymule.engine/2", production)
         self.assertNotIn("cymule.engine/3", production)
@@ -1144,7 +1144,7 @@ fn quotes(bytes: &[u8]) -> bool {
         storage_schema = version_domains.load_json(ROOT / "schemas/durable-storage.schema.json")
         self.assertNotIn("machine_map_root", storage_schema["$defs"])
         self.assertNotIn("machine_log_root", storage_schema["$defs"])
-        self.assertIn("cymule.authenticated-map-node/1", domains["cymule.durable-state-root/3"]["depends_on"])
+        self.assertIn("cymule.authenticated-map-node/1", domains["cymule.durable-state-root/4"]["depends_on"])
         self.assertIn("cymule.continuation-state/1", domains["cymule.evolution-persistence-receipt/4"]["depends_on"])
         self.assertNotIn("cymule.durable-state/7", domains["cymule.evolution-persistence-receipt/4"]["depends_on"])
 
@@ -1201,12 +1201,12 @@ fn quotes(bytes: &[u8]) -> bool {
             "MachineSnapshot::VERSION",
         )
         self.assertEqual(
-            by_version["cymule.agent/6"]["sources"][0]["symbol"],
+            by_version["cymule.agent/7"]["sources"][0]["symbol"],
             "$token:/title",
         )
         malformed = copy.deepcopy(self.registry)
         agent = next(
-            domain for domain in malformed["domains"] if domain["version"] == "cymule.agent/6"
+            domain for domain in malformed["domains"] if domain["version"] == "cymule.agent/7"
         )
         agent["sources"][0]["symbol"] = "/type"
         with self.assertRaisesRegex(ValueError, "source anchor"):
@@ -1277,7 +1277,7 @@ fn quotes(bytes: &[u8]) -> bool {
     def test_tracked_plugin_schema_requires_fragment_owned_digest(self) -> None:
         malformed = copy.deepcopy(self.registry)
         agent = next(
-            domain for domain in malformed["domains"] if domain["version"] == "cymule.agent/6"
+            domain for domain in malformed["domains"] if domain["version"] == "cymule.agent/7"
         )
         agent["schemas"] = []
         with self.assertRaisesRegex(ValueError, "agent-protocol.schema.json requires exactly one root owner"):
@@ -1467,6 +1467,16 @@ fn quotes(bytes: &[u8]) -> bool {
         )
         version_domains.validate_identity_source_dependencies(publication)
 
+        reservation = by_version["cymule.agent-stream-publication-reservation/1"]
+        reservation_dependencies = {
+            "cymule.agent-stream-publication-intent/1",
+            "cymule.resource-pin-receipt/3",
+            "cymule.resource-retention-family/1",
+            "cymule.resource-retention-subject/1",
+        }
+        self.assertTrue(reservation_dependencies.issubset(reservation["embeds"]))
+        self.assertTrue(reservation_dependencies.issubset(reservation["depends_on"]))
+
     def test_virtual_archive_work_index_domains_are_registered(self) -> None:
         by_version = {domain["version"]: domain for domain in self.registry["domains"]}
         expected_roles = {
@@ -1501,7 +1511,7 @@ fn quotes(bytes: &[u8]) -> bool {
             {
                 "cymule.jcs/1",
                 "cymule.resource-locators/2",
-                "cymule.resource/3",
+                "cymule.resource/4",
             }.issubset(retention["depends_on"])
         )
         for version in (
@@ -1587,12 +1597,12 @@ fn quotes(bytes: &[u8]) -> bool {
                 "MAP_NODE_VERSION",
                 "binary_hash_domain",
             ),
-            "cymule.durable-state-root/3": (
+            "cymule.durable-state-root/4": (
                 "crates/cymule-durable/src/state_root.rs",
                 "STATE_ROOT_MANIFEST_VERSION",
                 "content_id_domain",
             ),
-            "cymule.durable-state-value/3": (
+            "cymule.durable-state-value/4": (
                 "crates/cymule-durable/src/state_root.rs",
                 "STATE_ROOT_VALUE_VERSION",
                 "content_id_domain",
@@ -1612,16 +1622,16 @@ fn quotes(bytes: &[u8]) -> bool {
             {
                 "cymule.authenticated-log-node/1",
                 "cymule.authenticated-map-node/1",
-                "cymule.durable-state-value/3",
+                "cymule.durable-state-value/4",
                 "cymule.machine-authority-frontier/3",
-            }.issubset(by_version["cymule.durable-state-root/3"]["depends_on"])
+            }.issubset(by_version["cymule.durable-state-root/4"]["depends_on"])
         )
         for provider in ("cymule.directory-store/5", "cymule.sqlite-store/6"):
             self.assertTrue(
                 {
                     "cymule.durable-gc-receipt/2",
                     "cymule.durable-head/2",
-                    "cymule.durable-state-root/3",
+                    "cymule.durable-state-root/4",
                 }.issubset(by_version[provider]["depends_on"])
             )
 
@@ -1739,10 +1749,10 @@ fn quotes(bytes: &[u8]) -> bool {
         )
         self.assertIn(
             "cymule.resource-manifest/3",
-            by_version["cymule.resource/3"]["embeds"],
+            by_version["cymule.resource/4"]["embeds"],
         )
         self.assertIn(
-            "cymule.resource/3",
+            "cymule.resource/4",
             by_version["cymule.resource-manifest-leaf/2"]["depends_on"],
         )
         self.assertEqual(
@@ -1750,7 +1760,7 @@ fn quotes(bytes: &[u8]) -> bool {
             [
                 "cymule.artifact/2",
                 "cymule.component-occurrence/4",
-                "cymule.framework-resource-handle/3",
+                "cymule.framework-resource-handle/4",
             ],
         )
         execution_binding = by_version["cymule.execution-binding/2"]
@@ -1832,13 +1842,17 @@ fn quotes(bytes: &[u8]) -> bool {
                 for domain in self.registry["domains"]
             )
         )
-        versions = {domain["version"] for domain in self.registry["domains"]}
-        self.assertIn("cymule.agent/6", versions)
+        by_version = {
+            domain["version"]: domain for domain in self.registry["domains"]
+        }
+        versions = set(by_version)
+        self.assertIn("cymule.agent/7", versions)
         self.assertTrue(
             {
-                "cymule.agent-command/2",
-                "cymule.agent-command-receipt/2",
+                "cymule.agent-command/3",
+                "cymule.agent-command-receipt/3",
                 "cymule.agent-session-current/2",
+                "cymule.agent-stream-publication-reservation/1",
                 "cymule.agent-stream-key/1",
                 "cymule.agent-stream-chunk-key/1",
             }.issubset(versions)
@@ -1847,8 +1861,8 @@ fn quotes(bytes: &[u8]) -> bool {
         self.assertIn("cymule.coupled-checkpoint-receipt/3", versions)
         self.assertIn("cymule.durable-control/4", versions)
         self.assertIn("cymule.durable-state/7", versions)
-        self.assertIn("cymule.durable-state-root/3", versions)
-        self.assertIn("cymule.durable-state-value/3", versions)
+        self.assertIn("cymule.durable-state-root/4", versions)
+        self.assertIn("cymule.durable-state-value/4", versions)
         self.assertIn("cymule.durable-revision/3", versions)
         self.assertIn("cymule.effect-provider-attempt/1", versions)
         self.assertIn("cymule.engine/5", versions)
@@ -1869,6 +1883,32 @@ fn quotes(bytes: &[u8]) -> bool {
         self.assertIn("cymule.command-admission/3", versions)
         self.assertIn("cymule.directory-store/5", versions)
         self.assertIn("cymule.sqlite-store/6", versions)
+        self.assertTrue(
+            {
+                "cymule.activation-timer-store/2",
+                "cymule.framework-resource-handle/4",
+                "cymule.resource-lifecycle-receipt-ref/3",
+                "cymule.resource-pin-current/2",
+                "cymule.resource/4",
+                "cymule.run-query-indexes/3",
+            }.issubset(versions)
+        )
+        rebuild_only = {
+            "mode": "unsupported",
+            "edge": None,
+            "runbook": "docs/migrations/pre-segmented-store-generations.md",
+        }
+        for version in (
+            "cymule.agent-command-receipt/3",
+            "cymule.agent-command/3",
+            "cymule.agent/7",
+            "cymule.durable-state-root/4",
+            "cymule.durable-state-value/4",
+            "cymule.resource-lifecycle-receipt-ref/3",
+            "cymule.resource-pin-current/2",
+            "cymule.run-query-indexes/3",
+        ):
+            self.assertEqual(by_version[version]["migration"], rebuild_only)
         for removed in (
             "cymule.virtual-checkpoint/4",
             "cymule.virtual-journal-base/2",
@@ -1891,6 +1931,10 @@ fn quotes(bytes: &[u8]) -> bool {
                 "cymule.agent-session-journal-base/1",
                 "cymule.agent/1",
                 "cymule.agent/3",
+                "cymule.agent/6",
+                "cymule.agent-command/2",
+                "cymule.agent-command-receipt/2",
+                "cymule.activation-timer-store/1",
                 "cymule.canary/1",
                 "cymule.coupled-checkpoint-receipt/2",
                 "cymule.command/5",
@@ -1899,7 +1943,9 @@ fn quotes(bytes: &[u8]) -> bool {
                 "cymule.durable-control/3",
                 "cymule.durable-revision/2",
                 "cymule.durable-state-root/2",
+                "cymule.durable-state-root/3",
                 "cymule.durable-state-value/2",
+                "cymule.durable-state-value/3",
                 "cymule.durable-state/3",
                 "cymule.durable-state/4",
                 "cymule.durable-state/5",
@@ -1919,11 +1965,16 @@ fn quotes(bytes: &[u8]) -> bool {
                 "cymule.machine-snapshot/7",
                 "cymule.machine-snapshot/9",
                 "cymule.plugin/2",
+                "cymule.framework-resource-handle/3",
                 "cymule.resource-handoff/3",
                 "cymule.resource-handoff/4",
+                "cymule.resource-lifecycle-receipt-ref/2",
                 "cymule.resource-lifecycle/1",
                 "cymule.resource-locators/1",
                 "cymule.resource-catalog-record/1",
+                "cymule.resource-pin-current/1",
+                "cymule.resource/3",
+                "cymule.run-query-indexes/2",
                 "cymule.version-domain-registry/1",
                 "cymule.version-domain-registry/2",
                 "cymule.directory-store/2",

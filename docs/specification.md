@@ -143,6 +143,27 @@ complete request is written, only one fully validated failure envelope remains
 authoritative; a success is response loss and follows the request's read-only
 versus mutating recovery classification.
 
+The CLI MUST emit compact JSON. One closed success response payload is bounded
+to 64 MiB, and the complete success envelope is bounded to 128 MiB plus the
+exact 32-byte compact-framing delta. The latter
+is the single response-stream authority: it covers the maximum accepted inner
+request echo plus the maximum response payload because the request framing
+removed from the echo is 48 bytes while success framing is 80 bytes. SDKs MUST
+retain at most that envelope plus one overflow byte on stdout. Stderr has a
+separate 1 MiB diagnostic-only bound plus one overflow byte and never consumes
+semantic response capacity. A complete valid failure envelope is authoritative
+even when the Engine exits nonzero or closes stdin early; process status is
+consulted only after failure admission. A success additionally requires a
+complete request write and a successful process status.
+The Engine measures the actual compact normalized request echo before dispatch
+and rejects more than `64 MiB - 48 bytes` as local
+`validation/correct_and_retry`; no Store, provider, or external effect may run
+first. After execution it separately measures the actual compact response
+payload at 64 MiB and the actual final envelope at
+`(64 MiB - 48) + 64 MiB + 80`. JSON escaping and normalization are therefore
+charged from the bytes that will actually be emitted, not inferred from the raw
+input length.
+
 SDKs MUST preserve the complete failure object. Process status and stderr are
 transport diagnostics only and MUST NOT become a parallel semantic error path.
 The CLI transport's `execute_durable` request MUST invoke the Rust durable
@@ -168,6 +189,12 @@ request, SDKs MUST report `unknown_world_outcome` with `reconcile`.
 A store head publish or transaction commit whose receipt is unavailable has the
 same closed failure and recovery disposition; it MUST NOT report
 `retry_same_request`.
+Strict Engine JSON additionally admits at most 128 nesting levels, 256 bytes
+per number token, and six exponent digits. Its bounded raw scan precedes the
+host parser. For every non-integral number it records a JSON-pointer-keyed
+canonical decimal rational; typed reserialization must retain the same map.
+Thus `0.10` and `1e-1` are equal, while
+`0.1` and `0.100000000000000005` cannot collide through a host binary float.
 
 Mutating durable preflight MUST resolve Store and Clock locations once through
 their nearest existing canonical ancestor, use those same stable locations for
@@ -406,8 +433,15 @@ requires retained inline bytes or a usable location. An immutable provider versi
 requires the original resolver binding for exact retrieval. A `live` Resource
 is useful state but is never exact replay evidence.
 
-One `cymule.resource/3` descriptor MUST contain no more than 64 semantic
-annotations and no more than 4 MiB of canonical JSON.
+One `cymule.resource/4` descriptor MUST contain no more than 64 semantic
+annotations and no more than 4 MiB of canonical JSON. Its media type MUST be
+exactly one non-empty lowercase ASCII RFC-token type, one `/`, and one
+non-empty lowercase ASCII RFC-token subtype. Only
+`a-z`, `0-9`, and ``!#$%&'*+-.^_`|~`` are admitted in either token; parameters,
+additional slashes, controls, whitespace, uppercase, and every other byte are
+invalid. UTF-8 inline text uses media type `text/plain`; its encoding is already
+closed by the inline `utf8` variant and is not duplicated as a media-type
+parameter.
 `cymule.resource-locators/2` is a separate replaceable realization record bound
 to one exact Resource ID and resolver implementation. It MUST contain no more
 than 16 locations or 256 KiB of canonical JSON. Locator sets contain only
@@ -421,6 +455,12 @@ Percent escapes MUST use uppercase hexadecimal and MUST NOT encode an
 unreserved byte. Private object, drive, sandbox, and signed-URL access uses an
 opaque resolver binding/reference whose reference is non-secret. Locations do not
 participate in Resource ID; moving identical content MUST preserve identity.
+
+Generation `/4` is a source-only semantic hard cut. The `/3` candidate, Handle,
+and framework Resource Handle type-key generations have no compatibility
+reader, normalizer, or migration path. Any internal test Store retaining those
+bytes MUST be reset and reseeded with `/4`; no physical production migration
+runbook exists for this unreleased generation.
 
 Provider-side immutable locator and proof metadata MUST use
 `cymule.resource-catalog-record/2`. Its complete canonical JSON wire MUST NOT
@@ -495,7 +535,7 @@ exactly `Pin`, `Release`, `GarbageCollect`, `BeginDelete`, `ReconcileDelete`,
 and its matching typed outcome. The StateRoot MUST keep separate current maps
 keyed by retention key, pin ID, and delete ID. A current projection contains no
 sequence or recursive history: its required
-`cymule.resource-lifecycle-receipt-ref/2` names the owning Resource, Agent, or
+`cymule.resource-lifecycle-receipt-ref/3` names the owning Resource, Agent, or
 Virtual profile plus exact command and receipt. Exact replay MUST load the
 owning typed command receipt by key and verify its nested outcome. Normal
 operations MUST NOT scan or replay a global lifecycle journal.
@@ -508,8 +548,13 @@ Resource `Pin` and `Release` MUST accept only explicit pins. A Virtual archive
 pin MUST be introduced only in the same CAS as its compaction certificate, and
 only Virtual `RetireArchive` may atomically commit terminal retirement and its
 exact `cymule.resource-archive-release/1`; generic release MUST reject it. An
-Agent finalized-stream pin MUST be introduced only by the Agent `Finalize`
-transaction and has no generic release path.
+Agent external-stream pin MUST first be introduced as `Reserved` by the
+pre-publication reservation CAS. That CAS and `BeginDelete` mutate the same
+physical-family current, so exactly one can win before provider I/O. Only a
+fresh reservation or NotApplied rearm acknowledgement MAY invoke publish.
+Published reconciliation MUST promote the exact reserved pin to `Active` in the
+Agent terminal `Finalize` transaction without incrementing the obligation
+count, and the pin has no generic release path.
 
 GC records the exact physical active-pin count and is deletion-eligible only at
 zero. `BeginDelete` MUST exact-load the command receipt selected by
@@ -631,6 +676,12 @@ claim references it. Releasing or replacing the last reference MUST remove it
 in that same state transition; the selected persistence-backed Clock remains
 the cold exact resolver.
 
+The official SQLite Clock MUST return only a real file-backed, writable `main`
+authority. Open MUST read back exact WAL plus `synchronous=FULL`, commit and
+read back one exact singleton metadata-row write probe, then read back both
+durability settings again. A readable immutable, read-only, or DELETE-only URI
+is not sufficient authority and MUST fail before a Clock instance is exposed.
+
 Persisted `Running` recovery MUST be an explicit takeover carrying the exact
 current fence and a verified current-scope-head observation from the retained
 Clock source generation. It MUST NOT commit before logical expiry. Expiry alone
@@ -655,7 +706,7 @@ does not claim this persistence because it deliberately uses one-shot memory.
 
 The M1 store MUST lower each admitted transition into immutable typed
 state-root objects and atomically move one small head that pins the exact
-`cymule.durable-state-root/3` manifest. The fixed manifest separately roots
+`cymule.durable-state-root/4` manifest. The fixed manifest separately roots
 Machine authority, admitted material, ordered batches, compacted base, Events,
 admissions, commands, proofs, and every closed M1 sidecar family; a complete
 `MachineSnapshot` or `DurableState` value is never a storage object. Persistent maps copy only the
@@ -810,6 +861,14 @@ bound MUST NOT reject, truncate, reselect, or otherwise reinterpret it. The
 driver acknowledges transport delivery only after the activation CAS succeeds.
 Lost acknowledgement MUST redeliver the identical activation ID, source,
 targets, and value; admission then returns the retained decision.
+The official HTTP `/1` and timer `/2` SQLite sources MUST load each complete
+persisted row before fresh selection, retained replay, schedule/request replay,
+or acknowledgement. Stored JSON MUST duplicate-reject, decode, and reproduce
+its exact canonical bytes. HTTP MUST rebuild the complete signal request and
+match its request digest. Timer `/2` MUST rebuild the complete activation ID,
+timer ID, due observation, and value schedule and match its schedule digest;
+timer `/1` has no reader or fallback. Any mismatch is retained-authority
+`Integrity` and MUST expose neither parked-wait selection nor an M1 delivery.
 Open MUST NOT rebuild or enumerate the complete parked-wait index. A fresh
 selection resolves only its bounded source page and exact target membership;
 committed transitions update only touched paths. A stale authenticated page
@@ -824,7 +883,11 @@ one prepared effect, resolve one retained unknown-world effect, cancel one Run,
 or issue one of the seven bounded Run-index/current/child-page/exact-item
 queries. Query pages MUST bind one exact revision and StateRoot, authenticate
 their continuation position, honor the caller's item and canonical-byte
-budgets, and never return a full Run/domain mirror or accept a query ID. Start, resume,
+budgets, and never return a full Run/domain mirror or accept a query ID. A Run
+Wait page MUST read only a same-CAS bounded summary leaf and MUST NOT load or
+compile the complete Wait or its Input schema. Exact-item, activation, and
+explicit full-audit paths retain the complete Wait; full audit MUST prove exact
+bidirectional equality between every complete Wait and its Run summary. Start, resume,
 takeover, and release MUST carry the exact driver, positive TTL, and an issued
 Clock reference; takeover also carries the exact current fence. Wait admission
 and cancellation are typed store-only commands and MUST require neither an
@@ -1265,6 +1328,10 @@ Settlement admits one matching observation, reconciliation or
 outcome. Unrelated Plans, command receipts, Artifacts and Events MUST remain
 unchanged.
 `Unknown` observation and the outbox `unknown` state MUST share one CAS.
+Every persisted dispatch and query summary MUST carry a result if and only if
+its outbox state is `applied`; that reference MUST have exact kind
+`cymule.effect-result/1`. StateRoot leaf decode, exact lookup, and full audit
+MUST reject a missing Applied result or a result attached to any other state.
 
 The `cymule.plugin/3` dispatch and reconciliation boundaries MUST carry one
 `cymule.effect-provider-attempt/1` whose content identity binds the semantic

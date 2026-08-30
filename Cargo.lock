@@ -327,6 +327,7 @@ dependencies = [
  "cymule-resource",
  "cymule-runtime",
  "cymule-virtual",
+ "nix",
  "serde",
  "serde_json",
  "tempfile",

@@ -86,7 +86,7 @@
 - Occurrence selection carries distinct occurrence and selection identities plus
   the exact ExecutionBinding Artifact. Responses preserve the complete typed pin;
   SDKs never reconstruct its decision or Plan lineage.
-- SDKs also author the same semantic-only `cymule.resource/3` candidates and
+- SDKs also author the same semantic-only `cymule.resource/4` candidates and
   producer-provenance `cymule.resource-handoff/5` wire records carrying the
   producer's exact typed Resource Handle Artifact. Locators, grants,
   signed URLs, and credential revisions never enter candidates. SDKs delegate
@@ -98,6 +98,9 @@
 - Resource `annotations` are omission-only when empty. Builders omit the member
   instead of emitting `{}` so the submitted wire remains identical to the Rust
   request echo; non-empty annotations remain semantic identity input.
+- Resource `/4` builders and recursive response validators use one exact
+  lowercase ASCII type/subtype token grammar. They reject `/3`, parameters,
+  controls, whitespace, uppercase, and additional slashes without normalization.
 - Clock issuance crosses custom and CLI transports as
   `{ run_id, observation }`. High-level clients compare `run_id` and source
   generation with the exact request before returning the observation; only
@@ -163,7 +166,7 @@
   values and reject every Unicode control character, including C1
   U+0080..U+009F, identically in Rust, TypeScript, Python, Go, and JSON Schema.
 - SDKs obtain opaque `cymule.clock-observation/2` references only through Engine
-  v4 `observe_clock`. They never construct, seal, hash, or expose a complete
+  v5 `observe_clock`. They never construct, seal, hash, or expose a complete
   future Clock receipt; durable mutation consumes an already issued reference
   under the selected source generation.
 - Durable Run projections validate closed component outcomes, provider Attempt
@@ -214,6 +217,17 @@
   transport. An oversized caller request is local
   `validation/correct_and_retry`; a child that closes stdin after emitting one
   valid failure may not have that failure replaced by a pipe error.
+- Every custom transport has one `exchange` operation over the complete strict
+  request snapshot. Success returns `{request, response}` and is exact-matched
+  before typed payload admission; bare inner responses are unsupported.
+- The compact success payload is bounded to 64 MiB and the complete stdout
+  response envelope to 128 MiB plus its exact 32-byte framing delta. Diagnostic stderr has a separate 1 MiB bound.
+  A valid failure envelope wins over nonzero process status; success additionally
+  requires a complete stdin write and zero status.
+- Strict parsers reject nesting beyond 128 levels and preserve exact fractional
+  decimal evidence through echo comparison before exposing host numeric values.
+  They reject a number token above 256 bytes or exponent above six digits before
+  host numeric parsing or process spawn.
 - Durable and live-evolution successes are recursively closed. Store, executor,
   migration, and shadow targets remain separate; queries send no executor.
 - Live evolution carries the migration provider only for an exact nested

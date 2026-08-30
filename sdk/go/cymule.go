@@ -14,6 +14,7 @@ import (
 	"io"
 	"math"
 	"math/big"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
@@ -30,16 +31,20 @@ import (
 // EngineProtocolVersion is the frozen Engine transport contract.
 const EngineProtocolVersion = "cymule.engine/5"
 const maxExactInteger uint64 = 9_007_199_254_740_991
-const maxEngineOutputBytes = 16 * 1024 * 1024
+const maxJSONNumberTokenBytes = 256
+const maxJSONExponentDigits = 6
 const maxEngineRequestBytes = 64 * 1024 * 1024
+const engineRequestFramingBytes = 48
+const maxEngineResponsePayloadBytes = maxEngineRequestBytes
+const engineSuccessFramingBytes = 80
+const maxEngineResponseBytes = maxEngineRequestBytes - engineRequestFramingBytes + maxEngineResponsePayloadBytes + engineSuccessFramingBytes
+const maxEngineDiagnosticBytes = 1024 * 1024
 const maxInlineResourceBytes = 1024 * 1024
 const maxArtifactBytes = 8 * 1024 * 1024
 const maxArtifactBase64Bytes = ((maxArtifactBytes + 2) / 3) * 4
 const ordinaryPluginMessageBytes uint64 = 8 * 1024 * 1024
 const evolutionPluginMessageBytes uint64 = 16 * 1024 * 1024
 const defaultEngineTimeout = 30 * time.Second
-const engineTerminationGrace = 200 * time.Millisecond
-const engineGroupExitLimit = 2 * time.Second
 const emptyResourceManifestRoot = "sha256:6a754fadbb296b87040c37dab30caea63de1bd1a85142bc82a03a7cf82e64dfc"
 
 // EngineIssue is one machine-readable validation or contract issue.
@@ -5032,9 +5037,9 @@ func NewResourceHandoff(transferID string, producer ResourceProducerProvenance, 
 // TextResource creates one inline UTF-8 Resource Candidate.
 func TextResource(text string, annotations map[string]string) ResourceCandidate {
 	return ResourceCandidate{
-		ResourceVersion: "cymule.resource/3",
+		ResourceVersion: "cymule.resource/4",
 		Shape:           "inline",
-		MediaType:       "text/plain;charset=utf-8",
+		MediaType:       "text/plain",
 		Inline:          &InlineData{Encoding: "utf8", Text: text},
 		Integrity:       ResourceIntegrity{Kind: "inline"},
 		Annotations:     annotations,
@@ -5044,7 +5049,7 @@ func TextResource(text string, annotations map[string]string) ResourceCandidate 
 // JSONResource creates one inline structured Resource Candidate.
 func JSONResource(value any, annotations map[string]string) ResourceCandidate {
 	return ResourceCandidate{
-		ResourceVersion: "cymule.resource/3",
+		ResourceVersion: "cymule.resource/4",
 		Shape:           "inline",
 		MediaType:       "application/json",
 		Inline:          &InlineData{Encoding: "json", Value: value},
@@ -5054,15 +5059,18 @@ func JSONResource(value any, annotations map[string]string) ResourceCandidate {
 }
 
 // ExternalResource creates a provider-neutral external Resource Candidate.
-func ExternalResource(shape, mediaType string, integrity ResourceIntegrity, manifest *ResourceManifestDescriptor, annotations map[string]string) ResourceCandidate {
+func ExternalResource(shape, mediaType string, integrity ResourceIntegrity, manifest *ResourceManifestDescriptor, annotations map[string]string) (ResourceCandidate, error) {
+	if !validResourceMediaType(mediaType) {
+		return ResourceCandidate{}, fmt.Errorf("Resource media type is invalid")
+	}
 	return ResourceCandidate{
-		ResourceVersion: "cymule.resource/3",
+		ResourceVersion: "cymule.resource/4",
 		Shape:           shape,
 		MediaType:       mediaType,
 		Integrity:       integrity,
 		Manifest:        manifest,
 		Annotations:     annotations,
-	}
+	}, nil
 }
 
 // EffectProfile describes provider-neutral effect behavior.
@@ -6562,7 +6570,7 @@ func (engine CliEngine) ObserveClock(target EngineClockTarget, runID string) (Cl
 }
 
 func validateResourceHandle(resource ResourceHandle) error {
-	if resource.ResourceVersion != "cymule.resource/3" || !validSHA256(resource.ResourceID) ||
+	if resource.ResourceVersion != "cymule.resource/4" || !validSHA256(resource.ResourceID) ||
 		!slices.Contains([]string{"inline", "object", "collection", "directory", "snapshot"}, resource.Shape) ||
 		!validResourceMediaType(resource.MediaType) {
 		return fmt.Errorf("Resource Handle fields are invalid")
@@ -6761,15 +6769,33 @@ func resourceManifestDescriptorID(manifest ResourceManifestDescriptor) string {
 }
 
 func validResourceMediaType(value string) bool {
-	if len(value) < 1 || len(value) > 255 || !strings.Contains(value, "/") || value != strings.ToLower(value) {
+	if len(value) < 3 || len(value) > 255 {
 		return false
 	}
-	for _, character := range []byte(value) {
-		if character > unicode.MaxASCII || unicode.IsSpace(rune(character)) {
-			return false
+	mediaType, mediaSubtype, found := strings.Cut(value, "/")
+	if !found || mediaType == "" || mediaSubtype == "" || strings.Contains(mediaSubtype, "/") {
+		return false
+	}
+	for _, token := range []string{mediaType, mediaSubtype} {
+		for index := range len(token) {
+			if !validResourceMediaTypeTokenByte(token[index]) {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+func validResourceMediaTypeTokenByte(character byte) bool {
+	if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+		return true
+	}
+	switch character {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	default:
+		return false
+	}
 }
 
 func validResourceToken(value string) bool {
@@ -7413,24 +7439,42 @@ func (engine CliEngine) request(request any, response any) error {
 	if ctx.Err() != nil {
 		return interruptedFailure(request, ctx.Err(), false)
 	}
+	if !engineWaitAuthorityAvailable() {
+		return validationFailure(
+			"engine_rpc_platform_unsupported",
+			"CLI Engine direct-child wait authority is unsupported on this platform",
+		)
+	}
 	command := exec.Command(executable, "rpc")
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		return transportFailure("engine_stdin_unavailable", "the Engine stdin pipe is unavailable")
 	}
-	stdout := newBoundedOutput(maxEngineOutputBytes)
-	stderr := newBoundedOutput(maxEngineOutputBytes)
-	command.Stdout = &stdout
-	command.Stderr = &stderr
+	stdout := newBoundedOutput(maxEngineResponseBytes)
+	stderr := newBoundedOutput(maxEngineDiagnosticBytes)
+	stdoutPipe, err := command.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return transportFailure("engine_stdout_unavailable", "the Engine stdout pipe is unavailable")
+	}
+	stderrPipe, err := command.StderrPipe()
+	if err != nil {
+		_ = stdin.Close()
+		_ = stdoutPipe.Close()
+		return transportFailure("engine_stderr_unavailable", "the Engine stderr pipe is unavailable")
+	}
 	if startErr := command.Start(); startErr != nil {
 		_ = stdin.Close()
+		_ = stdoutPipe.Close()
+		_ = stderrPipe.Close()
 		if ctx.Err() != nil {
 			return interruptedFailure(request, ctx.Err(), false)
 		}
 		return transportFailure("engine_start_failed", "the Engine process could not be started")
 	}
 	inputDone := make(chan error, 1)
+	stdoutDone := make(chan error, 1)
+	stderrDone := make(chan error, 1)
 	go func() {
 		_, writeErr := stdin.Write(input)
 		closeErr := stdin.Close()
@@ -7439,12 +7483,16 @@ func (engine CliEngine) request(request any, response any) error {
 		}
 		inputDone <- writeErr
 	}()
-	waitDone := make(chan error, 1)
 	go func() {
-		waitDone <- command.Wait()
+		_, copyErr := io.Copy(&stdout, stdoutPipe)
+		stdoutDone <- copyErr
 	}()
-	waitErr, interrupted, residualGroup, terminationErr := awaitEngineProcess(
-		ctx, command.Process.Pid, waitDone,
+	go func() {
+		_, copyErr := io.Copy(&stderr, stderrPipe)
+		stderrDone <- copyErr
+	}()
+	waitErr, stdoutErr, stderrErr, interrupted, terminationErr := awaitEngineProcess(
+		ctx, command, stdin, stdoutPipe, stderrPipe, stdoutDone, stderrDone,
 	)
 	// A complete Engine response remains authoritative when the child closed
 	// stdin early; joining the writer prevents a goroutine leak, while its
@@ -7453,14 +7501,20 @@ func (engine CliEngine) request(request any, response any) error {
 	if terminationErr != nil {
 		return responseLossFailure(request, "engine_process_termination_failed")
 	}
-	if residualGroup {
-		return responseLossFailure(request, "engine_process_group_leaked")
-	}
 	if interrupted {
 		return interruptedFailure(request, ctx.Err(), true)
 	}
+	if stdoutErr != nil || stderrErr != nil {
+		return responseLossFailure(request, "engine_io_failed")
+	}
 	if stdout.overflowed() || stderr.overflowed() {
-		return responseLossFailure(request, "engine_output_limit_exceeded")
+		if stdout.overflowed() {
+			return responseLossFailure(request, "engine_output_limit_exceeded")
+		}
+		return responseLossFailure(request, "engine_diagnostic_limit_exceeded")
+	}
+	if failure, valid := decodeValidEngineFailure(stdout.bytes()); valid {
+		return failure
 	}
 	if waitErr != nil {
 		return responseLossFailure(request, "engine_process_failed")
@@ -7477,133 +7531,79 @@ func (engine CliEngine) request(request any, response any) error {
 
 func awaitEngineProcess(
 	ctx context.Context,
-	processGroupID int,
-	waitDone <-chan error,
-) (waitErr error, interrupted bool, residualGroup bool, terminationErr error) {
-	select {
-	case waitErr = <-waitDone:
-		residualGroup, terminationErr = terminateResidualEngineProcessGroup(processGroupID)
-		return waitErr, false, residualGroup, terminationErr
-	default:
-	}
-	select {
-	case waitErr = <-waitDone:
-		residualGroup, terminationErr = terminateResidualEngineProcessGroup(processGroupID)
-		return waitErr, false, residualGroup, terminationErr
-	case <-ctx.Done():
+	command *exec.Cmd,
+	stdinPipe io.Closer,
+	stdoutPipe io.Closer,
+	stderrPipe io.Closer,
+	stdoutDone <-chan error,
+	stderrDone <-chan error,
+) (waitErr, stdoutErr, stderrErr error, interrupted bool, terminationErr error) {
+	processID := command.Process.Pid
+	stdoutComplete := false
+	stderrComplete := false
+	for {
+		if !stdoutComplete {
+			select {
+			case stdoutErr = <-stdoutDone:
+				stdoutComplete = true
+			default:
+			}
+		}
+		if !stderrComplete {
+			select {
+			case stderrErr = <-stderrDone:
+				stderrComplete = true
+			default:
+			}
+		}
+		exited, err := engineProcessExitedWithoutReaping(processID)
+		if err != nil {
+			_ = stdinPipe.Close()
+			_ = stdoutPipe.Close()
+			_ = stderrPipe.Close()
+			if !stdoutComplete {
+				stdoutErr = <-stdoutDone
+			}
+			if !stderrComplete {
+				stderrErr = <-stderrDone
+			}
+			go func() { _ = command.Wait() }()
+			return nil, stdoutErr, stderrErr, false, err
+		}
+		if exited && stdoutComplete && stderrComplete {
+			return command.Wait(), stdoutErr, stderrErr, false, nil
+		}
 		select {
-		case waitErr = <-waitDone:
-			residualGroup, terminationErr = terminateResidualEngineProcessGroup(processGroupID)
-			return waitErr, false, residualGroup, terminationErr
-		default:
+		case <-ctx.Done():
+			waitErr, terminationErr = terminateEngineProcess(
+				command, stdinPipe, stdoutPipe, stderrPipe,
+			)
+			if !stdoutComplete {
+				stdoutErr = <-stdoutDone
+			}
+			if !stderrComplete {
+				stderrErr = <-stderrDone
+			}
+			return waitErr, stdoutErr, stderrErr, true, terminationErr
+		case <-time.After(5 * time.Millisecond):
 		}
-		waitErr, terminationErr = terminateEngineProcessGroup(processGroupID, waitDone)
-		return waitErr, true, false, terminationErr
 	}
 }
 
-func terminateResidualEngineProcessGroup(processGroupID int) (bool, error) {
-	exists, err := engineProcessGroupExists(processGroupID)
-	if err != nil || !exists {
-		return false, err
-	}
-	if err := signalEngineProcessGroup(processGroupID, syscall.SIGTERM); err != nil {
-		return true, err
-	}
-	exited, err := waitForEngineProcessGroupExitWithin(processGroupID, engineTerminationGrace)
-	if err != nil {
-		return true, err
-	}
-	if exited {
-		return true, nil
-	}
-	if err := signalEngineProcessGroup(processGroupID, syscall.SIGKILL); err != nil {
-		return true, err
-	}
-	return true, waitForEngineProcessGroupExit(processGroupID)
-}
-
-func waitForEngineProcessGroupExitWithin(processGroupID int, limit time.Duration) (bool, error) {
-	deadline := time.Now().Add(limit)
-	for {
-		exists, err := engineProcessGroupExists(processGroupID)
-		if err != nil {
-			return false, err
-		}
-		if !exists {
-			return true, nil
-		}
-		if !time.Now().Before(deadline) {
-			return false, nil
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-func terminateEngineProcessGroup(
-	processGroupID int,
-	waitDone <-chan error,
+func terminateEngineProcess(
+	command *exec.Cmd,
+	stdinPipe io.Closer,
+	stdoutPipe io.Closer,
+	stderrPipe io.Closer,
 ) (waitErr error, terminationErr error) {
-	_ = signalEngineProcessGroup(processGroupID, syscall.SIGTERM)
-	grace := time.NewTimer(engineTerminationGrace)
-	waitReceived := false
-	select {
-	case waitErr = <-waitDone:
-		waitReceived = true
-		<-grace.C
-	case <-grace.C:
+	terminationErr = command.Process.Kill()
+	if errors.Is(terminationErr, os.ErrProcessDone) || errors.Is(terminationErr, syscall.ESRCH) {
+		terminationErr = nil
 	}
-	if err := signalEngineProcessGroup(processGroupID, syscall.SIGKILL); err != nil {
-		terminationErr = err
-	}
-	if !waitReceived {
-		waitErr = <-waitDone
-	}
-	if err := waitForEngineProcessGroupExit(processGroupID); err != nil && terminationErr == nil {
-		terminationErr = err
-	}
-	return waitErr, terminationErr
-}
-
-func signalEngineProcessGroup(processGroupID int, selectedSignal syscall.Signal) error {
-	if processGroupID <= 0 {
-		return fmt.Errorf("Engine process group identity is invalid")
-	}
-	if err := syscall.Kill(-processGroupID, selectedSignal); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
-	}
-	return nil
-}
-
-func waitForEngineProcessGroupExit(processGroupID int) error {
-	deadline := time.Now().Add(engineGroupExitLimit)
-	for {
-		exists, err := engineProcessGroupExists(processGroupID)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("Engine process group %d did not exit", processGroupID)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-func engineProcessGroupExists(processGroupID int) (bool, error) {
-	if processGroupID <= 0 {
-		return false, fmt.Errorf("Engine process group identity is invalid")
-	}
-	err := syscall.Kill(-processGroupID, 0)
-	if err == nil || errors.Is(err, syscall.EPERM) {
-		return true, nil
-	}
-	if errors.Is(err, syscall.ESRCH) {
-		return false, nil
-	}
-	return false, err
+	_ = stdinPipe.Close()
+	_ = stdoutPipe.Close()
+	_ = stderrPipe.Close()
+	return command.Wait(), terminationErr
 }
 
 type boundedOutput struct {
@@ -7633,6 +7633,31 @@ func (output *boundedOutput) overflowed() bool {
 
 func (output *boundedOutput) bytes() []byte {
 	return output.data
+}
+
+func decodeValidEngineFailure(input []byte) (EngineFailure, bool) {
+	value, err := decodeUniqueJSON(input)
+	if err != nil {
+		return EngineFailure{}, false
+	}
+	object, ok := value.(map[string]any)
+	if !ok || object["engine_protocol"] != EngineProtocolVersion || object["outcome"] != "failure" {
+		return EngineFailure{}, false
+	}
+	if err := requireExactJSONFields(object, []string{"outcome", "engine_protocol", "error"}); err != nil {
+		return EngineFailure{}, false
+	}
+	if err := validateEngineFailureWire(object["error"]); err != nil {
+		return EngineFailure{}, false
+	}
+	var failure EngineFailure
+	if err := decodeClosedValue(object["error"], &failure); err != nil {
+		return EngineFailure{}, false
+	}
+	if err := failure.validate(); err != nil {
+		return EngineFailure{}, false
+	}
+	return failure, true
 }
 
 func decodeEngineResponse(input []byte, response any) error {
@@ -7705,6 +7730,21 @@ func decodeEngineResponseForRequest(input []byte, response any, request any) err
 		if request != nil && !rawWireValueEquals(*envelope.Request, request) {
 			return invalidEngineResponseForRequest(request, "success request echo does not match the sent request")
 		}
+		responseValue, err := decodeUniqueJSON(*envelope.Response)
+		if err != nil {
+			return invalidEngineResponseForRequest(request, err.Error())
+		}
+		hostResponse, err := projectHostJSONNumbers(responseValue)
+		if err != nil {
+			return invalidEngineResponseForRequest(request, err.Error())
+		}
+		normalizedResponse, err := json.Marshal(hostResponse)
+		if err != nil {
+			return invalidEngineResponseForRequest(request, err.Error())
+		}
+		if len(normalizedResponse) > maxEngineResponsePayloadBytes {
+			return responseLossFailure(request, "engine_response_payload_too_large")
+		}
 		if err := validateSuccessResponse(*envelope.Response); err != nil {
 			return invalidEngineResponseForRequest(request, err.Error())
 		}
@@ -7719,6 +7759,45 @@ func decodeEngineResponseForRequest(input []byte, response any, request any) err
 		return nil
 	default:
 		return invalidEngineResponseForRequest(request, "response outcome is not closed")
+	}
+}
+
+func projectHostJSONNumbers(value any) (any, error) {
+	switch value := value.(type) {
+	case json.Number:
+		integer, isInteger, err := mathematicalJSONInteger(value)
+		if err != nil {
+			return nil, err
+		}
+		if isInteger {
+			if integer.Sign() < 0 {
+				return integer.Int64(), nil
+			}
+			return integer.Uint64(), nil
+		}
+		return value.Float64()
+	case []any:
+		projected := make([]any, len(value))
+		for index, member := range value {
+			var err error
+			projected[index], err = projectHostJSONNumbers(member)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return projected, nil
+	case map[string]any:
+		projected := make(map[string]any, len(value))
+		for key, member := range value {
+			var err error
+			projected[key], err = projectHostJSONNumbers(member)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return projected, nil
+	default:
+		return value, nil
 	}
 }
 
@@ -8489,7 +8568,7 @@ func rawWireValueEquals(raw json.RawMessage, value any) bool {
 	if err != nil {
 		return false
 	}
-	return reflect.DeepEqual(decoded, value)
+	return decodedWireValuesEqual(decoded, value)
 }
 
 func wireValuesEqual(left, right any) bool {
@@ -8509,12 +8588,87 @@ func wireValuesEqual(left, right any) bool {
 	if err != nil {
 		return false
 	}
-	leftNormalized, err := json.Marshal(leftValue)
-	if err != nil {
-		return false
+	return decodedWireValuesEqual(leftValue, rightValue)
+}
+
+func decodedWireValuesEqual(left, right any) bool {
+	switch leftValue := left.(type) {
+	case json.Number:
+		rightValue, ok := right.(json.Number)
+		if !ok {
+			return false
+		}
+		leftInteger, leftIsInteger, leftErr := mathematicalJSONInteger(leftValue)
+		rightInteger, rightIsInteger, rightErr := mathematicalJSONInteger(rightValue)
+		if leftErr != nil || rightErr != nil || leftIsInteger != rightIsInteger {
+			return false
+		}
+		if leftIsInteger {
+			return leftInteger.Cmp(rightInteger) == 0
+		}
+		leftFraction, leftErr := canonicalJSONFraction(leftValue)
+		rightFraction, rightErr := canonicalJSONFraction(rightValue)
+		return leftErr == nil && rightErr == nil && leftFraction == rightFraction
+	case []any:
+		rightValue, ok := right.([]any)
+		if !ok || len(leftValue) != len(rightValue) {
+			return false
+		}
+		for index, member := range leftValue {
+			if !decodedWireValuesEqual(member, rightValue[index]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		rightValue, ok := right.(map[string]any)
+		if !ok || len(leftValue) != len(rightValue) {
+			return false
+		}
+		for key, member := range leftValue {
+			rightMember, exists := rightValue[key]
+			if !exists || !decodedWireValuesEqual(member, rightMember) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(left, right)
 	}
-	rightNormalized, err := json.Marshal(rightValue)
-	return err == nil && bytes.Equal(leftNormalized, rightNormalized)
+}
+
+func canonicalJSONFraction(value json.Number) (string, error) {
+	text := value.String()
+	mantissa := text
+	exponent := 0
+	if index := strings.IndexAny(text, "eE"); index >= 0 {
+		mantissa = text[:index]
+		parsed, err := strconv.Atoi(text[index+1:])
+		if err != nil {
+			return "", err
+		}
+		exponent = parsed
+	}
+	negative := strings.HasPrefix(mantissa, "-")
+	mantissa = strings.TrimPrefix(mantissa, "-")
+	fractionDigits := 0
+	if point := strings.IndexByte(mantissa, '.'); point >= 0 {
+		fractionDigits = len(mantissa) - point - 1
+		mantissa = mantissa[:point] + mantissa[point+1:]
+	}
+	digits := strings.TrimLeft(mantissa, "0")
+	if digits == "" {
+		return "0", nil
+	}
+	scale := exponent - fractionDigits
+	for strings.HasSuffix(digits, "0") {
+		digits = strings.TrimSuffix(digits, "0")
+		scale++
+	}
+	if negative {
+		digits = "-" + digits
+	}
+	return fmt.Sprintf("%se%d", digits, scale), nil
 }
 
 func decodeClosedJSON(input []byte, target any) error {
@@ -8596,9 +8750,12 @@ func decodeUniqueJSON(input []byte) (any, error) {
 	if err := validateJSONStringScalars(input); err != nil {
 		return nil, err
 	}
+	if err := validateRawJSONComplexity(input); err != nil {
+		return nil, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(input))
 	decoder.UseNumber()
-	value, err := readUniqueJSONValue(decoder)
+	value, err := readUniqueJSONValue(decoder, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -8609,6 +8766,58 @@ func decodeUniqueJSON(input []byte) (any, error) {
 		return nil, err
 	}
 	return value, nil
+}
+
+func validateRawJSONComplexity(input []byte) error {
+	depth := 0
+	for index := 0; index < len(input); {
+		switch input[index] {
+		case '"':
+			index++
+			for index < len(input) {
+				if input[index] == '\\' {
+					index += 2
+					continue
+				}
+				if input[index] == '"' {
+					index++
+					break
+				}
+				index++
+			}
+		case '{', '[':
+			depth++
+			if depth > 128 {
+				return fmt.Errorf("JSON nesting exceeds the fixed depth limit")
+			}
+			index++
+		case '}', ']':
+			depth--
+			index++
+		case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			start := index
+			exponentDigits := 0
+			inExponent := false
+			for index < len(input) && strings.ContainsRune("-+0123456789.eE", rune(input[index])) {
+				if inExponent && input[index] >= '0' && input[index] <= '9' {
+					exponentDigits++
+				}
+				if input[index] == 'e' || input[index] == 'E' {
+					inExponent = true
+				}
+				index++
+				if index-start > maxJSONNumberTokenBytes {
+					return fmt.Errorf("JSON number token exceeds the fixed byte limit")
+				}
+			}
+			if exponentDigits > maxJSONExponentDigits {
+				return fmt.Errorf("JSON number exponent exceeds the fixed digit limit")
+			}
+		default:
+			index++
+		}
+	}
+	return nil
 }
 
 func validateJSONStringScalars(input []byte) error {
@@ -8786,7 +8995,10 @@ func validateGoJSONStringsAt(value reflect.Value, active map[jsonVisit]bool) err
 	return nil
 }
 
-func readUniqueJSONValue(decoder *json.Decoder) (any, error) {
+func readUniqueJSONValue(decoder *json.Decoder, depth int) (any, error) {
+	if depth > 128 {
+		return nil, fmt.Errorf("JSON nesting exceeds the fixed depth limit")
+	}
 	token, err := decoder.Token()
 	if err != nil {
 		return nil, err
@@ -8820,7 +9032,7 @@ func readUniqueJSONValue(decoder *json.Decoder) (any, error) {
 			if _, exists := members[member]; exists {
 				return nil, fmt.Errorf("duplicate JSON object member %q", member)
 			}
-			value, err := readUniqueJSONValue(decoder)
+			value, err := readUniqueJSONValue(decoder, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -8837,7 +9049,7 @@ func readUniqueJSONValue(decoder *json.Decoder) (any, error) {
 	case '[':
 		values := make([]any, 0)
 		for decoder.More() {
-			value, err := readUniqueJSONValue(decoder)
+			value, err := readUniqueJSONValue(decoder, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -8898,11 +9110,18 @@ func parseSafeJSONUint(value json.Number, positive bool) (uint64, error) {
 
 func mathematicalJSONInteger(value json.Number) (*big.Int, bool, error) {
 	text := value.String()
+	if len(text) > maxJSONNumberTokenBytes {
+		return nil, false, fmt.Errorf("JSON number token exceeds the fixed byte limit")
+	}
 	mantissa := text
 	exponentText := "0"
 	if index := strings.IndexAny(text, "eE"); index >= 0 {
 		mantissa = text[:index]
 		exponentText = text[index+1:]
+	}
+	exponentDigits := strings.TrimPrefix(strings.TrimPrefix(exponentText, "+"), "-")
+	if len(exponentDigits) > maxJSONExponentDigits {
+		return nil, false, fmt.Errorf("JSON number exponent exceeds the fixed digit limit")
 	}
 	exponent, ok := new(big.Int).SetString(exponentText, 10)
 	if !ok {

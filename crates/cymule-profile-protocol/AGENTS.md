@@ -54,6 +54,12 @@
 
 ## Identities, receipts, and limits
 
+- `cymule.resource/4` owns one public `validate_resource_media_type` authority:
+  exactly two non-empty lowercase ASCII RFC-token subsets separated by one
+  slash, with no parameter, whitespace, control, uppercase, or additional
+  slash. Resource stores reuse that validator; they never copy or widen it.
+  Resource `/3` and framework Resource Handle `/3` have no reader or migration
+  fallback.
 - Content-derived IDs bind the complete semantic body they name. Receipt IDs
   bind the exact parent source, semantic command, outcome, and ordered typed
   mutations, but never their own result current, physical manifest, revision,
@@ -77,7 +83,12 @@
   Resource must equal that prederived Handle exactly. Finalized current and
   receipt reads recompute the full update byte count for both delivery modes.
   External streams keep staged bytes and content blocks zero, while their final
-  update byte counter remains nonzero. The staged-chunk byte limit is unchanged.
+  update byte counter remains nonzero. Before provider I/O, an external Finalize
+  persists its content-derived publication reservation plus a `Reserved` profile
+  pin in the same physical retention family. Only a fresh reservation or
+  NotApplied rearm acknowledgement owns one publish call; reopen observes a
+  claimed attempt. Terminal finalization promotes that exact reservation without
+  changing the family obligation count. The staged-chunk byte limit is unchanged.
 - Agent Session close is the sole reducer authority for terminal Session state.
   Session metadata retains one bounded non-terminal Tool capacity directory;
   close exact-reads that complete directory and atomically writes every Tool's
@@ -97,8 +108,9 @@
   validator owns this state-dependent capacity for helpers, public snapshot
   commands, current reads, and receipt replay alike.
 - These Agent bounds and the required counters belong to the current unfrozen
-  internal `cymule.agent/6` hard cut. Omitted counters and historical aggregate
-  stream shapes have no default, compatibility decoder, or migration fallback;
+  internal `cymule.agent/7` hard cut. Omitted counters, omitted publication
+  reservations, and historical aggregate stream shapes have no default,
+  compatibility decoder, or migration fallback;
   freeze the final schema digest with this release generation.
 - Required-nullable fields reject a missing JSON member and accept explicit
   `null`. Never use Serde defaults as a compatibility path for a required

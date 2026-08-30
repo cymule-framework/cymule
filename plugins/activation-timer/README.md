@@ -2,7 +2,11 @@
 
 `cymule-activation-timer` is a durable logical timer source backed by SQLite.
 Schedules retain a stable activation ID, timer ID, due observation and typed
-value. A timer is acknowledged only after Cymule commits its activation CAS;
+value. Generation `/2` also retains one canonical `schedule_digest` over all
+four fields. Fresh selection, retained redelivery, exact schedule replay, and
+acknowledgement load the complete row, require strict canonical value/target
+bytes, and recompute that digest before a delivery can reach M1. A timer is
+acknowledged only after Cymule commits its activation CAS;
 the first exact wait targets are persisted before delivery, so lost
 acknowledgement redelivers the same activation and targets even after those
 waits leave the rebuilt parked index.
@@ -21,12 +25,14 @@ Unicode scalar values with no control character. Multi-byte identities are not
 measured by their UTF-8 byte length.
 
 The SQLite store has one physical generation,
-`cymule.activation-timer-store/1`. A completely empty database is initialized
+`cymule.activation-timer-store/2`. A completely empty database is initialized
 atomically; every nonempty database must already contain the exact singleton
 generation and fixed table/index DDL before configuration or data access.
 Older, partial, foreign, or modified databases fail with
 `unsupported_store_generation` and are not altered. This crate has no in-place
-upgrade, importer, or process-local alternate authority.
+upgrade, importer, or process-local alternate authority. The predecessor `/1`
+shape has no reader or decode fallback; retained internal-test state must be
+drained and reseeded under the current schedule authority.
 
 ```sh
 cargo add cymule-activation-timer

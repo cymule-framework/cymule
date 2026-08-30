@@ -50,6 +50,7 @@ from cymule import (
     _validate_positive_epoch,
     _validate_plan_candidate,
     _validate_restart_request,
+    _wire_json_equal,
     _strict_json_loads,
 )
 
@@ -1409,17 +1410,23 @@ class EndToEndTest(unittest.TestCase):
 
         class WrongRunClockTransport:
             @staticmethod
-            def observe_clock(
-                _target: dict[str, object], _run_id: str
+            def exchange(
+                request: dict[str, object],
             ) -> dict[str, object]:
                 return {
-                    "run_id": "run:foreign",
-                    "observation": {
-                        "clock_version": "cymule.clock-observation/2",
-                        "observation_id": _content_id("2"),
-                        "source_id": clock["source_id"],
-                        "source_generation": clock["source_generation"],
-                        "scope": _content_id("3"),
+                    "request": request,
+                    "response": {
+                        "type": "clock_observed",
+                        "result": {
+                            "run_id": "run:foreign",
+                            "observation": {
+                                "clock_version": "cymule.clock-observation/2",
+                                "observation_id": _content_id("2"),
+                                "source_id": clock["source_id"],
+                                "source_generation": clock["source_generation"],
+                                "scope": _content_id("3"),
+                            },
+                        },
                     },
                 }
 
@@ -1772,11 +1779,29 @@ class EndToEndTest(unittest.TestCase):
         )
         empty_digest = _manifest_descriptor_id(empty_root, 0, 0)
         self.assertNotIn("annotations", ResourceBuilder.text("no annotations"))
+        for media_type in [
+            "text/\0plain",
+            "text/",
+            "/plain",
+            "a/b/c",
+            "Text/plain",
+            "text/Plain",
+            "text/plain;charset=utf-8",
+            "text/ plain",
+        ]:
+            with self.subTest(builder_media_type=repr(media_type)), self.assertRaises(
+                ValueError
+            ):
+                ResourceBuilder.external(
+                    "object",
+                    media_type,
+                    {"kind": "content", "digest": digest, "size": 0},
+                )
         valid_candidates = [
             ResourceBuilder.text("resource validation"),
             ResourceBuilder.json({"nested": [1, True, None]}),
             {
-                "resource_version": "cymule.resource/3",
+                "resource_version": "cymule.resource/4",
                 "shape": "inline",
                 "media_type": "application/octet-stream",
                 "inline": {"encoding": "base64", "data": "YQ=="},
@@ -1784,7 +1809,7 @@ class EndToEndTest(unittest.TestCase):
             },
             ResourceBuilder.external(
                 "object",
-                "application/octet-stream",
+                "application/vnd.cymule.resource+json",
                 {"kind": "content", "digest": digest, "size": 1},
             ),
             ResourceBuilder.external(
@@ -1875,6 +1900,7 @@ class EndToEndTest(unittest.TestCase):
         inline = ResourceBuilder.text("value")
         invalid_candidates = [
             {**inline, "annotations": {}},
+            {**inline, "resource_version": "cymule.resource/3"},
             ResourceBuilder.external(
                 "directory",
                 "application/octet-stream",
@@ -1903,14 +1929,14 @@ class EndToEndTest(unittest.TestCase):
             ),
             {**inline, "inline": {"encoding": "utf8"}},
             {
-                "resource_version": "cymule.resource/3",
+                "resource_version": "cymule.resource/4",
                 "shape": "object",
                 "media_type": "application/octet-stream",
                 "inline": {"encoding": "utf8", "text": "forged"},
                 "integrity": {"kind": "content", "digest": digest, "size": 6},
             },
             {
-                "resource_version": "cymule.resource/3",
+                "resource_version": "cymule.resource/4",
                 "shape": "collection",
                 "media_type": "application/octet-stream",
                 "integrity": {"kind": "content", "digest": digest, "size": 10},
@@ -1924,6 +1950,11 @@ class EndToEndTest(unittest.TestCase):
                 },
             },
             {**inline, "media_type": "Text/Plain"},
+            {**inline, "media_type": "text/\0plain"},
+            {**inline, "media_type": "text/"},
+            {**inline, "media_type": "/plain"},
+            {**inline, "media_type": "a/b/c"},
+            {**inline, "media_type": "text/plain;charset=utf-8"},
             ResourceBuilder.external(
                 "object",
                 "application/octet-stream",
@@ -3235,16 +3266,21 @@ class EndToEndTest(unittest.TestCase):
         class CapturingTransport:
             command: dict[str, object] | None = None
 
-            def execute_durable(
-                self, target: dict[str, object], command: dict[str, object]
+            def exchange(
+                self, request: dict[str, object]
             ) -> dict[str, object]:
-                del target
-                self.command = copy.deepcopy(command)
+                self.command = copy.deepcopy(request["command"])
                 return {
-                    "type": "run_current",
-                    "observed_revision": _content_id("a"),
-                    "source_root": "b" * 64,
-                    "current": None,
+                    "request": request,
+                    "response": {
+                        "type": "durable_executed",
+                        "response": {
+                            "type": "run_current",
+                            "observed_revision": _content_id("a"),
+                            "source_root": "b" * 64,
+                            "current": None,
+                        },
+                    },
                 }
 
         transport = CapturingTransport()
@@ -3289,21 +3325,10 @@ class EndToEndTest(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls = 0
 
-            def execute_durable(
-                self,
-                target: dict[str, object],
-                command: dict[str, object],
-            ) -> dict[str, object]:
-                del target, command
+            def exchange(self, request: dict[str, object]) -> dict[str, object]:
+                del request
                 self.calls += 1
-                raise AssertionError("invalid durable request reached transport")
-
-            def observe_clock(
-                self, target: dict[str, object], run_id: str
-            ) -> dict[str, object]:
-                del target, run_id
-                self.calls += 1
-                raise AssertionError("invalid Clock request reached transport")
+                raise AssertionError("invalid request reached transport")
 
         def assert_local_validation(
             engine: DurableEngine,
@@ -3408,6 +3433,85 @@ class EndToEndTest(unittest.TestCase):
             with self.subTest(case=label):
                 assert_local_validation(engine, transport, invoke)
 
+        class WrongEchoTransport:
+            def exchange(self, request: dict[str, object]) -> dict[str, object]:
+                wrong = copy.deepcopy(request)
+                wrong["type"] = "verify_durable_command"
+                return {
+                    "request": wrong,
+                    "response": {
+                        "type": "durable_executed",
+                        "response": {
+                            "type": "run_current",
+                            "observed_revision": _content_id("6"),
+                            "source_root": "7" * 64,
+                            "current": None,
+                        },
+                    },
+                }
+
+        with self.assertRaises(EngineError) as wrong_echo:
+            DurableEngine(
+                store,
+                None,
+                None,
+                WrongEchoTransport(),  # type: ignore[arg-type]
+            ).run_current("run:wrong-custom-echo", None)
+        self.assertEqual(
+            wrong_echo.exception.failure["code"], "invalid_engine_response"
+        )
+
+        class FractionTransport:
+            def exchange(self, request: dict[str, object]) -> dict[str, object]:
+                json.dumps(request, allow_nan=False)
+                if request["type"] == "seal":
+                    return {
+                        "request": request,
+                        "response": {
+                            "type": "sealed",
+                            "plan": {
+                                "plan_id": _content_id("3"),
+                                "candidate": request["candidate"],
+                            },
+                        },
+                    }
+                self_outer.assertEqual(request["type"], "execute_durable")
+                command = request["command"]
+                self_outer.assertIs(type(command["input"]), float)
+                self_outer.assertEqual(command["input"], 0.1)
+                return {
+                    "request": request,
+                    "response": {
+                        "type": "durable_executed",
+                        "response": {
+                            "type": "run_boundary",
+                            "boundary": {
+                                "status": "completed",
+                                "result": {
+                                    "run_id": command["run_id"],
+                                    "plan_id": _content_id("3"),
+                                    "value": None,
+                                    "projection_digest": "4" * 64,
+                                    "precondition_token": "pre:0:" + _content_id("5"),
+                                    "effects": [],
+                                },
+                            },
+                        },
+                    },
+                }
+
+        self_outer = self
+        fraction_candidate = FlowBuilder("custom_fraction", {}, {}).finish(
+            {"kind": "input"}
+        )
+        fraction_response = DurableEngine(
+            store,
+            plugin,
+            clock,
+            FractionTransport(),  # type: ignore[arg-type]
+        ).start("run:custom-fraction", fraction_candidate, 0.1, fixture_execution())
+        self.assertEqual(fraction_response["type"], "run_boundary")
+
         class ReturningTransport:
             def __init__(
                 self,
@@ -3418,24 +3522,21 @@ class EndToEndTest(unittest.TestCase):
                 self.durable_response = durable_response
                 self.evolution_commit = evolution_commit
 
-            def execute_durable(
-                self,
-                target: dict[str, object],
-                command: dict[str, object],
-            ) -> dict[str, object]:
-                del target, command
-                assert self.durable_response is not None
-                return copy.deepcopy(self.durable_response)
-
-            def execute_live_evolution(
-                self,
-                target: dict[str, object],
-                evolution_id: str,
-                command: dict[str, object],
-            ) -> dict[str, object]:
-                del target, evolution_id, command
-                assert self.evolution_commit is not None
-                return copy.deepcopy(self.evolution_commit)
+            def exchange(self, request: dict[str, object]) -> dict[str, object]:
+                if request["type"] == "execute_durable":
+                    assert self.durable_response is not None
+                    response = {
+                        "type": "durable_executed",
+                        "response": copy.deepcopy(self.durable_response),
+                    }
+                else:
+                    assert request["type"] == "execute_live_evolution"
+                    assert self.evolution_commit is not None
+                    response = {
+                        "type": "live_evolution_executed",
+                        "commit": copy.deepcopy(self.evolution_commit),
+                    }
+                return {"request": request, "response": response}
 
         forged_current = {
             "type": "run_current",
@@ -3537,21 +3638,8 @@ class EndToEndTest(unittest.TestCase):
         )
 
         class RaisingTransport:
-            def execute_durable(
-                self,
-                target: dict[str, object],
-                command: dict[str, object],
-            ) -> dict[str, object]:
-                del target, command
-                raise RuntimeError("ordinary custom transport failure")
-
-            def execute_live_evolution(
-                self,
-                target: dict[str, object],
-                evolution_id: str,
-                command: dict[str, object],
-            ) -> dict[str, object]:
-                del target, evolution_id, command
+            def exchange(self, request: dict[str, object]) -> dict[str, object]:
+                del request
                 raise RuntimeError("ordinary custom transport failure")
 
         exception_cases = (
@@ -3616,12 +3704,8 @@ class EndToEndTest(unittest.TestCase):
             def __init__(self, failure: dict[str, object]) -> None:
                 self.failure = failure
 
-            def execute_durable(
-                self,
-                target: dict[str, object],
-                command: dict[str, object],
-            ) -> dict[str, object]:
-                del target, command
+            def exchange(self, request: dict[str, object]) -> dict[str, object]:
+                del request
                 raise EngineError(copy.deepcopy(self.failure))
 
         malformed_failure = {
@@ -3747,17 +3831,15 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(clock_failure.exception.failure["category"], "unknown_world_outcome")
         self.assertEqual(clock_failure.exception.failure["retry_disposition"], "reconcile")
 
-    def test_python_cancellation_callback_failure_reaps_the_engine_group(self) -> None:
+    def test_python_cancellation_callback_failure_reaps_the_direct_engine(self) -> None:
         with tempfile.TemporaryDirectory(
             prefix="cymule-python-cancellation-callback-"
         ) as directory:
             executable = os.path.join(directory, "callback-engine")
             started = os.path.join(directory, "started")
-            late_effect = os.path.join(directory, "late-effect")
             with open(executable, "w", encoding="utf-8") as script:
                 script.write(
                     "#!/bin/sh\n"
-                    f"( sleep 0.4; printf leaked > {late_effect!r} ) &\n"
                     f"printf started > {started!r}\n"
                     "while :; do sleep 1; done\n"
                 )
@@ -3793,8 +3875,6 @@ class EndToEndTest(unittest.TestCase):
                 rejected.exception.failure["retry_disposition"], "reconcile"
             )
             self.assertNotIn("private callback failure", str(rejected.exception))
-            time.sleep(0.6)
-            self.assertFalse(os.path.exists(late_effect))
 
     def test_engine_json_rejects_duplicate_object_members(self) -> None:
         with self.assertRaisesRegex(ValueError, "duplicate JSON object member"):
@@ -3815,8 +3895,26 @@ class EndToEndTest(unittest.TestCase):
         )
         self.assertEqual(fractional["value"], 1.5)
         self.assertIsInstance(fractional["value"], float)
+        rounded = _strict_json_loads('{"value":0.1}')
+        distinct = _strict_json_loads('{"value":0.100000000000000005}')
+        self.assertEqual(float(rounded["value"]), float(distinct["value"]))
+        self.assertFalse(
+            _wire_json_equal(rounded, distinct),
+            "distinct fractional decimal tokens must not collide through float",
+        )
         with self.assertRaisesRegex(ValueError, "not distinguishable from an integer"):
             _strict_json_loads('{"value":9007199254740991.1}')
+        with self.assertRaisesRegex(ValueError, "fixed digit limit"):
+            _strict_json_loads('{"value":1e9999999}')
+        with self.assertRaisesRegex(ValueError, "fixed byte limit"):
+            _strict_json_loads('{"value":' + "1" * 257 + '}')
+
+        exact_depth = "[" * 128 + "0" + "]" * 128
+        self.assertIsInstance(_strict_json_loads(exact_depth), list)
+        with self.assertRaisesRegex(ValueError, "fixed depth limit"):
+            _strict_json_loads("[" * 129 + "0" + "]" * 129)
+        with self.assertRaisesRegex(ValueError, "fixed depth limit"):
+            _strict_json_loads("[" * 2_000 + "0" + "]" * 2_000)
 
         engine_path = os.environ.get("CYMULE_BIN")
         if engine_path is None:
@@ -4318,6 +4416,34 @@ time.sleep(10)
         with tempfile.TemporaryDirectory(
             prefix="cymule-python-output-limit-"
         ) as directory:
+            large_candidate = copy.deepcopy(candidate)
+            large_candidate["metadata"]["padding"] = "x" * (9 * 1024 * 1024)
+            large_plan = {
+                "plan_id": _content_id("f"),
+                "candidate": large_candidate,
+            }
+            sealed = _engine_with_success(
+                directory, {"type": "sealed", "plan": large_plan}
+            ).seal(large_candidate)
+            self.assertEqual(
+                sealed["candidate"]["metadata"]["padding"],
+                large_candidate["metadata"]["padding"],
+            )
+
+            nonzero = os.path.join(directory, "nonzero-failure-engine")
+            with open(nonzero, "w", encoding="utf-8") as script:
+                script.write(
+                    """#!/bin/sh
+/bin/cat >/dev/null
+printf '%s' '{"engine_protocol":"cymule.engine/5","outcome":"failure","error":{"category":"validation","phase":"validate_request","code":"nonzero_failure","message":"validated failure wins over process status","retry_disposition":"correct_and_retry"}}'
+exit 23
+"""
+                )
+            os.chmod(nonzero, 0o700)
+            with self.assertRaises(EngineError) as remote_failure:
+                CliEngine(nonzero).seal(candidate)
+            self.assertEqual(remote_failure.exception.failure["code"], "nonzero_failure")
+
             for stream in ("stdout", "stderr"):
                 executable = os.path.join(directory, f"engine-{stream}")
                 with open(executable, "w", encoding="utf-8") as script:
@@ -4328,7 +4454,7 @@ import sys
 
 sys.stdin.buffer.read()
 fd = 1 if sys.argv[0].endswith("stdout") else 2
-remaining = 16 * 1024 * 1024 + 1
+remaining = (128 * 1024 * 1024 + 32 if fd == 1 else 1024 * 1024) + 1
 chunk = b"x" * (64 * 1024)
 while remaining:
     part = chunk[:remaining]
@@ -4346,7 +4472,11 @@ while remaining:
                 )
                 self.assertEqual(
                     rejected.exception.failure["code"],
-                    "engine_output_limit_exceeded",
+                    (
+                        "engine_output_limit_exceeded"
+                        if stream == "stdout"
+                        else "engine_diagnostic_limit_exceeded"
+                    ),
                 )
                 if stream == "stderr":
                     plan = {"plan_id": _content_id("1"), "candidate": candidate}
@@ -5157,6 +5287,14 @@ sys.stdout.write({success!r})
         )
         self.assertEqual(resource["resource_id"], expected_resource_id)
         self.assertEqual(resource["integrity"], {"kind": "inline"})
+        vendor = ResourceBuilder.external(
+            "object",
+            "application/vnd.cymule.resource+json",
+            {"kind": "content", "digest": _content_id("1"), "size": 0},
+        )
+        sealed_vendor = CliEngine(engine_path).seal_resource(vendor)
+        self.assertEqual(sealed_vendor["resource_version"], "cymule.resource/4")
+        self.assertEqual(sealed_vendor["media_type"], vendor["media_type"])
 
     def test_python_wait_activation_validates_through_rust_engine(self) -> None:
         engine_path = os.environ.get("CYMULE_BIN")
@@ -5216,7 +5354,7 @@ sys.stdout.write({success!r})
             ],
             "replay_availability": {"status": "exact"},
             "rehydration_manifest": {
-                "resource_version": "cymule.resource/3",
+                "resource_version": "cymule.resource/4",
                 "resource_id": _content_id("b"),
                 "shape": "object",
                 "media_type": "application/octet-stream",

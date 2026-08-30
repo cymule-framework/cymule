@@ -37,6 +37,9 @@
 - Resource builders preserve exact wire names and send candidates to the Rust
   engine. Do not add a Python Resource ID implementation or accept credentials
   in public URL helpers.
+- Resource `/4` builders and response validation share the exact lowercase
+  ASCII type/subtype token grammar and exact-reject `/3`; parameters are not
+  normalized or stripped.
 - Wait activation builders sort and deduplicate exact targets while preserving
   delivery, source, and Artifact identities. Rust Engine verification is not a
   substitute for durable CAS admission against pending waits.
@@ -76,6 +79,13 @@
   omitted optional field never equals an explicit null. Failure envelopes carry
   no request echo. Do not replace this universal correlation with local hashes
   or operation-specific derivation.
+- Custom transports implement only `exchange(request)` and return the complete
+  `{request, response}` success. A bare Clock, Durable, Seal, or Evolution
+  payload is not accepted by the high-level facade.
+- Strict JSON admits at most 128 nesting levels, maps parser `RecursionError` to
+  a structured fixed-depth rejection, and retains exact `Decimal` evidence for
+  non-integral tokens until echo and typed admission finish. Number tokens are
+  capped at 256 bytes and exponents at six digits before `Decimal` construction.
 - Verification successes must return the exact wait activation or control
   command submitted on the wire. A `sealed_resource` success must recursively
   validate the complete Handle and equal the submitted Candidate after removing
@@ -95,7 +105,7 @@
   instead return `timed_out/refresh_and_retry`; preserve that closed failure
   rather than reclassifying it as local response loss.
 - A cancellation callback failure after process start is response loss: always
-  kill and reap the complete Engine group and drain every pipe in `finally`;
+  kill and reap the direct Engine Child and close every local pipe in `finally`;
   mutations return `unknown_world_outcome/reconcile` without exposing the
   callback exception.
 - Engine failure messages/contracts, issue codes/messages, and JSON Pointer
@@ -155,12 +165,13 @@
   distinct replacement Run, explicit input, and evidence without local
   interpretation. Durable alone derives the authenticated source witness.
 - Reject non-finite or non-positive deadlines before `Popen`. Poll cancellation
-  while the child is running, drain pipes concurrently, and let timeout,
-  cancellation, or overflow latch exactly one immediate group `SIGKILL`; return
-  only after the direct child is reaped and every inherited pipe reaches EOF.
-- Keep draining stdout and stderr after their retained 16 MiB plus one-byte
-  limit is reached. Output overflow is response loss, and the request deadline
-  remains active until the direct child and every inherited pipe close.
+  in one selector-driven nonblocking stdin/stdout/stderr loop; timeout,
+  cancellation, or overflow kills the direct Child if still live and closes
+  every local descriptor without waiting on inherited-pipe threads.
+- Stdout retains the 128 MiB plus 32-byte framing response-envelope bound plus one byte; stderr
+  retains the independent 1 MiB diagnostic bound plus one byte. The SDK owns
+  only its direct Child handle and local pipes; the Engine must close internal
+  providers before exit. Non-POSIX process transport fails before spawn.
 - Durable cancellation and claimed-effect reconciliation expose only their
   closed Rust receipts. Compare the original reason/value and every authority
   field with the nested command; validate but never derive the boundary reason

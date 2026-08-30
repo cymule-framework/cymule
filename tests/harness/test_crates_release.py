@@ -265,65 +265,51 @@ class NewCrateRateLimitTests(unittest.TestCase):
 
 
 class RegistryMutationFenceTests(unittest.TestCase):
-    def test_remote_main_or_tag_move_stops_before_the_next_crate_put(self) -> None:
-        controller_sha = "a" * 40
+    def test_remote_tag_move_stops_before_the_next_crate_put(self) -> None:
         release_sha = "b" * 40
         release_tag = "v0.2.0"
-        expected = (
-            f"{controller_sha}\trefs/heads/main\n"
-            f"{release_sha}\trefs/tags/{release_tag}^{{}}\n"
-        )
-        moved_refs = (
-            (
-                f"{'c' * 40}\trefs/heads/main\n"
-                f"{release_sha}\trefs/tags/{release_tag}^{{}}\n"
-            ),
-            (
-                f"{controller_sha}\trefs/heads/main\n"
-                f"{'d' * 40}\trefs/tags/{release_tag}^{{}}\n"
-            ),
-        )
-        for moved in moved_refs:
-            with self.subTest(moved=moved), tempfile.TemporaryDirectory() as temporary:
-                upload = pathlib.Path(temporary) / "crate.publish"
-                upload.write_bytes(b"closed body")
-                authority = lambda: crates_release.verify_remote_release_authority(
-                    controller_sha, release_sha, release_tag
+        expected = f"{release_sha}\trefs/tags/{release_tag}^{{}}\n"
+        moved = f"{'d' * 40}\trefs/tags/{release_tag}^{{}}\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            upload = pathlib.Path(temporary) / "crate.publish"
+            upload.write_bytes(b"closed body")
+            authority = lambda: crates_release.verify_remote_release_authority(
+                release_sha, release_tag
+            )
+            with (
+                mock.patch.object(
+                    crates_release,
+                    "run",
+                    side_effect=[
+                        mock.Mock(stdout=expected),
+                        mock.Mock(stdout=moved),
+                    ],
+                ),
+                mock.patch.object(
+                    crates_release.urllib.request,
+                    "urlopen",
+                    return_value=io.BytesIO(b"{}"),
+                ) as put,
+                mock.patch.object(crates_release, "wait_for_checksum"),
+            ):
+                crates_release.publish_crate(
+                    "cymule-first",
+                    "0.2.0",
+                    "e" * 64,
+                    upload,
+                    "token",
+                    authority,
                 )
-                with (
-                    mock.patch.object(
-                        crates_release,
-                        "run",
-                        side_effect=[
-                            mock.Mock(stdout=expected),
-                            mock.Mock(stdout=moved),
-                        ],
-                    ),
-                    mock.patch.object(
-                        crates_release.urllib.request,
-                        "urlopen",
-                        return_value=io.BytesIO(b"{}"),
-                    ) as put,
-                    mock.patch.object(crates_release, "wait_for_checksum"),
-                ):
+                with self.assertRaisesRegex(ValueError, "authority moved"):
                     crates_release.publish_crate(
-                        "cymule-first",
+                        "cymule-second",
                         "0.2.0",
                         "e" * 64,
                         upload,
                         "token",
                         authority,
                     )
-                    with self.assertRaisesRegex(ValueError, "authority moved"):
-                        crates_release.publish_crate(
-                            "cymule-second",
-                            "0.2.0",
-                            "e" * 64,
-                            upload,
-                            "token",
-                            authority,
-                        )
-                    self.assertEqual(put.call_count, 1)
+                self.assertEqual(put.call_count, 1)
 
     def test_put_transport_or_http_loss_reconciles_exact_checksum(self) -> None:
         errors = (

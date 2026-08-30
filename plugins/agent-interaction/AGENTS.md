@@ -65,26 +65,30 @@
   retained registry binding through specialized Durable methods; never accept
   a caller-supplied publication, host response, reconciliation result, token,
   trait object, or opaque bytes at commit time.
-- External stream finalization commits Agent current/receipt, publication
-  catalog record, content-derived permanent Agent-stream Resource pin, and
-  Resource retention current in one CAS. There is no pre-pin requirement or
-  split follow-up write.
+- External stream finalization first commits one content-derived publication
+  reservation, `Reserved` Agent-stream Resource pin, and physical retention
+  current before provider I/O. Only that fresh CAS acknowledgement, or a fresh
+  rearm after durable NotApplied evidence, authorizes one publish call. Reopen
+  observes a claimed attempt without redispatch. Published reconciliation then
+  commits Agent current/receipt, catalog record, and promotion of that exact pin
+  to `Active` in one CAS; it never increments the obligation twice.
 - Stream Open, Append, and Abort return the exact Agent commit. Finalize and
   observe-only reconciliation return the closed finalization outcome, which
   may retain an Unknown publication intent instead of claiming a commit.
-- External finalization is a closed two-stage read within that one commit
-  attempt: provider preflight uses `resource: null`, the non-Serde publication
-  derives the exact profile-pin selectors, Durable reads those Resource
-  currents from the already-pinned source revision, and only the final receipt
-  retains the complete `resource: { retention, pin }` before witness.
+- External finalization derives the semantic Resource handle, physical family,
+  and profile-pin selectors before provider I/O. Durable exact-reads those
+  Resource currents at the command source, persists the reservation on the
+  stream current, and uses the reserved currents as the final receipt source.
+  Provider products remain non-Serde throughout.
 - External delivery pins expected media type, content digest, and byte size at
   Open. Finalize derives one closed intent binding source revision/digest,
   Session, stream, command, resolver, target, and content. The intent is the
   only serializable recovery authority; provider products remain non-Serde.
   Providers accept only that intent, publish idempotently, and return a closed
-  exact-readback observation. Unknown or a post-I/O CAS failure returns the same
-  intent; recovery requires it, exact-matches freshly read touched state, and
-  uses the observe-only finalization path without calling publish again.
+  exact-readback observation. Unknown or an unacknowledged post-I/O CAS returns
+  the same intent; known CAS/reducer conflicts remain typed errors. Recovery
+  requires the intent, exact-matches the durable reservation, and uses the
+  observe-only finalization path without calling publish again.
 - Input checkpoints bind exact Run, full `WaitOwner`, response-derived result
   Artifact, and typed M1 receipt references. Workspace checkpoints bind exact
   Run/scope/phase/Continuation/Effect/obligation plus a closed M1 receipt ref.
@@ -195,8 +199,12 @@
   concatenate a caller Tool ID into another bounded identity; the full legal
   512-scalar input must remain usable without truncation.
 - The real SQLite `/6` process-death suite derives its Agent-owned CAS count
-  from one successful terminal run, then kills a managed child immediately
-  before and after every Session/Tool, host-occurrence, and staged-stream CAS.
+  from one successful terminal run through a test-only `DurableStore` wrapper,
+  then kills a managed child after immutable objects are staged but before the
+  head CAS and again after the underlying CAS returns but before the framework
+  receives its acknowledgement. It covers every Session/Tool, host-occurrence,
+  and staged-stream CAS; the AgentPersistence façade only records the exact
+  recovery command and is not the fault boundary.
   Recovery first replays the exact recorded command receipt, then uses the
   current occurrence recovery API; it must never redispatch a retained provider
   result. Its Session-Close matrix separately retains Pending and InProgress

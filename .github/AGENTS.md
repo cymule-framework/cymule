@@ -73,7 +73,7 @@
   tag lost-ack recovery requires the remote raw annotated-tag object to equal
   the locally constructed raw object as well as the peeled release commit.
 - GitHub Release mutation has one workflow writer:
-  `finalize-release.yml`. It must attest the completely revalidated BOM/2
+  `finalize-release.yml`. It must attest the completely revalidated BOM/3
   before any mutation. A separate protected contents-read job uses a
   repository-scoped Administration-read plus Actions-read App token to close a 15-minute live
   control-plane receipt bound to the same run/attempt, controller, release, raw
@@ -106,9 +106,10 @@
   `refs/tags/v<version>` whose commit is the retained release SHA. Standard OIDC
   provenance therefore remains tag-owned, while `job.workflow_ref` and
   `job.workflow_sha` identify the reusable current-main controller. The
-  tag-App and OIDC jobs check out that controller separately, re-read
-  current main, exact-match the invoked controller files to that commit, and
-  treat the tag checkout as data only. Admission requires the
+  verify job admits that controller once against current main. The tag-App and
+  OIDC jobs check it out separately, exact-match the invoked controller files
+  to the admitted commit, and treat the tag checkout as data only. Admission
+  requires the
   tag's caller file to remain byte-identical to the resolved current-main `/1`
   caller. A tag without that caller generation is unsupported; the retired
   filename and direct controller never receive authority.
@@ -128,11 +129,12 @@
   an irreversible tag from stale registry evidence. Package matrix jobs are
   independently retryable, skip immutable versions already present in npm, and
   publish both package names before the separately authorized finalization
-  workflow may create the GitHub Release. A missing-tag push rechecks current
-  main immediately before mutation and always resolves push failure or lost
-  response only when the remote raw annotated-tag object equals the locally
-  constructed object and its peeled commit equals the release SHA; the push
-  exit status alone is not authority.
+  workflow may create the GitHub Release. A missing-tag push keeps the
+  once-admitted controller immutable, re-observes the remote tag immediately
+  before mutation, and resolves push failure or lost response only when the
+  remote raw annotated-tag object equals the locally constructed object and
+  its peeled commit equals the release SHA; the push exit status alone is not
+  authority.
 - A registry retry retains a version only after rebuilding or downloading the
   exact staged bytes and comparing registry digests. npm additionally reads the
   fully verified Sigstore bundle and closed singleton SLSA statement back and
@@ -171,23 +173,23 @@
   `stage_version: cymule.release-finalization-stage/3`; older bundles have no
   reader. It binds the private source SHA, distinct public release SHA, raw
   immutable mirror-receipt tag, and shared source-snapshot digest. A protected
-  `contents: read` attestation job uses complete release ancestry and reruns the complete BOM/2
+  `contents: read` attestation job uses complete release ancestry and reruns the complete BOM/3
   workspace-derived validator and attests the exact BOM without Release write
   authority. The sole protected `contents: write` job runs no third-party
   Action: it fetches the exact controller and complete data-only release
   workspace with Git, downloads only this run's immutable stage and attestation
   artifacts, authenticates the stage bytes, verifies the exact attestation,
   and then validates only the attested registry/package projection before it
-  re-reads current main plus the frozen raw/peeled tag identities and invokes
-  the current controller. The complete workspace-derived semantic validator
+  re-reads the frozen raw/peeled tag identities and invokes the immutable
+  controller admitted from current main at workflow start. The complete workspace-derived semantic validator
   runs in freeze and the read-only attestor. The writer never installs
   dependencies, builds, tests, or executes tag/artifact-carried code.
 - Finalization is a recoverable draft transaction: read or create the exact
   draft, create a missing BOM asset without replacement, byte-compare it by
   download, re-read metadata, publish, and repeat the terminal metadata/asset
-  readback. Current main, the raw tag object, and the peeled commit are re-read
-  immediately before each create, upload, publish, or Latest mutation and once
-  more after the terminal metadata/asset readback. A same-commit retag with
+  readback. Current main is admitted once for the non-cancelling run; the raw
+  tag object and peeled commit are re-read immediately before each create,
+  upload, publish, or Latest mutation and once more after terminal readback. A same-commit retag with
   different annotation or signature is rejected even when the Release was
   already converged and no mutation was needed. The complete Release asset set is
   exactly the frozen BOM; its REST database ID, name, size, SHA-256, and

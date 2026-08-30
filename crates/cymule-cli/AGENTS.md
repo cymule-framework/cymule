@@ -38,7 +38,7 @@
   and its exact adapter; every other command forbids that registry, and no
   lookup may infer, default, or fall back to another target.
 - `seal_resource` is an additive request/response pair over
-  `cymule.resource/3`. The CLI delegates validation and identity to
+  `cymule.resource/4`. The CLI delegates validation and identity to
   `cymule-resource`; it must never compute Resource IDs independently.
 - `verify_wait_activation` validates only the versioned provider-neutral
   delivery record. Stateful source matching, consume-once admission, and

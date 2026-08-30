@@ -210,28 +210,30 @@ provider product remains non-Serde. The provider accepts only that intent,
 publishes idempotently, and may return only Published with exact readback,
 NotApplied, or Unknown.
 
-The external path is a two-stage read inside one pinned commit attempt. Before
-provider I/O the stream source has `resource: null`, because no Resource family
-or pin key exists until the verified publication is known. The publication
-derives the exact `ResourceProfilePin`; Durable then reads retention and pin
-currents from the original source revision, constructs the complete bounded
-before witness, and runs the pure reducer. Only that complete source enters the
-semantic receipt.
+Before provider I/O Durable derives the semantic Resource handle, physical
+retention family, and exact `ResourceProfilePin` from the immutable Open
+content. One StateRoot CAS persists the publication reservation on the stream,
+the `Reserved` pin, its family count, and the Finalize command. That CAS competes
+directly with `BeginDelete`; whichever head transition wins makes the loser a
+typed conflict before its provider call.
 
-Published followed by any Resource read, Agent reduction, or CAS failure
-returns `PublicationOutcomeUnknown` with the same intent. The dedicated
-reconciliation method requires that restored intent, rereads the touched
-Finalize source, exact-matches its digest and derived identity, and calls only
-provider observation. It never invokes publish; a restart therefore cannot
-turn an unknown write into a second write.
+Only a freshly acknowledged reservation or NotApplied rearm owns one publish
+call. Reopen of `DispatchClaimed` performs no publish. Dedicated reconciliation
+requires the restored intent and calls only provider observation. Exact
+NotApplied observation is persisted before a later rearm may claim one new
+attempt. Published readback is reconciled against the retained reservation;
+only an ambiguous final Store acknowledgement becomes
+`PublicationOutcomeUnknown`, while known source/reducer/CAS conflicts remain
+their typed errors.
 
-External finalization is one StateRoot CAS over:
+External terminal finalization is one later StateRoot CAS over:
 
 - command and semantic receipt;
 - stream and Session/update/message-or-tool currents;
 - exact `ResourceCatalogRecord` publication;
-- content-derived `ResourcePinKind::AgentStream`; and
-- Resource pin and retention currents.
+- the already content-derived `ResourcePinKind::AgentStream`; and
+- promotion of the exact `Reserved` Resource pin to `Active` without changing
+  the family obligation count.
 
 The shared Resource reducer rejects deleted/fenced families, duplicate pins,
 wrong physical families, and released pins. Resource GC resolves the retained
@@ -333,11 +335,12 @@ Agent/M1 transition.
 
 ## Wire and compatibility
 
-Current persisted command and receipt selectors are `cymule.agent-command/2`
-and `cymule.agent-command-receipt/2`; bounded Session metadata is
+Current persisted command and receipt selectors are `cymule.agent-command/3`
+and `cymule.agent-command-receipt/3`; bounded Session metadata is
 `cymule.agent-session-current/2`, and the current closed schema generation is
-`cymule.agent/6`. Recovery observations and publication intents use their own
-content-ID generations. All persisted unions deny unknown fields.
+`cymule.agent/7`. Recovery observations, publication intents, and publication
+reservations use their own content-ID generations. All persisted unions deny
+unknown fields.
 There is no reader or writer for the removed aggregate Session, recursive
 journal-base, or stream-record formats. This profile is still internal, so the
 terminal keyed model is a deliberate historical incompatibility rather than a

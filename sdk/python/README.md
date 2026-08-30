@@ -64,10 +64,14 @@ to the submitted Candidate. Optional structured-failure members are
 omission-only, and malformed post-mutation responses require reconciliation.
 Cancellation and claimed-effect resolution return complete request-bound
 receipts while Rust remains the sole Artifact identity authority. Stdout and
-stderr are continuously drained with independent hard retention limits. A
-finite positive deadline or cancellation latches one immediate group `SIGKILL`,
-then waits for the direct child to be reaped and every inherited pipe to reach
-EOF; an ignored `SIGTERM` or a descendant closing its pipes cannot escape.
+stderr are drained by one nonblocking selector with independent 128 MiB plus 32-byte framing
+response-envelope and 1 MiB diagnostic limits. A custom transport implements
+only `exchange(request)` and returns the complete accepted request plus
+response. Strict JSON retains exact fractional decimal evidence through echo
+admission and rejects nesting beyond 128 levels. A finite positive deadline or
+cancellation kills only the official direct Child when still live, closes local
+descriptors, and reaps it. The Engine/executor watchdog owns descendant closure;
+the SDK never signals a raw PID or PGID after reaping.
 Run IDs, execution owners, and Clock source/scope identities accept 1..512
 printable Unicode scalar values. Queries carry required-null revision/cursor
 members plus explicit item and canonical-byte budgets; there is no query ID or

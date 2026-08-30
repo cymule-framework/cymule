@@ -63,6 +63,13 @@ STABLE_VERSION_ADMISSION = (
     '          [[ "$RELEASE_VERSION" =~ '
     '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$ ]]'
 )
+DOWNSTREAM_CURRENT_MAIN_MARKERS = (
+    "refs/remotes/origin/main",
+    "refs/heads/main",
+    "origin main",
+    "current_main=",
+    "remote_main=",
+)
 
 
 def workflow_paths(root: pathlib.Path = WORKFLOWS) -> list[pathlib.Path]:
@@ -113,6 +120,21 @@ def job_bodies(text: str) -> dict[str, str]:
     if len(jobs) != len(matches):
         raise ValueError("release workflow repeats a top-level job name")
     return jobs
+
+
+def reject_downstream_current_main_reads(
+    workflow: str, jobs: dict[str, str]
+) -> None:
+    """Keep current-main admission at the verify job's single linearization point."""
+
+    for name, body in jobs.items():
+        if name == "verify":
+            continue
+        markers = [marker for marker in DOWNSTREAM_CURRENT_MAIN_MARKERS if marker in body]
+        if markers:
+            raise ValueError(
+                f"{workflow} {name} revokes an admitted immutable controller: {markers}"
+            )
 
 
 def workflow_events(text: str) -> set[str]:
@@ -516,20 +538,13 @@ def verify_npm_publish_boundary(text: str) -> None:
                 f"{NPM_CONTROLLER} {name} does not authenticate the current "
                 f"verifier and tag payload: {missing}"
             )
-    if (
-        jobs["preflight-registry"].count(
-            'test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"'
-        )
-        != 1
-    ):
-        raise ValueError(f"{NPM_CONTROLLER} tag admission is not current-main bound")
+    if jobs["verify"].count('test "$CONTROLLER_SHA" = "$current_main"') != 1:
+        raise ValueError(f"{NPM_CONTROLLER} has no single current-main admission point")
+    reject_downstream_current_main_reads(NPM_CONTROLLER, jobs)
     expected_tag_run = """        run: |
           test "$RESOLVED_CONTROLLER_SHA" = "$CONTROLLER_SHA"
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/npm_release.py scripts/version_domains.py
-          git fetch --no-tags origin main
-          current_main=$(git rev-parse refs/remotes/origin/main)
-          test "$current_main" = "$CONTROLLER_SHA"
           test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"
           test "$(node --version)" = v26.7.0
           test "$(npm --version)" = 11.19.0
@@ -548,7 +563,6 @@ def verify_npm_publish_boundary(text: str) -> None:
               --manifest "$RUNNER_TEMP/npm-stage-cymule-sdk/manifest.json" \\
               --release-sha "$RELEASE_SHA"
           else
-            test "$current_main" = "$RELEASE_SHA"
             python3 scripts/npm_release.py tag-creation-admission \\
               --manifest "$RUNNER_TEMP/npm-stage-cymule/manifest.json" \\
               --release-sha "$RELEASE_SHA"
@@ -577,10 +591,6 @@ def verify_npm_publish_boundary(text: str) -> None:
               test "$remote_before_tag_sha" = "$expected_tag_sha"
               test "$remote_before_release_sha" = "$RELEASE_SHA"
             else
-              git fetch --no-tags origin main
-              current_main=$(git rev-parse refs/remotes/origin/main)
-              test "$current_main" = "$CONTROLLER_SHA"
-              test "$current_main" = "$RELEASE_SHA"
               authorization=$(printf 'x-access-token:%s' "$TAG_PUSH_TOKEN" | base64 | tr -d '\\n')
               if ! git -C "$CYMULE_RELEASE_WORKSPACE" \\
                 -c "http.extraHeader=Authorization: Basic $authorization" \\
@@ -622,13 +632,11 @@ def verify_npm_publish_boundary(text: str) -> None:
         "CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload",
         'test "$RESOLVED_CONTROLLER_SHA" = "$CONTROLLER_SHA"',
         'test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"',
-        'test "$current_main" = "$CONTROLLER_SHA"',
         'test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"',
         controller_integrity,
-        'test "$current_main" = "$RELEASE_SHA"',
     ):
         if fragment not in tag:
-            raise ValueError(f"{NPM_CONTROLLER} tag writer is not current-main bound")
+            raise ValueError(f"{NPM_CONTROLLER} tag writer is not immutable-controller bound")
     tag_admission = "python3 scripts/npm_release.py publication-admission"
     tag_creation_admission = "python3 scripts/npm_release.py tag-creation-admission"
     if (
@@ -649,15 +657,8 @@ def verify_npm_publish_boundary(text: str) -> None:
     final_commit_readback = (
         '          test "$final_remote_release_sha" = "$RELEASE_SHA"\n'
     )
-    pre_push_fence = (
-        "              git fetch --no-tags origin main\n"
-        "              current_main=$(git rev-parse refs/remotes/origin/main)\n"
-        '              test "$current_main" = "$CONTROLLER_SHA"\n'
-        '              test "$current_main" = "$RELEASE_SHA"\n'
-    )
     if (
         tag.count(push_marker) != 1
-        or tag.count(pre_push_fence) != 1
         or tag.count(final_tag_readback) != 1
         or tag.count(final_commit_readback) != 1
         or tag.count('            expected_tag_sha=$remote_tag_sha\n') != 1
@@ -671,13 +672,12 @@ def verify_npm_publish_boundary(text: str) -> None:
         )
         != 1
         or 'x-access-token:%s\' "$TAG_PUSH_TOKEN"' not in tag
-        or tag.rindex(tag_creation_admission) >= tag.index(pre_push_fence)
-        or tag.index(pre_push_fence) >= tag.index(push_marker)
+        or tag.rindex(tag_creation_admission) >= tag.index(push_marker)
         or tag.index(push_marker) >= tag.index(final_tag_readback)
         or tag.index(final_tag_readback) >= tag.index(final_commit_readback)
     ):
         raise ValueError(
-            f"{NPM_CONTROLLER} tag push is not current-fenced and loss-resolved"
+            f"{NPM_CONTROLLER} tag push is not admitted and loss-resolved"
         )
     if tag.count(expected_tag_run) != 1 or re.search(
         r"^\s+run:", tag.replace(expected_tag_run, "", 1), flags=re.MULTILINE
@@ -691,7 +691,7 @@ def verify_npm_publish_boundary(text: str) -> None:
     for fragment in (
         "CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload",
         'test "$RESOLVED_CONTROLLER_SHA" = "$CONTROLLER_SHA"',
-        'test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"',
+        'test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"',
         'test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"',
         "python3 scripts/npm_release.py verify-staged",
         "python3 scripts/npm_release.py publish",
@@ -753,7 +753,6 @@ def verify_crates_controller_boundary(text: str) -> None:
         "EXECUTOR_WITNESS_SHA: ${{ needs.executor-witness.outputs.release_sha }}",
         'test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"',
         'test "$EXECUTOR_WITNESS_SHA" = "$RELEASE_SHA"',
-        'test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"',
         'test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"',
         "python3 scripts/crates_release.py publish",
     )
@@ -764,6 +763,9 @@ def verify_crates_controller_boundary(text: str) -> None:
             "publish-crates.yml does not separate current controller and tag payload: "
             f"{missing}"
         )
+    if verify.count('test "$GITHUB_SHA" = "$current_main"') != 1:
+        raise ValueError("publish-crates.yml has no single current-main admission point")
+    reject_downstream_current_main_reads("publish-crates.yml", jobs)
     required_executor_witness = (
         "needs: verify",
         "runs-on: macos-15",
@@ -829,8 +831,6 @@ def verify_crates_controller_boundary(text: str) -> None:
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           test "$EXECUTOR_WITNESS_SHA" = "$RELEASE_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/crates_release.py scripts/version_domains.py
-          git fetch --no-tags origin main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
           remote_release_sha=$(git ls-remote origin "refs/tags/$RELEASE_TAG^{}" | cut -f1)
           test -n "$remote_release_sha"
           test "$remote_release_sha" = "$RELEASE_SHA"
@@ -841,8 +841,6 @@ def verify_crates_controller_boundary(text: str) -> None:
     expected_publish = """        run: |
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/crates_release.py scripts/version_domains.py
-          git fetch --no-tags origin main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
           remote_release_sha=$(git ls-remote origin "refs/tags/$RELEASE_TAG^{}" | cut -f1)
           test -n "$remote_release_sha"
           test "$remote_release_sha" = "$RELEASE_SHA"
@@ -945,7 +943,6 @@ def verify_finalization_controller_boundary(text: str) -> None:
         "CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-payload",
         'test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"',
         'test "$(git -C release-payload rev-parse HEAD)" = "$RELEASE_SHA"',
-        'test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"',
         'RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}',
         'PRIVATE_SOURCE_SHA: ${{ needs.verify.outputs.private_source_sha }}',
         'MIRROR_RECEIPT_TAG_SHA: ${{ needs.verify.outputs.mirror_receipt_tag_sha }}',
@@ -991,7 +988,7 @@ def verify_finalization_controller_boundary(text: str) -> None:
         "owner: ${{ github.repository_owner }}",
         "repositories: ${{ github.event.repository.name }}",
         'git diff --quiet "$CONTROLLER_SHA" -- scripts/verify_github_release_settings.py',
-        'test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"',
+        'test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"',
         'test "$remote_tag_sha" = "$RELEASE_TAG_SHA"',
         'test "$remote_release_sha" = "$RELEASE_SHA"',
         'test "$remote_mirror_receipt_tag_sha" = "$MIRROR_RECEIPT_TAG_SHA"',
@@ -1013,7 +1010,7 @@ def verify_finalization_controller_boundary(text: str) -> None:
         "actions/attest@a1948c3f048ba23858d222213b7c278aabede763",
         "uv run --project sdk/python --frozen python3 scripts/finalize_release.py verify-stage",
         "CYMULE_RELEASE_WORKSPACE: ${{ github.workspace }}/release-authority",
-        'test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"',
+        'test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"',
         'RELEASE_TAG_SHA: ${{ needs.verify.outputs.release_tag_sha }}',
         'PRIVATE_SOURCE_SHA: ${{ needs.verify.outputs.private_source_sha }}',
         'MIRROR_RECEIPT_TAG_SHA: ${{ needs.verify.outputs.mirror_receipt_tag_sha }}',
@@ -1042,7 +1039,7 @@ def verify_finalization_controller_boundary(text: str) -> None:
         "owner: ${{ github.repository_owner }}",
         "repositories: ${{ github.event.repository.name }}",
         'git diff --quiet "$CONTROLLER_SHA" -- scripts/verify_github_release_settings.py',
-        'test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"',
+        'test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"',
         'test "$remote_tag_sha" = "$RELEASE_TAG_SHA"',
         'test "$remote_release_sha" = "$RELEASE_SHA"',
         "python3 scripts/verify_github_release_settings.py",
@@ -1073,7 +1070,7 @@ def verify_finalization_controller_boundary(text: str) -> None:
         'release-attestation-$RELEASE_VERSION',
         'release-control-plane-$RELEASE_VERSION',
         'export CYMULE_RELEASE_WORKSPACE="$authority_dir"',
-        'test "$remote_main" = "$CONTROLLER_SHA"',
+        'test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"',
         'test "$remote_tag_sha" = "$RELEASE_TAG_SHA"',
         'python3 "$controller_dir/scripts/finalize_release.py" publish',
         '--attestation-bundle "$attestation_dir/bundle.json"',
@@ -1098,9 +1095,12 @@ def verify_finalization_controller_boundary(text: str) -> None:
     missing.extend(fragment for fragment in required_publish if fragment not in publish)
     if missing:
         raise ValueError(
-            "finalize-release.yml does not freeze data before its current-main controller: "
+            "finalize-release.yml does not freeze data under its admitted controller: "
             f"{missing}"
         )
+    if verify.count('test "$GITHUB_SHA" = "$current_main"') != 1:
+        raise ValueError("finalize-release.yml has no single current-main admission point")
+    reject_downstream_current_main_reads("finalize-release.yml", jobs)
     if (
         verify.count("actions/checkout@") != 2
         or verify.count("ref: ${{ steps.identity.outputs.release_sha }}") != 1
@@ -1496,8 +1496,6 @@ def verify_finalization_controller_boundary(text: str) -> None:
           export CYMULE_RELEASE_WORKSPACE="$authority_dir"
           cd "$controller_dir"
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
-          remote_main=$(git ls-remote origin refs/heads/main | cut -f1)
-          test "$remote_main" = "$CONTROLLER_SHA"
           remote_refs=$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
           test "$(printf '%s\\n' "$remote_refs" | grep -c .)" -eq 2
           remote_tag_sha=$(printf '%s\\n' "$remote_refs" | awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref {print $1}')
@@ -1710,7 +1708,8 @@ def verify_private_mirror_ci(text: str) -> None:
             shellcheck,
             '  script:\n'
             '    - test -z "${' + mirror_token + ':-}"\n'
-            '    - test "$(shellcheck --version | sed -n \'s/^version: //p\')" = 0.10.0\n'
+            '    - |\n'
+            '      test "$(shellcheck --version | sed -n \'s/^version: //p\')" = 0.10.0\n'
             '    - shellcheck .gitlab/scripts/compute_public_source_snapshot.sh\n'
             '    - shellcheck .gitlab/scripts/publish-public-mirror.sh\n'
             '    - shellcheck .gitlab/scripts/scan_public_mirror_artifact.sh\n'

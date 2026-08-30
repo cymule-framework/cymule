@@ -322,8 +322,6 @@ jobs:
           test "$RESOLVED_CONTROLLER_SHA" = "$CONTROLLER_SHA"
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/npm_release.py scripts/version_domains.py
-          git fetch --no-tags origin main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
           test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"
           if test "$TAG_EXISTS" = true; then
             python3 scripts/npm_release.py publication-admission \
@@ -399,9 +397,6 @@ jobs:
           test "$RESOLVED_CONTROLLER_SHA" = "$CONTROLLER_SHA"
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/npm_release.py scripts/version_domains.py
-          git fetch --no-tags origin main
-          current_main=$(git rev-parse refs/remotes/origin/main)
-          test "$current_main" = "$CONTROLLER_SHA"
           test "$(git -C "$CYMULE_RELEASE_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"
           test "$(node --version)" = v26.7.0
           test "$(npm --version)" = 11.19.0
@@ -420,7 +415,6 @@ jobs:
               --manifest "$RUNNER_TEMP/npm-stage-cymule-sdk/manifest.json" \
               --release-sha "$RELEASE_SHA"
           else
-            test "$current_main" = "$RELEASE_SHA"
             python3 scripts/npm_release.py tag-creation-admission \
               --manifest "$RUNNER_TEMP/npm-stage-cymule/manifest.json" \
               --release-sha "$RELEASE_SHA"
@@ -449,10 +443,6 @@ jobs:
               test "$remote_before_tag_sha" = "$expected_tag_sha"
               test "$remote_before_release_sha" = "$RELEASE_SHA"
             else
-              git fetch --no-tags origin main
-              current_main=$(git rev-parse refs/remotes/origin/main)
-              test "$current_main" = "$CONTROLLER_SHA"
-              test "$current_main" = "$RELEASE_SHA"
               authorization=$(printf 'x-access-token:%s' "$TAG_PUSH_TOKEN" | base64 | tr -d '\n')
               if ! git -C "$CYMULE_RELEASE_WORKSPACE" \
                 -c "http.extraHeader=Authorization: Basic $authorization" \
@@ -522,8 +512,6 @@ jobs:
           test "$RESOLVED_CONTROLLER_SHA" = "$CONTROLLER_SHA"
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/npm_release.py scripts/version_domains.py
-          git fetch --no-tags origin main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
           remote_release_sha=$(git ls-remote origin "refs/tags/$RELEASE_TAG^{}" | cut -f1)
           test -n "$remote_release_sha"
           test "$remote_release_sha" = "$RELEASE_SHA"
@@ -544,8 +532,6 @@ jobs:
           test "$RESOLVED_CONTROLLER_SHA" = "$CONTROLLER_SHA"
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/npm_release.py scripts/version_domains.py
-          git fetch --no-tags origin main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
           remote_release_sha=$(git ls-remote origin "refs/tags/$RELEASE_TAG^{}" | cut -f1)
           test -n "$remote_release_sha"
           test "$remote_release_sha" = "$RELEASE_SHA"

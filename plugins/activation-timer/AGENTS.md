@@ -6,12 +6,18 @@
 - The file-backed SQLite generation is the only timer authority. Do not expose
   an in-memory constructor or another process-local schedule/acknowledgement
   store, including for tests.
-- The timer store accepts only the exact `cymule.activation-timer-store/1`
+- The timer store accepts only the exact `cymule.activation-timer-store/2`
   physical generation. Initialize only a completely empty SQLite database
   inside one immediate transaction and verify the singleton generation row plus
   every fixed table/index DDL before commit. Reject every nonempty mismatch with
   `unsupported_store_generation` before PRAGMA or mutation; never ALTER, heal,
   or import it.
+- Generation `/2` retains one `schedule_digest` over the complete activation
+  ID, timer ID, due observation, and typed value. Fresh selection, retained
+  delivery, schedule replay, and acknowledgement all load and validate the
+  complete row, require strict canonical JSON bytes, and recompute that digest.
+  Any direct field mismatch is stable `Integrity` before parked-wait selection
+  or an M1 delivery; `/1` has no reader, importer, or fallback.
 - Activation and timer identities use the shared 1..=512 Unicode-scalar,
   no-control-character contract. Never substitute UTF-8 byte length.
 - `receive` may return only a currently due timer with an exact target selected

@@ -34,6 +34,9 @@ pub const AGENT_RECOVERY_OBSERVATION_VERSION: &str = "cymule.agent-recovery-obse
 /// Frozen identity generation for one external stream publication intent.
 pub const AGENT_STREAM_PUBLICATION_INTENT_VERSION: &str =
     "cymule.agent-stream-publication-intent/1";
+/// Frozen persisted pre-publication reservation generation.
+pub const AGENT_STREAM_PUBLICATION_RESERVATION_VERSION: &str =
+    "cymule.agent-stream-publication-reservation/1";
 const AGENT_OCCURRENCE_TRANSITION_ID_DOMAIN: &str = "cymule.agent-occurrence-transition-id/1";
 const AGENT_UPDATE_DIGEST_DOMAIN: &str = "cymule.agent-update-current/1";
 const AGENT_MESSAGE_DIGEST_DOMAIN: &str = "cymule.agent-message-current/1";
@@ -4332,6 +4335,12 @@ pub struct AgentStreamCurrent {
     pub target: AgentStreamTarget,
     /// Immutable source of the final content.
     pub delivery: AgentStreamDelivery,
+    /// Durable provider-dispatch reservation for one external Finalize.
+    ///
+    /// This is present only while an external stream remains open between its
+    /// pre-publication retention CAS and terminal finalization.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub publication_reservation: Option<Box<AgentStreamPublicationReservation>>,
     /// Current lifecycle state.
     pub state: AgentStreamState,
     /// Next zero-based chunk sequence.
@@ -4393,15 +4402,7 @@ impl AgentStreamCurrent {
                 "Agent stream content count does not match its staged chunks".to_owned(),
             ));
         }
-        if matches!(self.delivery, AgentStreamDelivery::ExternalResource { .. })
-            && (self.next_chunk_sequence != 0
-                || self.staged_bytes != 0
-                || self.staged_content_blocks != 0)
-        {
-            return Err(ProtocolError::Validation(
-                "external Agent stream cannot retain staged chunks".to_owned(),
-            ));
-        }
+        self.verify_delivery_state()?;
         if let Some(head) = &self.chunk_head {
             validate_sha256("Agent stream chunk head", head)?;
         }
@@ -4417,6 +4418,11 @@ impl AgentStreamCurrent {
                 }
             }
             AgentStreamState::Finalized => {
+                if self.publication_reservation.is_some() {
+                    return Err(ProtocolError::Validation(
+                        "finalized Agent stream cannot retain a publication reservation".to_owned(),
+                    ));
+                }
                 let update = self.final_update.as_ref().ok_or_else(|| {
                     ProtocolError::Validation(
                         "finalized Agent stream current requires its Session update".to_owned(),
@@ -4441,6 +4447,11 @@ impl AgentStreamCurrent {
                 }
             }
             AgentStreamState::Aborted => {
+                if self.publication_reservation.is_some() {
+                    return Err(ProtocolError::Validation(
+                        "aborted Agent stream cannot retain a publication reservation".to_owned(),
+                    ));
+                }
                 if self.final_update.is_some() || self.content_digest.is_some() {
                     return Err(ProtocolError::Validation(
                         "aborted Agent stream cannot retain finalized output".to_owned(),
@@ -4457,6 +4468,46 @@ impl AgentStreamCurrent {
             }
         }
         validate_canonical_size("Agent stream current", self, MAX_AGENT_CURRENT_BYTES)
+    }
+
+    fn verify_delivery_state(&self) -> ProtocolResult<()> {
+        if matches!(self.delivery, AgentStreamDelivery::ExternalResource { .. })
+            && (self.next_chunk_sequence != 0
+                || self.staged_bytes != 0
+                || self.staged_content_blocks != 0)
+        {
+            return Err(ProtocolError::Validation(
+                "external Agent stream cannot retain staged chunks".to_owned(),
+            ));
+        }
+        match (&self.delivery, &self.publication_reservation) {
+            (
+                AgentStreamDelivery::ExternalResource {
+                    resolver_binding,
+                    content,
+                },
+                Some(reservation),
+            ) => {
+                reservation.verify()?;
+                if reservation.intent.session_id() != self.session_id
+                    || reservation.intent.stream_id() != self.stream_id
+                    || reservation.intent.resolver_binding() != resolver_binding
+                    || reservation.intent.content() != content
+                {
+                    return Err(ProtocolError::IdentityMismatch(
+                        "Agent stream publication reservation changed its owner or delivery"
+                            .to_owned(),
+                    ));
+                }
+            }
+            (AgentStreamDelivery::ExternalResource { .. } | AgentStreamDelivery::Staged, None) => {}
+            (AgentStreamDelivery::Staged, Some(_)) => {
+                return Err(ProtocolError::Validation(
+                    "staged Agent stream cannot retain a publication reservation".to_owned(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -4887,6 +4938,164 @@ impl AgentStreamPublicationIntent {
     }
 }
 
+/// Durable phase of one exact external publication attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStreamPublicationReservationPhase {
+    /// One freshly acknowledged Store CAS owns exactly one provider publish call.
+    DispatchClaimed,
+    /// Exact provider observation proved the latest attempt did not apply.
+    NotApplied,
+}
+
+#[derive(Serialize)]
+struct AgentStreamPublicationReservationIdentity<'a> {
+    reservation_version: &'a str,
+    intent: &'a AgentStreamPublicationIntent,
+    resource_pin_receipt: &'a ResourcePinReceipt,
+}
+
+/// Durable pre-publication authority for one external Agent stream.
+///
+/// The stable reservation identity binds the immutable intent and Resource
+/// retention obligation. `attempt` and `phase` are the bounded dispatch
+/// current: only a fresh CAS into `DispatchClaimed` authorizes one provider
+/// call, while reopen observes that exact attempt instead of redispatching it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentStreamPublicationReservation {
+    /// Reservation wire generation.
+    pub reservation_version: String,
+    /// Content identity of the immutable intent and Resource obligation.
+    pub reservation_id: String,
+    /// Framework-derived immutable provider authority.
+    pub intent: AgentStreamPublicationIntent,
+    /// Exact reserved Resource pin receipt and resulting family count.
+    pub resource_pin_receipt: ResourcePinReceipt,
+    /// One-based provider dispatch attempt ordinal.
+    pub attempt: u64,
+    /// Durable dispatch state of the latest attempt.
+    pub phase: AgentStreamPublicationReservationPhase,
+}
+
+impl AgentStreamPublicationReservation {
+    fn new(
+        intent: AgentStreamPublicationIntent,
+        resource_pin_receipt: ResourcePinReceipt,
+    ) -> ProtocolResult<Self> {
+        let reservation_id = content_id(
+            AGENT_STREAM_PUBLICATION_RESERVATION_VERSION,
+            &AgentStreamPublicationReservationIdentity {
+                reservation_version: AGENT_STREAM_PUBLICATION_RESERVATION_VERSION,
+                intent: &intent,
+                resource_pin_receipt: &resource_pin_receipt,
+            },
+        )?;
+        let reservation = Self {
+            reservation_version: AGENT_STREAM_PUBLICATION_RESERVATION_VERSION.to_owned(),
+            reservation_id,
+            intent,
+            resource_pin_receipt,
+            attempt: 1,
+            phase: AgentStreamPublicationReservationPhase::DispatchClaimed,
+        };
+        reservation.verify()?;
+        Ok(reservation)
+    }
+
+    /// Verify immutable intent/pin closure and bounded dispatch state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reservation identity, owner, pin, attempt, or
+    /// canonical representation changed.
+    pub fn verify(&self) -> ProtocolResult<()> {
+        require_agent_version(
+            "Agent stream publication reservation",
+            &self.reservation_version,
+            AGENT_STREAM_PUBLICATION_RESERVATION_VERSION,
+        )?;
+        self.intent.verify()?;
+        self.resource_pin_receipt
+            .verify()
+            .map_err(resource_protocol_error)?;
+        let expected_pin = agent_stream_resource_profile_pin_from_intent(&self.intent)?;
+        if self.resource_pin_receipt.command_id != self.intent.command_id()
+            || self.resource_pin_receipt.pin != expected_pin.pin
+            || self.attempt == 0
+            || self.attempt > MAX_EXACT_INTEGER
+        {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent stream publication reservation changed its command, pin, or attempt"
+                    .to_owned(),
+            ));
+        }
+        let expected = content_id(
+            AGENT_STREAM_PUBLICATION_RESERVATION_VERSION,
+            &AgentStreamPublicationReservationIdentity {
+                reservation_version: &self.reservation_version,
+                intent: &self.intent,
+                resource_pin_receipt: &self.resource_pin_receipt,
+            },
+        )?;
+        if self.reservation_id != expected {
+            return Err(ProtocolError::IdentityMismatch(
+                "Agent stream publication reservation does not match its immutable authority"
+                    .to_owned(),
+            ));
+        }
+        validate_canonical_size(
+            "Agent stream publication reservation",
+            self,
+            MAX_AGENT_VALUE_BYTES,
+        )
+    }
+
+    /// Advance exact `NotApplied` evidence into one freshly claimable attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the latest durable attempt is `NotApplied`.
+    pub fn rearm(&self) -> ProtocolResult<Self> {
+        self.verify()?;
+        if self.phase != AgentStreamPublicationReservationPhase::NotApplied {
+            return Err(ProtocolError::Conflict {
+                code: "agent_stream_publication_attempt_unresolved".to_owned(),
+                message: "Agent stream publication attempt must be observed before redispatch"
+                    .to_owned(),
+            });
+        }
+        let mut next = self.clone();
+        next.attempt = next.attempt.checked_add(1).ok_or_else(|| {
+            ProtocolError::Validation(
+                "Agent stream publication attempt ordinal is exhausted".to_owned(),
+            )
+        })?;
+        next.phase = AgentStreamPublicationReservationPhase::DispatchClaimed;
+        next.verify()?;
+        Ok(next)
+    }
+
+    /// Retain exact `NotApplied` evidence for the latest claimed attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless this reservation currently owns a dispatch.
+    pub fn mark_not_applied(&self) -> ProtocolResult<Self> {
+        self.verify()?;
+        if self.phase != AgentStreamPublicationReservationPhase::DispatchClaimed {
+            return Err(ProtocolError::Conflict {
+                code: "agent_stream_publication_not_dispatched".to_owned(),
+                message: "Agent stream publication has no claimed attempt to settle".to_owned(),
+            });
+        }
+        let mut next = self.clone();
+        next.phase = AgentStreamPublicationReservationPhase::NotApplied;
+        next.verify()?;
+        Ok(next)
+    }
+}
+
 /// Closed provider observation for one idempotent publication intent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentStreamPublicationObservation {
@@ -5148,36 +5357,27 @@ pub trait AgentProviders {
     ) -> ProtocolResult<AgentWorkspaceObservation>;
 }
 
-/// Invoke the exact external stream provider after source-only preflight.
-///
-/// The returned non-Serde product can be consumed only by the stream reducer;
-/// the persisted command and source never carry provider output. The preflight
-/// source intentionally has no Resource current: its returned publication
-/// first derives the exact pin selectors, after which Durable builds the full
-/// source from the already-pinned revision.
+/// Invoke the exact external stream provider from one freshly acknowledged
+/// durable reservation.
 ///
 /// # Errors
 ///
-/// Returns an error before provider I/O when the command/source is not one
-/// admissible external finalization, or after provider I/O when the publication
-/// does not match the retained resolver binding.
+/// Returns an error before provider I/O when the reservation does not own a
+/// claimed attempt, or after provider I/O when the publication does not match
+/// the retained resolver binding.
 pub fn execute_agent_stream_publication<P: AgentProviders + ?Sized>(
-    source: &AgentStreamSource,
-    command: &AgentCommand,
+    reservation: &AgentStreamPublicationReservation,
     providers: &mut P,
 ) -> ProtocolResult<AgentStreamPublicationResult> {
-    command.verify()?;
-    let AgentCommandAction::Stream(stream_command) = &command.action else {
-        return Err(ProtocolError::Validation(
-            "Agent stream provider requires a Stream command".to_owned(),
-        ));
-    };
-    let intent = preflight_external_stream_publication(
-        source,
-        stream_command,
-        &command.source_revision,
-        &command.command_id,
-    )?;
+    reservation.verify()?;
+    if reservation.phase != AgentStreamPublicationReservationPhase::DispatchClaimed {
+        return Err(ProtocolError::Conflict {
+            code: "agent_stream_publication_dispatch_not_claimed".to_owned(),
+            message: "Agent stream publication requires a freshly claimed durable attempt"
+                .to_owned(),
+        });
+    }
+    let intent = reservation.intent.clone();
     let observation = providers.publish_agent_stream(&intent)?;
     agent_stream_publication_result(intent, observation)
 }
@@ -5190,30 +5390,17 @@ pub fn execute_agent_stream_publication<P: AgentProviders + ?Sized>(
 /// derive the exact original intent, or when the provider violates the closed
 /// observation contract.
 pub fn reconcile_agent_stream_publication<P: AgentProviders + ?Sized>(
-    source: &AgentStreamSource,
-    command: &AgentCommand,
+    reservation: &AgentStreamPublicationReservation,
     expected_intent: &AgentStreamPublicationIntent,
     providers: &mut P,
 ) -> ProtocolResult<AgentStreamPublicationResult> {
-    command.verify()?;
-    let AgentCommandAction::Stream(stream_command) = &command.action else {
-        return Err(ProtocolError::Validation(
-            "Agent stream reconciliation requires a Stream command".to_owned(),
-        ));
-    };
+    reservation.verify()?;
     expected_intent.verify()?;
-    let intent = preflight_external_stream_publication(
-        source,
-        stream_command,
-        &command.source_revision,
-        &command.command_id,
-    )?;
-    if &intent != expected_intent {
+    if &reservation.intent != expected_intent {
         return Err(ProtocolError::Conflict {
             code: "agent_stream_publication_intent_changed".to_owned(),
-            message:
-                "Agent stream touched source no longer derives the expected publication intent"
-                    .to_owned(),
+            message: "Agent stream reservation no longer owns the expected publication intent"
+                .to_owned(),
         });
     }
     let observation = providers.observe_agent_stream_publication(expected_intent)?;
@@ -6868,9 +7055,9 @@ fn workspace_checkpoint_phase(
 }
 
 /// Closed Agent persistence command generation.
-pub const AGENT_COMMAND_VERSION: &str = "cymule.agent-command/2";
+pub const AGENT_COMMAND_VERSION: &str = "cymule.agent-command/3";
 /// Closed Agent persistence receipt generation.
-pub const AGENT_COMMAND_RECEIPT_VERSION: &str = "cymule.agent-command-receipt/2";
+pub const AGENT_COMMAND_RECEIPT_VERSION: &str = "cymule.agent-command-receipt/3";
 
 const AGENT_COMMAND_ID_DOMAIN: &str = "cymule.agent-command-id/1";
 const AGENT_COMMAND_RECEIPT_ID_DOMAIN: &str = "cymule.agent-command-receipt-id/1";
@@ -7361,6 +7548,7 @@ impl AgentStreamSource {
                 session_id: session_id.to_owned(),
                 target: target.clone(),
                 delivery: delivery.clone(),
+                publication_reservation: None,
                 state: AgentStreamState::Open,
                 next_chunk_sequence: 0,
                 chunk_head: None,
@@ -7568,15 +7756,20 @@ impl AgentStreamSource {
                 "staged Agent stream finalization cannot consume a publication product".to_owned(),
             ));
         }
-        let expected_intent = agent_stream_publication_intent(
-            &command.source_revision,
-            self,
-            &command.command_id,
-            stream,
-        )?;
+        let reservation = stream.publication_reservation.as_ref().ok_or_else(|| {
+            ProtocolError::IllegalTransition(
+                "external Agent stream finalization lost its publication reservation".to_owned(),
+            )
+        })?;
+        reservation.verify()?;
+        let expected_intent = reservation.intent.clone();
         let expected_pin =
             agent_stream_resource_profile_pin(session_id, stream_id, product.publication())?;
-        if product.intent() != &expected_intent || product.resource_profile_pin() != &expected_pin {
+        if reservation.phase != AgentStreamPublicationReservationPhase::DispatchClaimed
+            || reservation.resource_pin_receipt.pin != expected_pin.pin
+            || product.intent() != &expected_intent
+            || product.resource_profile_pin() != &expected_pin
+        {
             return Err(ProtocolError::IdentityMismatch(
                 "Agent stream publication product changed its preflight owner".to_owned(),
             ));
@@ -7628,12 +7821,17 @@ impl AgentStreamSource {
                     stream_command.stream_id(),
                     record,
                 )?;
-                let intent = agent_stream_publication_intent(
-                    &command.source_revision,
-                    self,
-                    &command.command_id,
-                    stream,
-                )?;
+                let intent = stream
+                    .publication_reservation
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ProtocolError::IdentityMismatch(
+                            "external Agent receipt source lost its publication reservation"
+                                .to_owned(),
+                        )
+                    })?
+                    .intent
+                    .clone();
                 let product = AgentStreamPublicationProduct::new(intent, publication)?;
                 self.reduce_with_publication(command, &product)?
             }
@@ -7713,6 +7911,7 @@ fn reduce_stream_finalization(
     session_postcondition.session.verify()?;
     let mut next = input.stream.clone();
     next.state = AgentStreamState::Finalized;
+    next.publication_reservation = None;
     next.final_update = Some(update);
     next.content_digest = Some(canonical_digest(&content)?);
     input.command_id.clone_into(&mut next.admitted_by);
@@ -7839,20 +8038,62 @@ fn stream_finalization_resource(
             let pin =
                 agent_stream_resource_profile_pin(input.session_id, input.stream_id, publication)?
                     .pin;
-            let receipt = reduce_resource_pin_receipt(
-                input.command_id,
-                &pin,
-                source.retention.as_ref(),
-                source.pin.as_ref(),
-            )
-            .map_err(resource_protocol_error)?;
+            let reservation = input
+                .stream
+                .publication_reservation
+                .as_ref()
+                .ok_or_else(|| {
+                    ProtocolError::IllegalTransition(
+                        "external Agent finalization lost its durable publication reservation"
+                            .to_owned(),
+                    )
+                })?;
+            reservation.verify()?;
+            let retained_pin = source.pin.as_ref().ok_or_else(|| {
+                ProtocolError::IllegalTransition(
+                    "external Agent finalization lost its reserved Resource pin".to_owned(),
+                )
+            })?;
+            let retained = source.retention.as_ref().ok_or_else(|| {
+                ProtocolError::IllegalTransition(
+                    "external Agent finalization lost its Resource retention obligation".to_owned(),
+                )
+            })?;
+            let reservation_origin =
+                crate::resource::ResourceLifecycleReceiptRef::from_agent_publication_reservation(
+                    input.command_id.to_owned(),
+                    input.session_id.to_owned(),
+                    input.stream_id.to_owned(),
+                    reservation.reservation_id.clone(),
+                )
+                .map_err(resource_protocol_error)?;
+            if reservation.resource_pin_receipt.pin != pin
+                || retained_pin.pin != pin
+                || retained_pin.status != crate::resource::ResourcePinStatus::Reserved
+                || retained_pin.last_receipt != reservation_origin
+                || retained.family != pin.subject.family
+                || retained.active_pin_count < reservation.resource_pin_receipt.active_pin_count
+            {
+                return Err(ProtocolError::Conflict {
+                    code: "agent_stream_publication_reservation_changed".to_owned(),
+                    message: "Agent stream publication reservation lost its exact Resource pin"
+                        .to_owned(),
+                });
+            }
             (
                 Some(agent_stream_publication_catalog_record(
                     input.session_id,
                     input.stream_id,
                     publication,
                 )?),
-                Some(receipt),
+                Some(
+                    ResourcePinReceipt::new(
+                        input.command_id.to_owned(),
+                        pin,
+                        retained.active_pin_count,
+                    )
+                    .map_err(resource_protocol_error)?,
+                ),
             )
         }
         (None, None) => (None, None),
@@ -7890,7 +8131,7 @@ fn preflight_external_stream_publication(
             chunks,
             target,
             update,
-            resource: None,
+            resource: _,
         },
     ) = (command, source)
     else {
@@ -7904,6 +8145,7 @@ fn preflight_external_stream_publication(
         || stream.session_id != *session_id
         || stream.stream_id != *stream_id
         || stream.state != AgentStreamState::Open
+        || stream.publication_reservation.is_some()
         || !chunks.is_empty()
         || update.is_some()
     {
@@ -7924,6 +8166,157 @@ fn preflight_external_stream_publication(
     )
 }
 
+/// Derive the immutable external publication intent and its exact physical
+/// retention selector before provider I/O.
+///
+/// # Errors
+///
+/// Returns an error when the command/source is not one admissible external
+/// finalization or cannot identify one exact profile pin.
+pub fn prepare_agent_stream_publication(
+    source: &AgentStreamSource,
+    command: &AgentCommand,
+) -> ProtocolResult<(AgentStreamPublicationIntent, ResourceProfilePin)> {
+    command.verify()?;
+    let AgentCommandAction::Stream(stream_command) = &command.action else {
+        return Err(ProtocolError::Validation(
+            "Agent stream publication preparation requires a Stream command".to_owned(),
+        ));
+    };
+    let intent = preflight_external_stream_publication(
+        source,
+        stream_command,
+        &command.source_revision,
+        &command.command_id,
+    )?;
+    let pin = agent_stream_resource_profile_pin_from_intent(&intent)?;
+    Ok((intent, pin))
+}
+
+/// Persistable postcondition for the first pre-publication retention CAS.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentStreamPublicationReservationPostcondition {
+    /// Open stream current carrying the newly claimed dispatch attempt.
+    pub stream: AgentStreamCurrent,
+    /// Exact reserved Resource pin receipt used by Durable lowering.
+    pub resource_pin_receipt: ResourcePinReceipt,
+}
+
+/// Reduce one external publication reservation over its exact Agent and
+/// Resource source. This pure transition performs no provider I/O.
+///
+/// # Errors
+///
+/// Returns an error when the stream already has a reservation, a deletion
+/// fence owns the physical family, or the exact pin source changed.
+pub fn reserve_agent_stream_publication(
+    source: &AgentStreamSource,
+    command: &AgentCommand,
+) -> ProtocolResult<AgentStreamPublicationReservationPostcondition> {
+    let (intent, profile_pin) = prepare_agent_stream_publication(source, command)?;
+    let AgentStreamSource::Finalize {
+        stream,
+        resource: Some(resource),
+        ..
+    } = source
+    else {
+        return Err(ProtocolError::Validation(
+            "Agent publication reservation requires its exact Resource source".to_owned(),
+        ));
+    };
+    if stream.publication_reservation.is_some() {
+        return Err(ProtocolError::Conflict {
+            code: "agent_stream_publication_already_reserved".to_owned(),
+            message: "Agent stream already retains a publication reservation".to_owned(),
+        });
+    }
+    let resource_pin_receipt = reduce_resource_pin_receipt(
+        &command.command_id,
+        &profile_pin.pin,
+        resource.retention.as_ref(),
+        resource.pin.as_ref(),
+    )
+    .map_err(resource_protocol_error)?;
+    let reservation = AgentStreamPublicationReservation::new(intent, resource_pin_receipt.clone())?;
+    let mut next = stream.clone();
+    next.publication_reservation = Some(Box::new(reservation));
+    next.verify()?;
+    Ok(AgentStreamPublicationReservationPostcondition {
+        stream: next,
+        resource_pin_receipt,
+    })
+}
+
+/// Rearm one provider-proved `NotApplied` reservation. Only the fresh CAS that
+/// publishes this successor may invoke the provider again.
+///
+/// # Errors
+///
+/// Returns an error when the stream/command owner changed or the current
+/// attempt has not reached `NotApplied`.
+pub fn rearm_agent_stream_publication(
+    stream: &AgentStreamCurrent,
+    command: &AgentCommand,
+) -> ProtocolResult<AgentStreamCurrent> {
+    stream.verify()?;
+    command.verify()?;
+    let AgentCommandAction::Stream(AgentStreamCommand::Finalize {
+        session_id,
+        stream_id,
+    }) = &command.action
+    else {
+        return Err(ProtocolError::Validation(
+            "Agent publication rearm requires an external Finalize command".to_owned(),
+        ));
+    };
+    let reservation = stream.publication_reservation.as_ref().ok_or_else(|| {
+        ProtocolError::IllegalTransition(
+            "Agent publication rearm requires its durable reservation".to_owned(),
+        )
+    })?;
+    if stream.session_id != *session_id
+        || stream.stream_id != *stream_id
+        || reservation.intent.command_id() != command.command_id
+    {
+        return Err(ProtocolError::IdentityMismatch(
+            "Agent publication rearm changed its exact stream command".to_owned(),
+        ));
+    }
+    let mut next = stream.clone();
+    next.publication_reservation = Some(Box::new(reservation.rearm()?));
+    next.verify()?;
+    Ok(next)
+}
+
+/// Retain exact `NotApplied` observation for the latest claimed provider attempt.
+///
+/// # Errors
+///
+/// Returns an error when the stream/command owner changed or no attempt is
+/// currently dispatch-claimed.
+pub fn mark_agent_stream_publication_not_applied(
+    stream: &AgentStreamCurrent,
+    command: &AgentCommand,
+) -> ProtocolResult<AgentStreamCurrent> {
+    stream.verify()?;
+    command.verify()?;
+    let reservation = stream.publication_reservation.as_ref().ok_or_else(|| {
+        ProtocolError::IllegalTransition(
+            "Agent publication observation requires its durable reservation".to_owned(),
+        )
+    })?;
+    if reservation.intent.command_id() != command.command_id {
+        return Err(ProtocolError::IdentityMismatch(
+            "Agent publication observation changed its exact Finalize command".to_owned(),
+        ));
+    }
+    let mut next = stream.clone();
+    next.publication_reservation = Some(Box::new(reservation.mark_not_applied()?));
+    next.verify()?;
+    Ok(next)
+}
+
 fn agent_stream_publication_source_digest(source: &AgentStreamSource) -> ProtocolResult<String> {
     let mut preflight = source.clone();
     let AgentStreamSource::Finalize { resource, .. } = &mut preflight else {
@@ -7933,31 +8326,6 @@ fn agent_stream_publication_source_digest(source: &AgentStreamSource) -> Protoco
     };
     *resource = None;
     canonical_digest(&preflight).map_err(Into::into)
-}
-
-fn agent_stream_publication_intent(
-    source_revision: &str,
-    source: &AgentStreamSource,
-    command_id: &str,
-    stream: &AgentStreamCurrent,
-) -> ProtocolResult<AgentStreamPublicationIntent> {
-    let AgentStreamDelivery::ExternalResource {
-        resolver_binding,
-        content,
-    } = &stream.delivery
-    else {
-        return Err(ProtocolError::Validation(
-            "Agent stream publication intent requires external delivery".to_owned(),
-        ));
-    };
-    AgentStreamPublicationIntent::new(
-        source_revision,
-        source,
-        command_id,
-        stream,
-        resolver_binding,
-        content,
-    )
 }
 
 fn verify_external_stream_publication(
@@ -7995,13 +8363,36 @@ fn agent_stream_resource_profile_pin(
     stream_id: &str,
     publication: &ResourcePublication,
 ) -> ProtocolResult<ResourceProfilePin> {
-    let subject =
-        ResourceRetentionSubject::from_publication(publication).map_err(resource_protocol_error)?;
+    publication.verify().map_err(resource_protocol_error)?;
+    let intent_resource = &publication.resource;
+    let subject = ResourceRetentionSubject::from_handle(
+        &publication.locators.resolver_binding,
+        intent_resource,
+    )
+    .map_err(resource_protocol_error)?;
     let pin = ResourcePin::profile(
         subject,
         ResourcePinKind::AgentStream {
             session_id: session_id.to_owned(),
             stream_id: stream_id.to_owned(),
+        },
+    )
+    .map_err(resource_protocol_error)?;
+    ResourceProfilePin::new(pin).map_err(resource_protocol_error)
+}
+
+fn agent_stream_resource_profile_pin_from_intent(
+    intent: &AgentStreamPublicationIntent,
+) -> ProtocolResult<ResourceProfilePin> {
+    intent.verify()?;
+    let resource = intent.resource_handle()?;
+    let subject = ResourceRetentionSubject::from_handle(intent.resolver_binding(), &resource)
+        .map_err(resource_protocol_error)?;
+    let pin = ResourcePin::profile(
+        subject,
+        ResourcePinKind::AgentStream {
+            session_id: intent.session_id().to_owned(),
+            stream_id: intent.stream_id().to_owned(),
         },
     )
     .map_err(resource_protocol_error)?;
@@ -9030,7 +9421,8 @@ mod tests {
     use super::*;
     use crate::resource::{
         MAX_RESOURCE_ANNOTATIONS, RESOURCE_LOCATOR_VERSION, RESOURCE_VERSION, ResourceCandidate,
-        ResourceIntegrity, ResourceLocation, ResourceLocatorSet, ResourceShape,
+        ResourceIntegrity, ResourceLifecycleReceiptRef, ResourceLocation, ResourceLocatorSet,
+        ResourceShape,
     };
 
     fn revision(digit: char) -> String {
@@ -9339,9 +9731,8 @@ mod tests {
             publication: Some(forged_publication),
             ..TestAgentProviders::default()
         };
-        assert!(
-            execute_agent_stream_publication(&source, &finalize_command, &mut providers).is_err()
-        );
+        let (_, reservation) = reserve_external_stream_source(&finalize_command, source);
+        assert!(execute_agent_stream_publication(&reservation, &mut providers).is_err());
         assert_eq!(providers.publication_calls, 1);
     }
 
@@ -9529,6 +9920,59 @@ mod tests {
             resource: None,
         };
         (command, finalize, source)
+    }
+
+    fn reserve_external_stream_source(
+        command: &AgentCommand,
+        mut source: AgentStreamSource,
+    ) -> (AgentStreamSource, AgentStreamPublicationReservation) {
+        let (_, profile_pin) = prepare_agent_stream_publication(&source, command)
+            .expect("external publication selectors derive before I/O");
+        let AgentStreamSource::Finalize { resource, .. } = &mut source else {
+            panic!("fixture is an external finalization")
+        };
+        *resource = Some(Box::new(AgentStreamResourceSource {
+            retention: None,
+            pin: None,
+        }));
+        let reserved = reserve_agent_stream_publication(&source, command)
+            .expect("external publication reserves its physical family");
+        let reservation = reserved
+            .stream
+            .publication_reservation
+            .as_ref()
+            .expect("reservation is embedded in the stream current")
+            .as_ref()
+            .clone();
+        assert_eq!(profile_pin.pin, reservation.resource_pin_receipt.pin);
+        let origin = ResourceLifecycleReceiptRef::from_agent_publication_reservation(
+            command.command_id.clone(),
+            reservation.intent.session_id().to_owned(),
+            reservation.intent.stream_id().to_owned(),
+            reservation.reservation_id.clone(),
+        )
+        .expect("reservation lifecycle edge seals");
+        let resource = crate::resource::project_resource_pin_reservation_receipt(
+            &reservation.resource_pin_receipt,
+            origin,
+            None,
+            None,
+        )
+        .expect("reservation projects its exact Resource currents");
+        let AgentStreamSource::Finalize {
+            stream,
+            resource: source_resource,
+            ..
+        } = &mut source
+        else {
+            unreachable!("fixture shape was checked above")
+        };
+        *stream = reserved.stream;
+        *source_resource = Some(Box::new(AgentStreamResourceSource {
+            retention: Some(resource.retention),
+            pin: Some(resource.pin),
+        }));
+        (source, reservation)
     }
 
     struct WorkspaceTestFixture {
@@ -12151,7 +12595,7 @@ mod tests {
 
     #[test]
     fn external_stream_provider_is_preflighted_and_couples_resource_pin() {
-        let (finalize_command, finalize, mut source) = external_stream_finalize_fixture();
+        let (finalize_command, finalize, source) = external_stream_finalize_fixture();
         assert!(
             source
                 .reduce(&finalize_command.command_id, &finalize)
@@ -12162,7 +12606,8 @@ mod tests {
             publication: Some(external_publication()),
             ..TestAgentProviders::default()
         };
-        let result = execute_agent_stream_publication(&source, &finalize_command, &mut providers)
+        let (source, reservation) = reserve_external_stream_source(&finalize_command, source);
+        let result = execute_agent_stream_publication(&reservation, &mut providers)
             .expect("registered external publication resolves");
         let AgentStreamPublicationResult::Published { product } = result else {
             panic!("test provider must return a read-back publication")
@@ -12195,13 +12640,31 @@ mod tests {
                 ref stream_id,
             } if session_id == "session:external" && stream_id == "stream:external"
         ));
-        let AgentStreamSource::Finalize { resource, .. } = &mut source else {
-            panic!("fixture is an external finalization")
+        let mut wrong_reservation_origin = source.clone();
+        let AgentStreamSource::Finalize {
+            resource: Some(resource),
+            ..
+        } = &mut wrong_reservation_origin
+        else {
+            panic!("reserved fixture retains its Resource source")
         };
-        *resource = Some(Box::new(AgentStreamResourceSource {
-            retention: None,
-            pin: None,
-        }));
+        resource
+            .pin
+            .as_mut()
+            .expect("reserved fixture retains its Resource pin")
+            .last_receipt = ResourceLifecycleReceiptRef::from_agent_publication_reservation(
+            finalize_command.command_id.clone(),
+            "session:external",
+            "stream:external",
+            revision('f'),
+        )
+        .expect("foreign reservation origin seals");
+        assert!(
+            wrong_reservation_origin
+                .reduce_with_publication(&finalize_command, &product)
+                .is_err(),
+            "publication cannot promote a pin owned by another reservation"
+        );
         let finalized = source
             .reduce_with_publication(&finalize_command, &product)
             .expect("authorized external publication finalizes");
@@ -12228,6 +12691,7 @@ mod tests {
     #[test]
     fn external_stream_unknown_retains_exact_intent_for_read_only_reconciliation() {
         let (command, _, source) = external_stream_finalize_fixture();
+        let (_, reservation) = reserve_external_stream_source(&command, source);
         let mut providers = TestAgentProviders {
             publication_observation: Some(AgentStreamPublicationObservation::Unknown),
             reconciliation_observation: Some(AgentStreamPublicationObservation::Published {
@@ -12235,7 +12699,7 @@ mod tests {
             }),
             ..TestAgentProviders::default()
         };
-        let first = execute_agent_stream_publication(&source, &command, &mut providers)
+        let first = execute_agent_stream_publication(&reservation, &mut providers)
             .expect("ambiguous publication returns a typed result");
         let AgentStreamPublicationResult::Unknown { intent } = first else {
             panic!("ambiguous provider result must retain its exact intent")
@@ -12247,7 +12711,7 @@ mod tests {
         assert_eq!(restored, intent);
 
         let reconciled =
-            reconcile_agent_stream_publication(&source, &command, &restored, &mut providers)
+            reconcile_agent_stream_publication(&reservation, &restored, &mut providers)
                 .expect("read-only publication observation resolves");
         let AgentStreamPublicationResult::Published { product } = reconciled else {
             panic!("exact readback must return the verified publication product")
@@ -12260,16 +12724,25 @@ mod tests {
             vec![intent.clone(), intent.clone()]
         );
 
-        let mut drifted = source;
-        let AgentStreamSource::Finalize { stream, .. } = &mut drifted else {
-            panic!("fixture is an external finalization")
-        };
-        let AgentStreamDelivery::ExternalResource { content, .. } = &mut stream.delivery else {
-            panic!("fixture has external delivery")
-        };
-        content.digest = revision('b');
+        let (_, _, drifted_source) = external_stream_finalize_fixture_for(
+            "session:external-drifted",
+            "stream:external-drifted",
+            "message:external-drifted",
+        );
+        let (drifted_source, drifted) = reserve_external_stream_source(
+            &AgentCommand::new(
+                revision('4'),
+                AgentCommandAction::Stream(AgentStreamCommand::Finalize {
+                    session_id: "session:external-drifted".to_owned(),
+                    stream_id: "stream:external-drifted".to_owned(),
+                }),
+            )
+            .expect("drifted command seals"),
+            drifted_source,
+        );
+        drop(drifted_source);
         assert!(matches!(
-            reconcile_agent_stream_publication(&drifted, &command, &intent, &mut providers),
+            reconcile_agent_stream_publication(&drifted, &intent, &mut providers),
             Err(ProtocolError::Conflict { ref code, .. })
                 if code == "agent_stream_publication_intent_changed"
         ));
@@ -12311,9 +12784,8 @@ mod tests {
             publication: Some(forged),
             ..TestAgentProviders::default()
         };
-        assert!(
-            execute_agent_stream_publication(&source, &finalize_command, &mut providers).is_err()
-        );
+        let (_, reservation) = reserve_external_stream_source(&finalize_command, source);
+        assert!(execute_agent_stream_publication(&reservation, &mut providers).is_err());
         assert_eq!(providers.publication_calls, 1);
 
         let (finalize_command, _, source) = external_stream_finalize_fixture();
@@ -12321,9 +12793,8 @@ mod tests {
             publication: Some(external_publication_with_digest('b')),
             ..TestAgentProviders::default()
         };
-        assert!(
-            execute_agent_stream_publication(&source, &finalize_command, &mut providers).is_err()
-        );
+        let (_, reservation) = reserve_external_stream_source(&finalize_command, source);
+        assert!(execute_agent_stream_publication(&reservation, &mut providers).is_err());
         assert_eq!(providers.publication_calls, 1);
     }
 
@@ -12334,25 +12805,19 @@ mod tests {
             publication: Some(external_publication()),
             ..TestAgentProviders::default()
         };
-        let result =
-            execute_agent_stream_publication(&first_source, &first_command, &mut providers)
-                .expect("first stream resolves its pinned publication");
+        let (_, first_reservation) = reserve_external_stream_source(&first_command, first_source);
+        let result = execute_agent_stream_publication(&first_reservation, &mut providers)
+            .expect("first stream resolves its pinned publication");
         let AgentStreamPublicationResult::Published { product } = result else {
             panic!("test provider must return a read-back publication")
         };
 
-        let (second_command, _, mut second_source) = external_stream_finalize_fixture_for(
+        let (second_command, _, second_source) = external_stream_finalize_fixture_for(
             "session:external-other",
             "stream:external-other",
             "message:external-other",
         );
-        let AgentStreamSource::Finalize { resource, .. } = &mut second_source else {
-            panic!("fixture is an external finalization")
-        };
-        *resource = Some(Box::new(AgentStreamResourceSource {
-            retention: None,
-            pin: None,
-        }));
+        let (second_source, _) = reserve_external_stream_source(&second_command, second_source);
         let error = second_source
             .reduce_with_publication(&second_command, &product)
             .expect_err("a provider product cannot cross its preflight stream");
@@ -12366,11 +12831,11 @@ mod tests {
             panic!("fixture is an external finalization")
         };
         stream.state = AgentStreamState::Finalized;
-        let mut providers = TestAgentProviders {
+        let providers = TestAgentProviders {
             publication: Some(external_publication()),
             ..TestAgentProviders::default()
         };
-        assert!(execute_agent_stream_publication(&source, &command, &mut providers).is_err());
+        assert!(reserve_agent_stream_publication(&source, &command).is_err());
         assert_eq!(providers.publication_calls, 0);
 
         let (command, _, mut source) = external_stream_finalize_fixture();
@@ -12385,8 +12850,15 @@ mod tests {
             publication: Some(external_publication()),
             ..TestAgentProviders::default()
         };
-        assert!(execute_agent_stream_publication(&source, &command, &mut providers).is_err());
-        assert_eq!(providers.publication_calls, 0);
+        let reserved = reserve_agent_stream_publication(&source, &command)
+            .expect("exact Resource source admits reservation before I/O");
+        let reservation = reserved
+            .stream
+            .publication_reservation
+            .as_ref()
+            .expect("reservation persists");
+        assert!(execute_agent_stream_publication(reservation, &mut providers).is_ok());
+        assert_eq!(providers.publication_calls, 1);
     }
 
     #[test]

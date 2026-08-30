@@ -1077,6 +1077,7 @@ impl ProcessExecutor {
     ) -> RuntimeResult<RunningProcess> {
         use std::os::fd::OwnedFd;
 
+        ensure_supervised_child_reap_authority(&mut supervisor)?;
         let Ok(mut child) = command.spawn() else {
             let error = launch.classify_spawn_failure(ambiguous_world_effect);
             supervisor.terminate();
@@ -1128,6 +1129,7 @@ impl ProcessExecutor {
         ambiguous_world_effect: bool,
     ) -> RuntimeResult<RunningProcess> {
         launch.check_pre_start(deadline)?;
+        ensure_supervised_child_reap_authority(&mut supervisor)?;
         let working_directory = invocation
             .working_directory
             .as_deref()
@@ -1149,7 +1151,7 @@ impl ProcessExecutor {
             stdout,
             stderr,
         } = spawned;
-        let mut child = ProcessChild::Darwin { pid };
+        let mut child = ProcessChild::Darwin { pid, status: None };
         // SAFETY: `pid` is the exact suspended direct child. Read back the
         // kernel-applied process group before launch can commit.
         if unsafe { nix::libc::getpgid(pid) } != supervisor.process_group() {
@@ -2117,7 +2119,10 @@ enum ProcessChild {
     #[cfg(not(target_os = "macos"))]
     Standard(Child),
     #[cfg(target_os = "macos")]
-    Darwin { pid: nix::libc::pid_t },
+    Darwin {
+        pid: nix::libc::pid_t,
+        status: Option<ExitStatus>,
+    },
 }
 
 impl ProcessChild {
@@ -2126,7 +2131,23 @@ impl ProcessChild {
             #[cfg(not(target_os = "macos"))]
             Self::Standard(child) => child.try_wait(),
             #[cfg(target_os = "macos")]
-            Self::Darwin { pid } => wait_darwin_child(*pid, nix::libc::WNOHANG),
+            Self::Darwin { pid, status } => {
+                if status.is_some() {
+                    return Ok(*status);
+                }
+                loop {
+                    match wait_darwin_child(*pid, nix::libc::WNOHANG) {
+                        Ok(observed) => {
+                            if let Some(observed) = observed {
+                                *status = Some(observed);
+                            }
+                            return Ok(observed);
+                        }
+                        Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
         }
     }
 
@@ -2135,9 +2156,14 @@ impl ProcessChild {
             #[cfg(not(target_os = "macos"))]
             Self::Standard(child) => child.kill(),
             #[cfg(target_os = "macos")]
-            Self::Darwin { pid } => {
+            Self::Darwin { pid, status } => {
+                if status.is_some() {
+                    return Ok(());
+                }
                 // SAFETY: `pid` is the exact positive child identity returned
-                // by this invocation's successful `posix_spawn` call.
+                // by this invocation's successful `posix_spawn` call and has
+                // not been reaped. A retained status makes this a no-op so PID
+                // reuse can never redirect occurrence termination.
                 if unsafe { nix::libc::kill(*pid, nix::libc::SIGKILL) } == 0
                     || nix::errno::Errno::last_raw() == nix::libc::ESRCH
                 {
@@ -2154,16 +2180,59 @@ impl ProcessChild {
             #[cfg(not(target_os = "macos"))]
             Self::Standard(child) => child.wait(),
             #[cfg(target_os = "macos")]
-            Self::Darwin { pid } => loop {
-                match wait_darwin_child(*pid, 0) {
-                    Ok(Some(status)) => return Ok(status),
-                    Ok(None) => {}
-                    Err(error) if error.kind() == ErrorKind::Interrupted => {}
-                    Err(error) => return Err(error),
+            Self::Darwin { pid, status } => {
+                if let Some(observed) = *status {
+                    return Ok(observed);
                 }
-            },
+                loop {
+                    match wait_darwin_child(*pid, 0) {
+                        Ok(Some(observed)) => {
+                            *status = Some(observed);
+                            return Ok(observed);
+                        }
+                        Ok(None) => {}
+                        Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
         }
     }
+}
+
+#[cfg(unix)]
+fn ensure_supervised_child_reap_authority(
+    supervisor: &mut ProcessGroupSupervisor,
+) -> RuntimeResult<()> {
+    if let Err(error) = ensure_child_reap_authority() {
+        supervisor.terminate();
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_child_reap_authority() -> RuntimeResult<()> {
+    let mut action = std::mem::MaybeUninit::<nix::libc::sigaction>::uninit();
+    // SAFETY: a null second argument performs one read-only process-disposition
+    // query and initializes the caller-owned `action` value on success.
+    if unsafe { nix::libc::sigaction(nix::libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) }
+        != 0
+    {
+        return Err(RuntimeError::substrate(
+            "process_child_reap_authority_unavailable",
+            "process child-reap disposition could not be observed",
+        ));
+    }
+    // SAFETY: sigaction initialized the complete value after returning success.
+    let action = unsafe { action.assume_init() };
+    if action.sa_sigaction != nix::libc::SIG_DFL || action.sa_flags & nix::libc::SA_NOCLDWAIT != 0 {
+        return Err(RuntimeError::substrate(
+            "process_child_reap_authority_unavailable",
+            "process execution requires exclusive default SIGCHLD reap authority",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -2413,6 +2482,7 @@ struct ProcessGroupSupervisor {
 impl ProcessGroupSupervisor {
     fn start(deadline: Instant, launch: &LaunchAuthority) -> RuntimeResult<Self> {
         launch.check_pre_start(deadline)?;
+        ensure_child_reap_authority()?;
         let watchdog_deadline = monotonic_deadline(remaining(deadline))?;
         // SAFETY: `getpid` observes only the current process identity and is
         // called on the parent side before the watchdog fork.
@@ -4771,6 +4841,87 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn apple_descriptor_query_rejects_a_real_truncated_kernel_prefix() {
+        use super::{
+            ChildDescriptorAuthority, ChildDescriptorAuthorityView, apple_open_descriptor_count,
+        };
+        use std::mem::size_of;
+
+        let retained = (0..8)
+            .map(|_| std::fs::File::open("/dev/null").expect("descriptor fixture opens"))
+            .collect::<Vec<_>>();
+        let mut authority = ChildDescriptorAuthority::prepare()
+            .expect("Apple descriptor authority prepares in the parent");
+        let full = authority.view();
+        let truncated_entries = 3_i32;
+        let truncated_bytes = truncated_entries
+            .checked_mul(
+                i32::try_from(size_of::<nix::libc::proc_fdinfo>())
+                    .expect("Apple descriptor record size fits c_int"),
+            )
+            .expect("truncated descriptor buffer size fits c_int");
+        let truncated = ChildDescriptorAuthorityView {
+            buffer_address: full.buffer_address,
+            buffer_bytes: truncated_bytes,
+            descriptor_domain_exclusive: truncated_entries,
+        };
+
+        // SAFETY: the view exposes the first three records of the larger owned
+        // mapping. More than three descriptors are retained, so XNU fills the
+        // complete supplied buffer; a full return is truncation, never closure.
+        assert!(unsafe { apple_open_descriptor_count(truncated) }.is_none());
+        drop(retained);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reaped_darwin_child_never_signals_a_reusable_pid() {
+        use super::{DarwinSpawnedProcess, ProcessChild, spawn_darwin_suspended};
+        use std::collections::BTreeMap;
+
+        let working_directory = std::env::current_dir().expect("test working directory resolves");
+        let process_group = nix::unistd::getpgrp().as_raw();
+        let spawned = spawn_darwin_suspended(
+            std::path::Path::new("/usr/bin/true"),
+            &[],
+            &BTreeMap::new(),
+            &working_directory,
+            process_group,
+        )
+        .expect("suspended Darwin child starts");
+        let DarwinSpawnedProcess {
+            pid,
+            stdin,
+            stdout,
+            stderr,
+        } = spawned;
+        let mut child = ProcessChild::Darwin { pid, status: None };
+        // SAFETY: `pid` is the exact positive suspended child returned above.
+        assert_eq!(unsafe { nix::libc::kill(pid, nix::libc::SIGCONT) }, 0);
+        drop(stdin);
+        drop(stdout);
+        drop(stderr);
+
+        let first = child.wait().expect("Darwin child is reaped once");
+        assert!(first.success());
+        assert!(matches!(
+            &child,
+            ProcessChild::Darwin {
+                status: Some(_),
+                ..
+            }
+        ));
+        child
+            .kill()
+            .expect("termination after reap is an identity-safe no-op");
+        let retained = child
+            .wait()
+            .expect("retained status replays without waitpid");
+        assert_eq!(retained, first);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn concurrent_apple_descriptor_discovery_visits_only_open_entries() {
         use super::{ChildDescriptorAuthority, apple_open_descriptor_count};
         use std::sync::{Arc, Barrier};
@@ -5533,6 +5684,218 @@ mod tests {
                 .implementation_id,
             "process:high-fd-closed"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonexclusive_sigchld_disposition_cannot_start_an_occurrence() {
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("unit test executable resolves"),
+        )
+        .arg("--exact")
+        .arg("tests::nonexclusive_sigchld_disposition_helper")
+        .arg("--nocapture")
+        .env("CYMULE_TEST_NONEXCLUSIVE_SIGCHLD", "1")
+        .status()
+        .expect("SIGCHLD authority helper starts");
+        assert!(status.success(), "SIGCHLD authority helper failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonexclusive_sigchld_disposition_helper() {
+        use super::{ProcessExecutor, ProcessExecutorConfig};
+        use cymule_runtime::{PluginHost, RuntimeError};
+        use std::os::unix::fs::PermissionsExt;
+
+        unsafe extern "C" fn sigchld_observer(_signal: i32) {}
+
+        struct RestoreSigchld;
+
+        impl Drop for RestoreSigchld {
+            fn drop(&mut self) {
+                // SAFETY: this isolated helper restores the process disposition
+                // it intentionally changed and owns no child at this boundary.
+                unsafe {
+                    let _ = nix::libc::signal(nix::libc::SIGCHLD, nix::libc::SIG_DFL);
+                }
+            }
+        }
+
+        if std::env::var_os("CYMULE_TEST_NONEXCLUSIVE_SIGCHLD").is_none() {
+            return;
+        }
+        let _restore = RestoreSigchld;
+        let fixture = tempfile::tempdir().expect("SIGCHLD fixture creates");
+        let marker = fixture.path().join("provider-started");
+        let plugin = fixture.path().join("plugin.sh");
+        std::fs::write(
+            &plugin,
+            "#!/bin/sh\nprintf started > \"$1\"\n/bin/cat >/dev/null\n",
+        )
+        .expect("SIGCHLD plugin writes");
+        std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o700))
+            .expect("SIGCHLD plugin executes");
+
+        let assert_rejected = || {
+            let mut config = ProcessExecutorConfig::new(&plugin, runtime_closure());
+            config.arguments = vec![marker.to_string_lossy().into_owned()];
+            let mut executor = ProcessExecutor::new(config).expect("SIGCHLD executor captures");
+            assert!(matches!(
+                executor.describe(),
+                Err(RuntimeError::Substrate { code, .. })
+                    if code == "process_child_reap_authority_unavailable"
+            ));
+            assert!(
+                !marker.exists(),
+                "a nonexclusive SIGCHLD owner must fail before provider I/O"
+            );
+        };
+        for disposition in [
+            nix::libc::SIG_IGN,
+            sigchld_observer as *const () as nix::libc::sighandler_t,
+        ] {
+            // SAFETY: this isolated helper owns the process disposition and
+            // creates no child while a non-default value is installed.
+            assert_ne!(
+                unsafe { nix::libc::signal(nix::libc::SIGCHLD, disposition) },
+                nix::libc::SIG_ERR
+            );
+            assert_rejected();
+        }
+
+        // SAFETY: this isolated helper initializes and installs one complete
+        // process disposition, with no child alive at this boundary.
+        unsafe {
+            let mut action = std::mem::zeroed::<nix::libc::sigaction>();
+            action.sa_sigaction = nix::libc::SIG_DFL;
+            action.sa_flags = nix::libc::SA_NOCLDWAIT;
+            assert_eq!(nix::libc::sigemptyset(&raw mut action.sa_mask), 0);
+            assert_eq!(
+                nix::libc::sigaction(nix::libc::SIGCHLD, &raw const action, std::ptr::null_mut()),
+                0
+            );
+        }
+        assert_rejected();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn concurrent_parent_descriptor_churn_cannot_enter_the_plugin_image() {
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("unit test executable resolves"),
+        )
+        .arg("--exact")
+        .arg("tests::concurrent_parent_descriptor_churn_helper")
+        .arg("--nocapture")
+        .env("CYMULE_TEST_CONCURRENT_FD_CHURN", "1")
+        .status()
+        .expect("concurrent descriptor helper starts");
+        assert!(status.success(), "concurrent descriptor helper failed");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn concurrent_parent_descriptor_churn_helper() {
+        use super::{ProcessExecutor, ProcessExecutorConfig};
+        use cymule_runtime::PluginHost;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+
+        struct FixedDescriptorGuard(Vec<i32>);
+
+        impl Drop for FixedDescriptorGuard {
+            fn drop(&mut self) {
+                for descriptor in &self.0 {
+                    // SAFETY: this isolated helper owns every fixed descriptor
+                    // until the churn thread has joined.
+                    unsafe {
+                        let _ = nix::libc::close(*descriptor);
+                    }
+                }
+            }
+        }
+
+        if std::env::var_os("CYMULE_TEST_CONCURRENT_FD_CHURN").is_none() {
+            return;
+        }
+
+        let fixture = tempfile::tempdir().expect("descriptor-churn fixture creates");
+        let plugin = fixture.path().join("plugin.sh");
+        std::fs::write(
+            &plugin,
+            "#!/bin/sh\nfor descriptor in \"$@\"; do test ! -e \"/dev/fd/$descriptor\" || exit 91; done\n/bin/cat >/dev/null\nprintf '%s' '{\"type\":\"manifest\",\"manifest\":{\"plugin_version\":\"cymule.plugin/3\",\"implementation_id\":\"process:concurrent-fd-closed\",\"components\":{},\"effects\":{}}}'\n",
+        )
+        .expect("descriptor-churn plugin writes");
+        std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o700))
+            .expect("descriptor-churn plugin executes");
+
+        let source = std::fs::File::open("/dev/null").expect("descriptor source opens");
+        let targets = (700_i32..732_i32).collect::<Vec<_>>();
+        for target in &targets {
+            // SAFETY: every target is reserved to this isolated helper and the
+            // source descriptor remains live through the scoped churn thread.
+            assert_eq!(
+                unsafe { nix::libc::dup2(source.as_raw_fd(), *target) },
+                *target
+            );
+        }
+        let retained = FixedDescriptorGuard(targets.clone());
+
+        let mut config = ProcessExecutorConfig::new(&plugin, runtime_closure());
+        config.arguments = targets.iter().map(ToString::to_string).collect();
+        config.timeout = Duration::from_secs(10);
+        let mut executor =
+            ProcessExecutor::new(config).expect("descriptor-churn executor captures");
+        let stop = Arc::new(AtomicBool::new(false));
+        let iterations = Arc::new(AtomicUsize::new(0));
+
+        let manifest = std::thread::scope(|scope| {
+            let stop_worker = stop.clone();
+            let iterations_worker = iterations.clone();
+            let targets_worker = &targets;
+            let source_descriptor = source.as_raw_fd();
+            let worker = scope.spawn(move || {
+                while !stop_worker.load(Ordering::Acquire) {
+                    for target in targets_worker {
+                        if stop_worker.load(Ordering::Acquire) {
+                            break;
+                        }
+                        // SAFETY: this worker is the sole mutator of the fixed
+                        // high descriptor range. It always restores a closed
+                        // slot before observing the stop flag again.
+                        if unsafe { nix::libc::close(*target) } != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if unsafe { nix::libc::dup2(source_descriptor, *target) } != *target {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        iterations_worker.fetch_add(1, Ordering::Release);
+                    }
+                }
+                Ok(())
+            });
+
+            let churn_deadline = Instant::now() + Duration::from_secs(2);
+            while iterations.load(Ordering::Acquire) < 256 && Instant::now() < churn_deadline {
+                std::thread::yield_now();
+            }
+            let started = iterations.load(Ordering::Acquire) >= 256;
+            let manifest = executor.describe();
+            stop.store(true, Ordering::Release);
+            worker
+                .join()
+                .expect("descriptor churn worker joins")
+                .expect("descriptor churn remains inside its fixed range");
+            assert!(started, "descriptor churn did not overlap provider launch");
+            manifest
+        })
+        .expect("plugin image excludes every concurrently changing parent descriptor");
+        assert_eq!(manifest.implementation_id, "process:concurrent-fd-closed");
+        drop(retained);
     }
 
     #[cfg(unix)]

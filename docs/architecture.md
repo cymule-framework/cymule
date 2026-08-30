@@ -68,7 +68,9 @@ Success includes the complete strictly decoded request next to its response;
 each SDK compares it with the exact request value serialized on its wire
 before interpreting the response. Failure has no request echo. Stderr and
 process status are transport diagnostics, not a second semantic failure
-channel. Request/response pairing, member-presence preservation and ambiguous
+channel. Compact stdout has one 128 MiB plus 32-byte framing envelope limit capable of carrying a
+64 MiB accepted request echo plus a separately bounded 64 MiB response;
+diagnostic stderr retains an independent 1 MiB limit. Request/response pairing, member-presence preservation and ambiguous
 mutating-response handling are specified in
 [Engine failures](specification.md#31-engine-failures).
 
@@ -117,6 +119,11 @@ resolve bounded typed neighborhoods on demand. They do not rebuild the complete
 Machine, active projection, scheduler, Agent Session, application journal or
 parked-wait index. Exact historical lookup and `load_full_audit` are different
 operations; the latter explicitly traverses reachable authority.
+
+Run Wait pages authenticate a same-CAS map of small `DurableWaitSummary` leaves.
+They never load the complete Wait leaf or compile its Input schema. Exact-item,
+activation, and full-audit paths retain the complete Wait, while full audit
+checks bidirectional membership and exact summary equality.
 
 The coordinator lowers a Core command or complete command batch and any typed
 sidecars before publication. The Store writes immutable objects and compares

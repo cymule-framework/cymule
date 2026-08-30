@@ -1,7 +1,7 @@
 {
-  "resource_version": "cymule.resource/3",
+  "resource_version": "cymule.resource/4",
   "shape": "inline",
-  "media_type": "text/plain;charset=utf-8",
+  "media_type": "text/plain",
   "inline": {
     "encoding": "utf8",
     "text": "shared cross-run resource"

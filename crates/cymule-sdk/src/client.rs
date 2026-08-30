@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
-use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cymule_core::{PlanCandidate, SealedPlan, decode_json};
@@ -26,7 +27,9 @@ use cymule_runtime::{
     EngineFailure, EngineFailureCategory, EngineMigrationProviderTarget, EnginePhase,
     EnginePluginTarget, EngineRequestEnvelope, EngineResponseEnvelope, EngineResult,
     EngineRetryDisposition, EngineShadowProviderTarget, EngineStoreTarget, ExecutionOutcome,
-    MAX_ENGINE_REQUEST_BYTES, validate_json_typed_roundtrip, validate_strict_json,
+    MAX_ENGINE_DIAGNOSTIC_BYTES, MAX_ENGINE_REQUEST_BYTES, MAX_ENGINE_RESPONSE_BYTES,
+    MAX_ENGINE_RESPONSE_PAYLOAD_BYTES, validate_json_typed_roundtrip,
+    validate_json_typed_roundtrip_bytes, validate_strict_json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -81,28 +84,116 @@ pub struct DurableRunItemRead {
     pub item: Option<Box<DurableRunItem>>,
 }
 
-/// Engine operations shared by SDK transports.
+/// One exact request snapshot supplied to a custom Engine transport.
+///
+/// The snapshot is produced by the SDK's strict serializer. Custom transports
+/// inspect this value and must return it unchanged on success; they never
+/// receive an operation-specific projection as correlation authority.
+#[derive(Debug, Clone)]
+pub struct EngineRequestSnapshot {
+    encoded_envelope: Vec<u8>,
+    request: Value,
+    typed: EngineRequest,
+}
+
+impl EngineRequestSnapshot {
+    /// Return the complete normalized inner Engine request.
+    #[must_use]
+    pub fn request(&self) -> &Value {
+        &self.request
+    }
+}
+
+/// One successful custom Engine transport exchange.
+///
+/// `request` is the complete request accepted by the transport, not a selected
+/// identifier or command subset. The SDK validates both members before exposing
+/// any typed payload.
+#[derive(Debug, Clone)]
+pub struct EngineTransportSuccess {
+    /// Complete accepted inner Engine request.
+    pub request: Value,
+    /// Complete closed inner Engine response.
+    pub response: Value,
+}
+
+impl EngineTransportSuccess {
+    /// Construct one custom transport success for SDK admission.
+    #[must_use]
+    pub fn new(request: Value, response: Value) -> Self {
+        Self { request, response }
+    }
+}
+
+/// Engine transport seam plus typed SDK conveniences.
 pub trait Engine {
+    /// Exchange one complete strict request snapshot.
+    ///
+    /// # Errors
+    /// Returns one complete verified Engine failure. A success is admitted only
+    /// after its complete accepted request echo and response are validated.
+    fn exchange(&self, request: &EngineRequestSnapshot) -> EngineResult<EngineTransportSuccess>;
+
     /// Validate and seal a candidate with the trusted Rust kernel.
     ///
     /// # Errors
     /// Returns validation, Engine, or transport failures, including an invalid sealed response.
-    fn seal(&self, candidate: &PlanCandidate) -> EngineResult<SealedPlan>;
+    fn seal(&self, candidate: &PlanCandidate) -> EngineResult<SealedPlan> {
+        match exchange_typed(
+            self,
+            EngineRequest::Seal {
+                candidate: candidate.clone(),
+            },
+        )? {
+            EngineResponse::Sealed { plan } => Ok(plan),
+            response => Err(unexpected_response("sealed", &response)),
+        }
+    }
     /// Validate and seal a provider-neutral Resource Candidate.
     ///
     /// # Errors
     /// Returns invalid-candidate, Engine, or response-integrity failures.
-    fn seal_resource(&self, candidate: &ResourceCandidate) -> EngineResult<ResourceHandle>;
+    fn seal_resource(&self, candidate: &ResourceCandidate) -> EngineResult<ResourceHandle> {
+        match exchange_typed(
+            self,
+            EngineRequest::SealResource {
+                candidate: candidate.clone(),
+            },
+        )? {
+            EngineResponse::SealedResource { resource } => Ok(resource),
+            response => Err(unexpected_response("sealed_resource", &response)),
+        }
+    }
     /// Validate a provider-neutral signal or timer activation record.
     ///
     /// # Errors
     /// Returns malformed-activation, Engine, or mismatched-response failures.
-    fn verify_wait_activation(&self, activation: &WaitActivation) -> EngineResult<WaitActivation>;
+    fn verify_wait_activation(&self, activation: &WaitActivation) -> EngineResult<WaitActivation> {
+        match exchange_typed(
+            self,
+            EngineRequest::VerifyWaitActivation {
+                activation: activation.clone(),
+            },
+        )? {
+            EngineResponse::VerifiedWaitActivation { activation } => Ok(activation),
+            response => Err(unexpected_response("verified_wait_activation", &response)),
+        }
+    }
     /// Validate one closed, versioned M1 control envelope.
     ///
     /// # Errors
     /// Returns command-validation, Engine, or mismatched-response failures.
-    fn verify_durable_command(&self, command: &DurableCommand) -> EngineResult<DurableCommand>;
+    fn verify_durable_command(&self, command: &DurableCommand) -> EngineResult<DurableCommand> {
+        match exchange_typed(
+            self,
+            EngineRequest::VerifyDurableCommand {
+                command: command.clone(),
+            },
+        )? {
+            EngineResponse::VerifiedDurableCommand { command } => Ok(command),
+            response => Err(unexpected_response("verified_durable_command", &response)),
+        }
+    }
     /// Issue one exact retained logical Clock observation for a Run.
     ///
     /// # Errors
@@ -111,7 +202,18 @@ pub trait Engine {
         &self,
         target: &EngineClockTarget,
         run_id: &str,
-    ) -> EngineResult<ClockObservationResult>;
+    ) -> EngineResult<ClockObservationResult> {
+        match exchange_typed(
+            self,
+            EngineRequest::ObserveClock {
+                target: target.clone(),
+                run_id: run_id.to_owned(),
+            },
+        )? {
+            EngineResponse::ClockObserved { result } => Ok(result),
+            response => Err(unexpected_response("clock_observed", &response)),
+        }
+    }
     /// Validate one closed, versioned M4 control envelope.
     ///
     /// # Errors
@@ -119,7 +221,17 @@ pub trait Engine {
     fn verify_evolution_command(
         &self,
         command: &EvolutionCommand,
-    ) -> EngineResult<EvolutionCommand>;
+    ) -> EngineResult<EvolutionCommand> {
+        match exchange_typed(
+            self,
+            EngineRequest::VerifyEvolutionCommand {
+                command: command.clone(),
+            },
+        )? {
+            EngineResponse::VerifiedEvolutionCommand { command } => Ok(command),
+            response => Err(unexpected_response("verified_evolution_command", &response)),
+        }
+    }
     /// Validate one complete unified live-evolution control envelope.
     ///
     /// # Errors
@@ -127,7 +239,20 @@ pub trait Engine {
     fn verify_live_evolution_command(
         &self,
         command: &LiveEvolutionCommand,
-    ) -> EngineResult<LiveEvolutionCommand>;
+    ) -> EngineResult<LiveEvolutionCommand> {
+        match exchange_typed(
+            self,
+            EngineRequest::VerifyLiveEvolutionCommand {
+                command: command.clone(),
+            },
+        )? {
+            EngineResponse::VerifiedLiveEvolutionCommand { command } => Ok(command),
+            response => Err(unexpected_response(
+                "verified_live_evolution_command",
+                &response,
+            )),
+        }
+    }
     /// Submit one stateful command to a durable Rust authority.
     ///
     /// # Errors
@@ -137,7 +262,24 @@ pub trait Engine {
         &self,
         target: &EngineDurableTarget,
         command: &DurableCommand,
-    ) -> EngineResult<DurableResponse>;
+    ) -> EngineResult<DurableResponse> {
+        verify_durable_target_preflight(target, command)?;
+        let expected_start_plan = match command {
+            DurableCommand::StartRun { candidate, .. } => Some(self.seal(candidate)?),
+            _ => None,
+        };
+        let response = exchange_durable(self, target, command)?;
+        if let (
+            Some(plan),
+            DurableCommand::StartRun { run_id, .. },
+            DurableResponse::RunBoundary { boundary },
+        ) = (expected_start_plan.as_ref(), command, &response)
+        {
+            verify_durable_boundary_run(boundary, run_id, Some(&plan.plan_id))
+                .map_err(|error| invalid_typed_response(true, "durable Start response", &error))?;
+        }
+        Ok(response)
+    }
     /// Submit one stateful live-evolution command and return its semantic commit.
     ///
     /// # Errors
@@ -148,7 +290,21 @@ pub trait Engine {
         target: &EngineEvolutionTarget,
         evolution_id: &str,
         command: &LiveEvolutionCommand,
-    ) -> EngineResult<EvolutionCommit>;
+    ) -> EngineResult<EvolutionCommit> {
+        verify_live_evolution_preflight(command)?;
+        verify_evolution_target_preflight(target, command)?;
+        match exchange_typed(
+            self,
+            EngineRequest::ExecuteLiveEvolution {
+                target: target.clone(),
+                evolution_id: evolution_id.to_owned(),
+                command: command.clone(),
+            },
+        )? {
+            EngineResponse::LiveEvolutionExecuted { commit } => Ok(*commit),
+            response => Err(unexpected_response("live_evolution_executed", &response)),
+        }
+    }
     /// Execute a sealed plan through one complete process-backed plugin target.
     ///
     /// # Errors
@@ -159,7 +315,20 @@ pub trait Engine {
         input: &Value,
         plugin: &EnginePluginTarget,
         run_id: &str,
-    ) -> EngineResult<ExecutionOutcome>;
+    ) -> EngineResult<ExecutionOutcome> {
+        match exchange_typed(
+            self,
+            EngineRequest::Run {
+                plan: plan.clone(),
+                input: input.clone(),
+                plugin: plugin.clone(),
+                run_id: run_id.to_owned(),
+            },
+        )? {
+            EngineResponse::ExecutionBoundary { execution } => Ok(execution),
+            response => Err(unexpected_response("execution_boundary", &response)),
+        }
+    }
 }
 
 /// CLI-backed Engine transport used for cross-language parity.
@@ -167,7 +336,138 @@ pub trait Engine {
 pub struct CliEngine {
     executable: PathBuf,
     timeout: Duration,
-    cancelled: Arc<AtomicBool>,
+    cancellation: EngineCancellation,
+}
+
+/// One-shot cancellation authority shared by cloned CLI Engine clients.
+///
+/// Launch, cancellation, and successful completion linearize under one mutex.
+/// A cancellation that wins before launch prevents process creation; one that
+/// wins after launch but before admitted completion terminates the request.
+#[derive(Debug, Clone, Default)]
+pub struct EngineCancellation {
+    state: Arc<Mutex<EngineCancellationState>>,
+}
+
+#[derive(Debug, Default)]
+struct EngineCancellationState {
+    cancelled: bool,
+    next_call: u64,
+    active_calls: BTreeSet<u64>,
+}
+
+impl EngineCancellation {
+    /// Create an uncancelled one-shot authority.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cancel every active and future request sharing this authority.
+    ///
+    /// # Panics
+    /// Panics only when another thread poisoned the private cancellation mutex.
+    pub fn cancel(&self) {
+        self.state
+            .lock()
+            .expect("Engine cancellation state remains available")
+            .cancelled = true;
+    }
+
+    /// Return whether cancellation has linearized.
+    ///
+    /// # Panics
+    /// Panics only when another thread poisoned the private cancellation mutex.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.state
+            .lock()
+            .expect("Engine cancellation state remains available")
+            .cancelled
+    }
+
+    fn begin(&self, request: &EngineRequest) -> EngineResult<EngineCall> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("Engine cancellation state remains available");
+        if state.cancelled {
+            return Err(interrupted_failure(request, "cancelled", false));
+        }
+        let call_id = state.next_call;
+        state.next_call = state
+            .next_call
+            .checked_add(1)
+            .expect("Engine cancellation call identity space cannot exhaust");
+        assert!(state.active_calls.insert(call_id));
+        Ok(EngineCall {
+            cancellation: self.clone(),
+            call_id,
+            completed: false,
+        })
+    }
+}
+
+struct EngineCall {
+    cancellation: EngineCancellation,
+    call_id: u64,
+    completed: bool,
+}
+
+impl EngineCall {
+    fn launch(
+        &mut self,
+        request: &EngineRequest,
+        spawn: impl FnOnce() -> std::io::Result<std::process::Child>,
+    ) -> EngineResult<std::process::Child> {
+        let state = self
+            .cancellation
+            .state
+            .lock()
+            .expect("Engine cancellation state remains available");
+        if state.cancelled || !state.active_calls.contains(&self.call_id) {
+            return Err(interrupted_failure(request, "cancelled", false));
+        }
+        let child = spawn()
+            .map_err(|error| EngineFailure::transport("engine_start_failed", error.to_string()))?;
+        Ok(child)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        let state = self
+            .cancellation
+            .state
+            .lock()
+            .expect("Engine cancellation state remains available");
+        state.cancelled || !state.active_calls.contains(&self.call_id)
+    }
+
+    fn complete(&mut self) -> bool {
+        let mut state = self
+            .cancellation
+            .state
+            .lock()
+            .expect("Engine cancellation state remains available");
+        if state.cancelled || !state.active_calls.remove(&self.call_id) {
+            return false;
+        }
+        self.completed = true;
+        true
+    }
+}
+
+impl Drop for EngineCall {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        self.cancellation
+            .state
+            .lock()
+            .expect("Engine cancellation state remains available")
+            .active_calls
+            .remove(&self.call_id);
+    }
 }
 
 impl CliEngine {
@@ -176,7 +476,7 @@ impl CliEngine {
         Self {
             executable: executable.as_ref().to_path_buf(),
             timeout: Duration::from_secs(30),
-            cancelled: Arc::new(AtomicBool::new(false)),
+            cancellation: EngineCancellation::new(),
         }
     }
 
@@ -187,18 +487,20 @@ impl CliEngine {
         self
     }
 
-    /// Bind an externally controlled cancellation flag.
+    /// Bind one linearizable cancellation authority.
     #[must_use]
-    pub fn with_cancellation(mut self, cancelled: Arc<AtomicBool>) -> Self {
-        self.cancelled = cancelled;
+    pub fn with_cancellation(mut self, cancellation: EngineCancellation) -> Self {
+        self.cancellation = cancellation;
         self
     }
 
-    fn request(&self, request: &EngineRequest) -> EngineResult<EngineResponse> {
-        if self.cancelled.load(Ordering::Acquire) {
-            return Err(interrupted_failure(request, "cancelled", false));
-        }
-        let (encoded_request, sent_inner, sent_request) = snapshot_cli_request(request)?;
+    #[cfg(unix)]
+    fn exchange_snapshot(
+        &self,
+        snapshot: &EngineRequestSnapshot,
+    ) -> EngineResult<EngineTransportSuccess> {
+        let request = &snapshot.typed;
+        let mut call = self.cancellation.begin(request)?;
         let deadline = Instant::now().checked_add(self.timeout).ok_or_else(|| {
             local_request_failure("invalid_timeout", "timeout exceeds the clock range")
         })?;
@@ -208,199 +510,74 @@ impl CliEngine {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(unix)]
-        command.process_group(0);
-        let mut child = command
-            .spawn()
-            .map_err(|error| EngineFailure::transport("engine_start_failed", error.to_string()))?;
+        let mut child = call.launch(request, || command.spawn())?;
         let stdin = child.stdin.take().ok_or_else(|| {
-            terminate_engine(&mut child);
-            response_loss_failure(&sent_request, "engine_stdin_unavailable")
+            terminate_for_failure(&mut child, request, "engine_stdin_unavailable")
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
-            terminate_engine(&mut child);
-            response_loss_failure(&sent_request, "engine_stdout_unavailable")
+            terminate_for_failure(&mut child, request, "engine_stdout_unavailable")
         })?;
         let stderr = child.stderr.take().ok_or_else(|| {
-            terminate_engine(&mut child);
-            response_loss_failure(&sent_request, "engine_stderr_unavailable")
+            terminate_for_failure(&mut child, request, "engine_stderr_unavailable")
         })?;
-        let input_done = AtomicBool::new(false);
-        let output_done = AtomicBool::new(false);
-        let diagnostic_done = AtomicBool::new(false);
-        let (status, stdout, input_failed) = std::thread::scope(|scope| {
-            let input_complete = &input_done;
-            let input_bytes = &encoded_request;
-            let input = scope.spawn(move || {
-                let result = write_engine_input(stdin, input_bytes);
-                input_complete.store(true, Ordering::Release);
-                result
-            });
-            let output_complete = &output_done;
-            let output = scope.spawn(move || {
-                let result = read_engine_stream(stdout);
-                output_complete.store(true, Ordering::Release);
-                result
-            });
-            let diagnostic_complete = &diagnostic_done;
-            let diagnostic = scope.spawn(move || {
-                let result = read_engine_stream(stderr);
-                diagnostic_complete.store(true, Ordering::Release);
-                result
-            });
-            let status = self.wait_for_engine_completion(
-                &mut child,
-                &sent_request,
-                deadline,
-                [&input_done, &output_done, &diagnostic_done],
-            );
-            let input_failed = input
-                .join()
-                .map_err(|_| ())
-                .and_then(|value| value.map_err(|_| ()))
-                .is_err();
-            let output = output
-                .join()
-                .map_err(|_| ())
-                .and_then(|value| value.map_err(|_| ()));
-            let diagnostic = diagnostic
-                .join()
-                .map_err(|_| ())
-                .and_then(|value| value.map_err(|_| ()));
-            if output.is_err() || diagnostic.is_err() {
-                return Err(response_loss_failure(&sent_request, "engine_io_failed"));
+        let completion = run_engine_rpc(
+            &mut child,
+            EngineRpcPipes {
+                stdin,
+                stdout,
+                stderr,
+            },
+            &snapshot.encoded_envelope,
+            request,
+            &call,
+            deadline,
+        )?;
+        let decoded = decode_cli_transport_outcome(request, &completion.stdout);
+        let outcome = match decoded {
+            Ok(outcome) => outcome,
+            Err(_error) if !completion.status.success() => {
+                return Err(response_loss_failure(request, "engine_process_failed"));
             }
-            status.map(|status| (status, output.expect("checked output"), input_failed))
-        })?;
-        if !status.success() {
-            return Err(response_loss_failure(
-                &sent_request,
-                "engine_process_failed",
-            ));
-        }
-        admit_cli_output(&sent_request, &sent_inner, &stdout, input_failed)
-    }
-
-    fn wait_for_engine_completion(
-        &self,
-        child: &mut std::process::Child,
-        request: &EngineRequest,
-        deadline: Instant,
-        streams_done: [&AtomicBool; 3],
-    ) -> EngineResult<std::process::ExitStatus> {
-        let mut exited = None;
-        loop {
-            if self.cancelled.load(Ordering::Acquire) {
-                terminate_engine(child);
-                return Err(interrupted_failure(request, "cancelled", true));
-            }
-            if Instant::now() >= deadline {
-                terminate_engine(child);
-                return Err(interrupted_failure(request, "timed_out", true));
-            }
-            if exited.is_none() {
-                match child.try_wait() {
-                    Ok(Some(status)) if !status.success() => {
-                        terminate_engine(child);
-                        return Err(response_loss_failure(request, "engine_process_failed"));
-                    }
-                    Ok(Some(status)) => exited = Some(status),
-                    Ok(None) => {}
-                    Err(_) => {
-                        terminate_engine(child);
-                        return Err(response_loss_failure(request, "engine_wait_failed"));
-                    }
+            Err(error) => return Err(error),
+        };
+        match outcome {
+            CliTransportOutcome::Failure(failure) => {
+                if !call.complete() {
+                    return Err(interrupted_failure(request, "cancelled", true));
                 }
+                Err(failure)
             }
-            if streams_done.iter().all(|done| done.load(Ordering::Acquire))
-                && let Some(status) = exited
-            {
-                return Ok(status);
+            CliTransportOutcome::Success(success) => {
+                if completion.input_failed {
+                    return Err(response_loss_failure(request, "engine_request_incomplete"));
+                }
+                if !completion.status.success() {
+                    return Err(response_loss_failure(request, "engine_process_failed"));
+                }
+                if !call.complete() {
+                    return Err(interrupted_failure(request, "cancelled", true));
+                }
+                Ok(success)
             }
-            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
-    fn seal_resource(&self, candidate: &ResourceCandidate) -> EngineResult<ResourceHandle> {
-        match self.request(&EngineRequest::SealResource {
-            candidate: candidate.clone(),
-        })? {
-            EngineResponse::SealedResource { resource } => Ok(resource),
-            response => Err(unexpected_response("sealed_resource", &response)),
-        }
-    }
-
-    fn verify_wait_activation(&self, activation: &WaitActivation) -> EngineResult<WaitActivation> {
-        match self.request(&EngineRequest::VerifyWaitActivation {
-            activation: activation.clone(),
-        })? {
-            EngineResponse::VerifiedWaitActivation { activation } => {
-                activation.verify().map_err(|error| {
-                    invalid_engine_payload("wait activation", &error.to_string())
-                })?;
-                Ok(activation)
-            }
-            response => Err(unexpected_response("verified_wait_activation", &response)),
-        }
-    }
-
-    fn verify_durable_command(&self, command: &DurableCommand) -> EngineResult<DurableCommand> {
-        match self.request(&EngineRequest::VerifyDurableCommand {
-            command: command.clone(),
-        })? {
-            EngineResponse::VerifiedDurableCommand { command } => {
-                command.verify().map_err(|error| {
-                    invalid_engine_payload("durable command", &error.to_string())
-                })?;
-                Ok(command)
-            }
-            response => Err(unexpected_response("verified_durable_command", &response)),
-        }
-    }
-
-    fn observe_clock(
+    #[cfg(not(unix))]
+    fn exchange_snapshot(
         &self,
-        target: &EngineClockTarget,
-        run_id: &str,
-    ) -> EngineResult<ClockObservationResult> {
-        match self.request(&EngineRequest::ObserveClock {
-            target: target.clone(),
-            run_id: run_id.to_owned(),
-        })? {
-            EngineResponse::ClockObserved { result } => Ok(result),
-            response => Err(unexpected_response("clock_observed", &response)),
-        }
-    }
-
-    fn verify_evolution_command(
-        &self,
-        command: &EvolutionCommand,
-    ) -> EngineResult<EvolutionCommand> {
-        match self.request(&EngineRequest::VerifyEvolutionCommand {
-            command: command.clone(),
-        })? {
-            EngineResponse::VerifiedEvolutionCommand { command } => Ok(command),
-            response => Err(unexpected_response("verified_evolution_command", &response)),
-        }
-    }
-
-    fn verify_live_evolution_command(
-        &self,
-        command: &LiveEvolutionCommand,
-    ) -> EngineResult<LiveEvolutionCommand> {
-        match self.request(&EngineRequest::VerifyLiveEvolutionCommand {
-            command: command.clone(),
-        })? {
-            EngineResponse::VerifiedLiveEvolutionCommand { command } => Ok(command),
-            response => Err(unexpected_response(
-                "verified_live_evolution_command",
-                &response,
-            )),
-        }
+        snapshot: &EngineRequestSnapshot,
+    ) -> EngineResult<EngineTransportSuccess> {
+        Err(local_request_failure(
+            "engine_rpc_platform_unsupported",
+            format!(
+                "CLI Engine process-tree containment for request {:?} requires Unix",
+                snapshot.typed
+            ),
+        ))
     }
 }
 
-fn snapshot_cli_request(request: &EngineRequest) -> EngineResult<(Vec<u8>, Value, EngineRequest)> {
+fn snapshot_engine_request(request: &EngineRequest) -> EngineResult<EngineRequestSnapshot> {
     let encoded = serde_json::to_vec(&EngineRequestEnvelope::new(request))
         .map_err(|error| local_request_failure("request_encoding_failed", error))?;
     if encoded.len() > MAX_ENGINE_REQUEST_BYTES {
@@ -421,75 +598,439 @@ fn snapshot_cli_request(request: &EngineRequest) -> EngineResult<(Vec<u8>, Value
         .map_err(|error| local_request_failure("request_encoding_failed", error))?;
     validate_json_typed_roundtrip(&inner, &normalized)
         .map_err(|error| local_request_failure("request_encoding_failed", error))?;
-    Ok((encoded, inner, typed))
+    Ok(EngineRequestSnapshot {
+        encoded_envelope: encoded,
+        request: inner,
+        typed,
+    })
 }
 
-fn admit_cli_output(
-    sent_request: &EngineRequest,
-    sent_inner: &Value,
-    stdout: &[u8],
-    input_failed: bool,
+fn exchange_typed<E: Engine + ?Sized>(
+    engine: &E,
+    request: EngineRequest,
 ) -> EngineResult<EngineResponse> {
-    validate_strict_json(stdout)
-        .map_err(|_| response_loss_failure(sent_request, "invalid_engine_response"))?;
-    let raw_envelope: Value = decode_json(stdout)
-        .map_err(|_| response_loss_failure(sent_request, "invalid_engine_response"))?;
-    if input_failed && raw_envelope.get("outcome").and_then(Value::as_str) != Some("failure") {
-        return Err(response_loss_failure(
-            sent_request,
-            "engine_request_incomplete",
+    let snapshot = snapshot_engine_request(&request)?;
+    drop(request);
+    let success = engine.exchange(&snapshot).map_err(|failure| {
+        if failure.verify().is_ok() {
+            failure
+        } else {
+            invalid_typed_response(
+                request_is_mutating(&snapshot.typed),
+                "failure response",
+                "custom Engine transport returned an invalid failure",
+            )
+        }
+    })?;
+    let raw_envelope = serde_json::to_value(EngineResponseEnvelope::success(
+        success.request,
+        success.response,
+    ))
+    .map_err(|error| {
+        invalid_typed_response(
+            request_is_mutating(&snapshot.typed),
+            "custom transport response",
+            &error.to_string(),
+        )
+    })?;
+    admit_raw_engine_response(&snapshot.typed, &snapshot.request, &raw_envelope)
+}
+
+fn exchange_durable<E: Engine + ?Sized>(
+    engine: &E,
+    target: &EngineDurableTarget,
+    command: &DurableCommand,
+) -> EngineResult<DurableResponse> {
+    match exchange_typed(
+        engine,
+        EngineRequest::ExecuteDurable {
+            target: target.clone(),
+            command: command.clone(),
+        },
+    )? {
+        EngineResponse::DurableExecuted { response } => Ok(response),
+        response => Err(unexpected_response("durable_executed", &response)),
+    }
+}
+
+fn verify_durable_target_preflight(
+    target: &EngineDurableTarget,
+    command: &DurableCommand,
+) -> EngineResult<()> {
+    verify_durable_preflight(command)?;
+    target.verify()?;
+    if target.executor.is_some() != command.requires_executor()
+        || target.clock.is_some() != command.requires_clock()
+    {
+        return Err(facade_validation_failure(
+            EnginePhase::ExecuteDurable,
+            "invalid_durable_target_capabilities",
+            "durable target capabilities do not exactly match the command",
         ));
     }
-    admit_raw_engine_response(sent_request, sent_inner, &raw_envelope)
+    Ok(())
 }
 
-const ENGINE_STREAM_LIMIT: usize = 16 * 1024 * 1024;
-
-fn write_engine_input(mut stdin: std::process::ChildStdin, input: &[u8]) -> std::io::Result<()> {
-    stdin.write_all(input)
+#[cfg(unix)]
+struct EngineRpcCompletion {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    input_failed: bool,
 }
 
-fn read_engine_stream(mut stream: impl Read) -> std::io::Result<Vec<u8>> {
-    let mut retained = Vec::new();
-    let mut buffer = [0_u8; 16 * 1024];
-    let detection_limit = ENGINE_STREAM_LIMIT
-        .checked_add(1)
-        .expect("Engine stream limit must leave room for one overflow byte");
+#[cfg(unix)]
+struct EngineRpcPipes {
+    stdin: std::process::ChildStdin,
+    stdout: std::process::ChildStdout,
+    stderr: std::process::ChildStderr,
+}
+
+#[derive(Debug)]
+enum CliTransportOutcome {
+    Success(EngineTransportSuccess),
+    Failure(EngineFailure),
+}
+
+#[cfg(unix)]
+fn set_nonblocking(descriptor: &impl AsFd) -> std::io::Result<()> {
+    let flags = nix::fcntl::fcntl(descriptor, nix::fcntl::FcntlArg::F_GETFL)
+        .map_err(std::io::Error::from)?;
+    let flags = nix::fcntl::OFlag::from_bits_retain(flags) | nix::fcntl::OFlag::O_NONBLOCK;
+    nix::fcntl::fcntl(descriptor, nix::fcntl::FcntlArg::F_SETFL(flags))
+        .map_err(std::io::Error::from)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_engine_rpc(
+    child: &mut std::process::Child,
+    pipes: EngineRpcPipes,
+    input: &[u8],
+    request: &EngineRequest,
+    call: &EngineCall,
+    deadline: Instant,
+) -> EngineResult<EngineRpcCompletion> {
+    set_nonblocking(&pipes.stdin)
+        .and_then(|()| set_nonblocking(&pipes.stdout))
+        .and_then(|()| set_nonblocking(&pipes.stderr))
+        .map_err(|_| terminate_for_failure(child, request, "engine_io_failed"))?;
+    let mut stdin = Some(pipes.stdin);
+    let mut stdout = Some(pipes.stdout);
+    let mut stderr = Some(pipes.stderr);
+    let mut input_offset = 0_usize;
+    let mut input_failed = false;
+    let mut retained_stdout = Vec::new();
+    let mut retained_stderr = Vec::new();
+    let mut status = None;
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+
     loop {
-        let read = stream.read(&mut buffer)?;
-        if read == 0 {
+        let interruption = if call.is_cancelled() {
+            Some("cancelled")
+        } else if Instant::now() >= deadline {
+            Some("timed_out")
+        } else {
+            None
+        };
+        if let Some(interruption) = interruption {
+            return Err(interrupt_engine_rpc(
+                child,
+                &mut stdin,
+                &mut stdout,
+                &mut stderr,
+                request,
+                interruption,
+            ));
+        }
+
+        pump_engine_input(&mut stdin, input, &mut input_offset, &mut input_failed);
+        let output_failure = pump_engine_outputs(
+            &mut stdout,
+            &mut stderr,
+            &mut retained_stdout,
+            &mut retained_stderr,
+            &mut buffer,
+        );
+        if let Some(code) = output_failure {
+            return Err(abort_for_failure(
+                child,
+                &mut stdin,
+                &mut stdout,
+                &mut stderr,
+                request,
+                code,
+            ));
+        }
+
+        if status.is_none() && observe_engine_status(child, &mut status).is_err() {
+            return Err(abort_for_failure(
+                child,
+                &mut stdin,
+                &mut stdout,
+                &mut stderr,
+                request,
+                "engine_wait_failed",
+            ));
+        }
+        if stdin.is_none() && stdout.is_none() && stderr.is_none() && status.is_some() {
             break;
         }
-        if retained.len() < detection_limit {
-            let remaining = detection_limit
-                .checked_sub(retained.len())
-                .expect("retained Engine stream bytes cannot exceed the detection limit");
-            retained.extend_from_slice(&buffer[..read.min(remaining)]);
-        }
+        std::thread::sleep(Duration::from_millis(1));
     }
-    if retained.len() > ENGINE_STREAM_LIMIT {
-        return Err(std::io::Error::other(
-            "Engine stream exceeded the byte limit",
-        ));
-    }
-    Ok(retained)
+
+    Ok(EngineRpcCompletion {
+        status: status.expect("Engine exit observed before transport completion"),
+        stdout: retained_stdout,
+        input_failed,
+    })
 }
 
-fn terminate_engine(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        // The direct child PID is also the process-group ID. Always signal the
-        // group, even after `try_wait` observed the direct child exit, because
-        // a descendant can still own one of the transport pipes.
-        let _ = Command::new("/bin/kill")
-            .arg("-KILL")
-            .arg(format!("-{}", child.id()))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+#[cfg(unix)]
+fn observe_engine_status(
+    child: &mut std::process::Child,
+    status: &mut Option<std::process::ExitStatus>,
+) -> std::io::Result<()> {
+    loop {
+        match child.try_wait() {
+            Ok(observed) => {
+                *status = observed;
+                return Ok(());
+            }
+            Err(error) if error.raw_os_error() == Some(nix::libc::EINTR) => {}
+            Err(error) => return Err(error),
+        }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn pump_engine_input(
+    stdin: &mut Option<std::process::ChildStdin>,
+    input: &[u8],
+    input_offset: &mut usize,
+    input_failed: &mut bool,
+) {
+    let Some(descriptor) = stdin.as_ref() else {
+        return;
+    };
+    match nix::unistd::write(descriptor, &input[*input_offset..]) {
+        Ok(0) | Err(nix::errno::Errno::EPIPE) => {
+            *input_failed = true;
+            stdin.take();
+        }
+        Ok(written) => {
+            *input_offset += written;
+            if *input_offset == input.len() {
+                stdin.take();
+            }
+        }
+        Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => {}
+        Err(_) => {
+            *input_failed = true;
+            stdin.take();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn pump_engine_output<T: AsFd>(
+    stream: &mut Option<T>,
+    retained: &mut Vec<u8>,
+    limit: usize,
+    buffer: &mut [u8],
+) -> Result<bool, ()> {
+    let Some(descriptor) = stream.as_ref() else {
+        return Ok(false);
+    };
+    match nix::unistd::read(descriptor, buffer) {
+        Ok(0) => {
+            stream.take();
+            Ok(false)
+        }
+        Ok(read) => {
+            retain_stream_bytes(retained, &buffer[..read], limit);
+            Ok(retained.len() > limit)
+        }
+        Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => Ok(false),
+        Err(_) => Err(()),
+    }
+}
+
+#[cfg(unix)]
+fn pump_engine_outputs(
+    stdout: &mut Option<std::process::ChildStdout>,
+    stderr: &mut Option<std::process::ChildStderr>,
+    retained_stdout: &mut Vec<u8>,
+    retained_stderr: &mut Vec<u8>,
+    buffer: &mut [u8],
+) -> Option<&'static str> {
+    match pump_engine_output(stdout, retained_stdout, MAX_ENGINE_RESPONSE_BYTES, buffer) {
+        Ok(true) => return Some("engine_output_limit_exceeded"),
+        Err(()) => return Some("engine_io_failed"),
+        Ok(false) => {}
+    }
+    match pump_engine_output(stderr, retained_stderr, MAX_ENGINE_DIAGNOSTIC_BYTES, buffer) {
+        Ok(true) => Some("engine_diagnostic_limit_exceeded"),
+        Err(()) => Some("engine_io_failed"),
+        Ok(false) => None,
+    }
+}
+
+#[cfg(unix)]
+fn abort_engine_rpc(
+    child: &mut std::process::Child,
+    stdin: &mut Option<std::process::ChildStdin>,
+    stdout: &mut Option<std::process::ChildStdout>,
+    stderr: &mut Option<std::process::ChildStderr>,
+) -> std::io::Result<()> {
+    stdin.take();
+    stdout.take();
+    stderr.take();
+    terminate_engine(child)
+}
+
+#[cfg(unix)]
+fn abort_for_failure(
+    child: &mut std::process::Child,
+    stdin: &mut Option<std::process::ChildStdin>,
+    stdout: &mut Option<std::process::ChildStdout>,
+    stderr: &mut Option<std::process::ChildStderr>,
+    request: &EngineRequest,
+    code: &str,
+) -> EngineFailure {
+    if abort_engine_rpc(child, stdin, stdout, stderr).is_err() {
+        response_loss_failure(request, "engine_process_termination_failed")
+    } else {
+        response_loss_failure(request, code)
+    }
+}
+
+#[cfg(unix)]
+fn interrupt_engine_rpc(
+    child: &mut std::process::Child,
+    stdin: &mut Option<std::process::ChildStdin>,
+    stdout: &mut Option<std::process::ChildStdout>,
+    stderr: &mut Option<std::process::ChildStderr>,
+    request: &EngineRequest,
+    kind: &str,
+) -> EngineFailure {
+    if abort_engine_rpc(child, stdin, stdout, stderr).is_err() {
+        response_loss_failure(request, "engine_process_termination_failed")
+    } else {
+        interrupted_failure(request, kind, true)
+    }
+}
+
+fn retain_stream_bytes(retained: &mut Vec<u8>, incoming: &[u8], limit: usize) {
+    let detection_limit = limit
+        .checked_add(1)
+        .expect("Engine stream bound leaves one overflow byte");
+    if retained.len() >= detection_limit {
+        return;
+    }
+    let remaining = detection_limit - retained.len();
+    retained.extend_from_slice(&incoming[..incoming.len().min(remaining)]);
+}
+
+fn decode_cli_transport_outcome(
+    request: &EngineRequest,
+    stdout: &[u8],
+) -> EngineResult<CliTransportOutcome> {
+    validate_strict_json(stdout)
+        .map_err(|_| response_loss_failure(request, "invalid_engine_response"))?;
+    let mut raw_envelope: Value = decode_json(stdout)
+        .map_err(|_| response_loss_failure(request, "invalid_engine_response"))?;
+    validate_response_payload_bound(request, &raw_envelope)?;
+    if let Some(protocol) = raw_envelope
+        .as_object()
+        .and_then(|envelope| envelope.get("engine_protocol"))
+        .and_then(Value::as_str)
+        && protocol != cymule_runtime::ENGINE_PROTOCOL_VERSION
+    {
+        return Err(unsupported_engine_protocol_failure(request, protocol));
+    }
+    normalize_mathematical_integers(&mut raw_envelope);
+    let envelope: EngineResponseEnvelope<Value, Value> =
+        serde_json::from_value(raw_envelope.clone()).map_err(|error| {
+            invalid_typed_response(
+                request_is_mutating(request),
+                "response envelope",
+                &error.to_string(),
+            )
+        })?;
+    let normalized = serde_json::to_value(&envelope).map_err(|error| {
+        invalid_typed_response(
+            request_is_mutating(request),
+            "response envelope",
+            &error.to_string(),
+        )
+    })?;
+    validate_json_typed_roundtrip_bytes(stdout, &raw_envelope, &normalized).map_err(|error| {
+        invalid_typed_response(request_is_mutating(request), "response envelope", &error)
+    })?;
+    match envelope {
+        EngineResponseEnvelope::Success {
+            engine_protocol,
+            request: accepted_request,
+            response,
+        } => {
+            if engine_protocol != cymule_runtime::ENGINE_PROTOCOL_VERSION {
+                return Err(unsupported_engine_protocol_failure(
+                    request,
+                    &engine_protocol,
+                ));
+            }
+            Ok(CliTransportOutcome::Success(EngineTransportSuccess::new(
+                accepted_request,
+                response,
+            )))
+        }
+        EngineResponseEnvelope::Failure {
+            engine_protocol,
+            error,
+        } => {
+            if engine_protocol != cymule_runtime::ENGINE_PROTOCOL_VERSION {
+                return Err(unsupported_engine_protocol_failure(
+                    request,
+                    &engine_protocol,
+                ));
+            }
+            error.verify().map_err(|validation| {
+                invalid_typed_response(
+                    request_is_mutating(request),
+                    "failure response",
+                    &validation.to_string(),
+                )
+            })?;
+            Ok(CliTransportOutcome::Failure(error))
+        }
+    }
+}
+
+fn terminate_engine(child: &mut std::process::Child) -> std::io::Result<()> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {
+                child.kill()?;
+                child.wait()?;
+                return Ok(());
+            }
+            Err(error) if error.raw_os_error() == Some(nix::libc::EINTR) => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn terminate_for_failure(
+    child: &mut std::process::Child,
+    request: &EngineRequest,
+    code: &str,
+) -> EngineFailure {
+    if terminate_engine(child).is_err() {
+        response_loss_failure(request, "engine_process_termination_failed")
+    } else {
+        response_loss_failure(request, code)
+    }
 }
 
 fn response_loss_failure(request: &EngineRequest, code: &str) -> EngineFailure {
@@ -640,111 +1181,8 @@ fn interrupted_failure(request: &EngineRequest, kind: &str, began: bool) -> Engi
 }
 
 impl Engine for CliEngine {
-    fn seal(&self, candidate: &PlanCandidate) -> EngineResult<SealedPlan> {
-        match self.request(&EngineRequest::Seal {
-            candidate: candidate.clone(),
-        })? {
-            EngineResponse::Sealed { plan } => Ok(plan),
-            response => Err(unexpected_response("sealed", &response)),
-        }
-    }
-
-    fn seal_resource(&self, candidate: &ResourceCandidate) -> EngineResult<ResourceHandle> {
-        CliEngine::seal_resource(self, candidate)
-    }
-
-    fn verify_wait_activation(&self, activation: &WaitActivation) -> EngineResult<WaitActivation> {
-        CliEngine::verify_wait_activation(self, activation)
-    }
-
-    fn verify_durable_command(&self, command: &DurableCommand) -> EngineResult<DurableCommand> {
-        CliEngine::verify_durable_command(self, command)
-    }
-
-    fn observe_clock(
-        &self,
-        target: &EngineClockTarget,
-        run_id: &str,
-    ) -> EngineResult<ClockObservationResult> {
-        CliEngine::observe_clock(self, target, run_id)
-    }
-
-    fn verify_evolution_command(
-        &self,
-        command: &EvolutionCommand,
-    ) -> EngineResult<EvolutionCommand> {
-        CliEngine::verify_evolution_command(self, command)
-    }
-
-    fn verify_live_evolution_command(
-        &self,
-        command: &LiveEvolutionCommand,
-    ) -> EngineResult<LiveEvolutionCommand> {
-        CliEngine::verify_live_evolution_command(self, command)
-    }
-
-    fn execute_durable(
-        &self,
-        target: &EngineDurableTarget,
-        command: &DurableCommand,
-    ) -> EngineResult<DurableResponse> {
-        let expected_start_plan = match command {
-            DurableCommand::StartRun { candidate, .. } => Some(self.seal(candidate)?),
-            _ => None,
-        };
-        let response = match self.request(&EngineRequest::ExecuteDurable {
-            target: target.clone(),
-            command: command.clone(),
-        })? {
-            EngineResponse::DurableExecuted { response } => response,
-            response => return Err(unexpected_response("durable_executed", &response)),
-        };
-        if let (
-            Some(plan),
-            DurableCommand::StartRun { run_id, .. },
-            DurableResponse::RunBoundary { boundary },
-        ) = (expected_start_plan.as_ref(), command, &response)
-        {
-            verify_durable_boundary_run(boundary, run_id, Some(&plan.plan_id))
-                .map_err(|error| invalid_typed_response(true, "durable Start response", &error))?;
-        }
-        Ok(response)
-    }
-
-    fn execute_live_evolution(
-        &self,
-        target: &EngineEvolutionTarget,
-        evolution_id: &str,
-        command: &LiveEvolutionCommand,
-    ) -> EngineResult<EvolutionCommit> {
-        verify_live_evolution_preflight(command)?;
-        verify_evolution_target_preflight(target, command)?;
-        match self.request(&EngineRequest::ExecuteLiveEvolution {
-            target: target.clone(),
-            evolution_id: evolution_id.to_owned(),
-            command: command.clone(),
-        })? {
-            EngineResponse::LiveEvolutionExecuted { commit } => Ok(*commit),
-            response => Err(unexpected_response("live_evolution_executed", &response)),
-        }
-    }
-
-    fn run(
-        &self,
-        plan: &SealedPlan,
-        input: &Value,
-        plugin: &EnginePluginTarget,
-        run_id: &str,
-    ) -> EngineResult<ExecutionOutcome> {
-        match self.request(&EngineRequest::Run {
-            plan: plan.clone(),
-            input: input.clone(),
-            plugin: plugin.clone(),
-            run_id: run_id.to_owned(),
-        })? {
-            EngineResponse::ExecutionBoundary { execution } => Ok(execution),
-            response => Err(unexpected_response("execution_boundary", &response)),
-        }
+    fn exchange(&self, request: &EngineRequestSnapshot) -> EngineResult<EngineTransportSuccess> {
+        self.exchange_snapshot(request)
     }
 }
 
@@ -838,6 +1276,7 @@ fn admit_raw_engine_response(
     sent_inner: &Value,
     raw_envelope: &Value,
 ) -> EngineResult<EngineResponse> {
+    validate_response_payload_bound(request, raw_envelope)?;
     if let Some(protocol) = raw_envelope
         .as_object()
         .and_then(|envelope| envelope.get("engine_protocol"))
@@ -867,6 +1306,34 @@ fn admit_raw_engine_response(
         invalid_typed_response(request_is_mutating(request), "response envelope", &error)
     })?;
     admit_engine_response(request, sent_inner, envelope)
+}
+
+fn validate_response_payload_bound(
+    request: &EngineRequest,
+    raw_envelope: &Value,
+) -> EngineResult<()> {
+    let Some(response) = raw_envelope
+        .as_object()
+        .filter(|envelope| envelope.get("outcome").and_then(Value::as_str) == Some("success"))
+        .and_then(|envelope| envelope.get("response"))
+    else {
+        return Ok(());
+    };
+    let bytes = serde_json::to_vec(response).map_err(|error| {
+        invalid_typed_response(
+            request_is_mutating(request),
+            "response payload",
+            &error.to_string(),
+        )
+    })?;
+    if bytes.len() > MAX_ENGINE_RESPONSE_PAYLOAD_BYTES {
+        return Err(invalid_typed_response(
+            request_is_mutating(request),
+            "response payload",
+            "response exceeds the fixed compact payload bound",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1404,10 +1871,10 @@ impl DurableEngine<CliEngine> {
         self
     }
 
-    /// Bind an externally controlled high-level durable cancellation flag.
+    /// Bind one linearizable high-level durable cancellation authority.
     #[must_use]
-    pub fn with_cancellation(mut self, cancelled: Arc<AtomicBool>) -> Self {
-        self.transport = self.transport.with_cancellation(cancelled);
+    pub fn with_cancellation(mut self, cancellation: EngineCancellation) -> Self {
+        self.transport = self.transport.with_cancellation(cancellation);
         self
     }
 }
@@ -1517,15 +1984,19 @@ impl<E: Engine> DurableEngine<E> {
         execution: ExecutionClaimRequest,
     ) -> EngineResult<DurableResponse> {
         let run_id = run_id.into();
-        self.require_durable_capabilities(true, true)?;
-        let plan = self.transport.seal(&candidate)?;
-        let response = self.submit(&DurableCommand::StartRun {
+        let command = DurableCommand::StartRun {
             control_version: DURABLE_CONTROL_VERSION.to_owned(),
             run_id: run_id.clone(),
             candidate,
             input,
             execution,
-        })?;
+        };
+        let target = self.durable_target(&command)?;
+        let DurableCommand::StartRun { candidate, .. } = &command else {
+            unreachable!("constructed Start command remains Start")
+        };
+        let plan = self.transport.seal(candidate)?;
+        let response = self.submit_prepared(&target, &command)?;
         let DurableResponse::RunBoundary { boundary } = &response else {
             return Err(unexpected_durable_response("start boundary", &response));
         };
@@ -1888,6 +2359,11 @@ impl<E: Engine> DurableEngine<E> {
     }
 
     fn submit(&self, command: &DurableCommand) -> EngineResult<DurableResponse> {
+        let target = self.durable_target(command)?;
+        self.submit_prepared(&target, command)
+    }
+
+    fn durable_target(&self, command: &DurableCommand) -> EngineResult<EngineDurableTarget> {
         verify_durable_preflight(command)?;
         self.require_durable_capabilities(command.requires_executor(), command.requires_clock())?;
         let target = EngineDurableTarget {
@@ -1901,8 +2377,16 @@ impl<E: Engine> DurableEngine<E> {
                 .then(|| self.clock.clone())
                 .flatten(),
         };
-        target.verify()?;
-        let response = self.transport.execute_durable(&target, command)?;
+        verify_durable_target_preflight(&target, command)?;
+        Ok(target)
+    }
+
+    fn submit_prepared(
+        &self,
+        target: &EngineDurableTarget,
+        command: &DurableCommand,
+    ) -> EngineResult<DurableResponse> {
+        let response = exchange_durable(&self.transport, target, command)?;
         verify_durable_response(command, &response).map_err(|error| {
             invalid_typed_response(
                 durable_command_is_mutating(command),
@@ -1993,20 +2477,15 @@ mod tests {
 
     #[test]
     fn engine_stream_limit_retains_one_exact_overflow_byte() {
-        let exact = read_engine_stream(
-            std::io::repeat(b'x').take(u64::try_from(ENGINE_STREAM_LIMIT).unwrap()),
-        )
-        .expect("the exact Engine stream limit must be admitted");
-        assert_eq!(exact.len(), ENGINE_STREAM_LIMIT);
-
-        let overflow = u64::try_from(ENGINE_STREAM_LIMIT)
-            .unwrap()
-            .checked_add(1)
-            .unwrap();
-        let error = read_engine_stream(std::io::repeat(b'x').take(overflow))
-            .expect_err("one byte beyond the Engine stream limit must be rejected");
-        assert_eq!(error.kind(), std::io::ErrorKind::Other);
-        assert_eq!(error.to_string(), "Engine stream exceeded the byte limit");
+        for limit in [17_usize, 31] {
+            let mut retained = Vec::new();
+            retain_stream_bytes(&mut retained, &vec![b'x'; limit], limit);
+            assert_eq!(retained.len(), limit);
+            retain_stream_bytes(&mut retained, b"overflow", limit);
+            assert_eq!(retained.len(), limit + 1);
+            retain_stream_bytes(&mut retained, b"ignored", limit);
+            assert_eq!(retained.len(), limit + 1);
+        }
     }
 
     fn fixture(name: &str) -> PathBuf {
@@ -2258,87 +2737,15 @@ mod tests {
     }
 
     impl Engine for PreflightProbe {
-        fn seal(&self, _candidate: &PlanCandidate) -> EngineResult<SealedPlan> {
-            unreachable!("preflight probe only accepts live evolution")
-        }
-
-        fn seal_resource(&self, _candidate: &ResourceCandidate) -> EngineResult<ResourceHandle> {
-            unreachable!("preflight probe only accepts live evolution")
-        }
-
-        fn verify_wait_activation(
+        fn exchange(
             &self,
-            _activation: &WaitActivation,
-        ) -> EngineResult<WaitActivation> {
-            unreachable!("preflight probe only accepts live evolution")
-        }
-
-        fn verify_durable_command(
-            &self,
-            _command: &DurableCommand,
-        ) -> EngineResult<DurableCommand> {
-            unreachable!("preflight probe only accepts live evolution")
-        }
-
-        fn observe_clock(
-            &self,
-            _target: &EngineClockTarget,
-            _run_id: &str,
-        ) -> EngineResult<ClockObservationResult> {
+            _request: &EngineRequestSnapshot,
+        ) -> EngineResult<EngineTransportSuccess> {
             self.invoked.store(true, Ordering::Release);
             Err(EngineFailure::transport(
                 "preflight_probe_invoked",
-                "invalid Clock request reached the transport",
+                "invalid request reached the transport",
             ))
-        }
-
-        fn verify_evolution_command(
-            &self,
-            _command: &EvolutionCommand,
-        ) -> EngineResult<EvolutionCommand> {
-            unreachable!("preflight probe only accepts live evolution")
-        }
-
-        fn verify_live_evolution_command(
-            &self,
-            _command: &LiveEvolutionCommand,
-        ) -> EngineResult<LiveEvolutionCommand> {
-            unreachable!("preflight probe only accepts live evolution")
-        }
-
-        fn execute_durable(
-            &self,
-            _target: &EngineDurableTarget,
-            _command: &DurableCommand,
-        ) -> EngineResult<DurableResponse> {
-            self.invoked.store(true, Ordering::Release);
-            Err(EngineFailure::transport(
-                "preflight_probe_invoked",
-                "invalid durable request reached the transport",
-            ))
-        }
-
-        fn execute_live_evolution(
-            &self,
-            _target: &EngineEvolutionTarget,
-            _evolution_id: &str,
-            _command: &LiveEvolutionCommand,
-        ) -> EngineResult<EvolutionCommit> {
-            self.invoked.store(true, Ordering::Release);
-            Err(EngineFailure::transport(
-                "preflight_probe_invoked",
-                "invalid command reached the mutation transport",
-            ))
-        }
-
-        fn run(
-            &self,
-            _plan: &SealedPlan,
-            _input: &Value,
-            _plugin: &EnginePluginTarget,
-            _run_id: &str,
-        ) -> EngineResult<ExecutionOutcome> {
-            unreachable!("preflight probe only accepts live evolution")
         }
     }
 
@@ -2349,80 +2756,30 @@ mod tests {
     }
 
     impl Engine for DurableQueryProbe {
-        fn seal(&self, candidate: &PlanCandidate) -> EngineResult<SealedPlan> {
-            cymule_core::seal_plan(candidate.clone())
-                .map_err(|error| local_request_failure("plan_seal_failed", error))
-        }
-
-        fn seal_resource(&self, _candidate: &ResourceCandidate) -> EngineResult<ResourceHandle> {
-            unreachable!("durable query probe only accepts Run queries")
-        }
-
-        fn verify_wait_activation(
+        fn exchange(
             &self,
-            _activation: &WaitActivation,
-        ) -> EngineResult<WaitActivation> {
-            unreachable!("durable query probe only accepts Run queries")
-        }
-
-        fn verify_durable_command(&self, command: &DurableCommand) -> EngineResult<DurableCommand> {
-            command
-                .verify()
-                .map_err(|error| local_request_failure("durable_command_invalid", error))?;
-            Ok(command.clone())
-        }
-
-        fn observe_clock(
-            &self,
-            _target: &EngineClockTarget,
-            _run_id: &str,
-        ) -> EngineResult<ClockObservationResult> {
-            unreachable!("durable query probe only accepts Run queries")
-        }
-
-        fn verify_evolution_command(
-            &self,
-            _command: &EvolutionCommand,
-        ) -> EngineResult<EvolutionCommand> {
-            unreachable!("durable query probe only accepts Run queries")
-        }
-
-        fn verify_live_evolution_command(
-            &self,
-            _command: &LiveEvolutionCommand,
-        ) -> EngineResult<LiveEvolutionCommand> {
-            unreachable!("durable query probe only accepts Run queries")
-        }
-
-        fn execute_durable(
-            &self,
-            target: &EngineDurableTarget,
-            command: &DurableCommand,
-        ) -> EngineResult<DurableResponse> {
-            self.requests
-                .lock()
-                .expect("query probe request lock remains available")
-                .push((target.clone(), command.clone()));
-            Ok(self.response.clone())
-        }
-
-        fn execute_live_evolution(
-            &self,
-            _target: &EngineEvolutionTarget,
-            _evolution_id: &str,
-            _command: &LiveEvolutionCommand,
-        ) -> EngineResult<EvolutionCommit> {
-            unreachable!("durable query probe only accepts Run queries")
-        }
-
-        fn run(
-            &self,
-            _plan: &SealedPlan,
-            _input: &Value,
-            _plugin: &EnginePluginTarget,
-            _run_id: &str,
-        ) -> EngineResult<ExecutionOutcome> {
-            unreachable!("durable query probe only accepts Run queries")
+            request: &EngineRequestSnapshot,
+        ) -> EngineResult<EngineTransportSuccess> {
+            let response = match &request.typed {
+                EngineRequest::Seal { candidate } => EngineResponse::Sealed {
+                    plan: cymule_core::seal_plan(candidate.clone())
+                        .map_err(|error| local_request_failure("plan_seal_failed", error))?,
+                },
+                EngineRequest::ExecuteDurable { target, command } => {
+                    self.requests
+                        .lock()
+                        .expect("query probe request lock remains available")
+                        .push((target.clone(), command.clone()));
+                    EngineResponse::DurableExecuted {
+                        response: self.response.clone(),
+                    }
+                }
+                _ => unreachable!("durable query probe only accepts Seal and Run queries"),
+            };
+            Ok(EngineTransportSuccess::new(
+                request.request.clone(),
+                serde_json::to_value(response).expect("query probe response serializes"),
+            ))
         }
     }
 
@@ -2561,6 +2918,36 @@ mod tests {
         );
 
         assert_exact_echo_still_validates_response(&seal);
+    }
+
+    #[test]
+    fn custom_transport_success_requires_the_complete_request_echo() {
+        struct WrongEchoTransport;
+
+        impl Engine for WrongEchoTransport {
+            fn exchange(
+                &self,
+                request: &EngineRequestSnapshot,
+            ) -> EngineResult<EngineTransportSuccess> {
+                let candidate: PlanCandidate =
+                    serde_json::from_value(request.request["candidate"].clone())
+                        .expect("custom transport candidate decodes");
+                let plan =
+                    cymule_core::seal_plan(candidate).expect("custom transport fixture Plan seals");
+                let mut wrong_request = request.request.clone();
+                wrong_request["type"] = Value::String("seal_resource".to_owned());
+                Ok(EngineTransportSuccess::new(
+                    wrong_request,
+                    serde_json::json!({"type":"sealed", "plan":plan}),
+                ))
+            }
+        }
+
+        let failure = WrongEchoTransport
+            .seal(&empty_candidate())
+            .expect_err("custom transport cannot return an operation-specific echo");
+        assert_eq!(failure.category, EngineFailureCategory::TransportFailure);
+        assert_eq!(failure.code.as_ref(), "invalid_engine_response");
     }
 
     fn assert_exact_echo_still_validates_response(seal: &EngineRequest) {
@@ -3698,6 +4085,44 @@ mod tests {
     }
 
     #[test]
+    fn cli_response_rejects_fractional_decimal_f64_collisions() {
+        let plan = cymule_core::seal_plan(empty_candidate()).expect("collision fixture Plan seals");
+        let request = EngineRequest::Run {
+            plan: plan.clone(),
+            input: serde_json::json!(0.1),
+            plugin: process_target("collision"),
+            run_id: "run:fraction-collision".to_owned(),
+        };
+        let request_json = serde_json::to_string(&request)
+            .expect("collision request serializes")
+            .replace("\"input\":0.1", "\"input\":0.100000000000000005");
+        let response = EngineResponse::ExecutionBoundary {
+            execution: ExecutionOutcome::Completed {
+                result: cymule_runtime::ExecutionResult {
+                    run_id: "run:fraction-collision".to_owned(),
+                    plan_id: plan.plan_id,
+                    value: Value::Null,
+                    projection_digest: "a".repeat(64),
+                    precondition_token: format!("pre:0:sha256:{}", "b".repeat(64)),
+                    effects: Vec::new(),
+                },
+            },
+        };
+        let raw = format!(
+            "{{\"engine_protocol\":\"cymule.engine/5\",\"outcome\":\"success\",\"request\":{request_json},\"response\":{}}}",
+            serde_json::to_string(&response).expect("collision response serializes")
+        );
+        let failure = decode_cli_transport_outcome(&request, raw.as_bytes())
+            .expect_err("fractional request echo collision is rejected");
+        assert_eq!(failure.category, EngineFailureCategory::UnknownWorldOutcome);
+        assert_eq!(failure.code.as_ref(), "invalid_engine_response");
+        assert_eq!(
+            failure.retry_disposition,
+            Some(EngineRetryDisposition::Reconcile)
+        );
+    }
+
+    #[test]
     fn failure_envelope_validation_uses_the_request_mutation_authority() {
         let invalid_failure = || {
             EngineFailure::new(
@@ -4638,7 +5063,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pre_spawn_cancellation_is_terminal_without_starting_the_engine() {
-        let cancelled = Arc::new(AtomicBool::new(true));
+        let cancelled = EngineCancellation::new();
+        cancelled.cancel();
         let error = CliEngine::new("/definitely/missing/cymule")
             .with_cancellation(cancelled)
             .execute_durable(
@@ -4801,7 +5227,7 @@ mod tests {
             EngineResponse::Sealed { plan: read_plan },
         ))
         .expect("read success serializes");
-        assert!(read_output.len() < ENGINE_STREAM_LIMIT);
+        assert!(read_output.len() < MAX_ENGINE_RESPONSE_BYTES);
         let read_engine = write_engine("forged-read-success", &read_output);
         let failure = CliEngine::new(read_engine)
             .with_timeout(Duration::from_secs(5))
@@ -4837,7 +5263,7 @@ mod tests {
             },
         ))
         .expect("mutation success serializes");
-        assert!(mutation_output.len() < ENGINE_STREAM_LIMIT);
+        assert!(mutation_output.len() < MAX_ENGINE_RESPONSE_BYTES);
         let mutation_engine = write_engine("forged-mutation-success", &mutation_output);
         let failure = CliEngine::new(mutation_engine)
             .with_timeout(Duration::from_secs(5))
@@ -4879,101 +5305,50 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn direct_child_exit_cannot_leave_a_descendant_holding_transport_pipes() {
-        let directory = tempfile::tempdir().expect("temporary Engine fixture directory");
-        let executable = directory.path().join("descendant-pipe-engine");
-        let child_pid_path = directory.path().join("child.pid");
-        let descendant_pid_path = directory.path().join("descendant.pid");
-        let release_path = directory.path().join("release");
+    fn timeout_closes_local_pipes_even_when_a_descendant_escapes_the_group() {
+        let directory = tempfile::tempdir().expect("isolated Engine fixture directory");
+        let executable = directory.path().join("escaped-pipe-engine");
+        let descendant_pid = directory.path().join("descendant.pid");
         std::fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nprintf '%s' \"$$\" > {:?}\n/bin/sleep 60 &\nprintf '%s' \"$!\" > {:?}\nwhile [ ! -e {:?} ]; do /bin/sleep 0.01; done\nexit 0\n",
-                child_pid_path.display().to_string(),
-                descendant_pid_path.display().to_string(),
-                release_path.display().to_string(),
+                "#!/usr/bin/env python3\nimport os\nimport sys\nimport time\nsys.stdin.buffer.read()\npid = os.fork()\nif pid == 0:\n    os.setsid()\n    with open({:?}, 'w', encoding='utf-8') as target:\n        target.write(str(os.getpid()))\n        target.flush()\n        os.fsync(target.fileno())\n    time.sleep(60)\n    os._exit(0)\nos._exit(0)\n",
+                descendant_pid.display().to_string(),
             ),
         )
-        .expect("Engine fixture writes");
+        .expect("escaped descendant fixture writes");
         let mut permissions = std::fs::metadata(&executable)
-            .expect("Engine fixture metadata reads")
+            .expect("escaped descendant fixture metadata reads")
             .permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&executable, permissions)
-            .expect("Engine fixture becomes executable");
-
-        let process_exists = |pid: u32| {
-            Command::new("/bin/kill")
-                .arg("-0")
-                .arg(pid.to_string())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
-        };
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let (result, descendant) = std::thread::scope(|scope| {
-            let engine = CliEngine::new(&executable)
-                .with_timeout(Duration::from_secs(30))
-                .with_cancellation(cancelled.clone());
-            let candidate = empty_candidate();
-            let request = scope.spawn(move || engine.seal(&candidate));
-
-            let ready_deadline = Instant::now() + Duration::from_secs(5);
-            while !child_pid_path.is_file() || !descendant_pid_path.is_file() {
-                assert!(
-                    Instant::now() < ready_deadline,
-                    "Engine fixture did not publish its ready marker"
-                );
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            let child = std::fs::read_to_string(&child_pid_path)
-                .expect("direct child PID was retained")
-                .parse::<u32>()
-                .expect("direct child PID is numeric");
-            let descendant = std::fs::read_to_string(&descendant_pid_path)
-                .expect("descendant PID was retained")
-                .parse::<u32>()
-                .expect("descendant PID is numeric");
-
-            std::fs::write(&release_path, b"release").expect("direct child is released");
-            let exit_deadline = Instant::now() + Duration::from_secs(5);
-            while process_exists(child) {
-                assert!(
-                    Instant::now() < exit_deadline,
-                    "Engine direct child {child} did not exit after release"
-                );
-                std::thread::sleep(Duration::from_millis(5));
-            }
-
-            let cancelled_at = Instant::now();
-            cancelled.store(true, Ordering::Release);
-            let result = request
-                .join()
-                .expect("Engine request thread does not panic");
-            assert!(
-                cancelled_at.elapsed() < Duration::from_secs(2),
-                "transport did not react to cancellation after direct-child exit"
-            );
-            (result, descendant)
-        });
-        let error = result.expect_err(
-            "cancellation terminates a descendant that retained pipes after direct-child exit",
+            .expect("escaped descendant fixture becomes executable");
+        let started = Instant::now();
+        let failure = CliEngine::new(&executable)
+            .with_timeout(Duration::from_secs(1))
+            .seal(&empty_candidate())
+            .expect_err("escaped inherited pipe cannot outlive the SDK deadline");
+        assert_eq!(failure.category, EngineFailureCategory::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "escaped inherited pipe blocked SDK return"
         );
-        assert_eq!(error.category, EngineFailureCategory::Cancelled);
-        assert_eq!(
-            error.retry_disposition,
-            Some(cymule_runtime::EngineRetryDisposition::Never)
-        );
-
-        let reaped_before = Instant::now();
-        while process_exists(descendant) {
+        let pid_deadline = Instant::now() + Duration::from_secs(2);
+        while !descendant_pid.is_file() {
             assert!(
-                reaped_before.elapsed() < Duration::from_secs(2),
-                "Engine descendant {descendant} survived process-group termination"
+                Instant::now() < pid_deadline,
+                "descendant PID was not published"
             );
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(5));
         }
+        let pid = std::fs::read_to_string(descendant_pid)
+            .expect("descendant PID reads")
+            .parse::<i32>()
+            .expect("descendant PID is numeric");
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
     }
 
     #[test]
@@ -5023,6 +5398,113 @@ mod tests {
             .expect_err("large forged response is drained, then rejected");
         assert_eq!(error.category, EngineFailureCategory::TransportFailure);
         assert_eq!(error.code.as_ref(), "invalid_engine_response");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn valid_success_above_sixteen_mib_and_nonzero_failure_are_admitted() {
+        let directory = tempfile::tempdir().expect("isolated Engine fixture directory");
+        let executable = directory.path().join("large-success-engine");
+        let mut candidate = empty_candidate();
+        candidate
+            .metadata
+            .insert("padding".to_owned(), "x".repeat(9 * 1024 * 1024));
+        let plan_id = cymule_core::seal_plan(candidate.clone())
+            .expect("large fixture Plan seals")
+            .plan_id;
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/usr/bin/env python3\nimport json\nimport sys\nrequest = json.load(sys.stdin)['request']\njson.dump({{'engine_protocol':'cymule.engine/5','outcome':'success','request':request,'response':{{'type':'sealed','plan':{{'plan_id':{plan_id:?},'candidate':request['candidate']}}}}}}, sys.stdout, separators=(',', ':'))\n"
+            ),
+        )
+        .expect("large Engine fixture writes");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("large Engine fixture metadata reads")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions)
+            .expect("large Engine fixture becomes executable");
+        let sealed = CliEngine::new(&executable)
+            .with_timeout(Duration::from_secs(10))
+            .seal(&candidate)
+            .expect("valid Engine response above the predecessor stream cap succeeds");
+        assert_eq!(sealed.candidate, candidate);
+
+        let failure_engine = directory.path().join("nonzero-failure-engine");
+        std::fs::write(
+            &failure_engine,
+            "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s' '{\"engine_protocol\":\"cymule.engine/5\",\"outcome\":\"failure\",\"error\":{\"category\":\"validation\",\"phase\":\"validate_request\",\"code\":\"nonzero_failure\",\"message\":\"validated failure wins over process status\",\"retry_disposition\":\"correct_and_retry\"}}'\nexit 23\n",
+        )
+        .expect("nonzero Engine fixture writes");
+        let mut permissions = std::fs::metadata(&failure_engine)
+            .expect("nonzero Engine fixture metadata reads")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&failure_engine, permissions)
+            .expect("nonzero Engine fixture becomes executable");
+        let failure = CliEngine::new(failure_engine)
+            .seal(&empty_candidate())
+            .expect_err("valid remote failure remains authoritative over nonzero exit");
+        assert_eq!(failure.category, EngineFailureCategory::Validation);
+        assert_eq!(failure.code.as_ref(), "nonzero_failure");
+        assert_eq!(
+            failure.retry_disposition,
+            Some(EngineRetryDisposition::CorrectAndRetry)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_during_snapshot_cannot_launch_the_engine() {
+        let directory = tempfile::tempdir().expect("isolated Engine fixture directory");
+        let marker = directory.path().join("spawned");
+        let executable = directory.path().join("engine");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\n: > {:?}\n/bin/cat >/dev/null\n", marker),
+        )
+        .expect("Engine fixture writes");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("Engine fixture metadata reads")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions)
+            .expect("Engine fixture becomes executable");
+        let cancellation = EngineCancellation::new();
+        let mut candidate = empty_candidate();
+        candidate
+            .metadata
+            .insert("padding".to_owned(), "x".repeat(48 * 1024 * 1024));
+        let result = std::thread::scope(|scope| {
+            let engine = CliEngine::new(&executable).with_cancellation(cancellation.clone());
+            let request = scope.spawn(move || engine.seal(&candidate));
+            let active_deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let active = cancellation
+                    .state
+                    .lock()
+                    .expect("cancellation state remains available")
+                    .active_calls
+                    .len();
+                if active == 1 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < active_deadline,
+                    "request did not enter snapshot"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            cancellation.cancel();
+            request.join().expect("snapshot request does not panic")
+        });
+        let failure = result.expect_err("cancellation wins before Engine launch");
+        assert_eq!(failure.category, EngineFailureCategory::Cancelled);
+        assert!(
+            !marker.exists(),
+            "cancelled snapshot still launched the Engine"
+        );
     }
 
     #[cfg(unix)]

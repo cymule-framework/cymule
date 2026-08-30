@@ -1285,7 +1285,7 @@
         "machine_plan", "machine_artifact", "machine_event", "machine_admission",
         "machine_command_batch",
         "machine_effect", "machine_obligation", "machine_attempt", "machine_fact",
-        "continuation", "run_current", "wait", "wait_activation", "lease", "outbox", "outbox_owner",
+        "continuation", "run_current", "wait", "wait_summary", "wait_activation", "lease", "outbox", "outbox_owner",
         "cancellation_receipt", "effect_resolution_receipt",
         "component_occurrence", "operation_attempt", "clock_observation", "snapshot",
         "history_compaction", "journal_record", "journal_prefix_replacement",
@@ -1535,7 +1535,7 @@
       ],
       "properties": {
         "value": { "const": "run_query_indexes" },
-        "index_version": { "const": "cymule.run-query-indexes/2" },
+        "index_version": { "const": "cymule.run-query-indexes/3" },
         "run_id": { "$ref": "#/$defs/run_identity" },
         "waits": { "$ref": "#/$defs/state_map_root" },
         "effects": { "$ref": "#/$defs/state_map_root" },
@@ -1750,7 +1750,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["value_version", "object_id", "value"],
       "properties": {
-        "value_version": { "const": "cymule.durable-state-value/3" },
+        "value_version": { "const": "cymule.durable-state-value/4" },
         "object_id": { "$ref": "#/$defs/content_id" },
         "value": { "$ref": "#/$defs/state_root_value" }
       }
@@ -1951,7 +1951,7 @@
       ],
       "allOf": [{ "$ref": "#/$defs/state_root_manifest_lineage" }],
       "properties": {
-        "manifest_version": { "const": "cymule.durable-state-root/3" },
+        "manifest_version": { "const": "cymule.durable-state-root/4" },
         "manifest_id": { "$ref": "#/$defs/content_id" },
         "parent_manifest": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
         "parent_revision": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
@@ -1993,7 +1993,7 @@
           "required": ["object", "value_version", "object_id", "value"],
           "properties": {
             "object": { "const": "value" },
-            "value_version": { "const": "cymule.durable-state-value/3" },
+            "value_version": { "const": "cymule.durable-state-value/4" },
             "object_id": { "$ref": "#/$defs/content_id" },
             "value": { "$ref": "#/$defs/state_root_value" }
           }
@@ -2028,7 +2028,7 @@
           "allOf": [{ "$ref": "#/$defs/state_root_manifest_lineage" }],
           "properties": {
             "object": { "const": "manifest" },
-            "manifest_version": { "const": "cymule.durable-state-root/3" },
+            "manifest_version": { "const": "cymule.durable-state-root/4" },
             "manifest_id": { "$ref": "#/$defs/content_id" },
             "parent_manifest": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },
             "parent_revision": { "oneOf": [{ "$ref": "#/$defs/content_id" }, { "type": "null" }] },

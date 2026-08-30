@@ -569,11 +569,11 @@ class FinalizeReleaseTests(unittest.TestCase):
                 [call for call in fake.calls if any(word in call for word in (" create ", " upload ", " edit "))],
             )
 
-    def test_draft_recovers_under_a_new_controller_without_replacing_the_bom(self) -> None:
+    def test_admitted_controller_completes_after_main_advances_and_revalidates(self) -> None:
         release_sha = "b" * 40
         old_controller = "a" * 40
         new_controller = "c" * 40
-        current_main = old_controller
+        main_advanced = False
         with tempfile.TemporaryDirectory() as temporary:
             directory = pathlib.Path(temporary)
             notes = directory / "notes.md"
@@ -612,12 +612,10 @@ class FinalizeReleaseTests(unittest.TestCase):
                 fake.asset_name = frozen.asset_name
 
                 def fence() -> None:
-                    nonlocal current_main
+                    nonlocal main_advanced
                     fake.fence()
                     if fake.fence_calls == 3:
-                        current_main = new_controller
-                    if controller != current_main:
-                        raise ValueError("remote public main moved from the release controller")
+                        main_advanced = True
 
                 def attest() -> None:
                     attestors.append((controller, frozen.asset_path.read_bytes()))
@@ -636,18 +634,17 @@ class FinalizeReleaseTests(unittest.TestCase):
                         invoke=fake,
                     )
 
+                converge()
+                self.assertFalse(fake.release["isDraft"])
+                self.assertEqual(fake.asset, bom.read_bytes())
                 if controller == old_controller:
-                    with self.assertRaisesRegex(ValueError, "public main moved"):
-                        converge()
-                    self.assertTrue(fake.release["isDraft"])
-                    self.assertEqual(fake.asset, bom.read_bytes())
                     original_asset_id = fake.asset_ids[frozen.tag]
                 else:
-                    converge()
-                    self.assertFalse(fake.release["isDraft"])
                     self.assertEqual(fake.asset_ids[frozen.tag], original_asset_id)
+            self.assertTrue(main_advanced)
             self.assertEqual(stages[0].asset_path.read_bytes(), stages[1].asset_path.read_bytes())
             self.assertEqual(sum(" upload " in call for call in fake.calls), 1)
+            self.assertIn((old_controller, bom.read_bytes()), attestors)
             self.assertIn((new_controller, bom.read_bytes()), attestors)
             with self.assertRaisesRegex(ValueError, "controller_sha"):
                 finalize_release.load_finalization_stage(
@@ -1107,8 +1104,7 @@ class FinalizeReleaseTests(unittest.TestCase):
                 )
         self.assertEqual(len(calls), 1)
 
-    def test_remote_release_fence_matches_main_tag_object_and_peeled_commit(self) -> None:
-        controller_sha = "a" * 40
+    def test_remote_release_fence_matches_tag_object_and_peeled_commit(self) -> None:
         release_sha = "b" * 40
         tag_object = "c" * 40
         mirror_receipt_tag = "d" * 40
@@ -1120,7 +1116,6 @@ class FinalizeReleaseTests(unittest.TestCase):
                 0,
                 "".join(
                     (
-                        f"{controller_sha}\trefs/heads/main\n",
                         f"{tag_object}\trefs/tags/v0.2.0\n",
                         f"{release_sha}\trefs/tags/v0.2.0^{{}}\n",
                         f"{mirror_receipt_tag}\trefs/tags/cymule-mirror/{release_sha}\n",
@@ -1132,32 +1127,11 @@ class FinalizeReleaseTests(unittest.TestCase):
         finalize_release.assert_remote_release_fence(
             repository="cymule-framework/cymule",
             tag="v0.2.0",
-            controller_sha=controller_sha,
             release_sha=release_sha,
             release_tag_sha=tag_object,
             mirror_receipt_tag_sha=mirror_receipt_tag,
             invoke=invoke,
         )
-
-        def stale(arguments):
-            result = invoke(arguments)
-            return subprocess.CompletedProcess(
-                arguments,
-                0,
-                result.stdout.replace(controller_sha, "d" * 40, 1),
-                "",
-            )
-
-        with self.assertRaisesRegex(ValueError, "public main moved"):
-            finalize_release.assert_remote_release_fence(
-                repository="cymule-framework/cymule",
-                tag="v0.2.0",
-                controller_sha=controller_sha,
-                release_sha=release_sha,
-                release_tag_sha=tag_object,
-                mirror_receipt_tag_sha=mirror_receipt_tag,
-                invoke=stale,
-            )
 
         def retagged(arguments):
             result = invoke(arguments)
@@ -1172,7 +1146,6 @@ class FinalizeReleaseTests(unittest.TestCase):
             finalize_release.assert_remote_release_fence(
                 repository="cymule-framework/cymule",
                 tag="v0.2.0",
-                controller_sha=controller_sha,
                 release_sha=release_sha,
                 release_tag_sha=tag_object,
                 mirror_receipt_tag_sha=mirror_receipt_tag,
@@ -1192,7 +1165,6 @@ class FinalizeReleaseTests(unittest.TestCase):
             finalize_release.assert_remote_release_fence(
                 repository="cymule-framework/cymule",
                 tag="v0.2.0",
-                controller_sha=controller_sha,
                 release_sha=release_sha,
                 release_tag_sha=tag_object,
                 mirror_receipt_tag_sha=mirror_receipt_tag,
@@ -1218,7 +1190,6 @@ class FinalizeReleaseTests(unittest.TestCase):
                     assert_fence=lambda: finalize_release.assert_remote_release_fence(
                         repository="cymule-framework/cymule",
                         tag="v0.2.0",
-                        controller_sha=controller_sha,
                         release_sha=release_sha,
                         release_tag_sha=tag_object,
                         mirror_receipt_tag_sha=mirror_receipt_tag,
@@ -2317,17 +2288,13 @@ class NpmReleaseTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, expected):
                     npm_release.load_stage(manifest, release_sha)
 
-    def test_npm_publish_fences_refs_after_missing_status_before_write(self) -> None:
+    def test_npm_publish_pins_tag_after_linearized_controller_admission(self) -> None:
         release_sha = "b" * 40
         controller_sha = "a" * 40
         release_tag = "v0.2.0"
-        moved_refs = (
-            ("c" * 40, release_sha),
-            (controller_sha, "d" * 40),
-        )
-        for observed_main, observed_tag in moved_refs:
+        for observed_tag, accepted in ((release_sha, True), ("d" * 40, False)):
             with self.subTest(
-                observed_main=observed_main, observed_tag=observed_tag
+                observed_tag=observed_tag, accepted=accepted
             ), tempfile.TemporaryDirectory() as temporary:
                 directory = pathlib.Path(temporary)
                 manifest = self.make_stage(directory, release_sha)
@@ -2342,10 +2309,7 @@ class NpmReleaseTests(unittest.TestCase):
                     return subprocess.CompletedProcess(
                         arguments,
                         0,
-                        (
-                            f"{observed_main}\trefs/heads/main\n"
-                            f"{observed_tag}\trefs/tags/{release_tag}^{{}}\n"
-                        ),
+                        f"{observed_tag}\trefs/tags/{release_tag}^{{}}\n",
                         "",
                     )
 
@@ -2363,11 +2327,18 @@ class NpmReleaseTests(unittest.TestCase):
                     ),
                     mock.patch.object(npm_release.subprocess, "run", side_effect=remote),
                     mock.patch.object(npm_release, "run_npm_publish") as publish,
+                    mock.patch.object(npm_release, "verify_registry"),
                 ):
-                    with self.assertRaisesRegex(ValueError, "authority moved"):
-                        npm_release.publish(manifest, release_sha)
+                    if accepted:
+                        self.assertEqual(
+                            npm_release.publish(manifest, release_sha), "published"
+                        )
+                        publish.assert_called_once()
+                    else:
+                        with self.assertRaisesRegex(ValueError, "authority moved"):
+                            npm_release.publish(manifest, release_sha)
+                        publish.assert_not_called()
                 self.assertEqual(events, ["status", "fence"])
-                publish.assert_not_called()
 
     def test_npm_publish_retains_an_exact_existing_version_without_write(self) -> None:
         release_sha = "a" * 40
@@ -3485,7 +3456,7 @@ jobs:
         ):
             with self.subTest(controller=controller), self.assertRaisesRegex(
                 ValueError,
-                "current-main controller|historical tag controller|data-only freeze",
+                "admitted controller|historical tag controller|data-only freeze",
             ):
                 release_workflows.verify_finalization_controller_boundary(
                     finalize.replace(
@@ -3578,7 +3549,7 @@ jobs:
                 + "      - uses: actions/download-artifact@"
                 + publish_suffix
             )
-        with self.assertRaisesRegex(ValueError, "current-main controller"):
+        with self.assertRaisesRegex(ValueError, "admitted controller"):
             release_workflows.verify_finalization_controller_boundary(
                 finalize.replace(
                     "ref: ${{ needs.verify.outputs.controller_sha }}",
@@ -3586,6 +3557,36 @@ jobs:
                     1,
                 )
             )
+
+    def test_current_main_is_read_only_at_the_single_admission_point(self) -> None:
+        fragment = 'test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"'
+        for name, workflow, verifier in (
+            (
+                "npm",
+                (ROOT / ".github/workflows/publish-npm-controller.yml").read_text(),
+                release_workflows.verify_npm_publish_boundary,
+            ),
+            (
+                "crates",
+                (ROOT / ".github/workflows/publish-crates.yml").read_text(),
+                release_workflows.verify_crates_controller_boundary,
+            ),
+            (
+                "finalize",
+                (ROOT / ".github/workflows/finalize-release.yml").read_text(),
+                release_workflows.verify_finalization_controller_boundary,
+            ),
+        ):
+            prefix, suffix = workflow.rsplit(fragment, 1)
+            with self.subTest(workflow=name), self.assertRaisesRegex(
+                ValueError, "revokes an admitted immutable controller"
+            ):
+                verifier(
+                    prefix
+                    + fragment
+                    + "\n          git ls-remote origin refs/heads/main"
+                    + suffix
+                )
 
     def test_terminal_release_permissions_and_tag_readback_are_closed(self) -> None:
         npm = (
@@ -3726,7 +3727,7 @@ jobs:
                     1,
                 )
             )
-        with self.assertRaisesRegex(ValueError, "current-fenced and loss-resolved"):
+        with self.assertRaisesRegex(ValueError, "admitted and loss-resolved"):
             release_workflows.verify_npm_publish_boundary(
                 npm.replace(
                     '              if ! git -C "$CYMULE_RELEASE_WORKSPACE" \\\n',
@@ -3741,7 +3742,7 @@ jobs:
             '          test "$final_remote_tag_sha" = "$expected_tag_sha"\n',
         ):
             with self.subTest(fragment=fragment), self.assertRaisesRegex(
-                ValueError, "current-fenced and loss-resolved"
+                ValueError, "admitted and loss-resolved"
             ):
                 release_workflows.verify_npm_publish_boundary(
                     npm.replace(fragment, "missing-raw-tag-binding\n", 1)
@@ -3828,7 +3829,7 @@ jobs:
             (
                 finalize,
                 release_workflows.verify_finalization_controller_boundary,
-                'test "$remote_main" = "$CONTROLLER_SHA"',
+                'test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"',
             ),
         ):
             prefix, suffix = workflow.rsplit(fragment, 1)
@@ -3880,7 +3881,7 @@ jobs:
             )
         with self.assertRaisesRegex(
             ValueError,
-            "frozen current controller|exact annotated tag|current-main controller",
+            "freeze data|frozen current controller|exact annotated tag|current-main controller",
         ):
             release_workflows.verify_finalization_controller_boundary(
                 finalize.replace(fragment, "missing-tag-readback", 1)
@@ -4043,6 +4044,15 @@ jobs:
             self.skipTest("private GitLab CI is absent from the public export")
         text = gitlab_ci.read_text(encoding="utf-8")
         release_workflows.verify_private_mirror_ci(text)
+        with self.assertRaisesRegex(ValueError, "executable commands outside its closure"):
+            release_workflows.verify_private_mirror_ci(
+                text.replace(
+                    "    - |\n"
+                    "      test \"$(shellcheck --version | sed -n 's/^version: //p')\" = 0.10.0",
+                    "    - test \"$(shellcheck --version | sed -n 's/^version: //p')\" = 0.10.0",
+                    1,
+                )
+            )
         for fragment in (
             '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"',
             "resource_group: public-mirror",

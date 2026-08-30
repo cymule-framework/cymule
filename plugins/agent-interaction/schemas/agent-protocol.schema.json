@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-  "title": "Cymule Agent Protocol cymule.agent/6",
+  "title": "Cymule Agent Protocol cymule.agent/7",
   "oneOf": [
     { "$ref": "#/$defs/agentSessionCurrent" },
     { "$ref": "#/$defs/agentUpdate" },
@@ -13,6 +13,7 @@
     { "$ref": "#/$defs/agentStreamCommand" },
     { "$ref": "#/$defs/agentStreamCurrent" },
     { "$ref": "#/$defs/agentStreamPublicationIntent" },
+    { "$ref": "#/$defs/agentStreamPublicationReservation" },
     { "$ref": "#/$defs/workspaceScopeRequest" }
   ],
   "$defs": {
@@ -1347,6 +1348,107 @@
         "size": { "$ref": "#/$defs/exactInteger" }
       }
     },
+    "resourceRetentionFamily": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family_version",
+        "retention_key",
+        "store_binding",
+        "content_digest"
+      ],
+      "properties": {
+        "family_version": { "const": "cymule.resource-retention-family/1" },
+        "retention_key": { "$ref": "#/$defs/sha256" },
+        "store_binding": { "$ref": "#/$defs/nonEmpty" },
+        "content_digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "resourceRetentionSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subject_version", "resource_id", "family"],
+      "properties": {
+        "subject_version": { "const": "cymule.resource-retention-subject/1" },
+        "resource_id": { "$ref": "#/$defs/sha256" },
+        "family": { "$ref": "#/$defs/resourceRetentionFamily" }
+      }
+    },
+    "agentStreamResourcePin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pin_id",
+        "subject",
+        "owner",
+        "kind"
+      ],
+      "properties": {
+        "pin_id": { "$ref": "#/$defs/sha256" },
+        "subject": { "$ref": "#/$defs/resourceRetentionSubject" },
+        "owner": { "$ref": "#/$defs/sha256" },
+        "kind": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "session_id", "stream_id"],
+          "properties": {
+            "kind": { "const": "agent_stream" },
+            "session_id": { "$ref": "#/$defs/nonEmpty" },
+            "stream_id": { "$ref": "#/$defs/nonEmpty" }
+          }
+        }
+      }
+    },
+    "agentStreamResourcePinReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_version",
+        "receipt_id",
+        "command_id",
+        "pin",
+        "active_pin_count"
+      ],
+      "properties": {
+        "receipt_version": { "const": "cymule.resource-pin-receipt/3" },
+        "receipt_id": { "$ref": "#/$defs/sha256" },
+        "command_id": { "$ref": "#/$defs/sha256" },
+        "pin": { "$ref": "#/$defs/agentStreamResourcePin" },
+        "active_pin_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "agentStreamPublicationReservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reservation_version",
+        "reservation_id",
+        "intent",
+        "resource_pin_receipt",
+        "attempt",
+        "phase"
+      ],
+      "properties": {
+        "reservation_version": {
+          "const": "cymule.agent-stream-publication-reservation/1"
+        },
+        "reservation_id": { "$ref": "#/$defs/sha256" },
+        "intent": { "$ref": "#/$defs/agentStreamPublicationIntent" },
+        "resource_pin_receipt": {
+          "$ref": "#/$defs/agentStreamResourcePinReceipt"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "phase": { "enum": ["dispatch_claimed", "not_applied"] }
+      }
+    },
     "agentStreamDelivery": {
       "oneOf": [
         {
@@ -1445,6 +1547,7 @@
         "session_id",
         "target",
         "delivery",
+        "publication_reservation",
         "state",
         "next_chunk_sequence",
         "chunk_head",
@@ -1461,6 +1564,12 @@
         "session_id": { "$ref": "#/$defs/nonEmpty" },
         "target": { "$ref": "#/$defs/agentStreamTarget" },
         "delivery": { "$ref": "#/$defs/agentStreamDelivery" },
+        "publication_reservation": {
+          "oneOf": [
+            { "$ref": "#/$defs/agentStreamPublicationReservation" },
+            { "type": "null" }
+          ]
+        },
         "state": { "enum": ["open", "finalized", "aborted"] },
         "next_chunk_sequence": {
           "type": "integer",
@@ -1533,6 +1642,20 @@
           },
           "then": {
             "properties": { "staged_content_blocks": { "const": 0 } }
+          },
+          "else": {
+            "properties": { "publication_reservation": { "type": "null" } }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": { "enum": ["finalized", "aborted"] }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "properties": { "publication_reservation": { "type": "null" } }
           }
         }
       ]

@@ -258,8 +258,6 @@ jobs:
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           test "$EXECUTOR_WITNESS_SHA" = "$RELEASE_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/crates_release.py scripts/version_domains.py
-          git fetch --no-tags origin main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
           remote_release_sha=$(git ls-remote origin "refs/tags/$RELEASE_TAG^{}" | cut -f1)
           test -n "$remote_release_sha"
           test "$remote_release_sha" = "$RELEASE_SHA"
@@ -283,8 +281,6 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$CONTROLLER_SHA"
           git diff --quiet "$CONTROLLER_SHA" -- scripts/crates_release.py scripts/version_domains.py
-          git fetch --no-tags origin main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$CONTROLLER_SHA"
           remote_release_sha=$(git ls-remote origin "refs/tags/$RELEASE_TAG^{}" | cut -f1)
           test -n "$remote_release_sha"
           test "$remote_release_sha" = "$RELEASE_SHA"

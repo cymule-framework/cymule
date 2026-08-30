@@ -133,12 +133,7 @@ impl<W: WallClock> SqliteClock<W> {
             .map_err(sqlite_error)?;
         require_file_backed_clock_authority(&connection)?;
         initialize_or_require(&mut connection)?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(sqlite_error)?;
-        connection
-            .pragma_update(None, "synchronous", "FULL")
-            .map_err(sqlite_error)?;
+        configure_and_prove_clock_durability(&mut connection)?;
         Ok(Self {
             connection,
             source_id,
@@ -352,6 +347,66 @@ fn require_file_backed_clock_authority(connection: &Connection) -> DurableResult
         return Err(DurableError::Validation(
             "Clock SQLite authority must be file-backed".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn configure_and_prove_clock_durability(connection: &mut Connection) -> DurableResult<()> {
+    connection
+        .pragma_update(Some("main"), "journal_mode", "WAL")
+        .map_err(clock_durability_error)?;
+    connection
+        .pragma_update(Some("main"), "synchronous", "FULL")
+        .map_err(clock_durability_error)?;
+    require_clock_durability_readback(connection)?;
+
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(clock_writable_error)?;
+    let changed = transaction
+        .execute(
+            "UPDATE main.cymule_clock_meta
+             SET schema_version = schema_version WHERE singleton = 1",
+            [],
+        )
+        .map_err(clock_writable_error)?;
+    if changed != 1 {
+        return Err(clock_integrity(
+            "clock_main_write_probe_mismatch",
+            format!("Clock main database write probe changed {changed} rows, expected 1"),
+        ));
+    }
+    let generation: String = transaction
+        .query_row(
+            "SELECT schema_version FROM main.cymule_clock_meta WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(clock_writable_error)?;
+    if generation != SQLITE_SCHEMA_VERSION {
+        return Err(clock_integrity(
+            "clock_main_write_probe_readback_mismatch",
+            "Clock main database write probe did not read back the exact schema authority",
+        ));
+    }
+    transaction.commit().map_err(clock_writable_error)?;
+    require_clock_durability_readback(connection)
+}
+
+fn require_clock_durability_readback(connection: &Connection) -> DurableResult<()> {
+    let journal_mode: String = connection
+        .pragma_query_value(Some("main"), "journal_mode", |row| row.get(0))
+        .map_err(clock_durability_error)?;
+    let synchronous: i64 = connection
+        .pragma_query_value(Some("main"), "synchronous", |row| row.get(0))
+        .map_err(clock_durability_error)?;
+    if !journal_mode.eq_ignore_ascii_case("wal") || synchronous != 2 {
+        return Err(DurableError::Substrate {
+            code: "clock_durability_not_applied".to_owned(),
+            message: format!(
+                "Clock main database retained journal_mode={journal_mode:?}, synchronous={synchronous}; expected WAL and FULL"
+            ),
+        });
     }
     Ok(())
 }
@@ -711,6 +766,39 @@ fn contention(error: rusqlite::Error) -> DurableError {
     }
 }
 
+fn clock_durability_error(error: rusqlite::Error) -> DurableError {
+    if sqlite_contention(&error) {
+        contention(error)
+    } else {
+        DurableError::Substrate {
+            code: "clock_durability_not_applied".to_owned(),
+            message: error.to_string(),
+        }
+    }
+}
+
+fn clock_writable_error(error: rusqlite::Error) -> DurableError {
+    if sqlite_contention(&error) {
+        contention(error)
+    } else {
+        DurableError::Substrate {
+            code: "clock_main_not_writable".to_owned(),
+            message: error.to_string(),
+        }
+    }
+}
+
+fn sqlite_contention(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if matches!(
+                failure.code,
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 fn sqlite_error(error: rusqlite::Error) -> DurableError {
     contention(error)
 }
@@ -743,6 +831,18 @@ fn retained_exact_integer(
 mod schema_tests {
     use super::*;
 
+    const TEST_GENERATION: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[derive(Clone, Copy)]
+    struct FixedWall;
+
+    impl WallClock for FixedWall {
+        fn now_unix_ms(&self) -> DurableResult<u64> {
+            Ok(1)
+        }
+    }
+
     #[test]
     fn failed_empty_initialization_rolls_back_before_exact_reopen() {
         let mut connection = Connection::open_in_memory().expect("test database opens");
@@ -758,5 +858,24 @@ mod schema_tests {
         );
         initialize_empty(&mut connection, &CLOCK_SCHEMA).expect("exact retry initializes");
         require_current_schema(&connection).expect("exact generation reads back");
+    }
+
+    #[test]
+    fn returned_connection_has_exact_main_durability_readback() {
+        let directory = tempfile::tempdir().expect("temporary directory creates");
+        let clock = SqliteClock::open_with_wall_clock(
+            directory.path().join("clock.sqlite"),
+            "clock:test",
+            TEST_GENERATION,
+            FixedWall,
+        )
+        .expect("Clock opens after durability proof");
+        require_clock_durability_readback(&clock.connection)
+            .expect("returned main connection retains WAL plus FULL");
+        let synchronous: i64 = clock
+            .connection
+            .pragma_query_value(Some("main"), "synchronous", |row| row.get(0))
+            .expect("main synchronous reads");
+        assert_eq!(synchronous, 2);
     }
 }

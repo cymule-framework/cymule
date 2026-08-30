@@ -422,7 +422,7 @@ fn frozen_resource_fixture_has_one_cross_language_identity() {
     let resource = candidate.seal().expect("fixture seals");
     assert_eq!(
         resource.resource_id,
-        "sha256:3779d4838c3ab0530ff707f9c1779bb72ba021073ee37226fa357f7696690205"
+        "sha256:a8615b23e5d8748ee2eec5db39d3eff74f31b3e3da5cf323f596d995b9363668"
     );
     let mut tampered = resource;
     tampered.media_type = "application/octet-stream".to_owned();
@@ -879,16 +879,37 @@ fn chunked_store_interface_keeps_provider_details_out_of_resource_identity() {
         writer.begin(&invalid),
         Err(ResourceError::Validation(_))
     ));
-    let invalid_media_type = ResourceWriteIntent {
-        write_id: "write:invalid-media-type".to_owned(),
+    for (index, media_type) in [
+        "text/\0plain",
+        "text/",
+        "/plain",
+        "a/b/c",
+        "Text/plain",
+        "text/plain;charset=utf-8",
+        "text/ plain",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let invalid_media_type = ResourceWriteIntent {
+            write_id: format!("write:invalid-media-type:{index}"),
+            shape: ResourceShape::Object,
+            media_type: media_type.to_owned(),
+            annotations: BTreeMap::new(),
+        };
+        assert!(matches!(
+            writer.begin(&invalid_media_type),
+            Err(ResourceError::Validation(_))
+        ));
+    }
+    ResourceWriteIntent {
+        write_id: "write:vendor-media-type".to_owned(),
         shape: ResourceShape::Object,
-        media_type: "Application/Octet-Stream".to_owned(),
+        media_type: "application/vnd.cymule.resource+json".to_owned(),
         annotations: BTreeMap::new(),
-    };
-    assert!(matches!(
-        writer.begin(&invalid_media_type),
-        Err(ResourceError::Validation(_))
-    ));
+    }
+    .validate()
+    .expect("vendor media type with structured suffix verifies");
     let mut excessive_annotations = BTreeMap::new();
     for index in 0..=MAX_RESOURCE_ANNOTATIONS {
         excessive_annotations.insert(format!("annotation:{index}"), String::new());

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     MAX_RESOURCE_ANNOTATIONS, ResourceCleanupReceipt, ResourceError, ResourceIntegrity,
-    ResourcePublication, ResourceResult, ResourceShape,
+    ResourcePublication, ResourceResult, ResourceShape, validate_resource_media_type,
 };
 
 /// Maximum bytes submitted to a store in one call.
@@ -59,17 +59,7 @@ impl ResourceWriteIntent {
                 "inline resources do not use chunked ArtifactStore writes".to_owned(),
             ));
         }
-        if self.media_type.is_empty()
-            || self.media_type.len() > 255
-            || !self.media_type.contains('/')
-            || !self.media_type.is_ascii()
-            || self.media_type != self.media_type.to_ascii_lowercase()
-            || self.media_type.chars().any(char::is_whitespace)
-        {
-            return Err(ResourceError::Validation(
-                "resource write media type is invalid".to_owned(),
-            ));
-        }
+        validate_resource_media_type(&self.media_type)?;
         if self.annotations.len() > MAX_RESOURCE_ANNOTATIONS {
             return Err(ResourceError::Validation(format!(
                 "resource write intent exceeds {MAX_RESOURCE_ANNOTATIONS} annotations"

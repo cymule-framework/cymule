@@ -5,6 +5,11 @@
   group leader and kills that exact still-live group when Engine death closes
   the channel. Clear ambient environment and pass only explicit configuration;
   never inherit credentials or `PATH`.
+- The embedding owns child reaping exclusively: `SIGCHLD` must retain its
+  default disposition and may not use `SA_NOCLDWAIT`, a competing handler, or
+  another thread that waits for arbitrary children. Recheck the observable
+  process-wide disposition before the watchdog fork and again before provider
+  spawn; fail before provider I/O when it is unavailable.
 - Capture executable bytes and the optional working-directory tree once, then
   create a fresh private materialization for every occurrence. A plugin may
   mutate its disposable occurrence but must never affect later invocations.
@@ -73,7 +78,9 @@
   plugin domain. Evolution retains its separate exact 16 MiB entrypoint.
 - Kill the complete occurrence process group after the leader exits or any
   failure occurs, then reap both the plugin child and the watchdog. Ordinary
-  forked descendants must not outlive the occurrence or retain its pipes.
+  forked descendants must not outlive the occurrence or retain its pipes. The
+  macOS child owner retains the first exact `waitpid` status; after reap, every
+  later kill is a no-op and may never signal a potentially reused numeric PID.
 - After either Effect dispatch or reconciliation has spawned, every timeout,
   cancellation, I/O failure, output-limit failure, process failure, malformed
   response, or attempt mismatch is an unknown-world outcome. Kill and reap the

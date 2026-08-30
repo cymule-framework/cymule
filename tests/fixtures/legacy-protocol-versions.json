@@ -13,6 +13,7 @@
   "machine_base_anchor": "cymule.machine-base-anchor/1",
   "machine_snapshot": "cymule.machine-snapshot/10",
   "operation_attempt": "cymule.operation-attempt/1",
+  "resource": "cymule.resource/3",
   "resource_list_cursor": "cymule.resource-list-cursor/2",
   "resource_list_proof": "cymule.resource-list-proof/4",
   "resource_locators": "cymule.resource-locators/1",

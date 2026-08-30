@@ -6,7 +6,7 @@ mod client;
 pub use builder::FlowBuilder;
 pub use client::{
     CliEngine, DurableEngine, DurablePageQueryOptions, DurableRunCurrentRead, DurableRunItemQuery,
-    DurableRunItemRead, Engine,
+    DurableRunItemRead, Engine, EngineCancellation, EngineRequestSnapshot, EngineTransportSuccess,
 };
 pub use cymule_core::{
     ArtifactRecord, ArtifactRef, COMPONENT_OUTPUT_ARTIFACT_KIND, ComponentContract, Definition,

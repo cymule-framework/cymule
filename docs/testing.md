@@ -103,6 +103,13 @@ uncorrelated success.
 The same leaf runs a shared negative fixture through the real Rust Engine and
 compares failure category, phase, code, and explicitly justified retry
 disposition. It never parses stderr to recover semantic meaning.
+Transport conformance also sends a legal success above 16 MiB, preserves a
+fully validated failure from a nonzero process exit, rejects the complete
+128 MiB plus 32-byte framing bound plus one on stdout and byte 1 MiB plus one on stderr, and exact-rejects distinct
+fractional decimals that collide in a host binary float. Custom transport tests
+change the complete accepted request echo rather than only an operation field.
+An exponent-normalized request whose echo expands past a test bound must reject
+before Store creation, proving normalized echo charging precedes dispatch.
 Stateful Rust tests separately prove that transitive registry relinking, Plan
 DAG edges, rollout decisions, occurrence pins, and virtual worker claims share
 the intended single-domain CAS boundaries. Profile reducer tests start with one

@@ -14,7 +14,7 @@ domains described in `docs/specification.md`.
 - Revalidate both closed npm archives against current registry state inside the
   protected tag writer before creating an immutable release tag.
 
-- Advance Resource Handles to `cymule.resource/3`, manifests to
+- Advance Resource Handles to `cymule.resource/4`, manifests to
   `cymule.resource-manifest/3`, list proofs to `/5`, list cursors to `/3`,
   locator sets to `cymule.resource-locators/2`, and provider catalog records to
   `cymule.resource-catalog-record/2`, with no predecessor readers. Descriptors
@@ -22,6 +22,9 @@ domains described in `docs/specification.md`.
   admit at most 16 canonical ASCII locations and 256 KiB; catalog records have
   one protocol-owned 16 MiB canonical JSON bound enforced before provider-body
   materialization.
+  Resource media types now use one lowercase ASCII type/subtype token grammar;
+  parameters, controls, whitespace, uppercase, extra slashes, `/3` Resources,
+  and `/3` framework Handle contracts have no reader.
   Canonical manifest entry bytes now derive the sole Merkle content authority;
   the descriptor ID binds that root, canonical byte size, entry count, and media
   type. Full copies stream-reconstruct the same descriptor, with no parallel
@@ -61,6 +64,13 @@ domains described in `docs/specification.md`.
   now page one Core-bound hidden sidecar companion, preserve unrelated Run
   commits, fence late same-Run results, and resume an already admitted
   `ExpectedFailure` without provider or Clock work.
+- Advance StateRoot manifests to `/4`, value objects to `/4`, and Run query
+  indexes to `/3`. Run Wait pages now read same-CAS bounded summary leaves and
+  never load or compile complete Input Wait schemas; exact reads and full audit
+  retain and cross-check the complete Wait authority.
+- Require every persisted Effect dispatch and query summary to carry an exact
+  `cymule.effect-result/1` Artifact if and only if its state is `Applied`,
+  including StateRoot leaf reopen, exact lookup, schema, and full audit.
 - Resolve exact hot/cold Start replay before Clock admission. Retained replay
   verifies its singleton batch and exact Plan/binding/input material; a fresh
   Start no longer constructs and discards a duplicate Machine stage.
@@ -88,10 +98,12 @@ domains described in `docs/specification.md`.
   M3 work.
 - Freeze HTTP and timer persistence as
   `cymule.activation-http-spool/1` and
-  `cymule.activation-timer-store/1`. Both initialize only an atomically
+  `cymule.activation-timer-store/2`. Both initialize only an atomically
   rechecked empty database and reject every nonempty predecessor, partial, or
   extended shape as `unsupported_store_generation`; neither repairs or imports
-  in place.
+  in place. HTTP revalidates complete canonical rows against the original
+  request digest before selection or replay. Timer `/2` adds one complete
+  schedule digest; `/1` has no reader or fallback.
 - Rename the misleading public `AuthorityLease` type to `CoordinationLease`
   without a wire-shape alias; coordination ownership and fencing do not grant
   capability authorization.
@@ -243,8 +255,13 @@ domains described in `docs/specification.md`.
   request because it may precede decoding; every predecessor success shape
   fails closed. Clock issuance now returns a typed Run-bound observation result
   so SDKs never duplicate opaque scope derivation. RPC stdin is cancellation-
-  aware and capped at 64 MiB before JSON decoding, while empty Resource
-  annotations have only the omitted wire.
+  aware and capped at 64 MiB before JSON decoding. Success separately bounds
+  the normalized request echo and response payload at 64 MiB and the complete
+  envelope at 134,217,760 bytes. Four SDKs now share complete custom exchanges,
+  exact fractional-decimal echo evidence, bounded number complexity, and one
+  direct-Engine-child lifecycle; the Engine/executor watchdog remains the sole
+  descendant-process closure authority. Empty Resource annotations have only
+  the omitted wire.
 - Separate coupled M3 claim execution into the typed
   `DurableVirtualControl::claim` facade. It is not an M4 control command,
   accepts no caller-authored M4 selector, and commits the occurrence selection,
@@ -270,6 +287,16 @@ domains described in `docs/specification.md`.
   publication's non-secret locator authority as a `ResourceCatalogRecord`
   beside the terminal stream and Session records. Descriptor-only output now
   fails closed, while reopen restores the exact publication for provider readback.
+- Reserve an external Agent stream's physical Resource family and exact
+  provider attempt before publication. The reserved pin competes with deletion
+  in one CAS, reopen never republishes a claimed attempt, `NotApplied` rearm is
+  explicit, and finalization atomically promotes the exact reservation to the
+  permanent pin without changing its family obligation count.
+- Make the macOS process executor use one fork-only watchdog and suspended raw
+  `posix_spawn` provider launch with exact inherited-FD closure. Retain reaped
+  child status to prevent PID-reuse signals, require exclusive default
+  `SIGCHLD` reaping authority, and reject truncated descriptor enumeration,
+  hard-limit high-FD leakage, and concurrent parent-FD churn before provider I/O.
 - Reestablish filesystem catalog/manifest-index durability on equal retry,
   enforce the 8 MiB Resource read bound inside both official adapters, and
   return empty-object EOF without issuing a zero-length object-store range.

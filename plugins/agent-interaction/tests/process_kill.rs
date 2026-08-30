@@ -15,8 +15,11 @@ use cymule_agent::{
     AgentRecoveryController, AgentResult, AgentStreamController,
 };
 use cymule_durable::{
-    ClockObservationAuthority, DurableResult, DurableRuntimeControl, DurableStoreControl,
-    ExecutionClockAuthority,
+    ApplicationJournalPrefix, ApplicationJournalPrefixReplacementAuthority,
+    ClockObservationAuthority, CoupledCheckpointReceipt, DurableResult, DurableRuntimeControl,
+    DurableStore, DurableStoreControl, ExecutionClockAuthority, GcReceipt, JournalRecordManifest,
+    StateRootManifest, StateRootResolver, StoreBatch, StoreCommit, StoreHead, StoreReclamation,
+    StoreStats,
 };
 use cymule_durable_protocol::{ClockObservation, ClockObservationRef};
 use cymule_profile_protocol::ProtocolResult;
@@ -25,7 +28,7 @@ use cymule_runtime::{
     PLUGIN_VERSION, PluginHost, PluginManifest, PluginRequest, PluginResponse, RuntimeError,
     RuntimeResult,
 };
-use cymule_store_sqlite::SqliteStore;
+use cymule_store_sqlite::{SqliteProcessDeathBarrier, SqliteStore};
 use cymule_test_world::{ManagedChild, TestWorld};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::json;
@@ -139,17 +142,18 @@ fn initialize_store(path: &Path) {
 }
 
 fn open_runtime(path: &Path) -> AgentRuntime {
+    open_runtime_with_store(
+        SqliteStore::open(path, STORE_DOMAIN).expect("Agent SQLite Store reopens"),
+    )
+}
+
+fn open_runtime_with_store<S: DurableStore>(store: S) -> DurableRuntimeControl<S, EmptyPlugin> {
     let admission = cymule_runtime::ExecutionBindingAdmission::for_local_process(
         EmptyPlugin,
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
     .expect("Agent test execution binding admits");
-    DurableRuntimeControl::open(
-        SqliteStore::open(path, STORE_DOMAIN).expect("Agent SQLite Store reopens"),
-        admission,
-        UnusedClock,
-    )
-    .expect("Agent runtime opens")
+    DurableRuntimeControl::open(store, admission, UnusedClock).expect("Agent runtime opens")
 }
 
 #[derive(Clone)]
@@ -365,63 +369,211 @@ fn host_request() -> agent_protocol::ToolRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KillPhase {
-    BeforeCommit,
-    AfterCommit,
+    ObjectsStaged,
+    AcknowledgementLost,
 }
 
 impl KillPhase {
     const fn label(self) -> &'static str {
         match self {
-            Self::BeforeCommit => "before_commit",
-            Self::AfterCommit => "after_commit",
+            Self::ObjectsStaged => "objects_staged_before_head_cas",
+            Self::AcknowledgementLost => "cas_acknowledgement_lost",
         }
     }
 }
 
-struct FaultingPersistence<P> {
-    inner: P,
+struct FaultingSqliteStore {
+    inner: SqliteStore,
     phase: Option<KillPhase>,
     fail_at: usize,
     calls: usize,
     marker: Option<PathBuf>,
-    command_path: Option<PathBuf>,
 }
 
-impl<P> FaultingPersistence<P> {
-    const fn counting(inner: P) -> Self {
+impl FaultingSqliteStore {
+    fn counting(path: &Path) -> Self {
         Self {
-            inner,
+            inner: SqliteStore::open(path, STORE_DOMAIN).expect("Agent SQLite Store reopens"),
             phase: None,
             fail_at: 0,
             calls: 0,
             marker: None,
-            command_path: None,
         }
     }
 
-    fn killing(
-        inner: P,
-        phase: KillPhase,
-        fail_at: usize,
-        marker: PathBuf,
-        command_path: PathBuf,
-    ) -> Self {
+    fn killing(path: &Path, phase: KillPhase, fail_at: usize, marker: PathBuf) -> Self {
         Self {
-            inner,
+            inner: SqliteStore::open(path, STORE_DOMAIN).expect("Agent SQLite Store reopens"),
             phase: Some(phase),
             fail_at,
             calls: 0,
             marker: Some(marker),
-            command_path: Some(command_path),
         }
     }
 
     const fn calls(&self) -> usize {
         self.calls
     }
+}
 
-    fn begin(&mut self, command: &agent_protocol::AgentCommand) -> usize {
+fn stop_at_store_boundary(marker: &Path, call: usize, phase: KillPhase) -> ! {
+    fs::write(marker, format!("{call}:{}", phase.label())).expect("Agent Store kill marker writes");
+    loop {
+        thread::park_timeout(Duration::from_mins(1));
+    }
+}
+
+impl DurableStore for FaultingSqliteStore {
+    fn load_head(&mut self) -> DurableResult<Option<StoreHead>> {
+        self.inner.load_head()
+    }
+
+    fn load_state_root_manifest(
+        &mut self,
+        manifest_id: &str,
+    ) -> DurableResult<Option<StateRootManifest>> {
+        self.inner.load_state_root_manifest(manifest_id)
+    }
+
+    fn with_state_root_resolver<T>(
+        &mut self,
+        current: &StateRootManifest,
+        read: impl FnOnce(&mut dyn StateRootResolver) -> DurableResult<T>,
+    ) -> DurableResult<T> {
+        self.inner.with_state_root_resolver(current, read)
+    }
+
+    fn application_journal_prefix(
+        &mut self,
+        manifest: &StateRootManifest,
+        journal_id: &str,
+        count: u64,
+    ) -> DurableResult<ApplicationJournalPrefix> {
+        self.inner
+            .application_journal_prefix(manifest, journal_id, count)
+    }
+
+    fn application_journal_record_manifest(
+        &mut self,
+        manifest: &StateRootManifest,
+        journal_id: &str,
+        record_id: &str,
+    ) -> DurableResult<Option<JournalRecordManifest>> {
+        self.inner
+            .application_journal_record_manifest(manifest, journal_id, record_id)
+    }
+
+    fn application_journal_prefix_replacement_authority(
+        &mut self,
+        manifest: &StateRootManifest,
+        replacement_id: &str,
+    ) -> DurableResult<Option<ApplicationJournalPrefixReplacementAuthority>> {
+        self.inner
+            .application_journal_prefix_replacement_authority(manifest, replacement_id)
+    }
+
+    fn coupled_checkpoint_receipt(
+        &mut self,
+        manifest: &StateRootManifest,
+        coupling_id: &str,
+    ) -> DurableResult<Option<CoupledCheckpointReceipt>> {
+        self.inner.coupled_checkpoint_receipt(manifest, coupling_id)
+    }
+
+    fn load_machine_command_archive_segment(
+        &mut self,
+        segment_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandArchiveSegment>> {
+        self.inner.load_machine_command_archive_segment(segment_id)
+    }
+
+    fn load_machine_command_archive_entry(
+        &mut self,
+        entry_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandArchiveEntry>> {
+        self.inner.load_machine_command_archive_entry(entry_id)
+    }
+
+    fn load_machine_command_archive_batch(
+        &mut self,
+        batch_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandBatchRecord>> {
+        self.inner.load_machine_command_archive_batch(batch_id)
+    }
+
+    fn load_machine_command_index_node(
+        &mut self,
+        node_id: &str,
+    ) -> DurableResult<Option<cymule_core::MachineCommandIndexNode>> {
+        self.inner.load_machine_command_index_node(node_id)
+    }
+
+    fn compare_and_commit(
+        &mut self,
+        expected: Option<&StoreHead>,
+        batch: &StoreBatch,
+    ) -> DurableResult<StoreCommit> {
         self.calls += 1;
+        let call = self.calls;
+        let selected = self.phase.filter(|_| call == self.fail_at);
+        match selected {
+            Some(KillPhase::ObjectsStaged) => {
+                let marker = self.marker.clone().expect("fault Store owns a marker");
+                self.inner.compare_and_commit_with_process_death_barrier(
+                    expected,
+                    batch,
+                    |barrier| match barrier {
+                        SqliteProcessDeathBarrier::ObjectsStaged => {
+                            stop_at_store_boundary(&marker, call, KillPhase::ObjectsStaged)
+                        }
+                    },
+                )
+            }
+            Some(KillPhase::AcknowledgementLost) => {
+                let result = self.inner.compare_and_commit(expected, batch);
+                if result.is_ok() {
+                    stop_at_store_boundary(
+                        self.marker.as_deref().expect("fault Store owns a marker"),
+                        call,
+                        KillPhase::AcknowledgementLost,
+                    );
+                }
+                result
+            }
+            None => self.inner.compare_and_commit(expected, batch),
+        }
+    }
+
+    fn reconcile_cold_reclamation(
+        &mut self,
+        request: &StoreReclamation,
+    ) -> DurableResult<GcReceipt> {
+        self.inner.reconcile_cold_reclamation(request)
+    }
+
+    fn advance_cold_reclamation(&mut self, request: &StoreReclamation) -> DurableResult<GcReceipt> {
+        self.inner.advance_cold_reclamation(request)
+    }
+
+    fn stats(&self) -> DurableResult<StoreStats> {
+        self.inner.stats()
+    }
+}
+
+struct RecordingPersistence<P> {
+    inner: P,
+    command_path: Option<PathBuf>,
+}
+
+impl<P> RecordingPersistence<P> {
+    const fn new(inner: P, command_path: Option<PathBuf>) -> Self {
+        Self {
+            inner,
+            command_path,
+        }
+    }
+
+    fn record(&self, command: &agent_protocol::AgentCommand) {
         if let Some(path) = &self.command_path {
             fs::write(
                 path,
@@ -429,52 +581,24 @@ impl<P> FaultingPersistence<P> {
             )
             .expect("Agent recovery command records");
         }
-        if self.phase == Some(KillPhase::BeforeCommit) && self.calls == self.fail_at {
-            self.stop();
-        }
-        self.calls
-    }
-
-    fn finish(&self, call: usize) {
-        if self.phase == Some(KillPhase::AfterCommit) && call == self.fail_at {
-            self.stop();
-        }
-    }
-
-    fn stop(&self) -> ! {
-        let phase = self.phase.expect("kill persistence owns a phase");
-        fs::write(
-            self.marker
-                .as_ref()
-                .expect("kill persistence owns a marker"),
-            format!("{}:{}", self.calls, phase.label()),
-        )
-        .expect("Agent kill marker writes");
-        loop {
-            thread::park_timeout(Duration::from_mins(1));
-        }
     }
 }
 
-impl<P: AgentPersistence> AgentPersistence for FaultingPersistence<P> {
+impl<P: AgentPersistence> AgentPersistence for RecordingPersistence<P> {
     fn commit_agent(
         &mut self,
         command: &agent_protocol::AgentCommand,
     ) -> AgentResult<agent_protocol::AgentCommit> {
-        let call = self.begin(command);
-        let outcome = self.inner.commit_agent(command);
-        self.finish(call);
-        outcome
+        self.record(command);
+        self.inner.commit_agent(command)
     }
 
     fn finalize_agent_stream(
         &mut self,
         command: &agent_protocol::AgentCommand,
     ) -> AgentResult<agent_protocol::AgentStreamFinalizeOutcome> {
-        let call = self.begin(command);
-        let outcome = self.inner.finalize_agent_stream(command);
-        self.finish(call);
-        outcome
+        self.record(command);
+        self.inner.finalize_agent_stream(command)
     }
 
     fn reconcile_agent_stream(
@@ -489,10 +613,8 @@ impl<P: AgentPersistence> AgentPersistence for FaultingPersistence<P> {
         &mut self,
         command: &agent_protocol::AgentCommand,
     ) -> AgentResult<agent_protocol::AgentWorkspaceCommitOutcome> {
-        let call = self.begin(command);
-        let outcome = self.inner.commit_agent_workspace(command);
-        self.finish(call);
-        outcome
+        self.record(command);
+        self.inner.commit_agent_workspace(command)
     }
 
     fn read_agent_session(
@@ -1224,23 +1346,18 @@ fn agent_process_kill_worker_entry() {
         .expect("Agent kill phase exists")
         .as_str()
     {
-        "before_commit" => KillPhase::BeforeCommit,
-        "after_commit" => KillPhase::AfterCommit,
+        "objects_staged_before_head_cas" => KillPhase::ObjectsStaged,
+        "cas_acknowledgement_lost" => KillPhase::AcknowledgementLost,
         phase => panic!("unknown Agent kill phase {phase}"),
     };
     let fail_at = std::env::var("CYMULE_AGENT_KILL_AT")
         .expect("Agent kill boundary exists")
         .parse()
         .expect("Agent kill boundary parses");
-    let mut runtime = open_runtime(Path::new(&database));
+    let store = FaultingSqliteStore::killing(Path::new(&database), phase, fail_at, marker);
+    let mut runtime = open_runtime_with_store(store);
     let mut providers = UnusedAgentProviders;
-    let persistence = FaultingPersistence::killing(
-        runtime.agent(&mut providers),
-        phase,
-        fail_at,
-        marker,
-        command_path,
-    );
+    let persistence = RecordingPersistence::new(runtime.agent(&mut providers), Some(command_path));
     converge_scenario(persistence, LedgerHost { database: ledger })
         .expect("Agent worker reaches its selected CAS boundary");
     panic!("Agent kill worker unexpectedly completed");
@@ -1261,19 +1378,15 @@ fn agent_close_process_kill_worker_entry() {
         .expect("Agent Close kill phase exists")
         .as_str()
     {
-        "before_commit" => KillPhase::BeforeCommit,
-        "after_commit" => KillPhase::AfterCommit,
+        "objects_staged_before_head_cas" => KillPhase::ObjectsStaged,
+        "cas_acknowledgement_lost" => KillPhase::AcknowledgementLost,
         phase => panic!("unknown Agent Close kill phase {phase}"),
     };
-    let mut runtime = open_runtime(Path::new(&database));
+    let store = FaultingSqliteStore::killing(Path::new(&database), phase, 1, marker);
+    let mut runtime = open_runtime_with_store(store);
     let mut providers = UnusedAgentProviders;
-    let mut persistence = FaultingPersistence::killing(
-        runtime.agent(&mut providers),
-        phase,
-        1,
-        marker,
-        command_path,
-    );
+    let mut persistence =
+        RecordingPersistence::new(runtime.agent(&mut providers), Some(command_path));
     let command = close_command(&mut persistence).expect("Agent Close command seals");
     persistence
         .commit_agent(&command)
@@ -1460,12 +1573,12 @@ impl AgentCloseFaultCase {
                 .verify_for(&command)
                 .expect("converged Agent Close commit verifies");
             match phase {
-                KillPhase::BeforeCommit => assert_eq!(
+                KillPhase::ObjectsStaged => assert_eq!(
                     first.committed_revision.as_ref(),
                     Some(&first.observed_revision),
                     "pre-CAS death must leave the same Close command to commit"
                 ),
-                KillPhase::AfterCommit => assert!(
+                KillPhase::AcknowledgementLost => assert!(
                     first.committed_revision.is_none(),
                     "post-CAS death must replay the already retained Close receipt"
                 ),
@@ -1476,11 +1589,11 @@ impl AgentCloseFaultCase {
                 .expect("converged Agent Close revision reads")
                 .revision;
             match phase {
-                KillPhase::BeforeCommit => assert_ne!(
+                KillPhase::ObjectsStaged => assert_ne!(
                     revision_before, revision_after_first,
                     "pre-CAS death must leave the open and closed StateRoot heads distinct"
                 ),
-                KillPhase::AfterCommit => assert_eq!(
+                KillPhase::AcknowledgementLost => assert_eq!(
                     revision_before, revision_after_first,
                     "post-CAS death recovery must observe the already closed StateRoot head"
                 ),
@@ -1541,16 +1654,19 @@ impl AgentCloseFaultCase {
 
 fn agent_cas_boundary_count() -> usize {
     let case = AgentFaultCase::new(0);
-    let mut runtime = open_runtime(&case.database);
+    let store = FaultingSqliteStore::counting(&case.database);
+    let mut runtime = open_runtime_with_store(store);
     let mut providers = UnusedAgentProviders;
-    let persistence = FaultingPersistence::counting(runtime.agent(&mut providers));
+    let persistence = RecordingPersistence::new(runtime.agent(&mut providers), None);
     let host = LedgerHost {
         database: case.ledger.clone(),
     };
     let (mut persistence, host) =
         converge_scenario(persistence, host).expect("successful Agent baseline converges");
-    let boundary_count = persistence.calls();
     assert_terminal_scenario(&mut persistence, &host).expect("baseline Agent state is terminal");
+    drop(persistence);
+    let (store, _) = runtime.into_parts();
+    let boundary_count = store.calls();
     assert!(
         boundary_count >= 9,
         "Agent baseline crosses Tool, occurrence, Session, and stream CAS boundaries"
@@ -1561,9 +1677,10 @@ fn agent_cas_boundary_count() -> usize {
 #[test]
 fn every_agent_owned_cas_boundary_survives_real_process_death() {
     let boundary_count = agent_cas_boundary_count();
-    for phase in [KillPhase::BeforeCommit, KillPhase::AfterCommit] {
+    for phase in [KillPhase::ObjectsStaged, KillPhase::AcknowledgementLost] {
         for fail_at in 1..=boundary_count {
-            let phase_offset = usize::from(phase == KillPhase::AfterCommit) * boundary_count;
+            let phase_offset =
+                usize::from(phase == KillPhase::AcknowledgementLost) * boundary_count;
             let seed = u64::try_from(phase_offset + fail_at)
                 .expect("Agent fault-matrix position fits u64");
             let case = AgentFaultCase::new(seed);
@@ -1576,7 +1693,7 @@ fn every_agent_owned_cas_boundary_survives_real_process_death() {
 #[test]
 fn session_close_atomically_cancels_all_tools_across_real_process_death() {
     let expected = AgentCloseFaultCase::new(10_000).close_without_death();
-    for (index, phase) in [KillPhase::BeforeCommit, KillPhase::AfterCommit]
+    for (index, phase) in [KillPhase::ObjectsStaged, KillPhase::AcknowledgementLost]
         .into_iter()
         .enumerate()
     {

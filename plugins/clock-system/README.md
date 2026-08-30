@@ -12,6 +12,12 @@ restarts, later observations still advance. SQLite contention fails immediately,
 including during authority/schema preflight, so retry and admission policy
 remain with the caller.
 
+Open returns only after the exact `main` connection reads back WAL plus
+`synchronous=FULL`, commits an exact metadata-row write/readback proving that
+`main` is writable, and reads both durability settings back again. Immutable,
+read-only, and DELETE-only URI/VFS authorities fail closed even when their
+schema is readable; a successful schema query is not durability evidence.
+
 `cymule-durable-protocol` is the public owner of the observation DTO, version,
 identity, and pure verification contract. This adapter exports the stateful
 `SqliteClock` and wall-clock boundary without aliasing those protocol types.

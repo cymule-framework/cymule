@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import base64
 import binascii
-import binascii
 import copy
 from decimal import Decimal, InvalidOperation
+import errno
 import hashlib
 import json
 import math
@@ -14,10 +14,10 @@ import os
 import re
 import signal
 import subprocess
-import threading
+import selectors
 import time
 from pathlib import Path
-from typing import Any, Callable, Literal, TypedDict, cast
+from typing import Any, Callable, Literal, Protocol, TypedDict, cast
 
 Json = None | bool | int | float | str | list["Json"] | dict[str, "Json"]
 
@@ -75,6 +75,19 @@ LiveEvolutionOutcome = dict[str, Any]
 DurableCommand = dict[str, Any]
 ENGINE_PROTOCOL_VERSION = "cymule.engine/5"
 _ENGINE_REQUEST_LIMIT = 64 * 1024 * 1024
+_ENGINE_REQUEST_FRAMING_BYTES = 48
+_ENGINE_RESPONSE_PAYLOAD_LIMIT = _ENGINE_REQUEST_LIMIT
+_ENGINE_SUCCESS_FRAMING_BYTES = 80
+_ENGINE_RESPONSE_LIMIT = (
+    _ENGINE_REQUEST_LIMIT
+    - _ENGINE_REQUEST_FRAMING_BYTES
+    + _ENGINE_RESPONSE_PAYLOAD_LIMIT
+    + _ENGINE_SUCCESS_FRAMING_BYTES
+)
+_ENGINE_DIAGNOSTIC_LIMIT = 1024 * 1024
+_MAX_JSON_DEPTH = 128
+_MAX_JSON_NUMBER_TOKEN_BYTES = 256
+_MAX_JSON_EXPONENT_DIGITS = 6
 
 
 EvolutionStateFamily = Literal[
@@ -409,6 +422,21 @@ class EngineError(RuntimeError):
     def __init__(self, failure: EngineFailure) -> None:
         self.failure = failure
         super().__init__(f"{failure['code']}: {failure['message']}")
+
+
+class EngineTransportSuccess(TypedDict):
+    """Complete accepted request echo and closed Engine response."""
+
+    request: dict[str, Any]
+    response: dict[str, Any]
+
+
+class EngineTransport(Protocol):
+    """Single custom transport seam shared by all Engine operations."""
+
+    def exchange(self, request: dict[str, Any]) -> EngineTransportSuccess:
+        """Exchange one complete strict request snapshot."""
+        ...
 
 
 class ExecutionResult(TypedDict):
@@ -1057,9 +1085,9 @@ class ResourceBuilder:
     def text(text: str, annotations: dict[str, str] | None = None) -> dict[str, Any]:
         retained_annotations = dict(annotations or {})
         return {
-            "resource_version": "cymule.resource/3",
+            "resource_version": "cymule.resource/4",
             "shape": "inline",
-            "media_type": "text/plain;charset=utf-8",
+            "media_type": "text/plain",
             "inline": {"encoding": "utf8", "text": text},
             "integrity": {"kind": "inline"},
             **({} if not retained_annotations else {"annotations": retained_annotations}),
@@ -1069,7 +1097,7 @@ class ResourceBuilder:
     def json(value: Json, annotations: dict[str, str] | None = None) -> dict[str, Any]:
         retained_annotations = dict(annotations or {})
         return {
-            "resource_version": "cymule.resource/3",
+            "resource_version": "cymule.resource/4",
             "shape": "inline",
             "media_type": "application/json",
             "inline": {"encoding": "json", "value": value},
@@ -1087,9 +1115,11 @@ class ResourceBuilder:
     ) -> dict[str, Any]:
         if shape == "inline":
             raise ValueError("external resource shape cannot be inline")
+        if not _is_resource_media_type(media_type):
+            raise ValueError("Resource media type is invalid")
         retained_annotations = dict(annotations or {})
         return {
-            "resource_version": "cymule.resource/3",
+            "resource_version": "cymule.resource/4",
             "shape": shape,
             "media_type": media_type,
             "integrity": copy.deepcopy(integrity),
@@ -2123,7 +2153,7 @@ def _snapshot_engine_request(
         encoded = json.dumps(
             envelope, separators=(",", ":"), allow_nan=False
         ).encode("utf-8")
-    except (TypeError, ValueError, OverflowError, UnicodeEncodeError) as error:
+    except (TypeError, ValueError, OverflowError, UnicodeEncodeError, RecursionError) as error:
         raise _validation_error(
             "invalid_engine_request", "Engine request could not be encoded"
         ) from error
@@ -2143,6 +2173,66 @@ def _snapshot_engine_request(
             "invalid_engine_request", "Engine request envelope must be closed"
         )
     return encoded, wire_envelope["request"]
+
+
+def _exchange_engine(
+    transport: EngineTransport,
+    request: dict[str, Any],
+    *,
+    expected_start_plan_id: str | None = None,
+    expected_patch_plan_id: str | None = None,
+) -> dict[str, Any]:
+    _, wire_request = _snapshot_engine_request(request)
+    custom_request = copy.deepcopy(request)
+    transport_request = copy.deepcopy(custom_request)
+    correlation_request = custom_request
+    try:
+        success = transport.exchange(transport_request)
+    except Exception as error:
+        raise _transport_invocation_error(wire_request, error) from error
+    if (
+        not isinstance(success, dict)
+        or set(success) != {"request", "response"}
+        or not isinstance(success.get("request"), dict)
+        or not isinstance(success.get("response"), dict)
+        or not _wire_json_equal(success["request"], correlation_request)
+    ):
+        raise _response_loss_error(wire_request, "invalid_engine_response")
+    response = success["response"]
+    try:
+        _validate_engine_response_payload_bound(correlation_request, response)
+        _validate_success_response(response)
+        expected_type = {
+            "seal": "sealed",
+            "seal_resource": "sealed_resource",
+            "verify_wait_activation": "verified_wait_activation",
+            "verify_durable_command": "verified_durable_command",
+            "observe_clock": "clock_observed",
+            "verify_evolution_command": "verified_evolution_command",
+            "verify_live_evolution_command": "verified_live_evolution_command",
+            "run": "execution_boundary",
+            "execute_durable": "durable_executed",
+            "execute_live_evolution": "live_evolution_executed",
+        }.get(correlation_request.get("type"))
+        if response.get("type") != expected_type:
+            raise _transport_error(
+                "invalid_engine_response", "Engine success type does not match its request"
+            )
+        _validate_success_response_for_request(
+            correlation_request,
+            response,
+            expected_start_plan_id=expected_start_plan_id,
+        )
+        if correlation_request.get("type") == "execute_live_evolution":
+            _validate_evolution_commit_for_request(
+                correlation_request["evolution_id"],
+                correlation_request["command"],
+                response["commit"],
+                expected_patch_plan_id=expected_patch_plan_id,
+            )
+    except (EngineError, KeyError, TypeError) as error:
+        raise _response_loss_error(wire_request, "invalid_engine_response") from error
+    return cast(dict[str, Any], _unbox_exact_fractions(response))
 
 
 class CliEngine:
@@ -2173,7 +2263,7 @@ class CliEngine:
             raise _validation_error(
                 "invalid_engine_request", "Plan Candidate must be an object"
             )
-        response = self._request({"type": "seal", "candidate": candidate_snapshot})
+        response = _exchange_engine(self, {"type": "seal", "candidate": candidate_snapshot})
         if response.get("type") != "sealed":
             raise _unexpected_response("sealed", response)
         plan = response["plan"]
@@ -2186,14 +2276,14 @@ class CliEngine:
 
     def seal_resource(self, candidate: dict[str, Any]) -> dict[str, Any]:
         """Validate and seal a Resource Candidate with the Rust engine."""
-        response = self._request({"type": "seal_resource", "candidate": candidate})
+        response = _exchange_engine(self, {"type": "seal_resource", "candidate": candidate})
         if response.get("type") != "sealed_resource":
             raise _unexpected_response("sealed_resource", response)
         return response["resource"]
 
     def verify_wait_activation(self, activation: dict[str, Any]) -> dict[str, Any]:
         """Validate an identified signal or timer delivery with the Rust engine."""
-        response = self._request(
+        response = _exchange_engine(self,
             {"type": "verify_wait_activation", "activation": activation}
         )
         if response.get("type") != "verified_wait_activation":
@@ -2202,7 +2292,7 @@ class CliEngine:
 
     def verify_durable_command(self, command: DurableCommand) -> DurableCommand:
         """Validate one closed M1 control envelope with the Rust engine."""
-        response = self._request(
+        response = _exchange_engine(self,
             {"type": "verify_durable_command", "command": command}
         )
         if response.get("type") != "verified_durable_command":
@@ -2227,7 +2317,7 @@ class CliEngine:
             raise _validation_error(
                 "invalid_clock_target", "Clock target failed local validation"
             ) from error
-        response = self._request(
+        response = _exchange_engine(self,
             {"type": "observe_clock", "target": target_snapshot, "run_id": run_id}
         )
         if response.get("type") != "clock_observed":
@@ -2236,7 +2326,7 @@ class CliEngine:
 
     def verify_evolution_command(self, command: EvolutionCommand) -> EvolutionCommand:
         """Validate one closed M4 control envelope with the Rust engine."""
-        response = self._request(
+        response = _exchange_engine(self,
             {"type": "verify_evolution_command", "command": command}
         )
         if response.get("type") != "verified_evolution_command":
@@ -2247,7 +2337,7 @@ class CliEngine:
         self, command: LiveEvolutionCommand
     ) -> LiveEvolutionCommand:
         """Validate one unified live-evolution envelope with the Rust engine."""
-        response = self._request(
+        response = _exchange_engine(self,
             {"type": "verify_live_evolution_command", "command": command}
         )
         if response.get("type") != "verified_live_evolution_command":
@@ -2274,7 +2364,7 @@ class CliEngine:
         expected_start_plan_id = None
         if command_snapshot["type"] == "start_run":
             expected_start_plan_id = self.seal(command_snapshot["candidate"])["plan_id"]
-        response = self._request(
+        response = _exchange_engine(self,
             {
                 "type": "execute_durable",
                 "target": target_snapshot,
@@ -2320,7 +2410,7 @@ class CliEngine:
             "evolution_id": evolution_id,
             "command": command_snapshot,
         }
-        response = self._request(request)
+        response = _exchange_engine(self, request, expected_patch_plan_id=expected_patch_plan_id)
         if response.get("type") != "live_evolution_executed":
             raise _unexpected_response("live_evolution_executed", response)
         commit = response["commit"]
@@ -2367,7 +2457,7 @@ class CliEngine:
             raise _validation_error(
                 "invalid_plugin_target", "execution target failed local validation"
             ) from error
-        response = self._request(
+        response = _exchange_engine(self,
             {
                 "type": "run",
                 "plan": plan_snapshot,
@@ -2380,12 +2470,7 @@ class CliEngine:
             raise _unexpected_response("execution_boundary", response)
         return response["execution"]
 
-    def _request(
-        self,
-        request: dict[str, Any],
-        *,
-        expected_start_plan_id: str | None = None,
-    ) -> dict[str, Any]:
+    def _exchange_wire(self, request: dict[str, Any]) -> EngineTransportSuccess:
         try:
             cancelled_before_start = (
                 self.cancelled is not None and self.cancelled()
@@ -2410,87 +2495,66 @@ class CliEngine:
                 "Engine timeout must be a finite positive number of seconds",
             )
         encoded, wire_request = _snapshot_engine_request(request)
+        if os.name != "posix":
+            raise _validation_error(
+                "engine_rpc_platform_unsupported",
+                "CLI Engine process-tree containment requires Unix",
+            )
         try:
             process = subprocess.Popen(
                 [self.executable, "rpc"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                start_new_session=True,
             )
         except OSError as error:
             raise _transport_error(
                 "engine_start_failed", "the Engine process could not be started"
             ) from error
-        streams: dict[str, bytes | BaseException] = {}
-        stream_done = {
-            "stdin": threading.Event(),
-            "stdout": threading.Event(),
-            "stderr": threading.Event(),
-        }
-        output_overflow = threading.Event()
-        output_limit = 16 * 1024 * 1024
-
-        def write_input() -> None:
+        def signal_process(selected_signal: int) -> None:
             try:
-                assert process.stdin is not None
-                process.stdin.write(encoded)
-                process.stdin.close()
-            except BaseException as error:  # retained until the process outcome is known
-                streams["stdin"] = error
-            finally:
-                stream_done["stdin"].set()
-
-        def read_stream(name: str, stream: Any) -> None:
-            retained = bytearray()
-            try:
-                while True:
-                    chunk = os.read(stream.fileno(), 64 * 1024)
-                    if not chunk:
-                        break
-                    remaining = output_limit + 1 - len(retained)
-                    if remaining > 0:
-                        retained.extend(chunk[:remaining])
-                        if len(retained) > output_limit:
-                            output_overflow.set()
-                streams[name] = bytes(retained)
-            except BaseException as error:  # retained until the process outcome is known
-                streams[name] = error
-            finally:
-                stream_done[name].set()
-
-        assert process.stdout is not None and process.stderr is not None
-        workers = [
-            threading.Thread(target=write_input, daemon=True),
-            threading.Thread(
-                target=read_stream, args=("stdout", process.stdout), daemon=True
-            ),
-            threading.Thread(
-                target=read_stream, args=("stderr", process.stderr), daemon=True
-            ),
-        ]
-        for worker in workers:
-            worker.start()
-
-        def signal_process_group(selected_signal: int) -> None:
-            try:
-                os.killpg(process.pid, selected_signal)
+                process.send_signal(selected_signal)
             except ProcessLookupError:
                 return
-            except PermissionError:
-                if process.poll() is None:
-                    process.send_signal(selected_signal)
 
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        for stream in (process.stdin, process.stdout, process.stderr):
+            os.set_blocking(stream.fileno(), False)
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        open_streams = {"stdin", "stdout", "stderr"}
+        stdout = bytearray()
+        stderr = bytearray()
+        input_offset = 0
+        input_failed = False
+        overflow_code: str | None = None
         deadline = time.monotonic() + self.timeout_seconds
         interruption: Literal["cancelled", "timed_out"] | None = None
-        overflowed = False
         cancellation_callback_failed = False
         transport_completed = False
+        child_exited = False
+
+        def close_stream(name: str) -> None:
+            if name not in open_streams:
+                return
+            stream = {
+                "stdin": process.stdin,
+                "stdout": process.stdout,
+                "stderr": process.stderr,
+            }[name]
+            try:
+                selector.unregister(stream)
+            except (KeyError, ValueError):
+                pass
+            stream.close()
+            open_streams.remove(name)
+
         try:
             while True:
-                if output_overflow.is_set():
-                    overflowed = True
-                    break
                 if self.cancelled is not None:
                     try:
                         if self.cancelled():
@@ -2502,70 +2566,108 @@ class CliEngine:
                 if time.monotonic() >= deadline:
                     interruption = "timed_out"
                     break
-                if process.poll() is not None and all(
-                    event.is_set() for event in stream_done.values()
-                ):
+                if not child_exited:
+                    child_exited = _process_exited_without_reaping(process.pid)
+                if child_exited and not open_streams:
                     transport_completed = True
                     break
-                time.sleep(0.01)
+                remaining = max(0.0, deadline - time.monotonic())
+                for key, _ in selector.select(min(0.01, remaining)):
+                    name = cast(str, key.data)
+                    stream = key.fileobj
+                    if name == "stdin":
+                        try:
+                            written = os.write(stream.fileno(), encoded[input_offset:])
+                            if written == 0:
+                                input_failed = True
+                                close_stream("stdin")
+                            else:
+                                input_offset += written
+                                if input_offset == len(encoded):
+                                    close_stream("stdin")
+                        except BlockingIOError:
+                            pass
+                        except OSError as error:
+                            if error.errno not in {errno.EAGAIN, errno.EINTR}:
+                                input_failed = True
+                                close_stream("stdin")
+                    else:
+                        try:
+                            chunk = os.read(stream.fileno(), 64 * 1024)
+                        except BlockingIOError:
+                            continue
+                        except OSError as error:
+                            if error.errno in {errno.EAGAIN, errno.EINTR}:
+                                continue
+                            overflow_code = "engine_io_failed"
+                            break
+                        if not chunk:
+                            close_stream(name)
+                            continue
+                        retained = stdout if name == "stdout" else stderr
+                        limit = (
+                            _ENGINE_RESPONSE_LIMIT
+                            if name == "stdout"
+                            else _ENGINE_DIAGNOSTIC_LIMIT
+                        )
+                        if len(retained) <= limit:
+                            retained.extend(chunk[: limit + 1 - len(retained)])
+                        if len(retained) > limit:
+                            overflow_code = (
+                                "engine_output_limit_exceeded"
+                                if name == "stdout"
+                                else "engine_diagnostic_limit_exceeded"
+                            )
+                            break
+                if overflow_code is not None:
+                    break
         finally:
             if (
                 not transport_completed
                 or interruption is not None
-                or overflowed
+                or overflow_code is not None
                 or cancellation_callback_failed
             ):
-                signal_process_group(signal.SIGKILL)
-            process.wait()
-            for worker in workers:
-                worker.join()
-            assert process.stdin is not None
-            process.stdin.close()
-            process.stdout.close()
-            process.stderr.close()
+                signal_process(signal.SIGKILL)
+            for name in tuple(open_streams):
+                close_stream(name)
+            selector.close()
+            try:
+                process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
         if cancellation_callback_failed:
             raise _response_loss_error(
                 wire_request, "engine_cancellation_callback_failed"
             )
-        if overflowed:
-            raise _response_loss_error(
-                wire_request, "engine_output_limit_exceeded"
-            )
+        if overflow_code is not None:
+            raise _response_loss_error(wire_request, overflow_code)
         if interruption is not None:
             raise _interrupted_error(
                 wire_request, interruption, request_began=True
             )
-        if process.returncode != 0:
-            raise _response_loss_error(wire_request, "engine_process_failed")
-        stdout = streams.get("stdout")
-        stderr = streams.get("stderr")
-        input_failed = isinstance(streams.get("stdin"), BaseException)
-        if (
-            not isinstance(stdout, bytes)
-            or not isinstance(stderr, bytes)
-            or len(stdout) > output_limit
-            or len(stderr) > output_limit
-        ):
-            raise _response_loss_error(wire_request, "invalid_engine_response")
         try:
             envelope = _strict_json_loads(stdout.decode())
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            if process.returncode not in {0, None}:
+                raise _response_loss_error(
+                    wire_request, "engine_process_failed"
+                ) from error
             raise _response_loss_error(wire_request, "invalid_engine_response") from error
-        if input_failed and (
-            not isinstance(envelope, dict) or envelope.get("outcome") != "failure"
-        ):
-            raise _response_loss_error(wire_request, "engine_request_incomplete")
-        if (
-            isinstance(envelope, dict)
-            and isinstance(envelope.get("engine_protocol"), str)
-            and envelope["engine_protocol"] != ENGINE_PROTOCOL_VERSION
-        ):
-            raise _unsupported_engine_protocol_error(
-                wire_request, envelope["engine_protocol"]
-            )
+        if not isinstance(envelope, dict) or envelope.get("engine_protocol") != ENGINE_PROTOCOL_VERSION:
+            if isinstance(envelope, dict) and isinstance(envelope.get("engine_protocol"), str):
+                raise _unsupported_engine_protocol_error(
+                    wire_request, envelope["engine_protocol"]
+                )
+            raise _response_loss_error(wire_request, "invalid_engine_response")
         try:
             _validate_engine_envelope_shape(envelope)
         except EngineError as error:
+            if process.returncode not in {0, None}:
+                raise _response_loss_error(
+                    wire_request, "engine_process_failed"
+                ) from error
             raise _response_loss_error(
                 wire_request, "invalid_engine_response"
             ) from error
@@ -2576,47 +2678,55 @@ class CliEngine:
                 raise _response_loss_error(
                     wire_request, "invalid_engine_response"
                 ) from error
-            raise EngineError(envelope["error"])
+            raise EngineError(cast(EngineFailure, _unbox_exact_fractions(envelope["error"])))
+        if input_failed:
+            raise _response_loss_error(wire_request, "engine_request_incomplete")
+        if process.returncode not in {0, None}:
+            raise _response_loss_error(wire_request, "engine_process_failed")
         if not _wire_json_equal(envelope["request"], wire_request):
             raise _response_loss_error(wire_request, "invalid_engine_response")
         response = envelope["response"]
         try:
+            _validate_engine_response_payload_bound(wire_request, response)
             _validate_success_response(response)
         except EngineError as error:
             raise _response_loss_error(
                 wire_request, "invalid_engine_response"
             ) from error
-        expected_type = {
-            "seal": "sealed",
-            "seal_resource": "sealed_resource",
-            "verify_wait_activation": "verified_wait_activation",
-            "verify_durable_command": "verified_durable_command",
-            "observe_clock": "clock_observed",
-            "verify_evolution_command": "verified_evolution_command",
-            "verify_live_evolution_command": "verified_live_evolution_command",
-            "run": "execution_boundary",
-            "execute_durable": "durable_executed",
-            "execute_live_evolution": "live_evolution_executed",
-        }.get(wire_request.get("type"))
-        if expected_type is None or response.get("type") != expected_type:
-            raise _response_loss_error(wire_request, "invalid_engine_response")
+        return {
+            "request": envelope["request"],
+            "response": response,
+        }
+
+    def exchange(self, request: dict[str, Any]) -> EngineTransportSuccess:
+        return cast(
+            EngineTransportSuccess,
+            _unbox_exact_fractions(self._exchange_wire(request)),
+        )
+
+
+def _process_exited_without_reaping(process_id: int) -> bool:
+    while True:
         try:
-            _validate_success_response_for_request(
-                wire_request,
-                response,
-                expected_start_plan_id=expected_start_plan_id,
+            result = os.waitid(
+                os.P_PID,
+                process_id,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT,
             )
-            if wire_request.get("type") == "execute_live_evolution":
-                _validate_evolution_commit_for_request(
-                    wire_request["evolution_id"],
-                    wire_request["command"],
-                    response["commit"],
-                )
-        except EngineError as error:
-            raise _response_loss_error(
-                wire_request, "invalid_engine_response"
-            ) from error
-        return response
+            return result is not None and result.si_code in {
+                os.CLD_EXITED,
+                os.CLD_KILLED,
+                os.CLD_DUMPED,
+            }
+        except InterruptedError:
+            continue
+
+
+def _validate_engine_response_payload_bound(
+    request: dict[str, Any], response: object
+) -> None:
+    if _json_size(_unbox_exact_fractions(response)) > _ENGINE_RESPONSE_PAYLOAD_LIMIT:
+        raise _response_loss_error(request, "engine_response_payload_too_large")
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -2636,7 +2746,7 @@ class DurableEngine:
         store: EngineStoreTarget | str | Path,
         plugin: EnginePluginTarget | None,
         clock: EngineClockTarget | None,
-        transport: CliEngine | None = None,
+        transport: EngineTransport | None = None,
         evolution_id: str = "cymule.sdk.live-evolution",
         migration_adapter: EngineMigrationProviderTarget | None = None,
         shadow_driver: EngineShadowProviderTarget | None = None,
@@ -2675,9 +2785,12 @@ class DurableEngine:
             DurableControlBuilder._identity("Run", run_id)
             _validate_json_value(self.clock)
             _validate_engine_clock_target(self.clock)
-            _, request = _snapshot_engine_request(
-                {"type": "observe_clock", "target": self.clock, "run_id": run_id}
-            )
+            request = {
+                "type": "observe_clock",
+                "target": copy.deepcopy(self.clock),
+                "run_id": run_id,
+            }
+            _snapshot_engine_request(request)
         except (EngineError, ValueError, TypeError) as error:
             if (
                 isinstance(error, EngineError)
@@ -2688,30 +2801,10 @@ class DurableEngine:
                 "clock_request_validation_failed",
                 "Clock observation request failed local validation",
             ) from error
-        try:
-            result = self.transport.observe_clock(
-                copy.deepcopy(request["target"]), request["run_id"]
-            )
-        except Exception as error:
-            raise _transport_invocation_error(request, error) from error
-        try:
-            _validate_json_value(result)
-            result_snapshot = copy.deepcopy(result)
-            _validate_clock_observation_result(result_snapshot)
-            if (
-                result_snapshot["run_id"] != request["run_id"]
-                or result_snapshot["observation"]["source_id"]
-                != request["target"]["source_id"]
-                or result_snapshot["observation"]["source_generation"]
-                != request["target"]["source_generation"]
-            ):
-                raise _transport_error(
-                    "invalid_engine_response",
-                    "Clock observation result does not match its request",
-                )
-        except (EngineError, KeyError, TypeError) as error:
-            raise _response_loss_error(request, "invalid_engine_response") from error
-        return result_snapshot["observation"]
+        response = _exchange_engine(self.transport, request)
+        if response.get("type") != "clock_observed":
+            raise _response_loss_error(request, "invalid_engine_response")
+        return response["result"]["observation"]
 
     def run_index_page(self, options: DurablePageQueryOptions) -> DurableQueryPage:
         response = self._submit(self._build_command(
@@ -2878,14 +2971,13 @@ class DurableEngine:
             }
             _validate_json_value(target)
             _validate_engine_evolution_target(target, command_snapshot)
-            _, request = _snapshot_engine_request(
-                {
-                    "type": "execute_live_evolution",
-                    "target": target,
-                    "evolution_id": self.evolution_id,
-                    "command": command_snapshot,
-                }
-            )
+            request = {
+                "type": "execute_live_evolution",
+                "target": copy.deepcopy(target),
+                "evolution_id": self.evolution_id,
+                "command": copy.deepcopy(command_snapshot),
+            }
+            _snapshot_engine_request(request)
         except (EngineError, KeyError, TypeError, ValueError) as error:
             if (
                 isinstance(error, EngineError)
@@ -2901,54 +2993,25 @@ class DurableEngine:
             request["command"]["operation"] == "apply"
             and request["command"]["command"]["operation"] == "apply_patch"
         ):
-            _, seal_request = _snapshot_engine_request(
-                {
-                    "type": "seal",
-                    "candidate": request["command"]["command"]["patch"]["target"],
-                }
-            )
-            try:
-                sealed = self.transport.seal(
-                    copy.deepcopy(seal_request["candidate"])
-                )
-            except Exception as error:
-                raise _transport_invocation_error(seal_request, error) from error
-            try:
-                _validate_json_value(sealed)
-                sealed_snapshot = copy.deepcopy(sealed)
-                _validate_sealed_plan(sealed_snapshot)
-                if not _wire_json_equal(
-                    sealed_snapshot["candidate"], seal_request["candidate"]
-                ):
-                    raise _transport_error(
-                        "invalid_engine_response",
-                        "sealed Plan does not match the patch target candidate",
-                    )
-                expected_patch_plan_id = sealed_snapshot["plan_id"]
-            except (EngineError, KeyError, TypeError) as error:
-                raise _response_loss_error(
-                    seal_request, "invalid_engine_response"
-                ) from error
-        try:
-            returned = self.transport.execute_live_evolution(
-                copy.deepcopy(request["target"]),
-                request["evolution_id"],
-                copy.deepcopy(request["command"]),
-            )
-        except Exception as error:
-            raise _transport_invocation_error(request, error) from error
-        try:
-            _validate_json_value(returned)
-            commit = copy.deepcopy(returned)
-            _validate_evolution_commit_for_request(
-                request["evolution_id"],
-                request["command"],
-                commit,
-                expected_patch_plan_id=expected_patch_plan_id,
-            )
-            return cast(EvolutionCommit, commit)
-        except (EngineError, KeyError, TypeError) as error:
-            raise _response_loss_error(request, "invalid_engine_response") from error
+            seal_request = {
+                "type": "seal",
+                "candidate": copy.deepcopy(
+                    request["command"]["command"]["patch"]["target"]
+                ),
+            }
+            _snapshot_engine_request(seal_request)
+            sealed_response = _exchange_engine(self.transport, seal_request)
+            if sealed_response.get("type") != "sealed":
+                raise _response_loss_error(seal_request, "invalid_engine_response")
+            expected_patch_plan_id = sealed_response["plan"]["plan_id"]
+        response = _exchange_engine(
+            self.transport,
+            request,
+            expected_patch_plan_id=expected_patch_plan_id,
+        )
+        if response.get("type") != "live_evolution_executed":
+            raise _response_loss_error(request, "invalid_engine_response")
+        return cast(EvolutionCommit, response["commit"])
 
     def _submit(self, command: DurableCommand) -> dict[str, Any]:
         store_only = command["type"] in {
@@ -2973,9 +3036,12 @@ class DurableEngine:
                 target["clock"] = self.clock
             _validate_json_value(target)
             _validate_engine_durable_target(target, command)
-            _, request = _snapshot_engine_request(
-                {"type": "execute_durable", "target": target, "command": command}
-            )
+            request = {
+                "type": "execute_durable",
+                "target": copy.deepcopy(target),
+                "command": copy.deepcopy(command),
+            }
+            _snapshot_engine_request(request)
         except (EngineError, KeyError, TypeError, ValueError) as error:
             if (
                 isinstance(error, EngineError)
@@ -2988,51 +3054,23 @@ class DurableEngine:
             ) from error
         expected_start_plan_id: str | None = None
         if request["command"]["type"] == "start_run":
-            _, seal_request = _snapshot_engine_request(
-                {"type": "seal", "candidate": request["command"]["candidate"]}
-            )
-            try:
-                sealed = self.transport.seal(
-                    copy.deepcopy(seal_request["candidate"])
-                )
-            except Exception as error:
-                raise _transport_invocation_error(seal_request, error) from error
-            try:
-                _validate_json_value(sealed)
-                sealed_snapshot = copy.deepcopy(sealed)
-                _validate_sealed_plan(sealed_snapshot)
-                if not _wire_json_equal(
-                    sealed_snapshot["candidate"], seal_request["candidate"]
-                ):
-                    raise _transport_error(
-                        "invalid_engine_response",
-                        "sealed Plan does not match the start candidate",
-                    )
-                expected_start_plan_id = sealed_snapshot["plan_id"]
-            except (EngineError, KeyError, TypeError) as error:
-                raise _response_loss_error(
-                    seal_request, "invalid_engine_response"
-                ) from error
-        try:
-            returned = self.transport.execute_durable(
-                copy.deepcopy(request["target"]), copy.deepcopy(request["command"])
-            )
-        except Exception as error:
-            raise _transport_invocation_error(request, error) from error
-        try:
-            _validate_json_value(returned)
-            response = copy.deepcopy(returned)
-            _validate_durable_response(response)
-            if not _durable_response_matches_command(
-                request["command"], response, expected_start_plan_id
-            ):
-                raise _transport_error(
-                    "invalid_engine_response",
-                    "durable response does not match its complete command",
-                )
-            return response
-        except (EngineError, KeyError, TypeError) as error:
-            raise _response_loss_error(request, "invalid_engine_response") from error
+            seal_request = {
+                "type": "seal",
+                "candidate": copy.deepcopy(request["command"]["candidate"]),
+            }
+            _snapshot_engine_request(seal_request)
+            sealed_response = _exchange_engine(self.transport, seal_request)
+            if sealed_response.get("type") != "sealed":
+                raise _response_loss_error(seal_request, "invalid_engine_response")
+            expected_start_plan_id = sealed_response["plan"]["plan_id"]
+        engine_response = _exchange_engine(
+            self.transport,
+            request,
+            expected_start_plan_id=expected_start_plan_id,
+        )
+        if engine_response.get("type") != "durable_executed":
+            raise _response_loss_error(request, "invalid_engine_response")
+        return engine_response["response"]
 
     def _run_page(
         self,
@@ -3170,15 +3208,50 @@ _EMPTY_RESOURCE_MANIFEST_ROOT = (
 )
 
 
-def _wire_json_equal(left: object, right: object) -> bool:
-    return json.dumps(
-        left, allow_nan=False, separators=(",", ":"), sort_keys=True
-    ) == json.dumps(
-        right, allow_nan=False, separators=(",", ":"), sort_keys=True
-    )
+class _ExactFraction(float):
+    """Internal exact decimal evidence for one non-integral JSON token."""
+
+    exact: Decimal
+
+    def __new__(cls, exact: Decimal) -> _ExactFraction:
+        instance = super().__new__(cls, float(exact))
+        instance.exact = exact
+        return instance
 
 
-def _validate_json_value(value: object, active: set[int] | None = None) -> None:
+def _wire_json_equal(left: object, right: object, depth: int = 0) -> bool:
+    if depth > _MAX_JSON_DEPTH:
+        return False
+    if isinstance(left, _ExactFraction) or isinstance(right, _ExactFraction):
+        return (
+            isinstance(left, _ExactFraction)
+            and isinstance(right, _ExactFraction)
+            and left.exact == right.exact
+        )
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _wire_json_equal(member, right[index], depth + 1)
+            for index, member in enumerate(left)
+        )
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(
+            _wire_json_equal(member, right[key], depth + 1)
+            for key, member in left.items()
+        )
+    return left == right
+
+
+def _validate_json_value(
+    value: object,
+    active: set[int] | None = None,
+    depth: int = 0,
+) -> None:
+    if depth > _MAX_JSON_DEPTH:
+        raise _validation_error(
+            "invalid_engine_request", "JSON nesting exceeds the fixed depth limit"
+        )
     if active is None:
         active = set()
     if isinstance(value, str) and any(
@@ -3208,7 +3281,7 @@ def _validate_json_value(value: object, active: set[int] | None = None) -> None:
         active.add(identity)
         try:
             for child in value:
-                _validate_json_value(child, active)
+                _validate_json_value(child, active, depth + 1)
         finally:
             active.remove(identity)
     elif isinstance(value, dict):
@@ -3224,9 +3297,9 @@ def _validate_json_value(value: object, active: set[int] | None = None) -> None:
         active.add(identity)
         try:
             for key in value:
-                _validate_json_value(key, active)
+                _validate_json_value(key, active, depth + 1)
             for child in value.values():
-                _validate_json_value(child, active)
+                _validate_json_value(child, active, depth + 1)
         finally:
             active.remove(identity)
     elif value is not None and not isinstance(value, (bool, str, int, float)):
@@ -3237,12 +3310,19 @@ def _validate_json_value(value: object, active: set[int] | None = None) -> None:
 
 def _strict_json_loads(value: str) -> object:
     def integer(value: str) -> int:
+        if len(value) > _MAX_JSON_NUMBER_TOKEN_BYTES:
+            raise ValueError("JSON number token exceeds the fixed byte limit")
         result = int(value)
         if abs(result) > _MAX_SAFE_JSON_INTEGER:
             raise ValueError("integer is outside the shared JSON domain")
         return result
 
-    def floating(value: str) -> int | float:
+    def floating(value: str) -> int | _ExactFraction:
+        if len(value) > _MAX_JSON_NUMBER_TOKEN_BYTES:
+            raise ValueError("JSON number token exceeds the fixed byte limit")
+        exponent = re.search(r"[eE]([+-]?)(\d+)$", value)
+        if exponent is not None and len(exponent.group(2)) > _MAX_JSON_EXPONENT_DIGITS:
+            raise ValueError("JSON number exponent exceeds the fixed digit limit")
         try:
             exact = Decimal(value)
         except InvalidOperation as error:
@@ -3260,30 +3340,50 @@ def _strict_json_loads(value: str) -> object:
             raise ValueError(
                 "fractional number is not distinguishable from an integer"
             )
-        return result
+        return _ExactFraction(exact)
 
-    decoded = json.loads(
-        value,
-        object_pairs_hook=_unique_json_object,
-        parse_int=integer,
-        parse_float=floating,
-        parse_constant=lambda item: (_ for _ in ()).throw(ValueError(f"invalid number {item}")),
-    )
+    try:
+        decoded = json.loads(
+            value,
+            object_pairs_hook=_unique_json_object,
+            parse_int=integer,
+            parse_float=floating,
+            parse_constant=lambda item: (_ for _ in ()).throw(ValueError(f"invalid number {item}")),
+        )
+    except RecursionError as error:
+        raise ValueError("JSON nesting exceeds the fixed depth limit") from error
+    _validate_decoded_json_depth(decoded)
     if _json_contains_surrogate(decoded):
         raise ValueError("JSON string contains a non-scalar code point")
     return decoded
 
 
+def _validate_decoded_json_depth(value: object) -> None:
+    pending = [(value, 0)]
+    while pending:
+        current, depth = pending.pop()
+        if depth > _MAX_JSON_DEPTH:
+            raise ValueError("JSON nesting exceeds the fixed depth limit")
+        if isinstance(current, list):
+            pending.extend((member, depth + 1) for member in current)
+        elif isinstance(current, dict):
+            pending.extend((key, depth + 1) for key in current)
+            pending.extend((member, depth + 1) for member in current.values())
+
+
 def _json_contains_surrogate(value: object) -> bool:
-    if isinstance(value, str):
-        return any(0xD800 <= ord(character) <= 0xDFFF for character in value)
-    if isinstance(value, list):
-        return any(_json_contains_surrogate(member) for member in value)
-    if isinstance(value, dict):
-        return any(
-            _json_contains_surrogate(key) or _json_contains_surrogate(member)
-            for key, member in value.items()
-        )
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str) and any(
+            0xD800 <= ord(character) <= 0xDFFF for character in current
+        ):
+            return True
+        if isinstance(current, list):
+            pending.extend(current)
+        elif isinstance(current, dict):
+            pending.extend(current)
+            pending.extend(current.values())
     return False
 
 
@@ -3759,7 +3859,7 @@ def _validate_resource_handle(value: object) -> None:
     )
     shape = resource["shape"]
     if (
-        resource["resource_version"] != "cymule.resource/3"
+        resource["resource_version"] != "cymule.resource/4"
         or not _is_sha256_id(resource["resource_id"])
         or not isinstance(shape, str)
         or shape not in {"inline", "object", "collection", "directory", "snapshot"}
@@ -3945,11 +4045,9 @@ def _is_resource_media_type(value: object) -> bool:
     return (
         isinstance(value, str)
         and size is not None
-        and 1 <= size <= 255
-        and "/" in value
-        and value.isascii()
-        and value == value.lower()
-        and not any(character.isspace() for character in value)
+        and 3 <= size <= 255
+        and re.fullmatch(r"[a-z0-9!#$%&'*+.^_`|~-]+/[a-z0-9!#$%&'*+.^_`|~-]+", value)
+        is not None
     )
 
 
@@ -4896,15 +4994,50 @@ def _validate_run_failure(value: object) -> None:
 
 
 def _json_size(value: object) -> int:
-    return len(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    )
+    return len(_encode_exact_json(value).encode("utf-8"))
+
+
+def _encode_exact_json(value: object, depth: int = 0) -> str:
+    if depth > _MAX_JSON_DEPTH:
+        raise ValueError("JSON nesting exceeds the fixed depth limit")
+    if isinstance(value, _ExactFraction):
+        return str(value.exact)
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return json.dumps(value, allow_nan=False)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return "[" + ",".join(
+            _encode_exact_json(member, depth + 1) for member in value
+        ) + "]"
+    if isinstance(value, dict):
+        return "{" + ",".join(
+            json.dumps(key, ensure_ascii=False)
+            + ":"
+            + _encode_exact_json(value[key], depth + 1)
+            for key in sorted(value)
+        ) + "}"
+    raise TypeError("value is outside the JSON data model")
+
+
+def _unbox_exact_fractions(value: object) -> object:
+    if isinstance(value, _ExactFraction):
+        return float(value)
+    if isinstance(value, list):
+        return [_unbox_exact_fractions(member) for member in value]
+    if isinstance(value, dict):
+        return {
+            key: _unbox_exact_fractions(member) for key, member in value.items()
+        }
+    return value
 
 
 def _durable_page_key_hash(canonical_key: str) -> str:
@@ -7433,6 +7566,8 @@ __all__ = [
     "EngineShadowProviderTarget",
     "EngineProcessConfig",
     "EngineStoreTarget",
+    "EngineTransport",
+    "EngineTransportSuccess",
     "EffectResolutionCommand",
     "EffectResolutionReceipt",
     "EffectReconciliationBoundary",

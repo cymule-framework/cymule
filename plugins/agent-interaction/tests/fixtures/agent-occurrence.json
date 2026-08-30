@@ -19,10 +19,10 @@
         {
           "type": "resource_handle",
           "resource": {
-            "resource_id": "sha256:3779d4838c3ab0530ff707f9c1779bb72ba021073ee37226fa357f7696690205",
-            "resource_version": "cymule.resource/3",
+            "resource_id": "sha256:a8615b23e5d8748ee2eec5db39d3eff74f31b3e3da5cf323f596d995b9363668",
+            "resource_version": "cymule.resource/4",
             "shape": "inline",
-            "media_type": "text/plain;charset=utf-8",
+            "media_type": "text/plain",
             "inline": {
               "encoding": "utf8",
               "text": "shared cross-run resource"

@@ -15,7 +15,7 @@ use serde_json::Value;
 use url::Url;
 
 /// Frozen semantic Resource descriptor version.
-pub const RESOURCE_VERSION: &str = "cymule.resource/3";
+pub const RESOURCE_VERSION: &str = "cymule.resource/4";
 /// Frozen non-semantic locator-set version.
 pub const RESOURCE_LOCATOR_VERSION: &str = "cymule.resource-locators/2";
 /// Frozen content-manifest descriptor version.
@@ -31,7 +31,10 @@ pub const CANONICAL_JSON_MEDIA_TYPE: &str = "application/json";
 /// Closed JSON Schema dialect used by typed Artifact contracts.
 pub const JSON_SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 /// Logical framework type key for the exact Resource Handle contract.
-pub const FRAMEWORK_RESOURCE_HANDLE_TYPE_KEY: &str = "cymule.framework-resource-handle/3";
+pub const FRAMEWORK_RESOURCE_HANDLE_TYPE_KEY: &str = "cymule.framework-resource-handle/4";
+/// Exact lowercase ASCII media-type grammar shared by Resource schemas.
+pub const RESOURCE_MEDIA_TYPE_PATTERN: &str =
+    r"^[a-z0-9!#$%&'*+.^_`|~-]+/[a-z0-9!#$%&'*+.^_`|~-]+$";
 /// Maximum decoded inline payload size.
 pub const INLINE_RESOURCE_LIMIT: usize = 1024 * 1024;
 /// Maximum semantic annotation entries on one Resource descriptor.
@@ -70,9 +73,9 @@ pub const RESOURCE_COMMAND_RECEIPT_VERSION: &str = "cymule.resource-command-rece
 /// Frozen current retention projection version.
 pub const RESOURCE_RETENTION_CURRENT_VERSION: &str = "cymule.resource-retention-current/1";
 /// Frozen current pin projection version.
-pub const RESOURCE_PIN_CURRENT_VERSION: &str = "cymule.resource-pin-current/1";
+pub const RESOURCE_PIN_CURRENT_VERSION: &str = "cymule.resource-pin-current/2";
 /// Frozen cross-profile lifecycle receipt-reference version.
-pub const RESOURCE_LIFECYCLE_RECEIPT_REF_VERSION: &str = "cymule.resource-lifecycle-receipt-ref/2";
+pub const RESOURCE_LIFECYCLE_RECEIPT_REF_VERSION: &str = "cymule.resource-lifecycle-receipt-ref/3";
 /// Frozen cross-profile pin delta version.
 pub const RESOURCE_PROFILE_PIN_VERSION: &str = "cymule.resource-profile-pin/1";
 /// Frozen current deletion projection version.
@@ -558,7 +561,7 @@ impl ResourceCandidate {
         Self {
             resource_version: RESOURCE_VERSION.to_owned(),
             shape: ResourceShape::Inline,
-            media_type: "text/plain;charset=utf-8".to_owned(),
+            media_type: "text/plain".to_owned(),
             inline: Some(InlineData::Utf8 { text: text.into() }),
             integrity: ResourceIntegrity::Inline,
             manifest: None,
@@ -706,7 +709,12 @@ pub fn resource_handle_artifact_schema() -> Value {
             "resource_id": resource_artifact_digest_schema(),
             "resource_version": {"const": RESOURCE_VERSION},
             "shape": {"enum": ["inline", "object", "collection", "directory", "snapshot"]},
-            "media_type": {"type": "string", "minLength": 3, "maxLength": 255},
+            "media_type": {
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 255,
+                "pattern": RESOURCE_MEDIA_TYPE_PATTERN
+            },
             "inline": resource_artifact_inline_schema(),
             "integrity": resource_artifact_integrity_schema(),
             "manifest": resource_artifact_manifest_schema(),
@@ -1131,6 +1139,40 @@ impl ResourceRetentionFamily {
 }
 
 impl ResourceRetentionSubject {
+    /// Normalize an immutable semantic handle and resolver binding before its
+    /// first provider publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the handle lacks exact content evidence or the
+    /// resolver binding cannot identify one physical retention family.
+    pub fn from_handle(resolver_binding: &str, resource: &ResourceHandle) -> ResourceResult<Self> {
+        resource.verify()?;
+        validate_identity("Resource store binding", resolver_binding)?;
+        let content_digest = resource
+            .integrity
+            .content_digest()
+            .ok_or_else(|| {
+                ResourceError::Validation(
+                    "Resource retention requires content-addressed integrity".to_owned(),
+                )
+            })?
+            .to_owned();
+        let family = ResourceRetentionFamily {
+            family_version: RESOURCE_RETENTION_FAMILY_VERSION.to_owned(),
+            retention_key: resource_retention_key_for(resolver_binding, &content_digest)?,
+            store_binding: resolver_binding.to_owned(),
+            content_digest,
+        };
+        let subject = Self {
+            subject_version: RESOURCE_RETENTION_SUBJECT_VERSION.to_owned(),
+            resource_id: resource.resource_id.clone(),
+            family,
+        };
+        subject.verify()?;
+        Ok(subject)
+    }
+
     /// Normalize one verified publication into its semantic retention subject.
     ///
     /// # Errors
@@ -2331,6 +2373,17 @@ pub enum ResourceLifecycleReceiptLocator {
         /// Exact outer Agent command-receipt identity.
         receipt_id: String,
     },
+    /// Agent-owned publication reservation retained in its exact stream current.
+    AgentPublicationReservation {
+        /// Exact Agent Finalize command identity.
+        command_id: String,
+        /// Owning Agent Session identity.
+        session_id: String,
+        /// Owning Agent stream identity.
+        stream_id: String,
+        /// Exact immutable reservation identity embedded in the stream current.
+        reservation_id: String,
+    },
     /// Virtual-owned archive transition in one scheduler receipt partition.
     Virtual {
         /// Exact Virtual scheduler partition.
@@ -2378,6 +2431,9 @@ pub struct ResourceRetentionCurrent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourcePinStatus {
+    /// The pin is a durable pre-publication retention obligation. It blocks
+    /// collection before provider I/O but does not yet claim the bytes exist.
+    Reserved,
     /// The pin actively retains its physical content family.
     Active,
     /// The pin has one terminal release receipt.
@@ -3219,6 +3275,32 @@ impl ResourceLifecycleReceiptRef {
         })
     }
 
+    /// Reference one exact Agent external-stream publication reservation.
+    ///
+    /// The reservation is embedded in the keyed Agent stream current and is
+    /// the only pre-publication authority allowed to hold a reserved Resource
+    /// pin. Durable resolves and verifies that current before accepting this
+    /// edge as lifecycle authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any exact Agent or reservation identity is invalid.
+    pub fn from_agent_publication_reservation(
+        command_id: impl Into<String>,
+        session_id: impl Into<String>,
+        stream_id: impl Into<String>,
+        reservation_id: impl Into<String>,
+    ) -> ResourceResult<Self> {
+        Self::new(
+            ResourceLifecycleReceiptLocator::AgentPublicationReservation {
+                command_id: command_id.into(),
+                session_id: session_id.into(),
+                stream_id: stream_id.into(),
+                reservation_id: reservation_id.into(),
+            },
+        )
+    }
+
     /// Reference one exact outer Virtual compaction receipt and archive pin.
     ///
     /// # Errors
@@ -3304,7 +3386,10 @@ impl ResourceLifecycleReceiptRef {
     pub const fn profile(&self) -> ResourceLifecycleProfile {
         match self.locator {
             ResourceLifecycleReceiptLocator::Resource { .. } => ResourceLifecycleProfile::Resource,
-            ResourceLifecycleReceiptLocator::Agent { .. } => ResourceLifecycleProfile::Agent,
+            ResourceLifecycleReceiptLocator::Agent { .. }
+            | ResourceLifecycleReceiptLocator::AgentPublicationReservation { .. } => {
+                ResourceLifecycleProfile::Agent
+            }
             ResourceLifecycleReceiptLocator::Virtual { .. } => ResourceLifecycleProfile::Virtual,
         }
     }
@@ -3314,6 +3399,7 @@ impl ResourceLifecycleReceiptRef {
         match &self.locator {
             ResourceLifecycleReceiptLocator::Resource { command_id, .. }
             | ResourceLifecycleReceiptLocator::Agent { command_id, .. }
+            | ResourceLifecycleReceiptLocator::AgentPublicationReservation { command_id, .. }
             | ResourceLifecycleReceiptLocator::Virtual { command_id, .. } => command_id,
         }
     }
@@ -3323,6 +3409,9 @@ impl ResourceLifecycleReceiptRef {
         match &self.locator {
             ResourceLifecycleReceiptLocator::Resource { receipt_id, .. }
             | ResourceLifecycleReceiptLocator::Agent { receipt_id, .. } => receipt_id,
+            ResourceLifecycleReceiptLocator::AgentPublicationReservation {
+                reservation_id, ..
+            } => reservation_id,
             ResourceLifecycleReceiptLocator::Virtual {
                 outer_receipt_id, ..
             } => outer_receipt_id,
@@ -3335,7 +3424,8 @@ impl ResourceLifecycleReceiptRef {
         match &self.locator {
             ResourceLifecycleReceiptLocator::Virtual { scheduler_id, .. } => Some(scheduler_id),
             ResourceLifecycleReceiptLocator::Resource { .. }
-            | ResourceLifecycleReceiptLocator::Agent { .. } => None,
+            | ResourceLifecycleReceiptLocator::Agent { .. }
+            | ResourceLifecycleReceiptLocator::AgentPublicationReservation { .. } => None,
         }
     }
 
@@ -3366,6 +3456,17 @@ impl ResourceLifecycleReceiptRef {
             } => {
                 validate_content_id("Resource lifecycle command", command_id)?;
                 validate_content_id("Resource lifecycle receipt", receipt_id)
+            }
+            ResourceLifecycleReceiptLocator::AgentPublicationReservation {
+                command_id,
+                session_id,
+                stream_id,
+                reservation_id,
+            } => {
+                validate_content_id("Agent publication reservation command", command_id)?;
+                validate_identity("Agent publication reservation Session", session_id)?;
+                validate_identity("Agent publication reservation stream", stream_id)?;
+                validate_content_id("Agent publication reservation", reservation_id)
             }
             ResourceLifecycleReceiptLocator::Virtual {
                 scheduler_id,
@@ -3438,11 +3539,15 @@ pub fn reduce_resource_pin_receipt(
         }
         return Err(ResourceError::Conflict {
             code: match current.status {
+                ResourcePinStatus::Reserved => "resource_pin_publication_reserved",
                 ResourcePinStatus::Active => "resource_pin_already_exists",
                 ResourcePinStatus::Released => "resource_pin_already_released",
             }
             .to_owned(),
             message: match current.status {
+                ResourcePinStatus::Reserved => {
+                    "Resource pin is reserved by an in-flight publication"
+                }
                 ResourcePinStatus::Active => "Resource pin already exists",
                 ResourcePinStatus::Released => "Resource pin is terminally released",
             }
@@ -3552,6 +3657,137 @@ pub fn project_resource_pin_receipt(
         pin: ResourcePinCurrent {
             state_version: RESOURCE_PIN_CURRENT_VERSION.to_owned(),
             pin: receipt.pin.clone(),
+            status: ResourcePinStatus::Active,
+            last_receipt: origin,
+        },
+    };
+    postcondition.retention.verify()?;
+    postcondition.pin.verify()?;
+    Ok(postcondition)
+}
+
+/// Materialize a pre-publication Agent retention reservation.
+///
+/// This transition counts the exact profile pin before provider I/O while
+/// retaining an explicit `Reserved` pin status. It therefore competes with a
+/// deletion fence on the same physical-family current without claiming that
+/// provider bytes already exist.
+///
+/// # Errors
+///
+/// Returns an error when the receipt is not an Agent stream pin, its
+/// reservation edge is malformed, or its exact lifecycle source changed.
+pub fn project_resource_pin_reservation_receipt(
+    receipt: &ResourcePinReceipt,
+    origin: ResourceLifecycleReceiptRef,
+    retention: Option<&ResourceRetentionCurrent>,
+    current_pin: Option<&ResourcePinCurrent>,
+) -> ResourceResult<ResourcePinPostcondition> {
+    receipt.verify()?;
+    origin.verify()?;
+    if !matches!(
+        &origin.locator,
+        ResourceLifecycleReceiptLocator::AgentPublicationReservation { .. }
+    ) || origin.command_id() != receipt.command_id
+        || !matches!(receipt.pin.kind, ResourcePinKind::AgentStream { .. })
+    {
+        return Err(ResourceError::Integrity {
+            code: "resource_pin_reservation_owner_mismatch".to_owned(),
+            message: "Resource publication reservation changed its Agent owner".to_owned(),
+        });
+    }
+    let expected =
+        reduce_resource_pin_receipt(&receipt.command_id, &receipt.pin, retention, current_pin)?;
+    if expected != *receipt {
+        return Err(ResourceError::Integrity {
+            code: "resource_pin_reservation_source_mismatch".to_owned(),
+            message: "Resource publication reservation changed its exact keyed source".to_owned(),
+        });
+    }
+    let postcondition = ResourcePinPostcondition {
+        retention: ResourceRetentionCurrent {
+            state_version: RESOURCE_RETENTION_CURRENT_VERSION.to_owned(),
+            family: receipt.pin.subject.family.clone(),
+            active_pin_count: receipt.active_pin_count,
+            disposition: ResourceRetentionDisposition::Active,
+            last_receipt: origin.clone(),
+        },
+        pin: ResourcePinCurrent {
+            state_version: RESOURCE_PIN_CURRENT_VERSION.to_owned(),
+            pin: receipt.pin.clone(),
+            status: ResourcePinStatus::Reserved,
+            last_receipt: origin,
+        },
+    };
+    postcondition.retention.verify()?;
+    postcondition.pin.verify()?;
+    Ok(postcondition)
+}
+
+/// Promote one exact pre-publication Agent reservation to its active permanent
+/// pin without changing the physical-family obligation count.
+///
+/// # Errors
+///
+/// Returns an error when the reserved pin, family count, reservation receipt,
+/// or terminal Agent receipt edge does not close exactly.
+pub fn project_resource_reserved_pin_receipt(
+    receipt: &ResourcePinReceipt,
+    origin: ResourceLifecycleReceiptRef,
+    retention: &ResourceRetentionCurrent,
+    current_pin: &ResourcePinCurrent,
+) -> ResourceResult<ResourcePinPostcondition> {
+    receipt.verify()?;
+    origin.verify()?;
+    retention.verify()?;
+    current_pin.verify()?;
+    let reservation_owner_matches = matches!(
+        (&receipt.pin.kind, &current_pin.last_receipt.locator),
+        (
+            ResourcePinKind::AgentStream {
+                session_id,
+                stream_id,
+            },
+            ResourceLifecycleReceiptLocator::AgentPublicationReservation {
+                command_id,
+                session_id: reserved_session,
+                stream_id: reserved_stream,
+                ..
+            },
+        ) if command_id == &receipt.command_id
+            && reserved_session == session_id
+            && reserved_stream == stream_id
+    );
+    if origin.command_id() != receipt.command_id
+        || origin.profile() != ResourceLifecycleProfile::Agent
+        || !matches!(
+            &origin.locator,
+            ResourceLifecycleReceiptLocator::Agent { .. }
+        )
+        || current_pin.status != ResourcePinStatus::Reserved
+        || current_pin.pin != receipt.pin
+        || !reservation_owner_matches
+        || retention.family != receipt.pin.subject.family
+        || retention.disposition != ResourceRetentionDisposition::Active
+        || retention.active_pin_count != receipt.active_pin_count
+    {
+        return Err(ResourceError::Conflict {
+            code: "resource_pin_reservation_promotion_mismatch".to_owned(),
+            message: "Resource publication reservation no longer owns the exact physical pin"
+                .to_owned(),
+        });
+    }
+    let postcondition = ResourcePinPostcondition {
+        retention: ResourceRetentionCurrent {
+            state_version: RESOURCE_RETENTION_CURRENT_VERSION.to_owned(),
+            family: retention.family.clone(),
+            active_pin_count: retention.active_pin_count,
+            disposition: ResourceRetentionDisposition::Active,
+            last_receipt: origin.clone(),
+        },
+        pin: ResourcePinCurrent {
+            state_version: RESOURCE_PIN_CURRENT_VERSION.to_owned(),
+            pin: current_pin.pin.clone(),
             status: ResourcePinStatus::Active,
             last_receipt: origin,
         },
@@ -3952,7 +4188,30 @@ impl ResourcePinCurrent {
         self.pin.verify()?;
         self.last_receipt.verify()?;
         let expected_profile = match (&self.pin.kind, self.status) {
+            (
+                ResourcePinKind::Explicit | ResourcePinKind::VirtualArchive { .. },
+                ResourcePinStatus::Reserved,
+            ) => {
+                return Err(ResourceError::Integrity {
+                    code: "resource_pin_reservation_profile_mismatch".to_owned(),
+                    message: "Only Agent external publication may reserve a Resource pin"
+                        .to_owned(),
+                });
+            }
             (ResourcePinKind::Explicit, _) => ResourceLifecycleProfile::Resource,
+            (ResourcePinKind::AgentStream { .. }, ResourcePinStatus::Reserved) => {
+                if !matches!(
+                    &self.last_receipt.locator,
+                    ResourceLifecycleReceiptLocator::AgentPublicationReservation { .. }
+                ) {
+                    return Err(ResourceError::Integrity {
+                        code: "resource_agent_stream_reservation_origin_mismatch".to_owned(),
+                        message: "Reserved Agent stream pin requires its publication reservation"
+                            .to_owned(),
+                    });
+                }
+                ResourceLifecycleProfile::Agent
+            }
             (ResourcePinKind::AgentStream { .. }, ResourcePinStatus::Active) => {
                 ResourceLifecycleProfile::Agent
             }
@@ -4056,7 +4315,7 @@ fn validate_resource_fields(
     annotations: &BTreeMap<String, String>,
 ) -> ResourceResult<()> {
     require_version("Resource", resource_version, RESOURCE_VERSION)?;
-    validate_media_type(media_type)?;
+    validate_resource_media_type(media_type)?;
     if annotations.len() > MAX_RESOURCE_ANNOTATIONS {
         return Err(ResourceError::Validation(format!(
             "Resource descriptor exceeds {MAX_RESOURCE_ANNOTATIONS} annotations"
@@ -4126,19 +4385,58 @@ fn validate_resource_fields(
     Ok(())
 }
 
-fn validate_media_type(media_type: &str) -> ResourceResult<()> {
-    if media_type.is_empty()
-        || media_type.len() > 255
-        || !media_type.contains('/')
-        || !media_type.is_ascii()
-        || media_type != media_type.to_ascii_lowercase()
-        || media_type.chars().any(char::is_whitespace)
+/// Validate the sole lowercase ASCII Resource media-type grammar.
+///
+/// Both type and subtype are non-empty RFC `token` subsets separated by one
+/// slash. Parameters and every byte outside lowercase ASCII `tchar` are not
+/// part of Resource identity.
+///
+/// # Errors
+///
+/// Returns an error when the media type is not the exact canonical wire.
+pub fn validate_resource_media_type(media_type: &str) -> ResourceResult<()> {
+    let mut parts = media_type.split('/');
+    let media_type_token = parts.next().unwrap_or_default();
+    let media_subtype_token = parts.next().unwrap_or_default();
+    if media_type.len() > 255
+        || media_type_token.is_empty()
+        || media_subtype_token.is_empty()
+        || parts.next().is_some()
+        || !media_type_token
+            .bytes()
+            .all(is_resource_media_type_token_byte)
+        || !media_subtype_token
+            .bytes()
+            .all(is_resource_media_type_token_byte)
     {
         return Err(ResourceError::Validation(
             "Resource media type is invalid".to_owned(),
         ));
     }
     Ok(())
+}
+
+const fn is_resource_media_type_token_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'!'
+            | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~'
+    )
 }
 
 fn validate_location(location: &ResourceLocation) -> ResourceResult<()> {
@@ -4343,6 +4641,49 @@ mod tests {
         };
         publication.verify().expect("fixture publication verifies");
         publication
+    }
+
+    #[test]
+    fn resource_media_type_grammar_is_closed_and_predecessor_is_rejected() {
+        for media_type in [
+            "text/plain",
+            "application/json",
+            "application/vnd.cymule.resource+json",
+            "a!#$%&'*+.^_`|~-/b!#$%&'*+.^_`|~-",
+        ] {
+            validate_resource_media_type(media_type)
+                .unwrap_or_else(|error| panic!("valid media type {media_type:?} failed: {error}"));
+        }
+        for media_type in [
+            "text/\0plain",
+            "text/",
+            "/plain",
+            "a/b/c",
+            "Text/plain",
+            "text/Plain",
+            "text/plain;charset=utf-8",
+            "text/ plain",
+            "text/\u{7f}plain",
+            "text\\plain",
+        ] {
+            assert!(
+                validate_resource_media_type(media_type).is_err(),
+                "invalid media type {media_type:?} was accepted"
+            );
+        }
+
+        let schema = resource_handle_artifact_schema();
+        assert_eq!(
+            schema["properties"]["media_type"]["pattern"],
+            RESOURCE_MEDIA_TYPE_PATTERN
+        );
+
+        let mut predecessor = ResourceCandidate::text("legacy");
+        predecessor.resource_version = "cymule.resource/3".to_owned();
+        assert!(matches!(
+            predecessor.validate(),
+            Err(ResourceError::Validation(message)) if message.contains("version")
+        ));
     }
 
     #[test]

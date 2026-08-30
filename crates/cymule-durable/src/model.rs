@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     ops::Index,
@@ -66,6 +68,31 @@ const SNAPSHOT_ID_DOMAIN: &str = "cymule.snapshot/2";
 pub(crate) const TRANSPORT_REQUEST_ID_DOMAIN: &str = "cymule.transport-request/1";
 pub(crate) const DERIVED_COMMAND_ID_DOMAIN: &str = "cymule.durable-command-id/1";
 pub(crate) const DURABLE_RUNTIME_ACTOR: &str = "actor:durable-runtime";
+
+#[cfg(test)]
+thread_local! {
+    static INPUT_WAIT_SCHEMA_COMPILATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_input_wait_schema_compilations() {
+    INPUT_WAIT_SCHEMA_COMPILATIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn input_wait_schema_compilations() -> usize {
+    INPUT_WAIT_SCHEMA_COMPILATIONS.get()
+}
+
+fn compile_input_wait_schema(wait_id: &str, schema: &serde_json::Value) -> DurableResult<()> {
+    #[cfg(test)]
+    INPUT_WAIT_SCHEMA_COMPILATIONS.set(INPUT_WAIT_SCHEMA_COMPILATIONS.get() + 1);
+    cymule_runtime::ContractValidator::compile(
+        cymule_runtime::ContractTarget::wait(wait_id),
+        schema,
+    )?;
+    Ok(())
+}
 
 /// Decode one exact immutable Artifact selected by its complete reference.
 pub(crate) fn decode_artifact_value(
@@ -4266,10 +4293,7 @@ impl WaitCondition {
                 schema,
             } => {
                 validate_wire_non_empty("input correlation", correlation)?;
-                cymule_runtime::ContractValidator::compile(
-                    cymule_runtime::ContractTarget::wait(&self.wait_id),
-                    schema,
-                )?;
+                compile_input_wait_schema(&self.wait_id, schema)?;
             }
         }
         match (&self.state, &self.result) {
@@ -4319,6 +4343,11 @@ impl EffectDispatch {
             result
                 .validate()
                 .map_err(|error| DurableError::Validation(error.to_string()))?;
+            if result.kind != EFFECT_RESULT_ARTIFACT_KIND {
+                return Err(DurableError::Validation(
+                    "effect outbox result has the wrong Artifact kind".to_owned(),
+                ));
+            }
         }
         let reconciliation_matches = match self.state {
             OutboxState::Pending | OutboxState::Claimed => {
@@ -4360,14 +4389,10 @@ impl EffectDispatch {
             | OutboxState::Unknown => self.claim_epoch > 0 && self.claim_owner.is_some(),
         };
         if !claim_matches
-            || matches!(
-                self.state,
-                OutboxState::Pending | OutboxState::Claimed | OutboxState::Unknown
-            ) && self.result.is_some()
+            || self.result.is_some() != (self.state == OutboxState::Applied)
             || matches!(self.state, OutboxState::Pending | OutboxState::Claimed)
                 && self.execution_availability
                     != cymule_core::EffectExecutionAvailability::Available
-            || self.state == OutboxState::NotApplied && self.result.is_some()
         {
             return Err(DurableError::Validation(
                 "effect outbox lifecycle does not match its claim or result".to_owned(),
@@ -6150,6 +6175,22 @@ mod tests {
         };
         dispatch.verify_wire()?;
         Ok((receipt, dispatch))
+    }
+
+    #[test]
+    fn effect_dispatch_applied_state_requires_the_exact_result_kind() -> DurableResult<()> {
+        let (_, dispatch) = resolution_receipt_fixture()?;
+        dispatch.verify_wire()?;
+
+        let mut missing = dispatch.clone();
+        missing.result = None;
+        assert!(missing.verify_wire().is_err());
+
+        let mut wrong_kind = dispatch;
+        wrong_kind.result =
+            Some(receipt_artifact("cymule.test.wrong-effect-result/1", &json!(null))?.reference);
+        assert!(wrong_kind.verify_wire().is_err());
+        Ok(())
     }
 
     #[test]

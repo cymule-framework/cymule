@@ -16,16 +16,16 @@
   starts; pre-start interruption and read-only requests retain their safe
   cancelled/timed-out disposition.
 - Engine-process stderr is diagnostic-only and never becomes an
-  `EngineFailure.Message`. Drain stdout and stderr concurrently, retain at most
-  16 MiB plus one overflow byte for each stream, and classify any overflow as
-  response loss; a mutating request requires reconciliation.
-- Every started Engine owns an isolated process group. Cancellation and
-  deadlines signal the complete group with `SIGTERM`, wait one fixed short
-  grace, then signal the complete group with `SIGKILL`; reap the direct child
-  and confirm the PGID is gone before returning. A natural direct-child exit
-  also checks the PGID and terminates any residual descendants before returning
-  response loss. `exec.Cmd.WaitDelay` or a direct-child-only kill is not a
-  process-tree termination authority.
+  `EngineFailure.Message`. Drain stdout and stderr concurrently; stdout retains
+  the 128 MiB plus 32-byte framing response-envelope bound plus one byte, while stderr retains its
+  independent 1 MiB diagnostic bound plus one byte. Overflow is response loss;
+  a mutating request requires reconciliation.
+- Every started Engine has one SDK-owned direct Child handle. Cancellation and
+  deadlines immediately kill that Child, close stdin/stdout/stderr parent
+  endpoints, and call `Cmd.Wait`; no grace extends the absolute deadline.
+  Natural exit is observed with `waitid(WNOWAIT)` and reaped only after local
+  stdout/stderr EOF. The Engine/executor watchdog owns descendants; the SDK
+  never signals a raw PID or PGID after reaping.
 - Every process-backed request carries a complete `EngineProcessConfig` inside
   `EnginePluginTarget`: absolute executable, ordered arguments, ambient-cleared
   environment, required nullable working directory, non-empty runtime closure,
@@ -69,6 +69,9 @@
   explicit. Recursively validate the returned Handle and compare its complete
   candidate portion with the sent candidate; the Rust Engine remains the only
   Resource ID derivation authority.
+- Resource `/4` builders and response validation share the exact lowercase
+  ASCII type/subtype token grammar. `ExternalResource` returns an error for an
+  invalid media type; it never emits a candidate that Rust must reinterpret.
 - Keep WaitActivation and source structs closed and provider-neutral. Builders
   sort/deduplicate targets; Rust verification is not durable CAS admission.
 - `DurableCommand` uses `json.RawMessage` for start input and activation value
@@ -148,6 +151,9 @@
   escapes before `encoding/json` can replace them. Caller-invalid transport
   preflight is a typed `validation/correct_and_retry` failure and never starts
   the Engine process.
+- A bounded raw scan before `encoding/json` rejects depth above 128, number
+  tokens above 256 bytes, and exponents above six digits. Fraction equality uses
+  a canonical decimal rational, not binary float or lexical spelling.
 - Durable cancellation and claimed-effect reconciliation return closed typed
   receipts. Bind cancellation ID, Run, and original reason exactly; bind every
   effect-resolution authority field and value exactly. Validate the Rust-owned

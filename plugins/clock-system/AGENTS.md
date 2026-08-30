@@ -12,6 +12,12 @@
   Use explicit read-write, create, URI, and no-mutex flags, then reject
   temporary or memory backends from SQLite's observed database list before
   schema or persistent PRAGMA mutation.
+- Before returning, open must read back exact `main` WAL and `synchronous=FULL`,
+  complete and commit one exact no-op write/readback against the singleton
+  Clock metadata row, then read back both durability settings again. An
+  immutable, read-only, or VFS-constrained DELETE-journal URI is not a Clock
+  authority and fails closed; successful schema reads alone do not prove a
+  writable durable `main` database.
 - Install SQLite's zero busy timeout immediately after opening the connection,
   before schema/authority preflight or any other query. Every `BUSY`/`LOCKED`
   result returns a conflict; do not wait on a process lock or hide retry policy

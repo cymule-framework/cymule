@@ -268,11 +268,31 @@ def main() -> int:
     effect_summary_validator = Draft202012Validator(
         {"$ref": engine_schema["$id"] + "#/$defs/durableEffectSummary"}, registry=registry
     )
+    wait_summary_validator = Draft202012Validator(
+        {"$ref": engine_schema["$id"] + "#/$defs/durableWaitSummary"}, registry=registry
+    )
+    pending_wait_summary = {
+        "wait_id": "sha256:" + "a" * 64,
+        "run_id": "run:wait-summary",
+        "state": "pending",
+        "result": None,
+    }
+    wait_summary_validator.validate(pending_wait_summary)
+    for malformed in (
+        {**pending_wait_summary, "state": "completed"},
+        {**pending_wait_summary, "result": canonical_artifact},
+    ):
+        assert_invalid(
+            wait_summary_validator,
+            malformed,
+            "Wait summary accepted a state/result mismatch",
+        )
     applied_effect_summary = load(root / "tests/fixtures/applied-effect-summary.json")
     effect_summary_validator.validate(applied_effect_summary)
     for malformed in (
         {**applied_effect_summary, "result": None},
         {**applied_effect_summary, "state": "not_applied"},
+        {**applied_effect_summary, "result": canonical_artifact},
         {key: value for key, value in applied_effect_summary.items() if key != "result"},
     ):
         assert_invalid(
@@ -1105,10 +1125,40 @@ def main() -> int:
     )
 
     resource_validator = Draft202012Validator(
-        by_title["Cymule Resource Protocol cymule.resource/3"], registry=registry
+        by_title["Cymule Resource Protocol cymule.resource/4"], registry=registry
     )
     resource_candidate = load(root / "tests/fixtures/resource-candidate.json")
     resource_validator.validate(resource_candidate)
+    resource_validator.validate(
+        {
+            **resource_candidate,
+            "media_type": "application/vnd.cymule.resource+json",
+        }
+    )
+    assert_invalid(
+        resource_validator,
+        {
+            **resource_candidate,
+            "resource_version": legacy_versions["resource"],
+        },
+        "Resource schema accepted predecessor generation /3",
+    )
+    for invalid_media_type in [
+        "text/\0plain",
+        "text/",
+        "/plain",
+        "a/b/c",
+        "Text/plain",
+        "text/Plain",
+        "text/plain;charset=utf-8",
+        "text/ plain",
+        "text/\u007fplain",
+    ]:
+        assert_invalid(
+            resource_validator,
+            {**resource_candidate, "media_type": invalid_media_type},
+            f"Resource schema accepted invalid media type {invalid_media_type!r}",
+        )
     assert_invalid(
         resource_validator,
         {**resource_candidate, "annotations": {}},
@@ -2067,7 +2117,7 @@ def main() -> int:
         "state": "applied",
         "claim_epoch": 1,
         "claim_owner": "driver:fixture",
-        "result": canonical_artifact,
+        "result": {**canonical_artifact, "kind": "cymule.effect-result/1"},
     }
     effect_dispatch_validator = Draft202012Validator(
         {
@@ -2077,6 +2127,17 @@ def main() -> int:
             )
         },
         registry=registry,
+    )
+    effect_dispatch_validator.validate(completed_effect)
+    assert_invalid(
+        effect_dispatch_validator,
+        {**completed_effect, "result": None},
+        "Applied Effect dispatch omitted its required result Artifact",
+    )
+    assert_invalid(
+        effect_dispatch_validator,
+        {**completed_effect, "result": canonical_artifact},
+        "Applied Effect dispatch accepted a result with the wrong Artifact kind",
     )
     durable_boundary_validator = Draft202012Validator(
         {
@@ -2684,7 +2745,7 @@ def main() -> int:
         "machine_plan", "machine_artifact", "machine_event", "machine_admission",
         "machine_command_batch",
         "machine_effect", "machine_obligation", "machine_attempt", "machine_fact",
-        "continuation", "run_current", "wait", "wait_activation", "lease", "outbox", "outbox_owner",
+        "continuation", "run_current", "wait", "wait_summary", "wait_activation", "lease", "outbox", "outbox_owner",
         "component_occurrence", "operation_attempt", "clock_observation", "snapshot",
         "cancellation_receipt", "effect_resolution_receipt",
         "history_compaction", "journal_record", "journal_prefix_replacement",
@@ -3073,7 +3134,7 @@ def main() -> int:
     archive_entry = storage_fixture["command_archive_objects"][1]
     machine_command_current_object = {
         "object": "value",
-        "value_version": "cymule.durable-state-value/3",
+        "value_version": "cymule.durable-state-value/4",
         "object_id": "sha256:" + "f" * 64,
         "value": {
             "value": "machine_command_current",
@@ -5014,7 +5075,7 @@ def main() -> int:
         raise AssertionError("virtual rehydration accepted a provider field")
 
     credential_url = {
-        "resource_version": "cymule.resource/3",
+        "resource_version": "cymule.resource/4",
         "shape": "object",
         "media_type": "application/octet-stream",
         "integrity": {"kind": "live", "identity": "live:credential-check"},

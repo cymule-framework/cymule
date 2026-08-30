@@ -11,6 +11,32 @@ use crate::RuntimeError;
 pub const ENGINE_PROTOCOL_VERSION: &str = "cymule.engine/5";
 /// Maximum UTF-8 bytes in one complete Engine request envelope.
 pub const MAX_ENGINE_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+/// Exact compact framing bytes around the inner request in a request envelope.
+pub const ENGINE_REQUEST_ENVELOPE_FRAMING_BYTES: usize = 48;
+/// Maximum compact bytes in the normalized inner request echoed by success.
+pub const MAX_ENGINE_REQUEST_ECHO_BYTES: usize =
+    MAX_ENGINE_REQUEST_BYTES - ENGINE_REQUEST_ENVELOPE_FRAMING_BYTES;
+/// Maximum compact JSON bytes in one closed Engine success response payload.
+///
+/// This equals the request bound because every currently admitted response is
+/// independently bounded by the same semantic object ceilings as its request.
+pub const MAX_ENGINE_RESPONSE_PAYLOAD_BYTES: usize = MAX_ENGINE_REQUEST_BYTES;
+/// Exact compact framing bytes around request and response in a success envelope.
+pub const ENGINE_SUCCESS_ENVELOPE_FRAMING_BYTES: usize = 80;
+/// Maximum UTF-8 bytes in one complete compact Engine response envelope.
+///
+/// A success contains the accepted inner request plus one response payload.
+/// Current compact request framing is 48 bytes and success framing is 80 bytes,
+/// so the exact maximum is twice the request bound plus their 32-byte delta.
+/// Failure envelopes are smaller.
+pub const MAX_ENGINE_RESPONSE_BYTES: usize = MAX_ENGINE_REQUEST_ECHO_BYTES
+    + MAX_ENGINE_RESPONSE_PAYLOAD_BYTES
+    + ENGINE_SUCCESS_ENVELOPE_FRAMING_BYTES;
+/// Maximum retained Engine stderr bytes.
+///
+/// Stderr is diagnostic-only and deliberately has a separate, narrower bound
+/// than the semantic response envelope.
+pub const MAX_ENGINE_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
 
 /// Official directory-store provider identity understood by the CLI Engine.
 pub const ENGINE_DIRECTORY_STORE_PROVIDER: &str = "cymule.directory-store/5";
@@ -1386,6 +1412,31 @@ mod tests {
             message_limit: 8 * 1024 * 1024,
             closure_limit: 64 * 1024 * 1024,
         }
+    }
+
+    #[test]
+    fn engine_response_bound_covers_exact_echo_payload_and_framing() {
+        let request = serde_json::to_vec(&EngineRequestEnvelope::new(serde_json::Value::Null))
+            .expect("request envelope serializes");
+        let success = serde_json::to_vec(&EngineResponseEnvelope::success(
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        ))
+        .expect("success envelope serializes");
+        let request_framing = request.len() - b"null".len();
+        let success_framing = success.len() - 2 * b"null".len();
+        assert_eq!(request_framing, ENGINE_REQUEST_ENVELOPE_FRAMING_BYTES);
+        assert_eq!(success_framing, ENGINE_SUCCESS_ENVELOPE_FRAMING_BYTES);
+        assert_eq!(
+            success_framing - request_framing,
+            ENGINE_SUCCESS_ENVELOPE_FRAMING_BYTES - ENGINE_REQUEST_ENVELOPE_FRAMING_BYTES
+        );
+        assert_eq!(
+            MAX_ENGINE_RESPONSE_BYTES,
+            MAX_ENGINE_REQUEST_ECHO_BYTES
+                + MAX_ENGINE_RESPONSE_PAYLOAD_BYTES
+                + ENGINE_SUCCESS_ENVELOPE_FRAMING_BYTES
+        );
     }
 
     #[test]

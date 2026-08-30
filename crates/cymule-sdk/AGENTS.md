@@ -72,6 +72,16 @@
   preserve only a fully validated Engine failure; accepting a success requires
   the complete request write, otherwise classify response loss by the original
   request's mutation authority.
+- Import the Runtime-owned 128 MiB plus 32-byte framing response-envelope and 1 MiB diagnostic
+  bounds. Stdout and stderr use separate plus-one overflow accounting; neither
+  a predecessor 16 MiB stream cap nor a shared output budget is conforming.
+- The CLI Engine must charge the actually serialized normalized request echo
+  against `64 MiB - 48 bytes` before Store/provider dispatch. Final response
+  and envelope checks do not repair a post-effect echo overflow.
+- `Engine` custom implementations provide only `exchange` over one
+  `EngineRequestSnapshot`. `EngineTransportSuccess` must carry the complete
+  accepted request echo and raw closed response; every typed convenience is a
+  validated facade over that seam, never a bare operation-specific return.
 - Every `verify_*` success must return the exact request-owned activation or
   command object for that operation. A self-validating payload with the right
   response tag is not sufficient; compare its typed value with the request
@@ -80,7 +90,7 @@
 - The Rust `Engine` surface returns `EngineFailure`, not `CoreError`. Preserve
   remote category, phase, code, contract issues, and retry disposition exactly;
   synthesize `transport_failure` only when no valid Engine envelope was received.
-- Resource builders emit semantic-only `cymule.resource/3` candidates. Only the Rust Engine
+- Resource builders emit semantic-only `cymule.resource/4` candidates. Only the Rust Engine
   seals Resource IDs; the SDK must not duplicate the resource canonicalizer.
   A seal success self-verifies the returned handle and requires its complete
   semantic descriptor to equal the exact echoed candidate. Plan sealing uses
@@ -209,16 +219,17 @@
   CLI timeout and cancellation. Effect resolution carries only its executor;
   execution commands carry executor plus Clock. Live evolution includes only
   the migration or shadow target required by the selected command, never both.
-- CLI cancellation terminates the isolated Engine process group before reaping
-  the direct child so provider descendants cannot retain transport pipes.
+- `EngineCancellation` is the sole Rust SDK cancellation authority. Preflight,
+  process launch, cancellation, and admitted completion linearize under its one
+  launch state; the removed public `Arc<AtomicBool>` entry cannot close the
+  launch race.
+- CLI cancellation terminates and reaps only the direct Engine child. The
+  official Engine/executor watchdog owns descendant closure; SDKs never signal
+  a raw PID or PGID after reaping.
 - Direct-child exit is not transport completion. The same absolute deadline
   remains active until bounded stdin, stdout, and stderr all close; at the
-  deadline the SDK kills the group even when the direct child was already
-  observed and reaped.
-- Process-group conformance tests publish a ready marker and wait for an
-  explicit release before the direct child exits. They must prove that exit
-  occurred before triggering cancellation or timeout; a post-timeout PID-file
-  read is not readiness evidence and creates a scheduler-dependent test race.
+  deadline the SDK closes local pipes and kills only a still-unreaped direct
+  Child. A Child already observed and reaped is never signalled by numeric ID.
 - Completed execution and durable boundaries require a lowercase Plan content
   ID, raw lowercase projection digest, strictly ordered lowercase effect
   content IDs, and the closed safe-range
@@ -229,6 +240,11 @@
 - All stdin/stdout/stderr work runs concurrently with the same absolute
   deadline. Nonzero exit, malformed output, or missing output after a mutating
   request becomes `unknown_world_outcome` with reconciliation disposition.
+- Unix CLI transport uses nonblocking descriptors rather than joinable pipe
+  threads. Deadline or cancellation closes every local descriptor before
+  returning even when a nonconforming descendant retained its copy. Natural
+  completion requires direct-child exit plus local EOF. Non-Unix process transport fails before
+  spawn until an equivalent process-tree authority exists.
 - A cancellation already signalled before process spawn is `cancelled/never`.
   After spawn, a read-only local timeout is `timed_out/retry_same_request` and a
   read-only cancellation remains `cancelled/never`; timeout or cancellation of

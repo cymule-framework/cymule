@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use cymule_activation_http::{AllowAll, SqliteHttpSignalDriver, durable_signal_router};
+use cymule_activation_http::{
+    AllowAll, HttpSignalRequest, SqliteHttpSignalDriver, durable_signal_router,
+};
 use cymule_clock_system::SqliteClock;
 use cymule_core::{Definition, Expression, Operation, PlanCandidate, Region, Step, WaitSpec};
 use cymule_durable::{
@@ -1073,6 +1075,85 @@ async fn http_ingress_selection_activation_and_ack_survive_real_process_death() 
     ] {
         run_http_kill_scenario(seed, mode).await;
     }
+}
+
+#[test]
+fn corrupt_http_request_reaches_neither_selection_delivery_nor_m1_cas() {
+    let world = TestWorld::new(17).expect("HTTP test world creates");
+    let state_database = world
+        .domain()
+        .path("state.sqlite")
+        .expect("state path resolves");
+    let spool_database = world
+        .domain()
+        .path("http.sqlite")
+        .expect("spool path resolves");
+    let clock_database = world
+        .domain()
+        .path("clock.sqlite")
+        .expect("Clock path resolves");
+    let store_domain = "domain:http-corrupt-request";
+    let mut runtime = open_runtime(
+        SqliteStore::open(&state_database, store_domain).expect("durable store opens"),
+        &clock_database,
+    );
+    start_waiting_run(
+        &mut runtime,
+        candidate(),
+        json!({"case": "corrupt-request"}),
+        RUN_ID,
+        execution_request(&clock_database),
+    );
+    let (_router, mut source) =
+        durable_signal_router(&spool_database, 8, AllowAll).expect("HTTP source opens");
+    let request = HttpSignalRequest {
+        activation_id: ACTIVATION_ID.to_owned(),
+        key: SIGNAL_KEY.to_owned(),
+        value: json!({"ok": true}),
+    };
+    Connection::open(&spool_database)
+        .expect("HTTP spool opens for fixture")
+        .execute(
+            "INSERT INTO cymule_http_signals(
+                activation_id, signal_key, value_json, request_digest,
+                selected_wait_ids, acknowledged
+             ) VALUES (?1, ?2, ?3, ?4, NULL, 0)",
+            rusqlite::params![
+                &request.activation_id,
+                &request.key,
+                cymule_core::canonical_bytes(&request.value).expect("signal value encodes"),
+                cymule_core::canonical_digest(&request).expect("signal request digest derives"),
+            ],
+        )
+        .expect("HTTP request fixture inserts");
+    Connection::open(&spool_database)
+        .expect("HTTP spool opens for corruption")
+        .execute(
+            "UPDATE cymule_http_signals SET value_json = X'66616c7365'
+             WHERE activation_id = ?1",
+            [ACTIVATION_ID],
+        )
+        .expect("HTTP value is corrupted without changing its request digest");
+    let before = physical_head(&state_database, store_domain);
+
+    assert!(matches!(
+        runtime.drive_wait_source(&mut source, 1),
+        Err(DurableError::Integrity { ref code, .. })
+            if code == "http_signal_request_digest_mismatch"
+    ));
+    assert_eq!(physical_head(&state_database, store_domain), before);
+    assert_eq!(
+        run_current(&mut runtime, RUN_ID).continuation_status,
+        ContinuationStatus::Waiting
+    );
+}
+
+fn physical_head(path: &Path, domain: &str) -> StoreHead {
+    let mut observer = SqliteStore::open_read_only(path, domain).expect("store observer opens");
+    observer
+        .load_head()
+        .expect("store head reads")
+        .expect("store head exists")
 }
 
 async fn run_http_kill_scenario(seed: u64, mode: &str) {

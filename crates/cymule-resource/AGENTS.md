@@ -4,7 +4,7 @@
   the sole pure lifecycle reducers; this crate re-exports them and owns the
   bounded resolver/store and typed M1 controller boundaries. Neither layer owns
   storage credentials or provider configuration.
-- `cymule.resource/3` Resource identity excludes realization locations.
+- `cymule.resource/4` Resource identity excludes realization locations.
   `cymule.resource-locators/2` is the sole separate replaceable resolver
   record; signed URLs,
   access grants, sessions, and credential revisions never enter the semantic
@@ -17,9 +17,10 @@
   wires within both 8,192 Unicode scalars and 8,192 UTF-8 bytes; equivalent but
   noncanonical or Unicode spellings are rejected rather than normalized.
   Percent escapes are uppercase and may not encode an unreserved byte.
-- Chunked-write intents admit the same lowercase ASCII media-type grammar as
-  the terminal Resource sealer. A store session must never be opened for an
-  intent that cannot become a valid immutable Resource descriptor.
+- Chunked-write intents call profile protocol's sole lowercase ASCII
+  type/subtype token validator. They admit neither parameters nor copied local
+  grammar. A store session must never be opened for an intent that cannot
+  become a valid immutable Resource descriptor.
 - Credentials, signed URLs, session tokens, and provider secrets never enter a
   Resource, Artifact, Event, Continuation, handoff, log, or fixture. Public URLs
   are credential-free; private resources use opaque resolver references.
@@ -184,14 +185,19 @@
   owning profile command/receipt, never an embedded receipt chain or global
   lifecycle replay log. Durable resolution exact-loads that graph and verifies
   the owning typed outcome before using a current as authority.
-- `cymule.resource-lifecycle-receipt-ref/2` is one versioned closed locator
+- `cymule.resource-lifecycle-receipt-ref/3` is one versioned closed locator
   union. Resource and Agent variants carry only their exact command and outer
   receipt identities; the Virtual variant additionally carries its scheduler
   partition and always names the outer `VirtualPersistenceReceipt`. A
   certificate ID or nested pin/release receipt ID is never a lifecycle receipt
   alias, and non-Virtual variants cannot carry a fabricated scheduler field.
-- Delete intent precedes provider I/O and fences every later Resource, Agent,
-  or Virtual pin for the physical family. Public commands request
+- Delete intent and Agent publication reservation compete on the same physical
+  retention-family CAS before either provider call. A winning delete fence
+  rejects reservation deterministically; a winning reservation retains one
+  `Reserved` Agent pin and makes later GC/delete ineligible. Only terminal
+  finalization promotes that exact pin to `Active`; it does not add another
+  obligation. Delete intent precedes provider deletion I/O and fences every
+  later Resource, Agent, or Virtual pin for the physical family. Public commands request
   reconciliation but never carry removed-byte counts or absence booleans;
   `begin_delete` derives the provider binding only from the verified
   publication and does not accept a duplicate caller-supplied binding;
@@ -218,7 +224,8 @@
   survives restart and has no TTL or generic Resource release path. Only the
   Virtual archive-retirement command may atomically publish its terminal
   retirement receipt and release that exact pin. Agent stream pins follow the
-  same fixed-owner rule and are created only by external stream finalization.
+  same fixed-owner rule: reservation creates the pre-publication obligation and
+  finalization promotes it to the permanent active pin.
 - Empty manifests have one canonical byte digest and Merkle root. Provider-side
   locator and proof metadata uses immutable
   `cymule.resource-catalog-record/2` values

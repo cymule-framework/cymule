@@ -19,7 +19,7 @@ cymule-profile-protocol.workspace = true
 
 [dev-dependencies]
 cymule-runtime.workspace = true
-cymule-store-sqlite.workspace = true
+cymule-store-sqlite = { workspace = true, features = ["process-death-test"] }
 cymule-test-world.workspace = true
 jsonschema.workspace = true
 rusqlite.workspace = true

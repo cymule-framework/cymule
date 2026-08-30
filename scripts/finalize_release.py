@@ -807,13 +807,18 @@ def assert_remote_release_fence(
     *,
     repository: str,
     tag: str,
-    controller_sha: str,
     release_sha: str,
     release_tag_sha: str,
     mirror_receipt_tag_sha: str,
     invoke: Invoke = invoke_git,
 ) -> None:
-    """Require current public main and the annotated tag before one mutation."""
+    """Require immutable release and mirror refs before one mutation.
+
+    The workflow admits one exact controller SHA from public main before any
+    release work begins. That admission is the linearization point for the
+    non-cancelled workflow run; a later main advance does not revoke the
+    already-running immutable controller.
+    """
 
     mirror_receipt_ref = (
         f"refs/tags/{mirror_receipt_tag_name(release_sha)}"
@@ -822,7 +827,6 @@ def assert_remote_release_fence(
         [
             "ls-remote",
             f"https://github.com/{repository}.git",
-            "refs/heads/main",
             f"refs/tags/{tag}",
             f"refs/tags/{tag}^{{}}",
             mirror_receipt_ref,
@@ -843,16 +847,13 @@ def assert_remote_release_fence(
     tag_ref = f"refs/tags/{tag}"
     peeled_ref = f"{tag_ref}^{{}}"
     if set(refs) != {
-        "refs/heads/main",
         tag_ref,
         peeled_ref,
         mirror_receipt_ref,
     }:
         raise ValueError(
-            "remote release fence omitted main, release tag, or mirror receipt"
+            "remote release fence omitted the release tag or mirror receipt"
         )
-    if refs["refs/heads/main"] != controller_sha:
-        raise ValueError("remote public main moved from the release controller")
     if refs[tag_ref] != release_tag_sha:
         raise ValueError("remote annotated tag object moved from the frozen tag")
     if refs[peeled_ref] != release_sha:
@@ -1721,7 +1722,6 @@ def main() -> int:
             assert_fence=lambda: assert_remote_release_fence(
                 repository=arguments.repository,
                 tag=frozen.tag,
-                controller_sha=arguments.controller_sha,
                 release_sha=arguments.release_sha,
                 release_tag_sha=frozen.release_tag_sha,
                 mirror_receipt_tag_sha=frozen.mirror_receipt_tag_sha,

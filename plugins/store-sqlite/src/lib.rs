@@ -120,7 +120,51 @@ enum SqliteBarrier {
     GcReconcileCommitComplete,
 }
 
+/// Transaction-internal barrier exposed only to the real process-death test
+/// feature. Normal adapters and callers cannot enable or observe this seam.
+#[cfg(feature = "process-death-test")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteProcessDeathBarrier {
+    /// Immutable objects are staged in the immediate transaction, while the
+    /// canonical head CAS has not yet executed.
+    ObjectsStaged,
+}
+
 impl SqliteStore {
+    /// Execute one real Store CAS with a process-death test barrier after all
+    /// immutable objects are staged and before the head CAS.
+    ///
+    /// This method is compiled only for the dedicated integration-test feature;
+    /// production `DurableStore` traffic always uses `compare_and_commit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ordinary Store error or the exact barrier error.
+    #[cfg(feature = "process-death-test")]
+    pub fn compare_and_commit_with_process_death_barrier(
+        &mut self,
+        expected: Option<&StoreHead>,
+        batch: &StoreBatch,
+        mut barrier: impl FnMut(SqliteProcessDeathBarrier) -> DurableResult<()>,
+    ) -> DurableResult<StoreCommit> {
+        self.compare_and_commit_with_barriers(
+            expected,
+            batch,
+            |point| match point {
+                SqliteBarrier::ObjectsStaged => barrier(SqliteProcessDeathBarrier::ObjectsStaged),
+                SqliteBarrier::HeadStaged
+                | SqliteBarrier::CommitComplete
+                | SqliteBarrier::GcAdvanceReceiptStaged
+                | SqliteBarrier::GcAdvanceSweepStaged
+                | SqliteBarrier::GcAdvanceHeadStaged
+                | SqliteBarrier::GcAdvanceCommitComplete
+                | SqliteBarrier::GcReconcileSweepStaged
+                | SqliteBarrier::GcReconcileCommitComplete => Ok(()),
+            },
+            || Ok(()),
+        )
+    }
+
     /// Open or create a writable persistent-root store.
     ///
     /// # Errors

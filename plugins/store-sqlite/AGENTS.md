@@ -105,6 +105,11 @@
   receipt, GC sweep, and GC-head boundaries. After every kill, run complete
   PRAGMA integrity_check, checkpoint WAL, repeat integrity check, reopen through
   SqliteStore, and compare the exact canonical readback.
+- The `process-death-test` feature is integration-test-only. It exposes exactly
+  the `ObjectsStaged` transaction barrier so a test-owned `DurableStore` wrapper
+  can SIGKILL after immutable inserts but before the head CAS. Normal builds do
+  not compile that method, and acknowledgement-loss coverage parks only after
+  the ordinary underlying `compare_and_commit` returns.
 - M4 process-death conformance uses only the public provider-registry-bound
   Evolution control over the exact SQLite `/6` store. A successful
   provider-free catalog mutation plus provider-backed migration derives the

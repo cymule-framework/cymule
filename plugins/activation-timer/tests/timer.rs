@@ -521,22 +521,32 @@ fn retained_delivery_precedes_earlier_unselected_timer_source_errors() {
 }
 
 #[test]
-fn malformed_timer_generation_is_rejected_without_mutation() {
+fn predecessor_timer_generation_is_rejected_without_mutation() {
     let directory = tempdir().expect("temporary directory creates");
     let database = directory.path().join("legacy-timer.sqlite");
     let connection = rusqlite::Connection::open(&database).expect("legacy timer store opens");
     connection
         .execute_batch(
-            "CREATE TABLE cymule_timers (
+            "CREATE TABLE cymule_timer_meta (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                schema_version TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE cymule_timers (
                 activation_id TEXT PRIMARY KEY NOT NULL,
                 timer_id TEXT NOT NULL,
                 due_unix_ms INTEGER NOT NULL,
                 value_json BLOB NOT NULL,
-                acknowledged INTEGER NOT NULL DEFAULT 0
+                selected_wait_ids BLOB,
+                acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged IN (0, 1))
              ) STRICT;
+             CREATE INDEX cymule_timers_due
+                ON cymule_timers(acknowledged, due_unix_ms, activation_id);
+             INSERT INTO cymule_timer_meta(singleton, schema_version)
+                VALUES (1, 'cymule.activation-timer-store/1');
              INSERT INTO cymule_timers(
-                activation_id, timer_id, due_unix_ms, value_json, acknowledged
-             ) VALUES ('activation:legacy', 'timer:legacy', 100, X'74727565', 0);",
+                activation_id, timer_id, due_unix_ms, value_json,
+                selected_wait_ids, acknowledged
+             ) VALUES ('activation:legacy', 'timer:legacy', 100, X'74727565', NULL, 0);",
         )
         .expect("legacy generation writes");
     drop(connection);
@@ -567,13 +577,92 @@ fn malformed_timer_generation_is_rejected_without_mutation() {
         )
         .expect("legacy payload remains");
     assert_eq!(retained, b"true");
-    let meta_count: i64 = connection
+    let generation: String = connection
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'table' AND name = 'cymule_timer_meta'",
+            "SELECT schema_version FROM cymule_timer_meta WHERE singleton = 1",
             [],
             |row| row.get(0),
         )
-        .expect("schema remains inspectable");
-    assert_eq!(meta_count, 0, "rejection must not heal the generation");
+        .expect("predecessor generation remains inspectable");
+    assert_eq!(generation, "cymule.activation-timer-store/1");
+}
+
+#[test]
+fn fresh_and_retained_timer_row_tamper_fails_before_target_selection() {
+    for retained in [false, true] {
+        for (name, mutation) in [
+            (
+                "activation",
+                "UPDATE cymule_timers SET activation_id = 'activation:tampered'",
+            ),
+            (
+                "timer",
+                "UPDATE cymule_timers SET timer_id = 'timer:tampered'",
+            ),
+            ("due", "UPDATE cymule_timers SET due_unix_ms = 99"),
+            (
+                "value",
+                "UPDATE cymule_timers SET value_json = X'66616c7365'",
+            ),
+            (
+                "noncanonical-value",
+                "UPDATE cymule_timers SET value_json = X'2074727565'",
+            ),
+            (
+                "schedule-digest",
+                "UPDATE cymule_timers SET schedule_digest = 'sha256:tampered'",
+            ),
+            (
+                "selected-targets",
+                "UPDATE cymule_timers
+                 SET selected_wait_ids = CAST(' [\"wait:timer\"]' AS BLOB)",
+            ),
+            (
+                "selected-target-identity",
+                "UPDATE cymule_timers SET selected_wait_ids = CAST('[\"\"]' AS BLOB)",
+            ),
+            (
+                "acknowledgement",
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE cymule_timers SET acknowledged = 2",
+            ),
+        ] {
+            let directory = tempdir().expect("temporary directory creates");
+            let database = directory.path().join(format!(
+                "timer-{name}-{}.sqlite",
+                if retained { "retained" } else { "fresh" }
+            ));
+            let mut driver = SqliteTimerDriver::open_with_clock(&database, ManualClock(100))
+                .expect("timer driver opens");
+            driver
+                .schedule("activation:one", "timer:one", 100, &json!({"due": true}))
+                .expect("timer schedules");
+            if retained {
+                driver
+                    .receive(&mut index(), 1)
+                    .expect("timer selects")
+                    .expect("delivery exists");
+            }
+            rusqlite::Connection::open(&database)
+                .expect("timer store opens for tamper")
+                .execute_batch(mutation)
+                .expect("test tampers one schedule field");
+
+            let mut view = ObservedTimerView {
+                waits: index_for_timer("timer:tampered"),
+                ..ObservedTimerView::default()
+            };
+            let error = driver
+                .receive(&mut view, 1)
+                .expect_err("tampered schedule cannot become a delivery");
+            assert!(
+                matches!(error, DurableError::Integrity { .. }),
+                "{name} {retained:?} produced {error:?}"
+            );
+            assert!(
+                view.selections.is_empty(),
+                "{name} {retained:?} reached parked-wait selection"
+            );
+        }
+    }
 }

@@ -358,10 +358,28 @@ fn rust_resource_seals_through_the_cli() {
         "purpose".to_owned(),
         "cross-language-conformance".to_owned(),
     )]);
-    let resource = CliEngine::new(engine_path)
+    let resource = CliEngine::new(&engine_path)
         .seal_resource(&candidate)
         .expect("Resource Candidate seals");
     assert_eq!(resource.resource_id, expected_resource_id);
+
+    let vendor = ResourceCandidate {
+        resource_version: "cymule.resource/4".to_owned(),
+        shape: cymule::ResourceShape::Object,
+        media_type: "application/vnd.cymule.resource+json".to_owned(),
+        inline: None,
+        integrity: cymule::ResourceIntegrity::Content {
+            digest: format!("sha256:{}", "1".repeat(64)),
+            size: 0,
+        },
+        manifest: None,
+        annotations: BTreeMap::new(),
+    };
+    let vendor_resource = CliEngine::new(&engine_path)
+        .seal_resource(&vendor)
+        .expect("vendor Resource Candidate seals");
+    assert_eq!(vendor_resource.resource_version, "cymule.resource/4");
+    assert_eq!(vendor_resource.media_type, vendor.media_type);
 }
 
 #[test]

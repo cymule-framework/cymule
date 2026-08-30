@@ -116,6 +116,73 @@ fn file_backend_detection_does_not_blacklist_memory_like_filenames() {
 }
 
 #[test]
+fn open_proves_writable_main_with_wal_and_full_synchronous_before_return() {
+    let directory = tempdir().expect("temporary directory creates");
+    let database = directory.path().join("clock-durability.sqlite");
+    let mut clock =
+        SqliteClock::open_with_wall_clock(&database, "clock:one", GENERATION, FixedWall(100))
+            .expect("writable durable Clock opens");
+    assert_eq!(
+        clock
+            .observe("durability")
+            .expect("returned Clock remains writable")
+            .logical_time,
+        100
+    );
+    drop(clock);
+
+    let observer = Connection::open(&database).expect("Clock database reopens for readback");
+    let journal_mode: String = observer
+        .pragma_query_value(Some("main"), "journal_mode", |row| row.get(0))
+        .expect("main journal mode reads");
+    assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+}
+
+#[test]
+fn immutable_read_only_and_delete_only_uris_fail_closed() {
+    for (mode, expected_code) in [
+        ("immutable", "clock_durability_not_applied"),
+        ("read-only", "clock_main_not_writable"),
+        ("delete-only", "clock_durability_not_applied"),
+    ] {
+        let directory = tempdir().expect("temporary directory creates");
+        let database = directory.path().join(format!("clock-{mode}.sqlite"));
+        drop(
+            SqliteClock::open_with_wall_clock(&database, "clock:one", GENERATION, FixedWall(100))
+                .expect("Clock fixture initializes"),
+        );
+        let observer = Connection::open(&database).expect("Clock fixture reopens");
+        observer
+            .query_row("PRAGMA main.wal_checkpoint(TRUNCATE)", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("Clock WAL checkpoints");
+        if mode == "delete-only" {
+            observer
+                .pragma_update(Some("main"), "journal_mode", "DELETE")
+                .expect("fixture enters DELETE journal mode");
+        }
+        drop(observer);
+
+        let uri = match mode {
+            "immutable" => format!("file:{}?immutable=1", database.display()),
+            "read-only" => format!("file:{}?mode=ro", database.display()),
+            "delete-only" => {
+                format!("file:{}?mode=rw&vfs=unix-dotfile", database.display())
+            }
+            _ => unreachable!("closed URI mode fixture"),
+        };
+        let error = SqliteClock::open_with_wall_clock(uri, "clock:one", GENERATION, FixedWall(101))
+            .err()
+            .expect("URI cannot satisfy writable WAL plus FULL authority");
+        assert!(
+            matches!(error, DurableError::Substrate { ref code, .. } if code == expected_code),
+            "unexpected {mode} URI error: {error:?}"
+        );
+    }
+}
+
+#[test]
 fn out_of_range_wall_observation_changes_no_clock_state() {
     let directory = tempdir().expect("temporary directory creates");
     let database = directory.path().join("clock.sqlite");

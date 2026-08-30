@@ -39,15 +39,19 @@ pub use plugin::{
 };
 pub use protocol::{
     ENGINE_CLOCK_SYSTEM_PROVIDER, ENGINE_DIRECTORY_STORE_PROVIDER,
-    ENGINE_PROCESS_EXECUTOR_PROVIDER, ENGINE_PROTOCOL_VERSION, ENGINE_SQLITE_STORE_PROVIDER,
-    EVOLUTION_PLUGIN_MESSAGE_LIMIT, EVOLUTION_PLUGIN_PROTOCOL_VERSION, EngineClockTarget,
-    EngineContractSide, EngineDurableTarget, EngineEvolutionTarget, EngineFailure,
-    EngineFailureCategory, EngineIssue, EngineMigrationProviderTarget, EnginePhase,
-    EnginePluginTarget, EngineProcessConfig, EngineRequestEnvelope, EngineResponseEnvelope,
-    EngineResult, EngineRetryDisposition, EngineShadowProviderTarget, EngineStoreTarget,
-    MAX_ENGINE_REQUEST_BYTES, MAX_EVOLUTION_TARGET_EXECUTION_BINDINGS, MAX_PROCESS_ARGUMENTS,
-    MAX_PROCESS_ENVIRONMENT_ENTRIES, MAX_PROCESS_RUNTIME_ENTRIES,
+    ENGINE_PROCESS_EXECUTOR_PROVIDER, ENGINE_PROTOCOL_VERSION,
+    ENGINE_REQUEST_ENVELOPE_FRAMING_BYTES, ENGINE_SQLITE_STORE_PROVIDER,
+    ENGINE_SUCCESS_ENVELOPE_FRAMING_BYTES, EVOLUTION_PLUGIN_MESSAGE_LIMIT,
+    EVOLUTION_PLUGIN_PROTOCOL_VERSION, EngineClockTarget, EngineContractSide, EngineDurableTarget,
+    EngineEvolutionTarget, EngineFailure, EngineFailureCategory, EngineIssue,
+    EngineMigrationProviderTarget, EnginePhase, EnginePluginTarget, EngineProcessConfig,
+    EngineRequestEnvelope, EngineResponseEnvelope, EngineResult, EngineRetryDisposition,
+    EngineShadowProviderTarget, EngineStoreTarget, MAX_ENGINE_DIAGNOSTIC_BYTES,
+    MAX_ENGINE_REQUEST_BYTES, MAX_ENGINE_REQUEST_ECHO_BYTES, MAX_ENGINE_RESPONSE_BYTES,
+    MAX_ENGINE_RESPONSE_PAYLOAD_BYTES, MAX_EVOLUTION_TARGET_EXECUTION_BINDINGS,
+    MAX_PROCESS_ARGUMENTS, MAX_PROCESS_ENVIRONMENT_ENTRIES, MAX_PROCESS_RUNTIME_ENTRIES,
 };
 pub use strict_json::{
-    decode_strict_json_value, validate_json_typed_roundtrip, validate_strict_json,
+    decode_strict_json_value, validate_json_typed_roundtrip, validate_json_typed_roundtrip_bytes,
+    validate_strict_json,
 };

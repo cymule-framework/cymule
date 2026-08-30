@@ -61,6 +61,12 @@ through the sole launch CAS before it may send `SIGCONT`. A pre-start winner
 therefore prevents provider I/O, while a launch-committed mutating call remains
 an unknown-world outcome.
 
+The embedding must leave `SIGCHLD` at its default disposition without
+`SA_NOCLDWAIT`, a competing handler, or another thread that waits for arbitrary
+children. The executor rechecks the observable disposition before both
+watchdog fork and provider spawn and fails before provider I/O when it is
+unavailable.
+
 For `cymule.plugin/3`, Runtime's 8 MiB Core-Artifact ceiling is the semantic
 request and response limit. `message_limit` must equal it exactly before an
 ordinary plugin process may start; an oversized in-process or child-process
@@ -112,8 +118,10 @@ therefore closes the group even if multiple launches are simultaneously blocked
 before provider start while holding one another's inherited channel
 descriptors. Normal completion, timeout,
 cancellation, and I/O failure also terminate the whole group and reap both
-direct children. Forked plugin children cannot keep a request open or perform
-late work after the leader returns. Stderr remains diagnostic only.
+direct children. The macOS child owner retains its first exact wait status and
+never signals that numeric PID after reap, when the kernel may reuse it. Forked
+plugin children cannot keep a request open or perform late work after the
+leader returns. Stderr remains diagnostic only.
 
 Invalid requests and attempts are deterministic before spawn. Once either
 Effect dispatch or reconciliation has spawned, a timeout, cancellation, I/O or

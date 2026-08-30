@@ -31,7 +31,7 @@ export interface ResourceManifestDescriptor {
 }
 
 export interface ResourceCandidate {
-  resource_version: "cymule.resource/3";
+  resource_version: "cymule.resource/4";
   shape: ResourceShape;
   media_type: string;
   inline?: InlineData;
@@ -2157,9 +2157,9 @@ export class VirtualSchedulingControlBuilder {
 export class ResourceBuilder {
   static text(text: string, annotations: Record<string, string> = {}): ResourceCandidate {
     return {
-      resource_version: "cymule.resource/3",
+      resource_version: "cymule.resource/4",
       shape: "inline",
-      media_type: "text/plain;charset=utf-8",
+      media_type: "text/plain",
       inline: { encoding: "utf8", text },
       integrity: { kind: "inline" },
       ...(Object.keys(annotations).length === 0 ? {} : { annotations: { ...annotations } }),
@@ -2168,7 +2168,7 @@ export class ResourceBuilder {
 
   static json(value: Json, annotations: Record<string, string> = {}): ResourceCandidate {
     return {
-      resource_version: "cymule.resource/3",
+      resource_version: "cymule.resource/4",
       shape: "inline",
       media_type: "application/json",
       inline: { encoding: "json", value },
@@ -2184,8 +2184,11 @@ export class ResourceBuilder {
     manifest: ResourceManifestDescriptor | undefined = undefined,
     annotations: Record<string, string> = {},
   ): ResourceCandidate {
+    if (!isResourceMediaType(mediaType)) {
+      throw new Error("Resource media type is invalid");
+    }
     return {
-      resource_version: "cymule.resource/3",
+      resource_version: "cymule.resource/4",
       shape,
       media_type: mediaType,
       integrity,
@@ -2299,19 +2302,25 @@ export interface CliEngineOptions {
 
 /** Provider-neutral Engine transport consumed by the high-level durable facade. */
 export interface EngineTransport {
-  seal(candidate: PlanCandidate): Promise<SealedPlan>;
-  observeClock(target: EngineClockTarget, runId: string): Promise<ClockObservationResult>;
-  executeDurable(target: EngineDurableTarget, command: DurableCommand): Promise<DurableResponse>;
-  executeLiveEvolution(
-    target: EngineEvolutionTarget,
-    evolutionId: string,
-    command: LiveEvolutionCommand,
-  ): Promise<EvolutionCommit>;
+  exchange(request: EngineRequest): Promise<EngineTransportSuccess>;
 }
 
+/** Complete accepted request echo and closed response returned by a transport. */
+export interface EngineTransportSuccess {
+  request: EngineRequest;
+  response: EngineResponse;
+}
+
+const CLI_ENGINE_WIRE_EXCHANGE = Symbol("cymule.cli-engine-wire-exchange");
+
 const DEFAULT_ENGINE_TIMEOUT_MS = 30_000;
-const ENGINE_STREAM_LIMIT = 16 * 1024 * 1024;
 const ENGINE_REQUEST_LIMIT = 64 * 1024 * 1024;
+const ENGINE_REQUEST_FRAMING_BYTES = 48;
+const ENGINE_RESPONSE_PAYLOAD_LIMIT = ENGINE_REQUEST_LIMIT;
+const ENGINE_SUCCESS_FRAMING_BYTES = 80;
+const ENGINE_RESPONSE_LIMIT = ENGINE_REQUEST_LIMIT - ENGINE_REQUEST_FRAMING_BYTES
+  + ENGINE_RESPONSE_PAYLOAD_LIMIT + ENGINE_SUCCESS_FRAMING_BYTES;
+const ENGINE_DIAGNOSTIC_LIMIT = 1024 * 1024;
 
 export class CliEngine {
   constructor(
@@ -2320,13 +2329,13 @@ export class CliEngine {
   ) {}
 
   async seal(candidate: PlanCandidate): Promise<SealedPlan> {
-    const response = await this.request({ type: "seal", candidate });
+    const response = await exchangeEngine(this, { type: "seal", candidate });
     if (response.type !== "sealed") throw unexpectedResponse("sealed", response.type);
     return response.plan;
   }
 
   async sealResource(candidate: ResourceCandidate): Promise<ResourceHandle> {
-    const response = await this.request({ type: "seal_resource", candidate });
+    const response = await exchangeEngine(this, { type: "seal_resource", candidate });
     if (response.type !== "sealed_resource") {
       throw unexpectedResponse("sealed_resource", response.type);
     }
@@ -2334,7 +2343,7 @@ export class CliEngine {
   }
 
   async verifyWaitActivation(activation: WaitActivation): Promise<WaitActivation> {
-    const response = await this.request({ type: "verify_wait_activation", activation });
+    const response = await exchangeEngine(this, { type: "verify_wait_activation", activation });
     if (response.type !== "verified_wait_activation") {
       throw unexpectedResponse("verified_wait_activation", response.type);
     }
@@ -2342,7 +2351,7 @@ export class CliEngine {
   }
 
   async verifyDurableCommand(command: DurableCommand): Promise<DurableCommand> {
-    const response = await this.request({ type: "verify_durable_command", command });
+    const response = await exchangeEngine(this, { type: "verify_durable_command", command });
     if (response.type !== "verified_durable_command") {
       throw unexpectedResponse("verified_durable_command", response.type);
     }
@@ -2359,7 +2368,7 @@ export class CliEngine {
     } catch (error) {
       throw localValidationError("validate_request", "invalid_clock_target", error);
     }
-    const response = await this.request({
+    const response = await exchangeEngine(this, {
       type: "observe_clock",
       target: targetSnapshot,
       run_id: runId,
@@ -2371,7 +2380,7 @@ export class CliEngine {
   }
 
   async verifyEvolutionCommand(command: EvolutionCommand): Promise<EvolutionCommand> {
-    const response = await this.request({ type: "verify_evolution_command", command });
+    const response = await exchangeEngine(this, { type: "verify_evolution_command", command });
     if (response.type !== "verified_evolution_command") {
       throw unexpectedResponse("verified_evolution_command", response.type);
     }
@@ -2379,7 +2388,7 @@ export class CliEngine {
   }
 
   async verifyLiveEvolutionCommand(command: LiveEvolutionCommand): Promise<LiveEvolutionCommand> {
-    const response = await this.request({ type: "verify_live_evolution_command", command });
+    const response = await exchangeEngine(this, { type: "verify_live_evolution_command", command });
     if (response.type !== "verified_live_evolution_command") {
       throw unexpectedResponse("verified_live_evolution_command", response.type);
     }
@@ -2409,7 +2418,8 @@ export class CliEngine {
     const expectedStartPlan = commandSnapshot.type === "start_run"
       ? (await this.seal(commandSnapshot.candidate)).plan_id
       : undefined;
-    const response = await this.request(
+    const response = await exchangeEngine(
+      this,
       { type: "execute_durable", target: targetSnapshot, command: commandSnapshot },
       expectedStartPlan === undefined ? {} : { expectedStartPlan },
     );
@@ -2447,7 +2457,8 @@ export class CliEngine {
       && commandSnapshot.command.operation === "apply_patch"
       ? (await this.seal(commandSnapshot.command.patch.target)).plan_id
       : undefined;
-    const response = await this.request(
+    const response = await exchangeEngine(
+      this,
       {
         type: "execute_live_evolution",
         target: targetSnapshot,
@@ -2494,7 +2505,7 @@ export class CliEngine {
     } catch (error) {
       throw localValidationError("validate_request", "invalid_plugin_target", error);
     }
-    const response = await this.request({
+    const response = await exchangeEngine(this, {
       type: "run",
       plan: planSnapshot,
       input: inputSnapshot,
@@ -2507,10 +2518,9 @@ export class CliEngine {
     return response.execution;
   }
 
-  private async request(
+  async [CLI_ENGINE_WIRE_EXCHANGE](
     request: EngineRequest,
-    preflight: EngineRequestPreflight = {},
-  ): Promise<EngineResponse> {
+  ): Promise<EngineTransportSuccess> {
     if (this.options.signal?.aborted === true) {
       throw interruptedError(request, "cancelled", false);
     }
@@ -2534,43 +2544,47 @@ export class CliEngine {
     try {
       rawEnvelope = parseStrictJson(transport.stdout);
     } catch (error) {
+      if (transport.exitCode !== 0) {
+        throw responseLossError(wireRequest, "engine_process_failed");
+      }
       throw responseLossError(
         wireRequest,
         "invalid_engine_response",
         error instanceof Error ? error.message : String(error),
       );
     }
-    if (transport.inputFailed
-      && (!isRecord(rawEnvelope) || rawEnvelope.outcome !== "failure")) {
+    if (!isRecord(rawEnvelope) || rawEnvelope.engine_protocol !== ENGINE_PROTOCOL_VERSION) {
+      if (isRecord(rawEnvelope) && typeof rawEnvelope.engine_protocol === "string") {
+        if (requestCanMutate(wireRequest)) {
+          throw responseLossError(
+            wireRequest,
+            "unsupported_engine_protocol",
+            `expected ${ENGINE_PROTOCOL_VERSION}, received ${JSON.stringify(rawEnvelope.engine_protocol)}`,
+          );
+        }
+        throw new EngineError({
+          category: "contract_violation",
+          phase: "transport",
+          code: "unsupported_engine_protocol",
+          message: `expected ${ENGINE_PROTOCOL_VERSION}, received ${JSON.stringify(rawEnvelope.engine_protocol)}`,
+          contract: ENGINE_PROTOCOL_VERSION,
+          contract_side: "schema",
+          retry_disposition: "never",
+        });
+      }
       throw responseLossError(
         wireRequest,
-        "engine_request_incomplete",
-        "the Engine closed stdin before receiving the complete request",
+        "invalid_engine_response",
+        "the Engine response omitted the exact protocol generation",
       );
-    }
-    if (isRecord(rawEnvelope) && typeof rawEnvelope.engine_protocol === "string"
-      && rawEnvelope.engine_protocol !== ENGINE_PROTOCOL_VERSION) {
-      if (requestCanMutate(wireRequest)) {
-        throw responseLossError(
-          wireRequest,
-          "unsupported_engine_protocol",
-          `expected ${ENGINE_PROTOCOL_VERSION}, received ${JSON.stringify(rawEnvelope.engine_protocol)}`,
-        );
-      }
-      throw new EngineError({
-        category: "contract_violation",
-        phase: "transport",
-        code: "unsupported_engine_protocol",
-        message: `expected ${ENGINE_PROTOCOL_VERSION}, received ${JSON.stringify(rawEnvelope.engine_protocol)}`,
-        contract: ENGINE_PROTOCOL_VERSION,
-        contract_side: "schema",
-        retry_disposition: "never",
-      });
     }
     let envelope: EngineResponseEnvelope;
     try {
       envelope = parseEngineEnvelope(rawEnvelope);
     } catch (error) {
+      if (transport.exitCode !== 0) {
+        throw responseLossError(wireRequest, "engine_process_failed");
+      }
       throw responseLossError(
         wireRequest,
         "invalid_engine_response",
@@ -2578,7 +2592,7 @@ export class CliEngine {
       );
     }
     if (envelope.outcome === "failure") {
-      const failure = unboxFloatIntegerTokens(envelope.error) as EngineFailure;
+      const failure = unboxExactFractionTokens(envelope.error) as EngineFailure;
       try {
         validateEngineFailure(failure);
       } catch (error) {
@@ -2590,9 +2604,20 @@ export class CliEngine {
       }
       throw new EngineError(failure);
     }
+    if (transport.inputFailed) {
+      throw responseLossError(
+        wireRequest,
+        "engine_request_incomplete",
+        "the Engine closed stdin before receiving the complete request",
+      );
+    }
+    if (transport.exitCode !== 0) {
+      throw responseLossError(wireRequest, "engine_process_failed");
+    }
     if (envelope.outcome !== "success") {
       throw transportError("invalid_engine_response", "response outcome is not closed");
     }
+    validateEngineResponsePayloadBound(wireRequest, envelope.response);
     if (!wireValuesEqual(envelope.request, wireRequest)) {
       throw responseLossError(
         wireRequest,
@@ -2617,20 +2642,12 @@ export class CliEngine {
         `expected ${expectedType}, received ${envelope.response.type}`,
       );
     }
-    let matches = false;
-    try {
-      matches = successResponseMatchesRequest(wireRequest, envelope.response, preflight);
-    } catch {
-      matches = false;
-    }
-    if (!matches) {
-      throw responseLossError(
-        wireRequest,
-        "invalid_engine_response",
-        "Engine success does not match its complete request",
-      );
-    }
-    return unboxFloatIntegerTokens(envelope.response) as EngineResponse;
+    return { request: envelope.request, response: envelope.response } as EngineTransportSuccess;
+  }
+
+  async exchange(request: EngineRequest): Promise<EngineTransportSuccess> {
+    const success = await this[CLI_ENGINE_WIRE_EXCHANGE](request);
+    return unboxExactFractionTokens(success) as EngineTransportSuccess;
   }
 }
 
@@ -2674,38 +2691,26 @@ export class DurableEngine {
       requireRequestRunIdentity(runId);
       assertStrictJson(this.clock);
       validateEngineClockTarget(this.clock);
-      const snapshot = snapshotEngineRequest({
+      const candidate: Extract<EngineRequest, { type: "observe_clock" }> = {
         type: "observe_clock",
-        target: this.clock,
+        target: structuredClone(this.clock),
         run_id: runId,
-      });
-      request = snapshot.wireRequest as Extract<EngineRequest, { type: "observe_clock" }>;
+      };
+      snapshotEngineRequest(candidate);
+      request = candidate;
     } catch (error) {
       if (error instanceof EngineError && error.failure.category === "validation") throw error;
       throw localValidationError("observe_clock", "clock_request_validation_failed", error);
     }
-    let result: ClockObservationResult;
-    try {
-      result = await this.#transport.observeClock(
-        structuredClone(request.target),
-        request.run_id,
+    const response = await exchangeEngine(this.#transport, request);
+    if (response.type !== "clock_observed") {
+      throw responseLossError(
+        request,
+        "invalid_engine_response",
+        "Clock observation returned the wrong Engine response",
       );
-    } catch (error) {
-      throw transportInvocationError(request, error);
     }
-    try {
-      assertStrictJson(result);
-      const resultSnapshot = structuredClone(result);
-      validateClockObservationResult(resultSnapshot);
-      if (resultSnapshot.run_id !== request.run_id
-        || resultSnapshot.observation.source_id !== request.target.source_id
-        || resultSnapshot.observation.source_generation !== request.target.source_generation) {
-        throw new Error("Clock observation result does not match its request");
-      }
-      return resultSnapshot.observation;
-    } catch (error) {
-      throw responseLossError(request, "invalid_engine_response", errorMessage(error));
-    }
+    return response.result.observation;
   }
 
   async runIndexPage(
@@ -2896,12 +2901,14 @@ export class DurableEngine {
       };
       assertStrictJson(target);
       validateEngineEvolutionTarget(target, commandSnapshot);
-      request = snapshotEngineRequest({
+      const candidate: Extract<EngineRequest, { type: "execute_live_evolution" }> = {
         type: "execute_live_evolution",
-        target,
+        target: structuredClone(target),
         evolution_id: this.evolutionId,
-        command: commandSnapshot,
-      }).wireRequest as Extract<EngineRequest, { type: "execute_live_evolution" }>;
+        command: structuredClone(commandSnapshot),
+      };
+      snapshotEngineRequest(candidate);
+      request = candidate;
     } catch (error) {
       if (error instanceof EngineError && error.failure.category === "validation") throw error;
       throw localValidationError(
@@ -2913,54 +2920,34 @@ export class DurableEngine {
     let expectedPatchTargetPlan: string | undefined;
     if (request.command.operation === "apply"
       && request.command.command.operation === "apply_patch") {
-      const sealRequest = snapshotEngineRequest({
+      const sealRequest: Extract<EngineRequest, { type: "seal" }> = {
         type: "seal",
-        candidate: request.command.command.patch.target,
-      }).wireRequest as Extract<EngineRequest, { type: "seal" }>;
-      let sealed: SealedPlan;
-      try {
-        sealed = await this.#transport.seal(structuredClone(sealRequest.candidate));
-      } catch (error) {
-        throw transportInvocationError(sealRequest, error);
+        candidate: structuredClone(request.command.command.patch.target),
+      };
+      snapshotEngineRequest(sealRequest);
+      const sealedResponse = await exchangeEngine(this.#transport, sealRequest);
+      if (sealedResponse.type !== "sealed") {
+        throw responseLossError(
+          sealRequest,
+          "invalid_engine_response",
+          "patch preflight returned the wrong Engine response",
+        );
       }
-      try {
-        assertStrictJson(sealed);
-        const sealedSnapshot = structuredClone(sealed);
-        validateSealedPlan(sealedSnapshot);
-        if (!wireValuesEqual(sealedSnapshot.candidate, sealRequest.candidate)) {
-          throw new Error("sealed Plan does not match the exact patch target candidate");
-        }
-        expectedPatchTargetPlan = sealedSnapshot.plan_id;
-      } catch (error) {
-        throw responseLossError(sealRequest, "invalid_engine_response", errorMessage(error));
-      }
+      expectedPatchTargetPlan = sealedResponse.plan.plan_id;
     }
-    let returned: EvolutionCommit;
-    try {
-      returned = await this.#transport.executeLiveEvolution(
-        structuredClone(request.target),
-        request.evolution_id,
-        structuredClone(request.command),
+    const response = await exchangeEngine(
+      this.#transport,
+      request,
+      expectedPatchTargetPlan === undefined ? {} : { expectedPatchTargetPlan },
+    );
+    if (response.type !== "live_evolution_executed") {
+      throw responseLossError(
+        request,
+        "invalid_engine_response",
+        "live evolution returned the wrong Engine response",
       );
-    } catch (error) {
-      throw transportInvocationError(request, error);
     }
-    try {
-      assertStrictJson(returned);
-      const commit = structuredClone(returned);
-      validateEvolutionCommit(commit);
-      if (!evolutionCommitMatchesRequest(
-        request.evolution_id,
-        request.command,
-        commit,
-        expectedPatchTargetPlan,
-      )) {
-        throw new Error("Evolution commit does not match its complete request");
-      }
-      return commit;
-    } catch (error) {
-      throw responseLossError(request, "invalid_engine_response", errorMessage(error));
-    }
+    return response.commit;
   }
 
   private async submit(command: DurableCommand): Promise<DurableResponse> {
@@ -2983,11 +2970,13 @@ export class DurableEngine {
       };
       assertStrictJson(target);
       validateEngineDurableTarget(target, command);
-      request = snapshotEngineRequest({
+      const candidate: Extract<EngineRequest, { type: "execute_durable" }> = {
         type: "execute_durable",
-        target,
-        command,
-      }).wireRequest as Extract<EngineRequest, { type: "execute_durable" }>;
+        target: structuredClone(target),
+        command: structuredClone(command),
+      };
+      snapshotEngineRequest(candidate);
+      request = candidate;
     } catch (error) {
       if (error instanceof EngineError && error.failure.category === "validation") throw error;
       throw localValidationError(
@@ -2998,48 +2987,34 @@ export class DurableEngine {
     }
     let expectedStartPlan: string | undefined;
     if (request.command.type === "start_run") {
-      const sealRequest = snapshotEngineRequest({
+      const sealRequest: Extract<EngineRequest, { type: "seal" }> = {
         type: "seal",
-        candidate: request.command.candidate,
-      }).wireRequest as Extract<EngineRequest, { type: "seal" }>;
-      let sealed: SealedPlan;
-      try {
-        sealed = await this.#transport.seal(structuredClone(sealRequest.candidate));
-      } catch (error) {
-        throw transportInvocationError(sealRequest, error);
+        candidate: structuredClone(request.command.candidate),
+      };
+      snapshotEngineRequest(sealRequest);
+      const sealedResponse = await exchangeEngine(this.#transport, sealRequest);
+      if (sealedResponse.type !== "sealed") {
+        throw responseLossError(
+          sealRequest,
+          "invalid_engine_response",
+          "Start preflight returned the wrong Engine response",
+        );
       }
-      try {
-        assertStrictJson(sealed);
-        const sealedSnapshot = structuredClone(sealed);
-        validateSealedPlan(sealedSnapshot);
-        if (!wireValuesEqual(sealedSnapshot.candidate, sealRequest.candidate)) {
-          throw new Error("sealed Plan does not match the exact start candidate");
-        }
-        expectedStartPlan = sealedSnapshot.plan_id;
-      } catch (error) {
-        throw responseLossError(sealRequest, "invalid_engine_response", errorMessage(error));
-      }
+      expectedStartPlan = sealedResponse.plan.plan_id;
     }
-    let returned: DurableResponse;
-    try {
-      returned = await this.#transport.executeDurable(
-        structuredClone(request.target),
-        structuredClone(request.command),
+    const engineResponse = await exchangeEngine(
+      this.#transport,
+      request,
+      expectedStartPlan === undefined ? {} : { expectedStartPlan },
+    );
+    if (engineResponse.type !== "durable_executed") {
+      throw responseLossError(
+        request,
+        "invalid_engine_response",
+        "durable command returned the wrong Engine response",
       );
-    } catch (error) {
-      throw transportInvocationError(request, error);
     }
-    try {
-      assertStrictJson(returned);
-      const response = structuredClone(returned);
-      validateDurableResponse(response);
-      if (!durableResponseMatchesCommand(request.command, response, expectedStartPlan)) {
-        throw new Error("durable response does not match its complete command");
-      }
-      return response;
-    } catch (error) {
-      throw responseLossError(request, "invalid_engine_response", errorMessage(error));
-    }
+    return engineResponse.response;
   }
 
   private buildCommand(factory: () => DurableCommand): DurableCommand {
@@ -3062,12 +3037,27 @@ async function runEngineProcess(
   request: EngineRequest,
   timeoutMs: number,
   signal: AbortSignal | undefined,
-): Promise<{ stdout: string; inputFailed: boolean }> {
-  return await new Promise<{ stdout: string; inputFailed: boolean }>((resolve, reject) => {
+): Promise<{
+  stdout: string;
+  inputFailed: boolean;
+  exitCode: number | null;
+}> {
+  if (process.platform === "win32") {
+    throw localValidationError(
+      "validate_request",
+      "engine_rpc_platform_unsupported",
+      new Error("CLI Engine process-tree containment requires Unix"),
+    );
+  }
+  return await new Promise<{
+    stdout: string;
+    inputFailed: boolean;
+    exitCode: number | null;
+  }>((resolve, reject) => {
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawn(executable, ["rpc"], {
-        detached: process.platform !== "win32",
+        detached: false,
         stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (error) {
@@ -3079,6 +3069,7 @@ async function runEngineProcess(
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let requestBegan = child.pid !== undefined;
+    let leaderExited = false;
     let inputFailed = false;
     let terminalError: EngineError | undefined;
     let state: "starting" | "running" | "terminating" | "closed" | "settled" =
@@ -3088,17 +3079,16 @@ async function runEngineProcess(
       clearTimeout(deadline);
       signal?.removeEventListener("abort", abort);
     };
-    const settleTermination = (): void => {
-      if (state !== "closed" || terminalError === undefined) return;
-      state = "settled";
-      clear();
-      reject(terminalError);
-    };
     const terminate = (error: EngineError): void => {
       if (terminalError !== undefined || state === "closed" || state === "settled") return;
       terminalError = error;
-      state = "terminating";
-      terminateEngineProcessGroup(child);
+      state = "settled";
+      if (!leaderExited) terminateEngineProcess(child);
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      clear();
+      reject(error);
     };
     const abort = (): void => {
       terminate(interruptedError(request, "cancelled", requestBegan));
@@ -3110,6 +3100,9 @@ async function runEngineProcess(
     child.once("spawn", () => {
       requestBegan = true;
       if (state === "starting") state = "running";
+    });
+    child.once("exit", () => {
+      leaderExited = true;
     });
     child.once("error", (error) => {
       if (state === "settled") return;
@@ -3124,8 +3117,8 @@ async function runEngineProcess(
     child.stdout.on("data", (chunk: Buffer) => {
       if (terminalError !== undefined) return;
       stdoutBytes += chunk.length;
-      if (stdoutBytes > ENGINE_STREAM_LIMIT) {
-        terminate(responseLossError(request, "engine_response_too_large"));
+      if (stdoutBytes > ENGINE_RESPONSE_LIMIT) {
+        terminate(responseLossError(request, "engine_output_limit_exceeded"));
         return;
       }
       stdoutChunks.push(chunk);
@@ -3133,8 +3126,8 @@ async function runEngineProcess(
     child.stderr.on("data", (chunk: Buffer) => {
       if (terminalError !== undefined) return;
       stderrBytes += chunk.length;
-      if (stderrBytes > ENGINE_STREAM_LIMIT) {
-        terminate(responseLossError(request, "engine_diagnostic_too_large"));
+      if (stderrBytes > ENGINE_DIAGNOSTIC_LIMIT) {
+        terminate(responseLossError(request, "engine_diagnostic_limit_exceeded"));
       }
     });
     // A conforming Engine may reject the request and close stdin before the
@@ -3146,19 +3139,15 @@ async function runEngineProcess(
       if (state === "settled") return;
       state = "closed";
       if (terminalError !== undefined) {
-        settleTermination();
         return;
       }
       state = "settled";
       clear();
-      if (code !== 0) {
-        reject(responseLossError(request, "engine_process_failed"));
-        return;
-      }
       try {
         resolve({
           stdout: new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(stdoutChunks)),
           inputFailed,
+          exitCode: code,
         });
       } catch (error) {
         reject(responseLossError(request, "invalid_engine_response", errorMessage(error)));
@@ -3171,18 +3160,8 @@ async function runEngineProcess(
   });
 }
 
-function terminateEngineProcessGroup(child: ChildProcessWithoutNullStreams): void {
-  const pid = child.pid;
-  if (pid === undefined) return;
-  try {
-    if (process.platform === "win32") {
-      child.kill("SIGKILL");
-    } else {
-      process.kill(-pid, "SIGKILL");
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") child.kill("SIGKILL");
-  }
+function terminateEngineProcess(child: ChildProcessWithoutNullStreams): void {
+  child.kill("SIGKILL");
 }
 
 function errorMessage(error: unknown): string {
@@ -3222,7 +3201,7 @@ function unexpectedResponse(expected: string, received: string): EngineError {
   });
 }
 
-type EngineRequest =
+export type EngineRequest =
   | { type: "seal"; candidate: PlanCandidate }
   | { type: "seal_resource"; candidate: ResourceCandidate }
   | { type: "verify_wait_activation"; activation: WaitActivation }
@@ -3283,7 +3262,67 @@ function snapshotEngineRequest(request: EngineRequest): {
   return { encodedRequest, wireRequest: wireEnvelope.request as EngineRequest };
 }
 
-type EngineResponse =
+async function exchangeEngine(
+  transport: EngineTransport,
+  request: EngineRequest,
+  preflight: EngineRequestPreflight = {},
+): Promise<EngineResponse> {
+  const { wireRequest } = snapshotEngineRequest(request);
+  const customRequest = structuredClone(request);
+  const transportRequest = structuredClone(customRequest);
+  const correlationRequest = customRequest;
+  let success: EngineTransportSuccess;
+  try {
+    success = await transport.exchange(transportRequest);
+  } catch (error) {
+    throw transportInvocationError(wireRequest, error);
+  }
+  if (!isRecord(success)
+    || !hasExactKeys(success, ["request", "response"])
+    || !wireValuesEqual(success.request, correlationRequest)) {
+    throw responseLossError(
+      wireRequest,
+      "invalid_engine_response",
+      "custom Engine success did not echo the complete accepted request",
+    );
+  }
+  try {
+    validateEngineResponsePayloadBound(correlationRequest, success.response);
+    validateSuccessResponse(success.response);
+  } catch (error) {
+    throw responseLossError(
+      wireRequest,
+      "invalid_engine_response",
+      errorMessage(error),
+    );
+  }
+  if (success.response.type !== expectedSuccessResponseType(correlationRequest)
+    || !successResponseMatchesRequest(correlationRequest, success.response, preflight)) {
+    throw responseLossError(
+      wireRequest,
+      "invalid_engine_response",
+      "custom Engine success does not match its complete request",
+    );
+  }
+  return unboxExactFractionTokens(success.response) as EngineResponse;
+}
+
+function validateEngineResponsePayloadBound(
+  request: EngineRequest,
+  response: EngineResponse,
+): void {
+  let encoded: string;
+  try {
+    encoded = encodeStrictJson(unboxExactFractionTokens(response));
+  } catch (error) {
+    throw responseLossError(request, "invalid_engine_response", errorMessage(error));
+  }
+  if (Buffer.byteLength(encoded, "utf8") > ENGINE_RESPONSE_PAYLOAD_LIMIT) {
+    throw responseLossError(request, "engine_response_payload_too_large");
+  }
+}
+
+export type EngineResponse =
   | { type: "sealed"; plan: SealedPlan }
   | { type: "sealed_resource"; resource: ResourceHandle }
   | { type: "verified_wait_activation"; activation: WaitActivation }
@@ -3660,12 +3699,10 @@ function liveEvolutionOutcomeMatchesCommand(
 
 function wireValuesEqual(left: unknown, right: unknown): boolean {
   if (left === right) return true;
-  if (isFloatIntegerToken(left) || isFloatIntegerToken(right)) {
-    const leftValue = isFloatIntegerToken(left) ? left.value : left;
-    const rightValue = isFloatIntegerToken(right) ? right.value : right;
-    return typeof leftValue === "number"
-      && typeof rightValue === "number"
-      && Object.is(leftValue, rightValue);
+  if (isExactFractionToken(left) || isExactFractionToken(right)) {
+    return isExactFractionToken(left)
+      && isExactFractionToken(right)
+      && left.canonical === right.canonical;
   }
   if (Array.isArray(left) || Array.isArray(right)) {
     return Array.isArray(left) && Array.isArray(right)
@@ -3766,7 +3803,7 @@ function validateResourceHandle(value: unknown): void {
   const allowed = new Set(["resource_id", "resource_version", "shape", "media_type", "inline", "integrity", "manifest", "annotations"]);
   if (!Object.keys(value).every((key) => allowed.has(key)) ||
     !["resource_id", "resource_version", "shape", "media_type", "integrity"].every((key) => key in value) ||
-    value.resource_version !== "cymule.resource/3" || !/^sha256:[0-9a-f]{64}$/.test(String(value.resource_id)) ||
+    value.resource_version !== "cymule.resource/4" || !/^sha256:[0-9a-f]{64}$/.test(String(value.resource_id)) ||
     !new Set(["inline", "object", "collection", "directory", "snapshot"]).has(String(value.shape)) ||
     !isResourceMediaType(value.media_type) || !isRecord(value.integrity)) {
     throw transportError("invalid_engine_response", "Resource Handle fields are invalid");
@@ -3827,7 +3864,7 @@ function validateInlineResource(value: Record<string, unknown>): void {
       throw transportError("invalid_engine_response", "inline UTF-8 Resource is invalid");
     }
   } else if (value.encoding === "json") {
-    const encoded = JSON.stringify(unboxFloatIntegerTokens(value.value));
+    const encoded = JSON.stringify(unboxExactFractionTokens(value.value));
     if (encoded === undefined || Buffer.byteLength(encoded) > 1_048_576) {
       throw transportError("invalid_engine_response", "inline JSON Resource is invalid");
     }
@@ -3877,12 +3914,9 @@ function resourceManifestDescriptorId(value: Record<string, unknown>): string {
 
 function isResourceMediaType(value: unknown): value is string {
   return typeof value === "string"
-    && Buffer.byteLength(value) >= 1
+    && Buffer.byteLength(value) >= 3
     && Buffer.byteLength(value) <= 255
-    && value.includes("/")
-    && /^[\x00-\x7f]+$/.test(value)
-    && value === value.toLowerCase()
-    && !/\s/.test(value);
+    && /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/.test(value);
 }
 
 function isResourceToken(value: unknown): value is string {
@@ -6474,7 +6508,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object"
     && value !== null
     && !Array.isArray(value)
-    && !isFloatIntegerToken(value);
+    && !isExactFractionToken(value);
 }
 
 function hasExactKeys(
@@ -6556,17 +6590,44 @@ function requestCanMutate(request: EngineRequest): boolean {
 }
 
 const MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991;
-const FLOAT_INTEGER_TOKEN = Symbol("cymule.json-float-integer-token");
+const MAX_JSON_DEPTH = 128;
+const MAX_JSON_NUMBER_TOKEN_BYTES = 256;
+const MAX_JSON_EXPONENT_DIGITS = 6;
+const EXACT_FRACTION_TOKEN = Symbol("cymule.json-exact-fraction-token");
 
-interface FloatIntegerToken {
-  readonly [FLOAT_INTEGER_TOKEN]: true;
+interface ExactFractionToken {
+  readonly [EXACT_FRACTION_TOKEN]: true;
   readonly value: number;
+  readonly canonical: string;
 }
 
-function isFloatIntegerToken(value: unknown): value is FloatIntegerToken {
+function isExactFractionToken(value: unknown): value is ExactFractionToken {
   return typeof value === "object"
     && value !== null
-    && (value as Partial<FloatIntegerToken>)[FLOAT_INTEGER_TOKEN] === true;
+    && (value as Partial<ExactFractionToken>)[EXACT_FRACTION_TOKEN] === true;
+}
+
+function exactFractionToken(token: string, value: number): ExactFractionToken {
+  const negative = token.startsWith("-");
+  const unsigned = negative ? token.slice(1) : token;
+  const exponentIndex = unsigned.search(/[eE]/);
+  const mantissa = exponentIndex < 0 ? unsigned : unsigned.slice(0, exponentIndex);
+  const exponent = BigInt(exponentIndex < 0 ? "0" : unsigned.slice(exponentIndex + 1));
+  const point = mantissa.indexOf(".");
+  const fractionalDigits = point < 0 ? 0 : mantissa.length - point - 1;
+  let digits = point < 0 ? mantissa : mantissa.slice(0, point) + mantissa.slice(point + 1);
+  digits = digits.replace(/^0+/, "") || "0";
+  let scale = exponent - BigInt(fractionalDigits);
+  while (digits.endsWith("0") && digits !== "0") {
+    digits = digits.slice(0, -1);
+    scale += 1n;
+  }
+  const coefficient = `${negative ? "-" : ""}${digits}`;
+  return {
+    [EXACT_FRACTION_TOKEN]: true,
+    value,
+    canonical: `${coefficient}e${scale}`,
+  };
 }
 
 function mathematicalIntegerToken(token: string): bigint | undefined {
@@ -6603,7 +6664,14 @@ function assertJsonString(value: string): void {
   }
 }
 
-function assertStrictJson(value: unknown, seen = new Set<object>()): void {
+function assertStrictJson(
+  value: unknown,
+  seen = new Set<object>(),
+  depth = 0,
+): void {
+  if (depth > MAX_JSON_DEPTH) {
+    throw transportError("request_encoding_failed", "JSON nesting exceeds the fixed depth limit");
+  }
   if (value === undefined || typeof value === "function" || typeof value === "symbol") {
     throw transportError("request_encoding_failed", "value is not in the JSON data model");
   }
@@ -6647,7 +6715,7 @@ function assertStrictJson(value: unknown, seen = new Set<object>()): void {
       if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
         throw transportError("request_encoding_failed", "array element is not plain JSON data");
       }
-      assertStrictJson(descriptor.value, seen);
+      assertStrictJson(descriptor.value, seen, depth + 1);
     }
   } else {
     const prototype = Object.getPrototypeOf(value);
@@ -6671,7 +6739,7 @@ function assertStrictJson(value: unknown, seen = new Set<object>()): void {
       if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
         throw transportError("request_encoding_failed", "object property is not plain JSON data");
       }
-      assertStrictJson(descriptor.value, seen);
+      assertStrictJson(descriptor.value, seen, depth + 1);
     }
   }
   seen.delete(value);
@@ -6701,7 +6769,8 @@ function parseStrictJson(text: string): unknown {
     }
     throw new Error("unterminated JSON string");
   };
-  const value = (): unknown => {
+  const value = (depth = 0): unknown => {
+    if (depth > MAX_JSON_DEPTH) throw new Error("JSON nesting exceeds the fixed depth limit");
     whitespace();
     if (text[index] === "{") {
       index += 1; whitespace();
@@ -6714,7 +6783,7 @@ function parseStrictJson(text: string): unknown {
         if (keys.has(key)) throw new Error(`duplicate JSON object key ${JSON.stringify(key)}`);
         keys.add(key); whitespace();
         if (text[index++] !== ":") throw new Error("missing object colon");
-        object[key] = value(); whitespace();
+        object[key] = value(depth + 1); whitespace();
         if (text[index] === "}") { index += 1; return object; }
         if (text[index++] !== ",") throw new Error("missing object comma");
         whitespace();
@@ -6725,7 +6794,7 @@ function parseStrictJson(text: string): unknown {
       const array: unknown[] = [];
       if (text[index] === "]") { index += 1; return array; }
       while (true) {
-        array.push(value()); whitespace();
+        array.push(value(depth + 1)); whitespace();
         if (text[index] === "]") { index += 1; return array; }
         if (text[index++] !== ",") throw new Error("missing array comma");
       }
@@ -6738,6 +6807,13 @@ function parseStrictJson(text: string): unknown {
     if (token === "true") return true;
     if (token === "false") return false;
     if (token === "null") return null;
+    if (token.length > MAX_JSON_NUMBER_TOKEN_BYTES) {
+      throw new Error("JSON number token exceeds the fixed byte limit");
+    }
+    const exponent = /[eE]([+-]?)(\d+)$/.exec(token);
+    if (exponent !== null && exponent[2]!.length > MAX_JSON_EXPONENT_DIGITS) {
+      throw new Error("JSON number exponent exceeds the fixed digit limit");
+    }
     if (/^-?\d+$/.test(token)) {
       const digits = token.startsWith("-") ? token.slice(1) : token;
       if (digits.length > 16) {
@@ -6762,18 +6838,18 @@ function parseStrictJson(text: string): unknown {
     if (Number.isInteger(number)) {
       throw new Error("non-integral JSON number is not distinguishable from an integer");
     }
-    return number;
+    return exactFractionToken(token, number);
   };
   const parsed = value(); whitespace();
   if (index !== text.length) throw new Error("trailing JSON content");
   return parsed;
 }
 
-function unboxFloatIntegerTokens(value: unknown): unknown {
-  if (isFloatIntegerToken(value)) return value.value;
-  if (Array.isArray(value)) return value.map(unboxFloatIntegerTokens);
+function unboxExactFractionTokens(value: unknown): unknown {
+  if (isExactFractionToken(value)) return value.value;
+  if (Array.isArray(value)) return value.map(unboxExactFractionTokens);
   if (!isRecord(value)) return value;
   return Object.fromEntries(
-    Object.entries(value).map(([key, child]) => [key, unboxFloatIntegerTokens(child)]),
+    Object.entries(value).map(([key, child]) => [key, unboxExactFractionTokens(child)]),
   );
 }

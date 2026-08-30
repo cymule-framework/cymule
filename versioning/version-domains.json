@@ -4,7 +4,7 @@
     "generation": "source-0.2.0-unreleased-generation-3",
     "workspace_version": "0.2.0",
     "state": "source",
-    "source_snapshot_digest": "sha256:770a03f0cb8a36fce80a89af69a8424c51f960f9e118f36994a98e81e199e49e",
+    "source_snapshot_digest": "sha256:fc9dfed2ff1c06e61f46a3ba125dc2776320fb1a4e4f94237dd86d48f4f3e0fa",
     "baseline_source_snapshot_digest": "sha256:e3783a1ae7e61f331d90f7d456f60eb132712ba1f70e1b7f2363078a3c31540a",
     "predecessor_registry_digest": null,
     "predecessor_source_snapshot_digest": null,
@@ -72,7 +72,7 @@
     },
     {
       "domain": "cymule.activation-timer-store",
-      "version": "cymule.activation-timer-store/1",
+      "version": "cymule.activation-timer-store/2",
       "kind": "persistence",
       "owner": "cymule-activation-timer",
       "writers": [
@@ -105,7 +105,11 @@
         "plugins/activation-timer/src/lib.rs"
       ],
       "compatibility_mode": null,
-      "migration": null,
+      "migration": {
+        "mode": "unsupported",
+        "edge": null,
+        "runbook": "docs/migrations/activation-timer-store-generation-2.md"
+      },
       "removal_gate": null,
       "conformance": [
         "rust-activation-timer"
@@ -210,7 +214,7 @@
     },
     {
       "domain": "cymule.agent-command-receipt",
-      "version": "cymule.agent-command-receipt/2",
+      "version": "cymule.agent-command-receipt/3",
       "kind": "receipt",
       "owner": "cymule-profile-protocol",
       "writers": [
@@ -241,7 +245,11 @@
         "crates/cymule-profile-protocol/src/agent.rs"
       ],
       "compatibility_mode": null,
-      "migration": null,
+      "migration": {
+        "mode": "unsupported",
+        "edge": null,
+        "runbook": "docs/migrations/pre-segmented-store-generations.md"
+      },
       "removal_gate": null,
       "conformance": [
         "rust-profile-protocol"
@@ -254,7 +262,7 @@
     },
     {
       "domain": "cymule.agent-command",
-      "version": "cymule.agent-command/2",
+      "version": "cymule.agent-command/3",
       "kind": "semantic",
       "owner": "cymule-profile-protocol",
       "writers": [
@@ -285,7 +293,11 @@
         "crates/cymule-profile-protocol/src/agent.rs"
       ],
       "compatibility_mode": null,
-      "migration": null,
+      "migration": {
+        "mode": "unsupported",
+        "edge": null,
+        "runbook": "docs/migrations/pre-segmented-store-generations.md"
+      },
       "removal_gate": null,
       "conformance": [
         "rust-profile-protocol"
@@ -400,7 +412,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:c4087c5cd6598ed67faa032d9126e7f980dc328aad1a1413611204461e39d7c6",
+          "canonical_digest": "sha256:7e0d6134e8a95bf094735c4e081572728f4bc7bca2ef7dcf2ff51b7682a37cf2",
           "fragment": "#/$defs/agentHostBinding",
           "root": false
         }
@@ -895,14 +907,14 @@
       ],
       "embeds": [
         "cymule.artifact/2",
-        "cymule.framework-resource-handle/3",
-        "cymule.resource/3"
+        "cymule.framework-resource-handle/4",
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.artifact/2",
-        "cymule.framework-resource-handle/3",
+        "cymule.framework-resource-handle/4",
         "cymule.jcs/1",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [
@@ -933,7 +945,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:c4087c5cd6598ed67faa032d9126e7f980dc328aad1a1413611204461e39d7c6",
+          "canonical_digest": "sha256:7e0d6134e8a95bf094735c4e081572728f4bc7bca2ef7dcf2ff51b7682a37cf2",
           "root": false,
           "fragment": "#/$defs/recoveryObservation"
         }
@@ -994,7 +1006,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:c4087c5cd6598ed67faa032d9126e7f980dc328aad1a1413611204461e39d7c6",
+          "canonical_digest": "sha256:7e0d6134e8a95bf094735c4e081572728f4bc7bca2ef7dcf2ff51b7682a37cf2",
           "fragment": "#/$defs/agentSessionCurrent",
           "root": false
         }
@@ -1294,9 +1306,83 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:c4087c5cd6598ed67faa032d9126e7f980dc328aad1a1413611204461e39d7c6",
+          "canonical_digest": "sha256:7e0d6134e8a95bf094735c4e081572728f4bc7bca2ef7dcf2ff51b7682a37cf2",
           "root": false,
           "fragment": "#/$defs/agentStreamPublicationIntent"
+        }
+      ],
+      "literal_locations": [
+        "crates/cymule-profile-protocol/src/agent.rs",
+        "plugins/agent-interaction/schemas/agent-protocol.schema.json"
+      ],
+      "defined_at_source_snapshot_digest": null
+    },
+    {
+      "domain": "cymule.agent-stream-publication-reservation",
+      "version": "cymule.agent-stream-publication-reservation/1",
+      "kind": "persistence",
+      "owner": "cymule-profile-protocol",
+      "writers": [
+        "cymule-agent",
+        "cymule-profile-protocol"
+      ],
+      "readers": [
+        "cymule-agent",
+        "cymule-profile-protocol",
+        "schema-governance"
+      ],
+      "sources": [
+        {
+          "path": "crates/cymule-profile-protocol/src/agent.rs",
+          "symbol": "AGENT_STREAM_PUBLICATION_RESERVATION_VERSION",
+          "role": "content_id_domain"
+        }
+      ],
+      "embeds": [
+        "cymule.agent-stream-publication-intent/1",
+        "cymule.resource-pin-receipt/3",
+        "cymule.resource-retention-family/1",
+        "cymule.resource-retention-subject/1"
+      ],
+      "depends_on": [
+        "cymule.agent-stream-publication-intent/1",
+        "cymule.jcs/1",
+        "cymule.resource-pin-receipt/3",
+        "cymule.resource-retention-family/1",
+        "cymule.resource-retention-subject/1"
+      ],
+      "consumers": {
+        "schemas": [
+          "plugins/agent-interaction/schemas/agent-protocol.schema.json"
+        ],
+        "types": [
+          "crates/cymule-profile-protocol/src/agent.rs::AGENT_STREAM_PUBLICATION_RESERVATION_VERSION"
+        ],
+        "packages": [
+          "cymule-agent",
+          "cymule-profile-protocol",
+          "schema-governance"
+        ]
+      },
+      "generator_paths": [
+        "crates/cymule-profile-protocol/src/agent.rs",
+        "plugins/agent-interaction/schemas/agent-protocol.schema.json"
+      ],
+      "compatibility_mode": null,
+      "migration": null,
+      "removal_gate": null,
+      "conformance": [
+        "protocol",
+        "rust-agent-plugin",
+        "rust-profile-protocol"
+      ],
+      "schemas": [
+        {
+          "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
+          "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
+          "canonical_digest": "sha256:7e0d6134e8a95bf094735c4e081572728f4bc7bca2ef7dcf2ff51b7682a37cf2",
+          "root": false,
+          "fragment": "#/$defs/agentStreamPublicationReservation"
         }
       ],
       "literal_locations": [
@@ -1329,13 +1415,13 @@
       "embeds": [
         "cymule.resource-catalog-record/2",
         "cymule.resource-locators/2",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.jcs/1",
         "cymule.resource-catalog-record/2",
         "cymule.resource-locators/2",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [],
@@ -1645,7 +1731,7 @@
     },
     {
       "domain": "cymule.agent",
-      "version": "cymule.agent/6",
+      "version": "cymule.agent/7",
       "kind": "semantic",
       "owner": "cymule-agent",
       "writers": [
@@ -1667,20 +1753,22 @@
         "cymule.agent-recovery-observation/1",
         "cymule.agent-session-current/2",
         "cymule.agent-stream-publication-intent/1",
+        "cymule.agent-stream-publication-reservation/1",
         "cymule.artifact/2",
         "cymule.clock-observation/2",
-        "cymule.framework-resource-handle/3",
-        "cymule.resource/3"
+        "cymule.framework-resource-handle/4",
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.agent-host-binding/1",
         "cymule.agent-recovery-observation/1",
         "cymule.agent-session-current/2",
         "cymule.agent-stream-publication-intent/1",
+        "cymule.agent-stream-publication-reservation/1",
         "cymule.artifact/2",
         "cymule.clock-observation/2",
-        "cymule.framework-resource-handle/3",
-        "cymule.resource/3"
+        "cymule.framework-resource-handle/4",
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [
@@ -1698,7 +1786,11 @@
         "plugins/agent-interaction/schemas/agent-protocol.schema.json"
       ],
       "compatibility_mode": null,
-      "migration": null,
+      "migration": {
+        "mode": "unsupported",
+        "edge": null,
+        "runbook": "docs/migrations/pre-segmented-store-generations.md"
+      },
       "removal_gate": null,
       "conformance": [
         "protocol",
@@ -1708,7 +1800,7 @@
         {
           "path": "plugins/agent-interaction/schemas/agent-protocol.schema.json",
           "id": "https://cymule.dev/schemas/agent-protocol.schema.json",
-          "canonical_digest": "sha256:c4087c5cd6598ed67faa032d9126e7f980dc328aad1a1413611204461e39d7c6",
+          "canonical_digest": "sha256:7e0d6134e8a95bf094735c4e081572728f4bc7bca2ef7dcf2ff51b7682a37cf2",
           "root": true
         }
       ],
@@ -1771,7 +1863,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/journal_prefix_replacement_authority",
           "root": false
         }
@@ -1838,7 +1930,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "root": false,
           "fragment": "#/$defs/journal_prefix_replacement_receipt"
         }
@@ -1903,7 +1995,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/journal_prefix",
           "root": false
         }
@@ -2120,14 +2212,14 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/artifact_ref",
           "root": false
         },
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/artifactRef",
           "root": false
         }
@@ -2341,14 +2433,14 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/state_log_node",
           "root": false
         },
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/state_log_root",
           "root": false
         }
@@ -2504,14 +2596,14 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/state_map_node",
           "root": false
         },
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/state_map_root",
           "root": false
         }
@@ -2677,7 +2769,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/cancellationReasonRef",
           "root": false
         }
@@ -2766,14 +2858,14 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/clock_observation",
           "root": false
         },
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/clockObservationRef",
           "root": false
         }
@@ -2917,7 +3009,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/command_admission",
           "root": false
         }
@@ -3240,7 +3332,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/command_archive_header",
           "root": false
         }
@@ -3383,7 +3475,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/command_batch",
           "root": false
         }
@@ -3664,7 +3756,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/command_index_proof",
           "root": false
         }
@@ -3731,7 +3823,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/command_envelope",
           "root": false
         }
@@ -3862,7 +3954,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/componentOccurrence",
           "root": false
         }
@@ -4052,7 +4144,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/executionClaim",
           "root": false
         }
@@ -4133,7 +4225,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/continuation",
           "root": false
         },
@@ -4289,7 +4381,7 @@
       ],
       "depends_on": [
         "cymule.agent-command-id/1",
-        "cymule.agent-command/2",
+        "cymule.agent-command/3",
         "cymule.artifact/2",
         "cymule.clock-observation/2",
         "cymule.command-batch-receipt/1",
@@ -4334,7 +4426,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/coupled_checkpoint_receipt",
           "root": false
         }
@@ -4671,7 +4763,7 @@
         "cymule.command-index-node/1",
         "cymule.durable-gc-receipt/2",
         "cymule.durable-head/2",
-        "cymule.durable-state-root/3"
+        "cymule.durable-state-root/4"
       ],
       "consumers": {
         "schemas": [],
@@ -4870,7 +4962,7 @@
       "depends_on": [
         "cymule.durable-physical-token/2",
         "cymule.durable-revision/3",
-        "cymule.durable-state-root/3",
+        "cymule.durable-state-root/4",
         "cymule.jcs/1"
       ],
       "consumers": {
@@ -4904,7 +4996,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/gc_receipt",
           "root": false
         }
@@ -4944,7 +5036,7 @@
         "cymule.command/6",
         "cymule.durable-gc-receipt/2",
         "cymule.durable-physical-token/2",
-        "cymule.durable-state-root/3",
+        "cymule.durable-state-root/4",
         "cymule.event/8",
         "cymule.machine-base-anchor/2"
       ],
@@ -4957,7 +5049,7 @@
         "cymule.durable-gc-receipt/2",
         "cymule.durable-physical-token/2",
         "cymule.durable-revision/3",
-        "cymule.durable-state-root/3",
+        "cymule.durable-state-root/4",
         "cymule.event/8",
         "cymule.machine-authority-root/2",
         "cymule.machine-base-anchor/2"
@@ -4993,7 +5085,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "root": true
         }
       ],
@@ -5032,7 +5124,7 @@
         "cymule.command-archive-segment/4",
         "cymule.command-index-node/1",
         "cymule.durable-gc-receipt/2",
-        "cymule.durable-state-root/3",
+        "cymule.durable-state-root/4",
         "cymule.jcs/1"
       ],
       "consumers": {
@@ -5066,7 +5158,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/physical_token",
           "root": false
         }
@@ -5134,7 +5226,7 @@
     },
     {
       "domain": "cymule.durable-state-root",
-      "version": "cymule.durable-state-root/3",
+      "version": "cymule.durable-state-root/4",
       "defined_at_source_snapshot_digest": null,
       "kind": "persistence",
       "owner": "cymule-durable",
@@ -5160,7 +5252,7 @@
         "cymule.command-admission/3",
         "cymule.command-index-proof/2",
         "cymule.command/6",
-        "cymule.durable-state-value/3",
+        "cymule.durable-state-value/4",
         "cymule.durable-state/7",
         "cymule.machine-authority-frontier/3",
         "cymule.machine-base-anchor/2",
@@ -5169,7 +5261,7 @@
         "cymule.machine-scope-current/1",
         "cymule.machine-snapshot/11",
         "cymule.pending-wait-source/1",
-        "cymule.run-query-indexes/2"
+        "cymule.run-query-indexes/3"
       ],
       "depends_on": [
         "cymule.authenticated-log-node/1",
@@ -5178,7 +5270,7 @@
         "cymule.command-index-proof/2",
         "cymule.command/6",
         "cymule.durable-revision/3",
-        "cymule.durable-state-value/3",
+        "cymule.durable-state-value/4",
         "cymule.durable-state/7",
         "cymule.jcs/1",
         "cymule.machine-authority-frontier/3",
@@ -5190,7 +5282,7 @@
         "cymule.machine-scope-current/1",
         "cymule.machine-snapshot/11",
         "cymule.pending-wait-source/1",
-        "cymule.run-query-indexes/2"
+        "cymule.run-query-indexes/3"
       ],
       "consumers": {
         "schemas": [
@@ -5211,7 +5303,11 @@
         "schemas/durable-storage.schema.json"
       ],
       "compatibility_mode": null,
-      "migration": null,
+      "migration": {
+        "mode": "unsupported",
+        "edge": null,
+        "runbook": "docs/migrations/pre-segmented-store-generations.md"
+      },
       "removal_gate": null,
       "conformance": [
         "protocol",
@@ -5223,7 +5319,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/state_root_object",
           "root": false
         }
@@ -5235,7 +5331,7 @@
     },
     {
       "domain": "cymule.durable-state-value",
-      "version": "cymule.durable-state-value/3",
+      "version": "cymule.durable-state-value/4",
       "defined_at_source_snapshot_digest": null,
       "kind": "persistence",
       "owner": "cymule-durable",
@@ -5267,7 +5363,7 @@
         "cymule.machine-run-current/2",
         "cymule.machine-scope-current/1",
         "cymule.pending-wait-source/1",
-        "cymule.run-query-indexes/2"
+        "cymule.run-query-indexes/3"
       ],
       "depends_on": [
         "cymule.application-journal-prefix-replacement-authority/2",
@@ -5285,7 +5381,7 @@
         "cymule.machine-run-current/2",
         "cymule.machine-scope-current/1",
         "cymule.pending-wait-source/1",
-        "cymule.run-query-indexes/2"
+        "cymule.run-query-indexes/3"
       ],
       "consumers": {
         "schemas": [
@@ -5306,7 +5402,11 @@
         "schemas/durable-storage.schema.json"
       ],
       "compatibility_mode": null,
-      "migration": null,
+      "migration": {
+        "mode": "unsupported",
+        "edge": null,
+        "runbook": "docs/migrations/pre-segmented-store-generations.md"
+      },
       "removal_gate": null,
       "conformance": [
         "protocol",
@@ -5318,7 +5418,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/state_value_object",
           "root": false
         }
@@ -5420,7 +5520,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/durable_state",
           "root": false
         }
@@ -5492,7 +5592,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/effect_args_ref",
           "root": false
         }
@@ -5510,6 +5610,7 @@
       "owner": "cymule-core",
       "writers": [
         "cymule-core",
+        "cymule-durable",
         "cymule-runtime"
       ],
       "readers": [
@@ -5529,11 +5630,13 @@
       "embeds": [
         "cymule.artifact/2",
         "cymule.effect-args/1",
+        "cymule.effect-result/1",
         "cymule.execution-binding/2"
       ],
       "depends_on": [
         "cymule.artifact/2",
         "cymule.effect-args/1",
+        "cymule.effect-result/1",
         "cymule.effect-schema/1",
         "cymule.execution-binding/2",
         "cymule.invocation/2",
@@ -5572,7 +5675,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/effectDispatch",
           "root": false
         }
@@ -5772,7 +5875,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/effectResolutionReceipt",
           "root": false
         }
@@ -5847,7 +5950,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/effectResultRef",
           "root": false
         }
@@ -5926,7 +6029,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/effect_projection",
           "root": false
         }
@@ -6075,16 +6178,17 @@
         "cymule.durable-state/7",
         "cymule.effect-intent/2",
         "cymule.effect-resolution-receipt/1",
+        "cymule.effect-result/1",
         "cymule.evolution-control/5",
         "cymule.evolution-persistence-command/4",
         "cymule.evolution-persistence-receipt/4",
         "cymule.execution-binding/2",
-        "cymule.framework-resource-handle/3",
+        "cymule.framework-resource-handle/4",
         "cymule.ir/3",
         "cymule.live-evolution-control/6",
         "cymule.operation-attempt/2",
         "cymule.plan/1",
-        "cymule.resource/3",
+        "cymule.resource/4",
         "cymule.run-cancellation-receipt/1",
         "cymule.subflow-revision/2",
         "cymule.wait-activation-receipt/3",
@@ -6101,16 +6205,17 @@
         "cymule.durable-state/7",
         "cymule.effect-intent/2",
         "cymule.effect-resolution-receipt/1",
+        "cymule.effect-result/1",
         "cymule.evolution-control/5",
         "cymule.evolution-persistence-command/4",
         "cymule.evolution-persistence-receipt/4",
         "cymule.execution-binding/2",
-        "cymule.framework-resource-handle/3",
+        "cymule.framework-resource-handle/4",
         "cymule.ir/3",
         "cymule.live-evolution-control/6",
         "cymule.operation-attempt/2",
         "cymule.plan/1",
-        "cymule.resource/3",
+        "cymule.resource/4",
         "cymule.run-cancellation-receipt/1",
         "cymule.subflow-revision/2",
         "cymule.wait-activation-receipt/3",
@@ -6148,7 +6253,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "root": true
         }
       ],
@@ -6269,7 +6374,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/core_event",
           "root": false
         }
@@ -6757,7 +6862,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/evolutionPersistenceCommand",
           "root": false
         }
@@ -6847,7 +6952,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/evolutionPersistenceReceipt",
           "root": false
         }
@@ -7276,7 +7381,7 @@
     },
     {
       "domain": "cymule.framework-resource-handle",
-      "version": "cymule.framework-resource-handle/3",
+      "version": "cymule.framework-resource-handle/4",
       "kind": "semantic",
       "owner": "cymule-profile-protocol",
       "writers": [
@@ -7297,14 +7402,14 @@
       "embeds": [
         "cymule.artifact-type-contract/1",
         "cymule.resource-manifest/3",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.artifact-type-contract/1",
         "cymule.artifact/2",
         "cymule.jcs/1",
         "cymule.resource-manifest/3",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [],
@@ -7641,7 +7746,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/history_compaction",
           "root": false
         }
@@ -7757,7 +7862,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/run_input_ref",
           "root": false
         }
@@ -8432,7 +8537,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/machine_authority_frontier",
           "root": false
         }
@@ -8558,7 +8663,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "root": false,
           "fragment": "#/$defs/machine_base_anchor"
         }
@@ -8752,7 +8857,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/machine_delta",
           "root": false
         }
@@ -9065,7 +9170,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/machine_paged_transition_current",
           "root": false
         }
@@ -9413,7 +9518,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/machine_run_current",
           "root": false
         }
@@ -9524,7 +9629,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/machine_scope_current",
           "root": false
         }
@@ -9699,7 +9804,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/machine_snapshot",
           "root": false
         }
@@ -10020,7 +10125,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/operationAttempt",
           "root": false
         }
@@ -10094,7 +10199,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/pending_wait_source",
           "root": false
         }
@@ -11568,14 +11673,14 @@
         "cymule.resource-locators/2",
         "cymule.resource-manifest/3",
         "cymule.resource-retention-key/1",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.jcs/1",
         "cymule.resource-locators/2",
         "cymule.resource-manifest/3",
         "cymule.resource-retention-key/1",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [],
@@ -11869,14 +11974,14 @@
         "cymule.resource-cleanup-receipt/2",
         "cymule.resource-fs/6",
         "cymule.resource-locators/2",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.resource-cleanup-plan/1",
         "cymule.resource-cleanup-receipt/2",
         "cymule.resource-fs/6",
         "cymule.resource-locators/2",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [],
@@ -12109,7 +12214,7 @@
         {
           "path": "schemas/resource.schema.json",
           "id": "https://cymule.dev/schemas/resource.schema.json",
-          "canonical_digest": "sha256:bd5a1586ac1a684087cb9692ae18792cd9d36ec6849678d2a8cc72cdaf7794e1",
+          "canonical_digest": "sha256:eda0c9d1a1f8fe2c07d2c7e8ce1df4d42f7f024895b1c6b6c9c1da58e6ba1fc5",
           "fragment": "#/$defs/resourceHandoffActivation",
           "root": false
         }
@@ -12193,12 +12298,12 @@
       "embeds": [
         "cymule.artifact/2",
         "cymule.component-occurrence/4",
-        "cymule.framework-resource-handle/3"
+        "cymule.framework-resource-handle/4"
       ],
       "depends_on": [
         "cymule.artifact/2",
         "cymule.component-occurrence/4",
-        "cymule.framework-resource-handle/3"
+        "cymule.framework-resource-handle/4"
       ],
       "consumers": {
         "schemas": [
@@ -12232,7 +12337,7 @@
         {
           "path": "schemas/resource.schema.json",
           "id": "https://cymule.dev/schemas/resource.schema.json",
-          "canonical_digest": "sha256:bd5a1586ac1a684087cb9692ae18792cd9d36ec6849678d2a8cc72cdaf7794e1",
+          "canonical_digest": "sha256:eda0c9d1a1f8fe2c07d2c7e8ce1df4d42f7f024895b1c6b6c9c1da58e6ba1fc5",
           "fragment": "#/$defs/resourceHandoff",
           "root": false
         }
@@ -12249,7 +12354,7 @@
     },
     {
       "domain": "cymule.resource-lifecycle-receipt-ref",
-      "version": "cymule.resource-lifecycle-receipt-ref/2",
+      "version": "cymule.resource-lifecycle-receipt-ref/3",
       "kind": "receipt",
       "owner": "cymule-profile-protocol",
       "writers": [
@@ -12280,7 +12385,11 @@
         "crates/cymule-profile-protocol/src/resource.rs"
       ],
       "compatibility_mode": null,
-      "migration": null,
+      "migration": {
+        "mode": "unsupported",
+        "edge": null,
+        "runbook": "docs/migrations/pre-segmented-store-generations.md"
+      },
       "removal_gate": null,
       "conformance": [
         "rust-profile-protocol"
@@ -12316,14 +12425,14 @@
         "cymule.resource-list-progress/3",
         "cymule.resource-locators/2",
         "cymule.resource-manifest/3",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.jcs/1",
         "cymule.resource-list-progress/3",
         "cymule.resource-locators/2",
         "cymule.resource-manifest/3",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [
@@ -12354,7 +12463,7 @@
         {
           "path": "schemas/resource.schema.json",
           "id": "https://cymule.dev/schemas/resource.schema.json",
-          "canonical_digest": "sha256:bd5a1586ac1a684087cb9692ae18792cd9d36ec6849678d2a8cc72cdaf7794e1",
+          "canonical_digest": "sha256:eda0c9d1a1f8fe2c07d2c7e8ce1df4d42f7f024895b1c6b6c9c1da58e6ba1fc5",
           "fragment": "#/$defs/listCursor",
           "root": false
         }
@@ -12388,14 +12497,14 @@
         "cymule.resource-locators/2",
         "cymule.resource-manifest-leaf/2",
         "cymule.resource-manifest/3",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.jcs/1",
         "cymule.resource-locators/2",
         "cymule.resource-manifest-leaf/2",
         "cymule.resource-manifest/3",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [],
@@ -12444,7 +12553,7 @@
         "cymule.resource-manifest-leaf/2",
         "cymule.resource-manifest-node/2",
         "cymule.resource-manifest/3",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.jcs/1",
@@ -12452,7 +12561,7 @@
         "cymule.resource-manifest-leaf/2",
         "cymule.resource-manifest-node/2",
         "cymule.resource-manifest/3",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [
@@ -12481,7 +12590,7 @@
         {
           "path": "schemas/resource.schema.json",
           "id": "https://cymule.dev/schemas/resource.schema.json",
-          "canonical_digest": "sha256:bd5a1586ac1a684087cb9692ae18792cd9d36ec6849678d2a8cc72cdaf7794e1",
+          "canonical_digest": "sha256:eda0c9d1a1f8fe2c07d2c7e8ce1df4d42f7f024895b1c6b6c9c1da58e6ba1fc5",
           "fragment": "#/$defs/listProof",
           "root": false
         }
@@ -12548,7 +12657,7 @@
         {
           "path": "schemas/resource.schema.json",
           "id": "https://cymule.dev/schemas/resource.schema.json",
-          "canonical_digest": "sha256:bd5a1586ac1a684087cb9692ae18792cd9d36ec6849678d2a8cc72cdaf7794e1",
+          "canonical_digest": "sha256:eda0c9d1a1f8fe2c07d2c7e8ce1df4d42f7f024895b1c6b6c9c1da58e6ba1fc5",
           "fragment": "#/$defs/locatorSet",
           "root": false
         }
@@ -12674,11 +12783,11 @@
         }
       ],
       "embeds": [
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.jcs/1",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [],
@@ -12823,7 +12932,7 @@
         {
           "path": "schemas/resource.schema.json",
           "id": "https://cymule.dev/schemas/resource.schema.json",
-          "canonical_digest": "sha256:bd5a1586ac1a684087cb9692ae18792cd9d36ec6849678d2a8cc72cdaf7794e1",
+          "canonical_digest": "sha256:eda0c9d1a1f8fe2c07d2c7e8ce1df4d42f7f024895b1c6b6c9c1da58e6ba1fc5",
           "fragment": "#/$defs/manifestDescriptor",
           "root": false
         }
@@ -12858,12 +12967,12 @@
       ],
       "embeds": [
         "cymule.resource-catalog-record/2",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.jcs/1",
         "cymule.resource-catalog-record/2",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [],
@@ -13135,14 +13244,14 @@
         "cymule.resource-cleanup-receipt/2",
         "cymule.resource-locators/2",
         "cymule.resource-object-store/5",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.resource-cleanup-plan/1",
         "cymule.resource-cleanup-receipt/2",
         "cymule.resource-locators/2",
         "cymule.resource-object-store/5",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [],
@@ -13218,7 +13327,7 @@
     },
     {
       "domain": "cymule.resource-pin-current",
-      "version": "cymule.resource-pin-current/1",
+      "version": "cymule.resource-pin-current/2",
       "kind": "persistence",
       "owner": "cymule-profile-protocol",
       "writers": [
@@ -13249,7 +13358,11 @@
         "crates/cymule-profile-protocol/src/resource.rs"
       ],
       "compatibility_mode": null,
-      "migration": null,
+      "migration": {
+        "mode": "unsupported",
+        "edge": null,
+        "runbook": "docs/migrations/pre-segmented-store-generations.md"
+      },
       "removal_gate": null,
       "conformance": [
         "rust-profile-protocol"
@@ -13298,6 +13411,7 @@
         ],
         "packages": [
           "cymule",
+          "cymule-agent",
           "cymule-profile-protocol",
           "cymule-resource"
         ]
@@ -13315,7 +13429,8 @@
       ],
       "schemas": [],
       "literal_locations": [
-        "crates/cymule-profile-protocol/src/resource.rs"
+        "crates/cymule-profile-protocol/src/resource.rs",
+        "plugins/agent-interaction/schemas/agent-protocol.schema.json"
       ],
       "defined_at_source_snapshot_digest": null
     },
@@ -13495,6 +13610,7 @@
         ],
         "packages": [
           "cymule",
+          "cymule-agent",
           "cymule-profile-protocol"
         ]
       },
@@ -13510,7 +13626,8 @@
       ],
       "schemas": [],
       "literal_locations": [
-        "crates/cymule-profile-protocol/src/resource.rs"
+        "crates/cymule-profile-protocol/src/resource.rs",
+        "plugins/agent-interaction/schemas/agent-protocol.schema.json"
       ],
       "defined_at_source_snapshot_digest": null
     },
@@ -13537,12 +13654,12 @@
       ],
       "embeds": [
         "cymule.resource-locators/2",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.jcs/1",
         "cymule.resource-locators/2",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "consumers": {
         "schemas": [],
@@ -13601,6 +13718,7 @@
         ],
         "packages": [
           "cymule",
+          "cymule-agent",
           "cymule-profile-protocol"
         ]
       },
@@ -13616,13 +13734,14 @@
       ],
       "schemas": [],
       "literal_locations": [
-        "crates/cymule-profile-protocol/src/resource.rs"
+        "crates/cymule-profile-protocol/src/resource.rs",
+        "plugins/agent-interaction/schemas/agent-protocol.schema.json"
       ],
       "defined_at_source_snapshot_digest": null
     },
     {
       "domain": "cymule.resource",
-      "version": "cymule.resource/3",
+      "version": "cymule.resource/4",
       "kind": "semantic",
       "owner": "cymule-profile-protocol",
       "writers": [
@@ -13707,7 +13826,7 @@
         {
           "path": "schemas/resource.schema.json",
           "id": "https://cymule.dev/schemas/resource.schema.json",
-          "canonical_digest": "sha256:bd5a1586ac1a684087cb9692ae18792cd9d36ec6849678d2a8cc72cdaf7794e1",
+          "canonical_digest": "sha256:eda0c9d1a1f8fe2c07d2c7e8ce1df4d42f7f024895b1c6b6c9c1da58e6ba1fc5",
           "root": true
         }
       ],
@@ -14125,7 +14244,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/cancellationReceipt",
           "root": false
         }
@@ -14141,7 +14260,7 @@
     },
     {
       "domain": "cymule.run-query-indexes",
-      "version": "cymule.run-query-indexes/2",
+      "version": "cymule.run-query-indexes/3",
       "kind": "persistence",
       "owner": "cymule-durable",
       "writers": [
@@ -14160,11 +14279,11 @@
       ],
       "embeds": [
         "cymule.authenticated-map-node/1",
-        "cymule.durable-state-root/3"
+        "cymule.durable-state-root/4"
       ],
       "depends_on": [
         "cymule.authenticated-map-node/1",
-        "cymule.durable-state-root/3"
+        "cymule.durable-state-root/4"
       ],
       "consumers": {
         "schemas": [
@@ -14183,7 +14302,11 @@
         "schemas/durable-storage.schema.json"
       ],
       "compatibility_mode": null,
-      "migration": null,
+      "migration": {
+        "mode": "unsupported",
+        "edge": null,
+        "runbook": "docs/migrations/pre-segmented-store-generations.md"
+      },
       "removal_gate": null,
       "conformance": [
         "protocol",
@@ -14193,7 +14316,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/run_query_indexes",
           "root": false
         }
@@ -14232,7 +14355,7 @@
       ],
       "depends_on": [
         "cymule.artifact/2",
-        "cymule.durable-state-root/3",
+        "cymule.durable-state-root/4",
         "cymule.execution-binding/2",
         "cymule.jcs/1",
         "cymule.plan/1"
@@ -14610,7 +14733,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/snapshot_record",
           "root": false
         }
@@ -14656,7 +14779,7 @@
         "cymule.command-index-node/1",
         "cymule.durable-gc-receipt/2",
         "cymule.durable-head/2",
-        "cymule.durable-state-root/3"
+        "cymule.durable-state-root/4"
       ],
       "consumers": {
         "schemas": [],
@@ -14766,7 +14889,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/subflowRevision",
           "root": false
         }
@@ -15649,13 +15772,13 @@
       "embeds": [
         "cymule.resource-catalog-record/2",
         "cymule.resource-locators/2",
-        "cymule.resource/3"
+        "cymule.resource/4"
       ],
       "depends_on": [
         "cymule.jcs/1",
         "cymule.resource-catalog-record/2",
         "cymule.resource-locators/2",
-        "cymule.resource/3",
+        "cymule.resource/4",
         "cymule.virtual-archive-manifest/2",
         "cymule.virtual-archive-write/2"
       ],
@@ -16069,7 +16192,7 @@
       "embeds": [],
       "depends_on": [
         "cymule.jcs/1",
-        "cymule.resource/3",
+        "cymule.resource/4",
         "cymule.virtual-archive-manifest/2"
       ],
       "consumers": {
@@ -16261,8 +16384,8 @@
       "embeds": [
         "cymule.artifact/2",
         "cymule.execution-binding/2",
-        "cymule.framework-resource-handle/3",
-        "cymule.resource/3",
+        "cymule.framework-resource-handle/4",
+        "cymule.resource/4",
         "cymule.virtual-archive-occurrence-leaf/1",
         "cymule.virtual-archive-occurrence-node/1",
         "cymule.virtual-archive-work-empty-leaf/1",
@@ -16273,9 +16396,9 @@
       "depends_on": [
         "cymule.artifact/2",
         "cymule.execution-binding/2",
-        "cymule.framework-resource-handle/3",
+        "cymule.framework-resource-handle/4",
         "cymule.jcs/1",
-        "cymule.resource/3",
+        "cymule.resource/4",
         "cymule.virtual-archive-occurrence-leaf/1",
         "cymule.virtual-archive-occurrence-node/1",
         "cymule.virtual-archive-work-empty-leaf/1",
@@ -17154,7 +17277,7 @@
         "cymule.resource-locators/2",
         "cymule.resource-pin-receipt/3",
         "cymule.resource-release-receipt/3",
-        "cymule.resource/3",
+        "cymule.resource/4",
         "cymule.virtual-archive-command-index-proof/1",
         "cymule.virtual-archive-retirement-control/1",
         "cymule.virtual-archive-work-proof/1",
@@ -17181,7 +17304,7 @@
         "cymule.resource-locators/2",
         "cymule.resource-pin-receipt/3",
         "cymule.resource-release-receipt/3",
-        "cymule.resource/3",
+        "cymule.resource/4",
         "cymule.virtual-archive-command-index-proof/1",
         "cymule.virtual-archive-retirement-control/1",
         "cymule.virtual-archive-work-proof/1",
@@ -18242,7 +18365,7 @@
         {
           "path": "schemas/durable-storage.schema.json",
           "id": "https://cymule.dev/schemas/durable-storage.schema.json",
-          "canonical_digest": "sha256:fc35a070bfd073de88b0c4361297b04d0031f85fdf4dfac3b5d9d83f68945f92",
+          "canonical_digest": "sha256:42e278bf41ce609e98baabcbfc2f83a31bd46a0856e4100443381a7d83b1c8a6",
           "fragment": "#/$defs/wait_activation_receipt",
           "root": false
         }
@@ -18453,7 +18576,7 @@
         {
           "path": "schemas/engine-protocol.schema.json",
           "id": "https://cymule.dev/schemas/engine-protocol.schema.json",
-          "canonical_digest": "sha256:c35a7c191aa1cd85e8a6a244b0c444d47de39de3d4b28251aaad0ab4b1f64f43",
+          "canonical_digest": "sha256:af5ff5556510785faf132ff5cf6f7113e593551c61789beaacde448375a7ed47",
           "fragment": "#/$defs/waitCondition",
           "root": false
         },
