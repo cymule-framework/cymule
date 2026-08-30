@@ -1039,12 +1039,17 @@ func TestCliEngineClassifiesPostStartInterruptionByMutation(t *testing.T) {
 func TestAwaitEngineProcessPrefersAnAlreadyCompletedNaturalExit(t *testing.T) {
 	for _, testCase := range []struct {
 		name      string
-		interrupt func(chan<- time.Time, chan<- struct{})
+		interrupt func(chan<- time.Time, *EngineCancellation)
 	}{
-		{"deadline", func(deadline chan<- time.Time, _ chan<- struct{}) { deadline <- time.Now() }},
-		{"cancellation", func(_ chan<- time.Time, cancellation chan<- struct{}) { cancellation <- struct{}{} }},
+		{"deadline", func(deadline chan<- time.Time, _ *EngineCancellation) { deadline <- time.Now() }},
+		{"cancellation", func(_ chan<- time.Time, cancellation *EngineCancellation) { cancellation.Cancel() }},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			cancellation := NewEngineCancellation()
+			call, ok := cancellation.begin()
+			if !ok {
+				t.Fatal("fresh Engine call was already cancelled")
+			}
 			command := exec.Command("/usr/bin/true")
 			stdinPipe, err := command.StdinPipe()
 			if err != nil {
@@ -1058,7 +1063,7 @@ func TestAwaitEngineProcessPrefersAnAlreadyCompletedNaturalExit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := command.Start(); err != nil {
+			if err := call.start(command); err != nil {
 				t.Fatal(err)
 			}
 			stdoutDone := make(chan error, 1)
@@ -1077,12 +1082,14 @@ func TestAwaitEngineProcessPrefersAnAlreadyCompletedNaturalExit(t *testing.T) {
 				}
 				time.Sleep(time.Millisecond)
 			}
+			if !call.observeTerminal() {
+				t.Fatal("completed Child did not win terminal arbitration")
+			}
 			deadline := make(chan time.Time, 1)
-			cancellation := make(chan struct{}, 1)
 			testCase.interrupt(deadline, cancellation)
 			result := awaitEngineProcess(
 				deadline,
-				cancellation,
+				call.done(),
 				command,
 				stdinPipe,
 				stdoutPipe,
@@ -1092,6 +1099,7 @@ func TestAwaitEngineProcessPrefersAnAlreadyCompletedNaturalExit(t *testing.T) {
 				stderrDone,
 				make(chan string),
 				engineProcessExitedWithoutReaping,
+				call.observeTerminal,
 				terminateEngineProcess,
 			)
 			if result.waitErr != nil || result.inputErr != nil || result.stdoutErr != nil ||
@@ -1101,7 +1109,79 @@ func TestAwaitEngineProcessPrefersAnAlreadyCompletedNaturalExit(t *testing.T) {
 					result.waitErr, result.interruption, result.terminationErr,
 				)
 			}
+			if !call.complete() {
+				t.Fatal("completed Child was reclassified during outcome settlement")
+			}
 		})
+	}
+}
+
+func TestAwaitEngineProcessJoinsReadersBeforeReturningCompletedOutput(t *testing.T) {
+	command := exec.Command("/usr/bin/true")
+	stdinPipe, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutPipe, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderrPipe, err := command.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		exited, err := engineProcessExitedWithoutReaping(command.Process.Pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exited {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	inputDone := make(chan error, 1)
+	inputDone <- stdinPipe.Close()
+	stdoutDone := make(chan error, 1)
+	stderrDone := make(chan error, 1)
+	deadline := make(chan time.Time, 1)
+	deadline <- time.Now()
+	claimed := make(chan struct{})
+	result := make(chan engineProcessResult, 1)
+	go func() {
+		result <- awaitEngineProcess(
+			deadline,
+			make(chan struct{}),
+			command,
+			stdinPipe,
+			stdoutPipe,
+			stderrPipe,
+			inputDone,
+			stdoutDone,
+			stderrDone,
+			make(chan string),
+			engineProcessExitedWithoutReaping,
+			func() bool {
+				close(claimed)
+				return true
+			},
+			terminateEngineProcess,
+		)
+	}()
+	<-claimed
+	select {
+	case <-result:
+		t.Fatal("completed Engine returned before its local readers joined")
+	default:
+	}
+	stdoutDone <- nil
+	stderrDone <- nil
+	completed := <-result
+	if completed.waitErr != nil || completed.stdoutErr != nil || completed.stderrErr != nil {
+		t.Fatalf("completed Engine reader join failed: %#v", completed)
 	}
 }
 
@@ -1149,6 +1229,7 @@ func TestAwaitEngineProcessKillsAndReapsOnOverflow(t *testing.T) {
 		stderrDone,
 		overflow.events,
 		engineProcessExitedWithoutReaping,
+		func() bool { return true },
 		terminateEngineProcess,
 	)
 	if result.overflowCode != "engine_output_limit_exceeded" || result.terminationErr != nil {
@@ -1204,6 +1285,7 @@ func TestAwaitEngineProcessTerminatesAndReapsOnWaitAuthorityError(t *testing.T) 
 		stderrDone,
 		make(chan string),
 		func(int) (bool, error) { return false, waitAuthorityErr },
+		func() bool { return true },
 		terminateEngineProcess,
 	)
 	if !errors.Is(result.terminationErr, waitAuthorityErr) {
@@ -1256,6 +1338,7 @@ func TestCancellationDoesNotOverrideTerminationFailure(t *testing.T) {
 		stderrDone,
 		make(chan string),
 		engineProcessExitedWithoutReaping,
+		func() bool { return true },
 		func(
 			command *exec.Cmd,
 			stdinPipe io.Closer,

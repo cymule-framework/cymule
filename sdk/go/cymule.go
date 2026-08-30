@@ -6174,6 +6174,7 @@ func (cancellation *EngineCancellation) Cancel() {
 type engineCall struct {
 	cancellation *EngineCancellation
 	active       bool
+	terminal     bool
 }
 
 func (cancellation *EngineCancellation) begin() (*engineCall, bool) {
@@ -6204,7 +6205,23 @@ func (call *engineCall) complete() bool {
 		return false
 	}
 	call.active = false
-	return !call.cancellation.cancelled
+	return call.terminal || !call.cancellation.cancelled
+}
+
+func (call *engineCall) observeTerminal() bool {
+	call.cancellation.mu.Lock()
+	defer call.cancellation.mu.Unlock()
+	if !call.active {
+		return false
+	}
+	if call.terminal {
+		return true
+	}
+	if call.cancellation.cancelled {
+		return false
+	}
+	call.terminal = true
+	return true
 }
 
 func (call *engineCall) abandon() {
@@ -7578,6 +7595,7 @@ func (engine CliEngine) request(request any, response any) error {
 		stderrDone,
 		overflow.events,
 		engineProcessExitedWithoutReaping,
+		call.observeTerminal,
 		terminateEngineProcess,
 	)
 	if processErr := classifyEngineProcessResult(request, processResult); processErr != nil {
@@ -7630,6 +7648,7 @@ func awaitEngineProcess(
 	stderrDone <-chan error,
 	overflow <-chan string,
 	processExited func(int) (bool, error),
+	claimNaturalExit func() bool,
 	terminateProcess func(*exec.Cmd, io.Closer, io.Closer, io.Closer) (error, error),
 ) engineProcessResult {
 	var result engineProcessResult
@@ -7638,20 +7657,30 @@ func awaitEngineProcess(
 	stdoutComplete := false
 	stderrComplete := false
 	childExited := false
+	naturalExit := false
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
 	terminate := func() (error, error) {
 		return terminateProcess(command, stdinPipe, stdoutPipe, stderrPipe)
 	}
-	reapExited := func() error {
-		if !inputComplete {
-			result.inputErr = io.ErrClosedPipe
-		}
+	finishExited := func() {
 		_ = stdinPipe.Close()
 		_ = stdoutPipe.Close()
 		_ = stderrPipe.Close()
-		return command.Wait()
+		if !inputComplete {
+			result.inputErr = <-inputDone
+			inputComplete = true
+		}
+		if !stdoutComplete {
+			result.stdoutErr = <-stdoutDone
+			stdoutComplete = true
+		}
+		if !stderrComplete {
+			result.stderrErr = <-stderrDone
+			stderrComplete = true
+		}
+		result.waitErr = command.Wait()
 	}
 	for {
 		if !inputComplete {
@@ -7684,33 +7713,34 @@ func awaitEngineProcess(
 			}
 			childExited = exited
 			if childExited {
+				naturalExit = claimNaturalExit()
 				_ = stdinPipe.Close()
 			}
 		}
-		if childExited && inputComplete && stdoutComplete && stderrComplete {
+		if naturalExit && inputComplete && stdoutComplete && stderrComplete {
 			result.waitErr = command.Wait()
 			return result
 		}
 		select {
 		case <-deadline:
-			if childExited {
-				result.waitErr = reapExited()
+			if naturalExit {
+				finishExited()
 				return result
 			}
 			result.waitErr, result.terminationErr = terminate()
 			result.interruption = context.DeadlineExceeded
 			return result
 		case <-cancellationDone:
-			if childExited {
-				result.waitErr = reapExited()
+			if naturalExit {
+				finishExited()
 				return result
 			}
 			result.waitErr, result.terminationErr = terminate()
 			result.interruption = context.Canceled
 			return result
 		case result.overflowCode = <-overflow:
-			if childExited {
-				result.waitErr = reapExited()
+			if naturalExit {
+				finishExited()
 			} else {
 				result.waitErr, result.terminationErr = terminate()
 			}
