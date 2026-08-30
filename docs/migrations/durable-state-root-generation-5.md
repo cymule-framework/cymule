@@ -12,6 +12,8 @@ independent `agent_target_claims` family. The family is the sole authority for
 exclusive `(Session, target kind, local identity)` ownership across ordinary
 Agent Message/Tool writes and Agent stream publication. Agent commands and
 receipts are `cymule.agent-command/4` and `cymule.agent-command-receipt/4`;
+their complete-body identity domains are `cymule.agent-command-id/2` and
+`cymule.agent-command-receipt-id/2`;
 external publication intent and reservation records are `/2`; the Agent schema
 is `cymule.agent/8`.
 
@@ -19,6 +21,8 @@ Generation `/4` cannot represent that claim family or prove that a provider
 publication reservation won the same CAS as every competing target writer.
 Current code therefore rejects `/4` manifests and values. There is no runtime
 importer, mixed reader, inferred claim, dual writer, or decode-failure fallback.
+Generation `/4` command and receipt identities are not reused: `/2` identity
+preimages bind the current selector together with the complete semantic body.
 This reset runbook is valid only when every persisted family may be retired as
 internal test state. A domain that must preserve any historical query, receipt,
 replay, Resource, Evolution, Virtual, journal, or business outcome MUST stop and

@@ -64,6 +64,9 @@
   bind the exact parent source, semantic command, outcome, and ordered typed
   mutations, but never their own result current, physical manifest, revision,
   or CAS token.
+- Agent command and receipt generation `/4` use identity domains `/2`; each ID
+  preimage includes its current selector. Never reuse a predecessor command or
+  receipt identity across a reducer-semantic hard cut.
 - Every leaf, command, receipt, source view, postcondition, page, and fanout has
   a checked count and canonical-byte bound. Account keys, negative lookups, and
   non-serializable source authority in aggregate accounting before provider

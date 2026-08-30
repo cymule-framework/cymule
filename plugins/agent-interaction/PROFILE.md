@@ -368,7 +368,8 @@ Agent/M1 transition.
 ## Wire and compatibility
 
 Current persisted command and receipt selectors are `cymule.agent-command/4`
-and `cymule.agent-command-receipt/4`; bounded Session metadata is
+and `cymule.agent-command-receipt/4`; their complete-body IDs use
+`cymule.agent-command-id/2` and `cymule.agent-command-receipt-id/2`; bounded Session metadata is
 `cymule.agent-session-current/2`, and the current closed schema generation is
 `cymule.agent/8`. Publication intent/reservation use `/2`; target claims use
 `cymule.agent-target-claim-current/1` with separate key and identity domains.

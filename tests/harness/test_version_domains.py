@@ -1429,7 +1429,7 @@ fn quotes(bytes: &[u8]) -> bool {
     def test_agent_session_and_stream_identities_are_registered(self) -> None:
         by_version = {domain["version"]: domain for domain in self.registry["domains"]}
         expected = {
-            "cymule.agent-command-id/1": (
+            "cymule.agent-command-id/2": (
                 "crates/cymule-profile-protocol/src/agent.rs",
                 "AGENT_COMMAND_ID_DOMAIN",
             ),
@@ -1875,7 +1875,9 @@ fn quotes(bytes: &[u8]) -> bool {
         self.assertIn("cymule.agent/8", versions)
         self.assertTrue(
             {
+                "cymule.agent-command-id/2",
                 "cymule.agent-command/4",
+                "cymule.agent-command-receipt-id/2",
                 "cymule.agent-command-receipt/4",
                 "cymule.agent-session-current/2",
                 "cymule.agent-stream-publication-reservation/2",
@@ -1946,8 +1948,12 @@ fn quotes(bytes: &[u8]) -> bool {
             "runbook": "docs/migrations/durable-state-root-generation-5.md",
         }
         for version in (
+            "cymule.agent-command-id/2",
             "cymule.agent-command/4",
+            "cymule.agent-command-receipt-id/2",
             "cymule.agent-command-receipt/4",
+            "cymule.agent-stream-publication-intent/2",
+            "cymule.agent-stream-publication-reservation/2",
             "cymule.agent-target-claim-current/1",
             "cymule.agent/8",
             "cymule.directory-store/5",

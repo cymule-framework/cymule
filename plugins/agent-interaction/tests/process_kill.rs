@@ -2234,8 +2234,13 @@ fn external_not_applied_abort_survives_real_store_process_death() {
 }
 
 #[test]
-fn retained_external_abort_replay_rejects_missing_or_tampered_resource_sidecars() {
+fn retained_external_abort_replay_rejects_missing_or_tampered_terminal_sidecars() {
     for (index, (kind, fault)) in [
+        (StateRootLeafKind::AgentStreamCurrent, SidecarFault::Missing),
+        (
+            StateRootLeafKind::AgentStreamCurrent,
+            SidecarFault::Tampered,
+        ),
         (StateRootLeafKind::ResourcePinCurrent, SidecarFault::Missing),
         (
             StateRootLeafKind::ResourcePinCurrent,

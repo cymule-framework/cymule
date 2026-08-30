@@ -7679,8 +7679,8 @@ pub const AGENT_COMMAND_VERSION: &str = "cymule.agent-command/4";
 /// Closed Agent persistence receipt generation.
 pub const AGENT_COMMAND_RECEIPT_VERSION: &str = "cymule.agent-command-receipt/4";
 
-const AGENT_COMMAND_ID_DOMAIN: &str = "cymule.agent-command-id/1";
-const AGENT_COMMAND_RECEIPT_ID_DOMAIN: &str = "cymule.agent-command-receipt-id/1";
+const AGENT_COMMAND_ID_DOMAIN: &str = "cymule.agent-command-id/2";
+const AGENT_COMMAND_RECEIPT_ID_DOMAIN: &str = "cymule.agent-command-receipt-id/2";
 const AGENT_UPDATE_KEY_DOMAIN: &str = "cymule.agent-update-key/1";
 const AGENT_MESSAGE_KEY_DOMAIN: &str = "cymule.agent-message-key/1";
 const AGENT_TOOL_KEY_DOMAIN: &str = "cymule.agent-tool-key/1";
@@ -7841,10 +7841,7 @@ impl AgentCommand {
         let source_revision = source_revision.into();
         validate_sha256("Agent command source revision", &source_revision)?;
         action.verify()?;
-        let command_id = content_id(
-            AGENT_COMMAND_ID_DOMAIN,
-            &(source_revision.as_str(), &action),
-        )?;
+        let command_id = agent_command_id(&source_revision, &action)?;
         Ok(Self {
             command_version: AGENT_COMMAND_VERSION.to_owned(),
             command_id,
@@ -7867,10 +7864,7 @@ impl AgentCommand {
         )?;
         validate_sha256("Agent command source revision", &self.source_revision)?;
         self.action.verify()?;
-        let expected = content_id(
-            AGENT_COMMAND_ID_DOMAIN,
-            &(self.source_revision.as_str(), &self.action),
-        )?;
+        let expected = agent_command_id(&self.source_revision, &self.action)?;
         if self.command_id != expected {
             return Err(ProtocolError::IdentityMismatch(format!(
                 "Agent command {} does not match {expected}",
@@ -7879,6 +7873,14 @@ impl AgentCommand {
         }
         validate_canonical_size("Agent command", self, MAX_AGENT_COMMAND_BYTES)
     }
+}
+
+fn agent_command_id(source_revision: &str, action: &AgentCommandAction) -> ProtocolResult<String> {
+    content_id(
+        AGENT_COMMAND_ID_DOMAIN,
+        &(AGENT_COMMAND_VERSION, source_revision, action),
+    )
+    .map_err(Into::into)
 }
 
 /// Bounded exact before witness resolved at one command's source revision.
@@ -10104,10 +10106,7 @@ impl AgentCommandReceipt {
         source: AgentCommandSource,
         outcome: AgentCommandOutcome,
     ) -> ProtocolResult<Self> {
-        let receipt_id = content_id(
-            AGENT_COMMAND_RECEIPT_ID_DOMAIN,
-            &(command.command_id.as_str(), &source, &outcome),
-        )?;
+        let receipt_id = agent_command_receipt_id(&command.command_id, &source, &outcome)?;
         let receipt = Self {
             receipt_version: AGENT_COMMAND_RECEIPT_VERSION.to_owned(),
             receipt_id,
@@ -10141,10 +10140,8 @@ impl AgentCommandReceipt {
                 "Agent receipt command identity does not match".to_owned(),
             ));
         }
-        let expected_receipt_id = content_id(
-            AGENT_COMMAND_RECEIPT_ID_DOMAIN,
-            &(self.command_id.as_str(), &self.source, &self.outcome),
-        )?;
+        let expected_receipt_id =
+            agent_command_receipt_id(&self.command_id, &self.source, &self.outcome)?;
         if self.receipt_id != expected_receipt_id {
             return Err(ProtocolError::IdentityMismatch(format!(
                 "Agent command receipt {} does not match {expected_receipt_id}",
@@ -10282,6 +10279,18 @@ impl AgentCommandReceipt {
         }
         Ok(resource_release_receipt.as_ref())
     }
+}
+
+fn agent_command_receipt_id(
+    command_id: &str,
+    source: &AgentCommandSource,
+    outcome: &AgentCommandOutcome,
+) -> ProtocolResult<String> {
+    content_id(
+        AGENT_COMMAND_RECEIPT_ID_DOMAIN,
+        &(AGENT_COMMAND_RECEIPT_VERSION, command_id, source, outcome),
+    )
+    .map_err(Into::into)
 }
 
 /// Derive the immutable Session update identity for one stream finalization.
@@ -11713,6 +11722,12 @@ mod tests {
             },
         )
         .expect("Session command seals");
+        let predecessor_command_id = content_id(
+            "cymule.agent-command-id/1",
+            &(command.source_revision.as_str(), &command.action),
+        )
+        .expect("predecessor command identity derives");
+        assert_ne!(command.command_id, predecessor_command_id);
         let mut predecessor_command = command.clone();
         predecessor_command.command_version = "cymule.agent-command/3".to_owned();
         assert!(predecessor_command.verify().is_err());
@@ -11734,6 +11749,16 @@ mod tests {
             AgentCommandOutcome::Session(postcondition.clone()),
         )
         .expect("exact receipt verifies");
+        let predecessor_receipt_id = content_id(
+            "cymule.agent-command-receipt-id/1",
+            &(
+                predecessor_command_id.as_str(),
+                &receipt.source,
+                &receipt.outcome,
+            ),
+        )
+        .expect("predecessor receipt identity derives");
+        assert_ne!(receipt.receipt_id, predecessor_receipt_id);
         let mut predecessor = receipt;
         predecessor.receipt_version = "cymule.agent-command-receipt/3".to_owned();
         assert!(predecessor.verify_for(&command).is_err());
@@ -13103,15 +13128,9 @@ mod tests {
             .as_mut()
             .expect("receipt retains the Unknown current")
             .occurrence = overflow;
-        receipt.receipt_id = content_id(
-            AGENT_COMMAND_RECEIPT_ID_DOMAIN,
-            &(
-                receipt.command_id.as_str(),
-                &receipt.source,
-                &receipt.outcome,
-            ),
-        )
-        .expect("tampered receipt identity reseals");
+        receipt.receipt_id =
+            agent_command_receipt_id(&receipt.command_id, &receipt.source, &receipt.outcome)
+                .expect("tampered receipt identity reseals");
         assert!(receipt.verify_for(&command).is_err());
         prior
             .verify()

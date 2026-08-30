@@ -6627,10 +6627,10 @@ fn audit_unmaterialized_agent_tool(
 
     match phase {
         AgentTargetClaimPhase::Reserved { .. } => {
-            if tool.is_some_and(agent_tool_is_terminal) {
+            if tool.is_none_or(|tool| tool.tool.status != ToolCallStatus::InProgress) {
                 return Err(DurableError::Integrity {
-                    code: "agent_target_claim_tool_phase_mismatch".to_owned(),
-                    message: "Reserved Agent Tool claim has a terminal target".to_owned(),
+                    code: "agent_target_claim_reserved_tool_invalid".to_owned(),
+                    message: "Reserved Agent Tool claim lost its InProgress target".to_owned(),
                 });
             }
         }
@@ -6660,6 +6660,23 @@ fn audit_agent_claim_currents<R: StateRootResolver + ?Sized>(
         let _ = crate::coordinator::verify_agent_target_claim_current_origin(
             manifest, resolver, claim,
         )?;
+        if let AgentTargetClaimPhase::Released { stream_id, .. } = &claim.phase {
+            let stream =
+                load_agent_stream_current(manifest, resolver, &claim.session_id, stream_id)?
+                    .ok_or_else(|| DurableError::Integrity {
+                        code: "agent_target_claim_released_stream_missing".to_owned(),
+                        message: "Released Agent target claim lost its Aborted stream".to_owned(),
+                    })?;
+            if stream.state != cymule_profile_protocol::agent::AgentStreamState::Aborted
+                || AgentTargetClaimTarget::from_stream_target(&stream.target) != claim.target
+            {
+                return Err(DurableError::Integrity {
+                    code: "agent_target_claim_released_stream_mismatch".to_owned(),
+                    message: "Released Agent target claim changed its Aborted stream".to_owned(),
+                });
+            }
+            audit_terminal_agent_stream(manifest, resolver, &stream)?;
+        }
         let target_key = match &claim.target {
             AgentTargetClaimTarget::Message { message_id } => {
                 cymule_profile_protocol::agent::agent_message_key(&claim.session_id, message_id)?
@@ -15694,6 +15711,39 @@ mod tests {
             audit_unmaterialized_agent_tool(&phase, None),
             Err(DurableError::Integrity { ref code, .. })
                 if code == "agent_target_claim_released_tool_missing"
+        ));
+    }
+
+    #[test]
+    fn reserved_tool_claim_requires_its_inprogress_target_during_full_audit() {
+        let phase = cymule_profile_protocol::agent::AgentTargetClaimPhase::Reserved {
+            stream_id: "stream:reserved-tool-audit".to_owned(),
+            reservation_id: format!("sha256:{}", "b".repeat(64)),
+        };
+        assert!(matches!(
+            audit_unmaterialized_agent_tool(&phase, None),
+            Err(DurableError::Integrity { ref code, .. })
+                if code == "agent_target_claim_reserved_tool_invalid"
+        ));
+        let pending = cymule_profile_protocol::agent::AgentToolCurrent {
+            session_id: "session:reserved-tool-audit".to_owned(),
+            tool: cymule_profile_protocol::agent::ToolCall {
+                tool_call_id: "tool:reserved-tool-audit".to_owned(),
+                operation: "test".to_owned(),
+                status: cymule_profile_protocol::agent::ToolCallStatus::Pending,
+                input: serde_json::Value::Null,
+                output: None,
+                locations: Vec::new(),
+            },
+            admitted_by: format!("sha256:{}", "c".repeat(64)),
+        };
+        pending
+            .verify()
+            .expect("Pending Tool current is valid alone");
+        assert!(matches!(
+            audit_unmaterialized_agent_tool(&phase, Some(&pending)),
+            Err(DurableError::Integrity { ref code, .. })
+                if code == "agent_target_claim_reserved_tool_invalid"
         ));
     }
 

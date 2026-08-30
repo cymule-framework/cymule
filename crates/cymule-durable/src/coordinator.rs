@@ -10702,7 +10702,7 @@ pub(crate) fn verify_agent_stream_finalization_graph<R: crate::StateRootResolver
             message: "Agent finalization command retained a non-final stream outcome".to_owned(),
         });
     };
-    verify_agent_finalized_stream_current(manifest, resolver, stream)?;
+    verify_agent_terminal_stream_current(manifest, resolver, stream)?;
     match (publication_record, resource_pin_receipt) {
         (Some(record), Some(pin_receipt)) => {
             let retained = crate::state_root::load_resource_catalog_record(
@@ -10785,7 +10785,7 @@ pub(crate) fn verify_agent_stream_finalization_graph<R: crate::StateRootResolver
     Ok(())
 }
 
-fn verify_agent_finalized_stream_current<R: crate::StateRootResolver + ?Sized>(
+fn verify_agent_terminal_stream_current<R: crate::StateRootResolver + ?Sized>(
     manifest: &crate::StateRootManifest,
     resolver: &mut R,
     expected: &agent_protocol::AgentStreamCurrent,
@@ -10797,13 +10797,13 @@ fn verify_agent_finalized_stream_current<R: crate::StateRootResolver + ?Sized>(
         &expected.stream_id,
     )?
     .ok_or_else(|| DurableError::Integrity {
-        code: "agent_finalize_stream_current_missing".to_owned(),
-        message: "Agent finalization lost its terminal stream current".to_owned(),
+        code: "agent_terminal_stream_current_missing".to_owned(),
+        message: "Agent terminal receipt lost its stream current".to_owned(),
     })?;
     if retained != *expected {
         return Err(DurableError::Integrity {
-            code: "agent_finalize_stream_current_mismatch".to_owned(),
-            message: "Agent finalization changed its terminal stream current".to_owned(),
+            code: "agent_terminal_stream_current_mismatch".to_owned(),
+            message: "Agent terminal receipt changed its stream current".to_owned(),
         });
     }
     Ok(())
@@ -10842,6 +10842,7 @@ pub(crate) fn verify_agent_stream_abort_graph<R: crate::StateRootResolver + ?Siz
             message: "Agent abort receipt retained another stream outcome".to_owned(),
         });
     };
+    verify_agent_terminal_stream_current(manifest, resolver, &postcondition.stream)?;
     match (resource.as_deref(), resource_release_receipt.as_ref()) {
         (None, None) => Ok(()),
         (Some(_), Some(release)) => {
@@ -14784,6 +14785,11 @@ mod agent_stream_publication_reservation_tests {
             .expect("aborted stream reads");
         assert_eq!(stream.state, agent_protocol::AgentStreamState::Aborted);
         assert!(stream.publication_reservation.is_none());
+        coordinator
+            .read_current_state_root(|manifest, resolver| {
+                crate::reachable_state_root_objects(manifest, resolver).map(|_| ())
+            })
+            .expect("Released claim and Aborted stream pass full audit");
         let session = coordinator
             .read_current_state_root(|manifest, resolver| {
                 require_agent_session(manifest, resolver, SESSION_ID)
