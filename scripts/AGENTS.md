@@ -434,3 +434,7 @@
 - The protocol leaf also runs the complete `cymule-test-adapter` Rust suite.
   Building the conformance executable without executing its process-wire and
   provider-ledger tests is not protocol evidence.
+- Run that self-hosting adapter suite through `verify-rust.sh --conformance`.
+  Cargo must bind `CARGO_BIN_EXE_cymule-test-adapter` to the same stripped,
+  fixed-budget artifact under test; do not point tests at an artifact from an
+  earlier command or enlarge the 64 MiB process-closure contract.

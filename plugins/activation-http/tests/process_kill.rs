@@ -35,7 +35,7 @@ use cymule_runtime::{
 };
 use cymule_store_sqlite::SqliteStore;
 use cymule_test_world::{ManagedChild, TestWorld};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, ErrorCode, OptionalExtension};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -642,11 +642,23 @@ async fn http_process_kill_worker_entry() {
     let response = tokio::spawn(router.oneshot(request(true)));
 
     if mode == "after_ingress" {
-        wait_for_spooled_request(&spool_database).await;
-        assert!(
-            !response.is_finished(),
-            "ingress cannot acknowledge before M1"
-        );
+        loop {
+            if spooled_request_exists(&spool_database).await {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        if response.is_finished() {
+            assert_eq!(
+                response
+                    .await
+                    .expect("completed HTTP ingress task joins")
+                    .expect("completed HTTP ingress responds")
+                    .status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ingress cannot acknowledge before M1",
+            );
+        }
         fs::write(marker, "after_ingress").expect("HTTP ingress barrier writes");
         loop {
             thread::park_timeout(Duration::from_mins(1));
@@ -1356,22 +1368,35 @@ fn assert_activation_closure<S: DurableStore>(
     assert_eq!(wait.result.as_ref(), committed.then_some(&expected_result));
 }
 
-async fn wait_for_spooled_request(path: &Path) {
-    loop {
+async fn spooled_request_exists(path: &Path) -> bool {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
         let connection = Connection::open(path).expect("HTTP spool opens for barrier read");
-        let retained: Option<i64> = connection
+        connection
+            .busy_timeout(Duration::ZERO)
+            .expect("HTTP spool barrier uses non-blocking contention");
+        match connection
             .query_row(
                 "SELECT 1 FROM cymule_http_signals WHERE activation_id = ?1",
                 [ACTIVATION_ID],
-                |row| row.get(0),
+                |row| row.get::<_, i64>(0),
             )
             .optional()
-            .expect("HTTP spool barrier reads");
-        if retained.is_some() {
-            return;
+        {
+            Ok(retained) => retained.is_some(),
+            Err(rusqlite::Error::SqliteFailure(failure, _))
+                if matches!(
+                    failure.code,
+                    ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+                ) =>
+            {
+                false
+            }
+            Err(error) => panic!("HTTP spool barrier read failed: {error}"),
         }
-        tokio::task::yield_now().await;
-    }
+    })
+    .await
+    .expect("HTTP spool barrier task joins")
 }
 
 fn assert_sqlite_integrity(path: &Path) {

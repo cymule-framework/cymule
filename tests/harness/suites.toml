@@ -159,7 +159,7 @@ lane = "protocol"
 tools = ["rust", "uv"]
 commands = [
   ["./scripts/verify-protocol.sh"],
-  ["./scripts/verify-rust.sh", "cymule-test-adapter"],
+  ["./scripts/verify-rust.sh", "--conformance", "cymule-test-adapter"],
 ]
 
 [suites.sdk-rust]

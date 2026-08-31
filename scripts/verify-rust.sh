@@ -4,6 +4,16 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
+test_profile_args=""
+if [ "${1:-}" = "--conformance" ]; then
+  test_profile_args="--profile conformance"
+  shift
+  if [ "$#" -eq 0 ]; then
+    echo "--conformance requires at least one Cargo package" >&2
+    exit 2
+  fi
+fi
+
 echo "== Rust formatting =="
 cargo fmt --all -- --check
 
@@ -43,7 +53,7 @@ cargo clippy $package_args --all-targets -- \
 
 echo "== Selected Rust tests:$package_args =="
 # shellcheck disable=SC2086
-cargo test $package_args
+cargo test $test_profile_args $package_args
 
 echo "== Selected Rust documentation:$package_args =="
 # shellcheck disable=SC2086

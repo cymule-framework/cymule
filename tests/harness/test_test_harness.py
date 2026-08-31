@@ -306,7 +306,7 @@ class ChangeRoutingTests(unittest.TestCase):
     def test_protocol_leaf_executes_the_test_adapter_conformance_suite(self) -> None:
         protocol = HARNESS.load_manifest()["suites"]["protocol"]
         self.assertIn(
-            ["./scripts/verify-rust.sh", "cymule-test-adapter"],
+            ["./scripts/verify-rust.sh", "--conformance", "cymule-test-adapter"],
             protocol["commands"],
         )
 
