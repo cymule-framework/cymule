@@ -34,6 +34,15 @@
 - `verify-sdk.sh` uses the locked Cargo graph and runs the Rust client unit and
   public-field facade tests beside real cross-language transport conformance. Re-exported
   nested DTOs must remain nameable from the `cymule` package alone.
+- `verify-sdk.sh`, `verify-protocol.sh`, and the self-hosting campaign use the
+  named Cargo `conformance` profile for executable fixtures. That profile keeps
+  dev/test semantics while removing platform-specific debug-symbol bulk, so
+  the same artifacts must fit the fixed 64 MiB SDK and 128 MiB campaign closure
+  budgets on every CI host. Never grow a closure budget to admit debug metadata.
+- The process-heavy durable campaign always runs as its own Cargo invocation
+  with `--test-threads=1`. Its cases intentionally create many sealed process
+  occurrences; case-level parallelism measures host I/O contention instead of
+  campaign semantics and can manufacture deadline failures.
 - Every SDK also runs the same structured Engine negative fixture through that
   binary. Keep missing-envelope transport failure separate from remote semantic
   failure and assert retry disposition only where the Rust boundary proves it.

@@ -766,33 +766,6 @@ async fn durable_sqlite_contention_is_unavailable_not_an_identity_conflict() {
         .expect("blocking writer rolls back");
 }
 
-#[tokio::test]
-async fn concurrent_exact_durable_waiters_complete_from_one_acknowledgement() {
-    let directory = tempdir().expect("temporary directory creates");
-    let database = directory.path().join("http.sqlite");
-    let (router, mut driver) =
-        durable_signal_router(&database, 4, AllowAll).expect("durable router builds");
-    let first = tokio::spawn(router.clone().oneshot(request()));
-    let selected = receive_pending(&mut driver, &mut index()).await;
-    let second = tokio::spawn(router.oneshot(request()));
-    tokio::task::yield_now().await;
-    driver
-        .acknowledge(&selected.activation_id)
-        .expect("selected delivery acknowledges once");
-
-    for response in [first, second] {
-        assert_eq!(
-            tokio::time::timeout(std::time::Duration::from_secs(2), response)
-                .await
-                .expect("durable waiter completes")
-                .expect("response task joins")
-                .expect("router responds")
-                .status(),
-            StatusCode::ACCEPTED
-        );
-    }
-}
-
 #[test]
 fn durable_ingress_matches_beyond_an_unrelated_1024_record_prefix() {
     let directory = tempdir().expect("temporary directory creates");

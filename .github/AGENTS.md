@@ -20,6 +20,10 @@
 - Ordinary `Required CI` may expand only the harness `full` suite. The broader
   `catalog` aggregate is explicit operator evidence and must never be selected
   by a changed path, including changes to the harness or scheduled runners.
+- The meta and protocol lanes check out complete history because their
+  release/schema/BOM witnesses authenticate the registered baseline source
+  snapshot in ancestry. Never weaken that validator or substitute a shallow
+  clone success.
 - Partition core and bounded M4 evolution mutation independently. Every matrix
   entry must select one named harness suite and upload only that suite's report
   and mutation output; do not merge their evidence directories.

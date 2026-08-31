@@ -1747,6 +1747,77 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_exact_waiters_complete_from_one_durable_acknowledgement() {
+        let directory = tempfile::tempdir().expect("temporary directory creates");
+        let database = directory.path().join("concurrent-waiters.sqlite");
+        let barrier = DurableIngressBarrier {
+            persisted: Arc::new(tokio::sync::Barrier::new(3)),
+            release: Arc::new(tokio::sync::Barrier::new(3)),
+        };
+        let (router, mut driver) =
+            durable_signal_router_inner(&database, 4, AllowAll, Some(barrier.clone()))
+                .expect("durable router builds");
+        let request = || {
+            Request::post("/v1/signals")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"activation_id":"activation:concurrent-waiters","key":"signal:test","value":true}"#,
+                ))
+                .expect("request builds")
+        };
+
+        let first = tokio::spawn(router.clone().oneshot(request()));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let retained: bool = driver
+                    .connection
+                    .query_row(
+                        "SELECT EXISTS(
+                           SELECT 1 FROM cymule_http_signals
+                           WHERE activation_id = 'activation:concurrent-waiters'
+                         )",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("test authority reads committed ingress");
+                if retained {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first request commits before the second request starts");
+        let second = tokio::spawn(router.oneshot(request()));
+
+        tokio::time::timeout(Duration::from_secs(2), barrier.persisted.wait())
+            .await
+            .expect("both exact requests persist before acknowledgement");
+        let targets = BTreeSet::from([test_wait_id("concurrent-waiters")]);
+        driver
+            .connection
+            .execute(
+                "UPDATE cymule_http_signals SET selected_wait_ids = ?1
+                 WHERE activation_id = 'activation:concurrent-waiters'",
+                [cymule_core::canonical_bytes(&targets).expect("targets encode")],
+            )
+            .expect("test selection persists");
+        driver
+            .acknowledge("activation:concurrent-waiters")
+            .expect("activation acknowledges exactly once");
+        barrier.release.wait().await;
+
+        for response in [first, second] {
+            let response = tokio::time::timeout(Duration::from_secs(2), response)
+                .await
+                .expect("durable waiter completes")
+                .expect("response task joins")
+                .expect("router responds");
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn bounded_waiter_registry_returns_http_backpressure() {
         let directory = tempfile::tempdir().expect("temporary directory creates");
         let database = directory.path().join("bounded-waiters.sqlite");

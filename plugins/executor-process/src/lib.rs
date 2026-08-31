@@ -118,7 +118,7 @@ const WATCHDOG_GROUP_ESTABLISHED: u8 = 0xa5;
 #[cfg(unix)]
 const WATCHDOG_EXITED_WITHOUT_STAGE: u8 = 9;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 struct ChildDescriptorAuthority {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     mapping: NonNull<nix::libc::proc_fdinfo>,
@@ -141,7 +141,7 @@ struct ChildDescriptorAuthorityView {
     descriptor_domain_exclusive: i32,
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 impl std::fmt::Debug for ChildDescriptorAuthority {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug = formatter.debug_struct("ChildDescriptorAuthority");
@@ -158,7 +158,7 @@ impl std::fmt::Debug for ChildDescriptorAuthority {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 impl Drop for ChildDescriptorAuthority {
     fn drop(&mut self) {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -173,23 +173,15 @@ impl Drop for ChildDescriptorAuthority {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 impl ChildDescriptorAuthority {
     fn prepare() -> RuntimeResult<Self> {
-        #[cfg(target_os = "linux")]
-        {
-            Ok(Self {})
-        }
         #[cfg(any(target_os = "macos", target_os = "ios"))]
-        {
-            prepare_apple_descriptor_authority()
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
-        {
-            Err(RuntimeError::plugin_defect(
-                "the process executor has no exact descriptor authority on this Unix platform",
-            ))
-        }
+        return prepare_apple_descriptor_authority();
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        Err(RuntimeError::plugin_defect(
+            "the process executor has no exact descriptor authority on this Unix platform",
+        ))
     }
 
     fn view(&mut self) -> ChildDescriptorAuthorityView {
@@ -202,6 +194,11 @@ impl ChildDescriptorAuthority {
             descriptor_domain_exclusive: self.descriptor_domain_exclusive,
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+const fn linux_child_descriptor_authority_view() -> ChildDescriptorAuthorityView {
+    ChildDescriptorAuthorityView {}
 }
 
 #[cfg(unix)]
@@ -1015,6 +1012,9 @@ impl ProcessExecutor {
         let mut process = {
             let mut supervisor = supervisor;
             let mut command = self.prepare_command(invocation);
+            #[cfg(target_os = "linux")]
+            let descriptor_authority = linux_child_descriptor_authority_view();
+            #[cfg(not(target_os = "linux"))]
             let descriptor_authority = supervisor.descriptor_authority_view();
             if let Err(error) = configure_process_boundary(
                 &mut command,
@@ -1743,7 +1743,7 @@ impl PrivateInvocationDirectory {
             if SFlag::from_bits_truncate(root_stat.st_mode) != SFlag::S_IFDIR
                 || root_stat.st_dev != named_stat.st_dev
                 || root_stat.st_ino != named_stat.st_ino
-                || u32::from(root_stat.st_mode & 0o7777) != PRIVATE_DIRECTORY_MODE
+                || unix_permission_bits(root_stat.st_mode) != u64::from(PRIVATE_DIRECTORY_MODE)
             {
                 return Err(RuntimeError::substrate(
                     "process_seal_failed",
@@ -2472,7 +2472,7 @@ struct ProcessGroupSupervisor {
     #[cfg(not(target_os = "macos"))]
     execution_deadline: nix::libc::timespec,
     engine_liveness: Option<UnixStream>,
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     descriptor_authority: ChildDescriptorAuthority,
     reaped: bool,
     group_closed: bool,
@@ -2516,7 +2516,11 @@ impl ProcessGroupSupervisor {
         // Both later forked children inherit the same untouched pages and fill
         // their own copy, so neither post-fork boundary allocates or discovers
         // descriptors through a userspace directory walk.
+        #[cfg(not(target_os = "linux"))]
         let mut descriptor_authority = ChildDescriptorAuthority::prepare()?;
+        #[cfg(target_os = "linux")]
+        let watchdog_descriptor_authority = linux_child_descriptor_authority_view();
+        #[cfg(not(target_os = "linux"))]
         let watchdog_descriptor_authority = descriptor_authority.view();
         launch.check_pre_start(deadline)?;
 
@@ -2590,7 +2594,7 @@ impl ProcessGroupSupervisor {
             #[cfg(not(target_os = "macos"))]
             execution_deadline: watchdog_deadline,
             engine_liveness: Some(engine_liveness),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             descriptor_authority,
             reaped: false,
             group_closed: false,
@@ -2623,7 +2627,7 @@ impl ProcessGroupSupervisor {
             .map_or(-1, std::os::fd::AsRawFd::as_raw_fd)
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     fn descriptor_authority_view(&mut self) -> ChildDescriptorAuthorityView {
         self.descriptor_authority.view()
     }
@@ -3050,17 +3054,19 @@ unsafe fn close_unrelated_descriptors(
     if lower < 0 || lower == upper {
         return WATCHDOG_DESCRIPTOR_KEEP_MISSING;
     }
-    let Some(middle_first) = lower.checked_add(1) else {
+    let Ok(lower) = u32::try_from(lower) else {
         return WATCHDOG_DESCRIPTOR_KEEP_MISSING;
     };
-    let Some(middle_last) = upper.checked_sub(1) else {
+    let Ok(upper) = u32::try_from(upper) else {
         return WATCHDOG_DESCRIPTOR_KEEP_MISSING;
     };
+    let middle_first = lower + 1;
+    let middle_last = upper - 1;
     let after_upper = upper.checked_add(1);
     let closed = unsafe {
-        (lower == 0 || close_linux_descriptor_range(0, (lower - 1) as u32))
-            && close_linux_descriptor_range(middle_first as u32, middle_last as u32)
-            && after_upper.is_none_or(|first| close_linux_descriptor_range(first as u32, u32::MAX))
+        (lower == 0 || close_linux_descriptor_range(0, lower - 1))
+            && close_linux_descriptor_range(middle_first, middle_last)
+            && after_upper.is_none_or(|first| close_linux_descriptor_range(first, u32::MAX))
     };
     if closed {
         WATCHDOG_DESCRIPTOR_ISOLATED
@@ -3711,7 +3717,7 @@ impl RelativeDirectoryCursor {
                 "private working-directory mode could not be verified",
             )
         })?;
-        if u32::from(metadata.st_mode & 0o7777) != mode {
+        if unix_permission_bits(metadata.st_mode) != u64::from(mode) {
             return Err(RuntimeError::substrate(
                 "process_seal_failed",
                 "private working-directory mode did not match its binding",
@@ -3878,6 +3884,11 @@ fn normalized_mode(mode: u32) -> RuntimeResult<nix::sys::stat::Mode> {
         )
     })?;
     Ok(nix::sys::stat::Mode::from_bits_truncate(bits))
+}
+
+#[cfg(unix)]
+fn unix_permission_bits(mode: nix::libc::mode_t) -> u64 {
+    u64::from(mode & 0o7777)
 }
 
 fn write_file_contents(
@@ -5564,14 +5575,20 @@ mod tests {
             .materialize_invocation(deadline)
             .expect("invocation materializes under umask");
         let root = fstat(invocation.directory.root()).expect("root mode reads");
-        assert_eq!(u32::from(root.st_mode & 0o7777), PRIVATE_DIRECTORY_MODE);
+        assert_eq!(
+            super::unix_permission_bits(root.st_mode),
+            u64::from(PRIVATE_DIRECTORY_MODE)
+        );
         let plugin = fstatat(
             invocation.directory.root(),
             "plugin",
             AtFlags::AT_SYMLINK_NOFOLLOW,
         )
         .expect("plugin mode reads");
-        assert_eq!(u32::from(plugin.st_mode & 0o7777), SEALED_EXECUTABLE_MODE);
+        assert_eq!(
+            super::unix_permission_bits(plugin.st_mode),
+            u64::from(SEALED_EXECUTABLE_MODE)
+        );
         let cwd = nix::dir::Dir::openat(
             invocation.directory.root(),
             "cwd",
@@ -5580,8 +5597,8 @@ mod tests {
         )
         .expect("cwd opens");
         assert_eq!(
-            u32::from(fstat(&cwd).expect("cwd mode reads").st_mode & 0o7777),
-            PRIVATE_DIRECTORY_MODE
+            super::unix_permission_bits(fstat(&cwd).expect("cwd mode reads").st_mode),
+            u64::from(PRIVATE_DIRECTORY_MODE)
         );
         let nested = nix::dir::Dir::openat(
             &cwd,
@@ -5591,26 +5608,24 @@ mod tests {
         )
         .expect("nested cwd opens");
         assert_eq!(
-            u32::from(fstat(&nested).expect("nested mode reads").st_mode & 0o7777),
-            PRIVATE_DIRECTORY_MODE
+            super::unix_permission_bits(fstat(&nested).expect("nested mode reads").st_mode),
+            u64::from(PRIVATE_DIRECTORY_MODE)
         );
         assert_eq!(
-            u32::from(
+            super::unix_permission_bits(
                 fstatat(&nested, "plain", AtFlags::AT_SYMLINK_NOFOLLOW)
                     .expect("plain mode reads")
                     .st_mode
-                    & 0o7777
             ),
-            0o600
+            0o600_u64
         );
         assert_eq!(
-            u32::from(
+            super::unix_permission_bits(
                 fstatat(&nested, "tool", AtFlags::AT_SYMLINK_NOFOLLOW)
                     .expect("tool mode reads")
                     .st_mode
-                    & 0o7777
             ),
-            0o700
+            0o700_u64
         );
         drop(nested);
         drop(cwd);

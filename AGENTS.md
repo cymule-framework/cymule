@@ -254,6 +254,10 @@ Use this precedence order when guidance conflicts:
   and must surface contention instead of waiting indefinitely.
 - Cross-language SDKs author the same frozen IR and use the same engine contract.
   They must not implement a second reducer or invent language-specific semantics.
+- SDK and self-hosting example conformance binaries use the workspace's
+  `conformance` Cargo profile: dev semantics with debug symbols stripped and
+  incremental state disabled. Tests retain the real 64/128 MiB closure budgets;
+  host-specific debug metadata must never enlarge those semantic limits.
 - `cymule.engine/5` is the only CLI Engine transport. Every request and every
   success or failure uses its versioned envelope; v3 is rejected without shape
   fallback. Stderr and process status are transport diagnostics, never a second

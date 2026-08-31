@@ -5740,8 +5740,8 @@ test("TypeScript preserves structured Rust Engine failures", async (context) => 
   await assertEngineFailure(
     () => engine.run(
       plan,
-      { message: "defect" },
-      processTarget(enginePath),
+      { simulate: "protocol_defect" },
+      processTarget(pluginPath),
       "run:ts-defect",
     ),
     expected.plugin_defect!,

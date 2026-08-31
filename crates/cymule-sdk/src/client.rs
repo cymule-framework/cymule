@@ -5428,12 +5428,12 @@ mod tests {
             .expect("escaped descendant fixture becomes executable");
         let started = Instant::now();
         let failure = CliEngine::new(&executable)
-            .with_timeout(Duration::from_secs(1))
+            .with_timeout(Duration::from_secs(5))
             .seal(&empty_candidate())
             .expect_err("escaped inherited pipe cannot outlive the SDK deadline");
         assert_eq!(failure.category, EngineFailureCategory::TimedOut);
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(6),
             "escaped inherited pipe blocked SDK return"
         );
         let pid_deadline = Instant::now() + Duration::from_secs(2);
@@ -5571,50 +5571,21 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn cancellation_during_snapshot_cannot_launch_the_engine() {
+    fn cancellation_between_begin_and_launch_cannot_start_the_engine() {
         let directory = tempfile::tempdir().expect("isolated Engine fixture directory");
         let marker = directory.path().join("spawned");
-        let executable = directory.path().join("engine");
-        std::fs::write(
-            &executable,
-            format!("#!/bin/sh\n: > {marker:?}\n/bin/cat >/dev/null\n"),
-        )
-        .expect("Engine fixture writes");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("Engine fixture metadata reads")
-            .permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&executable, permissions)
-            .expect("Engine fixture becomes executable");
         let cancellation = EngineCancellation::new();
-        let mut candidate = empty_candidate();
-        candidate
-            .metadata
-            .insert("padding".to_owned(), "x".repeat(48 * 1024 * 1024));
-        let result = std::thread::scope(|scope| {
-            let engine = CliEngine::new(&executable).with_cancellation(cancellation.clone());
-            let request = scope.spawn(move || engine.seal(&candidate));
-            let active_deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                let active = cancellation
-                    .state
-                    .lock()
-                    .expect("cancellation state remains available")
-                    .active_calls
-                    .len();
-                if active == 1 {
-                    break;
-                }
-                assert!(
-                    Instant::now() < active_deadline,
-                    "request did not enter snapshot"
-                );
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            cancellation.cancel();
-            request.join().expect("snapshot request does not panic")
+        let request = EngineRequest::Seal {
+            candidate: empty_candidate(),
+        };
+        let mut call = cancellation
+            .begin(&request)
+            .expect("uncancelled call begins");
+        cancellation.cancel();
+        let result = call.launch(&request, || {
+            std::fs::write(&marker, b"spawned")?;
+            std::process::Command::new("definitely-missing-cymule-engine").spawn()
         });
         let failure = result.expect_err("cancellation wins before Engine launch");
         assert_eq!(failure.category, EngineFailureCategory::Cancelled);

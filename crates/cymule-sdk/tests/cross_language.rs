@@ -640,7 +640,6 @@ fn rust_engine_preserves_structured_negative_outcomes() {
     let process_domain = tempfile::tempdir().expect("temporary process configuration domain");
     let effect_ledger = process_domain.path().join("effect-settlement.sqlite3");
     let plugin = process_target(plugin_path, &effect_ledger);
-    let defect_plugin = process_target(engine_path.clone(), &effect_ledger);
     let missing_plugin = process_target(
         "/cymule-conformance/missing-plugin".to_owned(),
         &effect_ledger,
@@ -676,8 +675,8 @@ fn rust_engine_preserves_structured_negative_outcomes() {
         &engine
             .run(
                 &plan,
-                &json!({"message": "plugin defect"}),
-                &defect_plugin,
+                &json!({"simulate": "protocol_defect"}),
+                &plugin,
                 "run:rust-plugin-defect",
             )
             .expect_err("invalid plugin process fails"),

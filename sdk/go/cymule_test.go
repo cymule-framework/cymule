@@ -3336,7 +3336,7 @@ func TestStructuredEngineFailures(t *testing.T) {
 	}
 	_, err = engine.Run(plan, map[string]any{"simulate": "expected_failure"}, testProcessPlugin(t, pluginPath), "run:go-expected")
 	assertEngineFailure(t, err, fixture.Cases["expected_plugin_failure"])
-	_, err = engine.Run(plan, map[string]any{"message": "defect"}, testProcessPlugin(t, enginePath), "run:go-defect")
+	_, err = engine.Run(plan, map[string]any{"simulate": "protocol_defect"}, testProcessPlugin(t, pluginPath), "run:go-defect")
 	assertEngineFailure(t, err, fixture.Cases["plugin_defect"])
 	_, err = engine.Run(plan, map[string]any{"message": "substrate"}, testProcessPlugin(t, "/cymule-conformance/missing-plugin"), "run:go-substrate")
 	assertEngineFailure(t, err, fixture.Cases["substrate_failure"])

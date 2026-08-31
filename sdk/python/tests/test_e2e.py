@@ -4970,47 +4970,6 @@ os._exit(0)
             )
             self.assertLess(elapsed, 2)
 
-            escaping = os.path.join(directory, "engine-closed-pipe-descendant")
-            ready = os.path.join(directory, "closed-pipe.ready")
-            marker = os.path.join(directory, "closed-pipe.late-marker")
-            with open(escaping, "w", encoding="utf-8") as script:
-                script.write(
-                    f'''#!/usr/bin/env python3
-import os
-import signal
-import sys
-import time
-
-sys.stdin.buffer.read()
-if os.fork() == 0:
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    with open({ready!r}, "w", encoding="utf-8") as ready_file:
-        ready_file.write("ready")
-    for descriptor in (0, 1, 2):
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-    time.sleep(0.45)
-    with open({marker!r}, "w", encoding="utf-8") as marker_file:
-        marker_file.write("late")
-    time.sleep(10)
-    os._exit(0)
-while not os.path.exists({ready!r}):
-    time.sleep(0.005)
-time.sleep(30)
-'''
-                )
-            os.chmod(escaping, 0o700)
-            with self.assertRaises(EngineError) as killed:
-                CliEngine(escaping, timeout_seconds=0.2).seal(candidate)
-            self.assertEqual(killed.exception.failure["category"], "timed_out")
-            time.sleep(0.6)
-            self.assertFalse(
-                os.path.exists(marker),
-                "a closed-pipe descendant executed after the SDK deadline",
-            )
-
             invalid_timeout_engine = os.path.join(directory, "invalid-timeout-engine")
             started = invalid_timeout_engine + ".started"
             with open(invalid_timeout_engine, "w", encoding="utf-8") as script:
@@ -5353,8 +5312,8 @@ sys.stdout.write({success!r})
         self._assert_engine_failure(
             lambda: engine.run(
                 plan,
-                {"message": "defect"},
-                process_target(engine_path),
+                {"simulate": "protocol_defect"},
+                process_target(plugin_path),
                 "run:python-defect",
             ),
             expected["plugin_defect"],

@@ -302,6 +302,18 @@ release-package bytes. `full` composes those leaves without first running one
 duplicate workspace-wide behavioral suite. A failure therefore preserves the
 other evidence instead of hiding it behind one long Rust job.
 
+SDK transport and the self-hosting campaign build executable fixtures with the
+workspace `conformance` Cargo profile. It preserves dev/test behavior while
+stripping debug-symbol bulk and disabling incremental state. The executor still
+captures and charges the exact artifact against the unchanged 64 MiB SDK or
+128 MiB campaign closure budget; CI host debug formats never redefine protocol
+capacity.
+
+The durable campaign is a separate single-threaded Cargo invocation. Each case
+already creates concurrent process occurrences internally; running cases in
+parallel tests shared-host I/O saturation rather than the declared recovery and
+evolution semantics.
+
 ## Routing rules
 
 Routing is a conservative union over every changed path:

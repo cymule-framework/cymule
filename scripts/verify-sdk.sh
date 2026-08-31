@@ -12,9 +12,9 @@ cd "$ROOT"
 
 case ${CYMULE_SDK_PREBUILT:-0} in
   0)
-    cargo build --locked -p cymule-cli -p cymule-test-adapter
-    CYMULE_BIN="$ROOT/target/debug/cymule"
-    CYMULE_TEST_PLUGIN="$ROOT/target/debug/cymule-test-adapter"
+    cargo build --locked --profile conformance -p cymule-cli -p cymule-test-adapter
+    CYMULE_BIN="$ROOT/target/conformance/cymule"
+    CYMULE_TEST_PLUGIN="$ROOT/target/conformance/cymule-test-adapter"
     ;;
   1)
     : "${CYMULE_BIN:?CYMULE_BIN is required when CYMULE_SDK_PREBUILT=1}"

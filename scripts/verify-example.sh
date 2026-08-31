@@ -11,4 +11,5 @@ python3 -c 'import json, pathlib, sys; result = json.loads(pathlib.Path(sys.argv
 cargo run --quiet -p cymule-example-hello-world -- Ada --unknown-once > "$ROOT/.cache/hello-world-unknown-result.json"
 python3 -c 'import json, pathlib, sys; result = json.loads(pathlib.Path(sys.argv[1]).read_text()); assert result["value"] == {"message": "Hello, Ada!"}; assert len(result["effects"]) == 1' "$ROOT/.cache/hello-world-unknown-result.json"
 
-cargo test --quiet -p cymule-example-durable-evaluation-campaign
+cargo test --quiet --profile conformance \
+  -p cymule-example-durable-evaluation-campaign -- --test-threads=1
