@@ -6,6 +6,7 @@ that an external migration has executed.
 
 | Runbook | State | Authority |
 | --- | --- | --- |
+| [Legacy public release ref revocation](legacy-public-release-ref-revocation-v1.md) | Executed 2026-08-31; terminal readback complete | GitHub Releases and annotated tags `v0.1.1` through `v0.1.4`; these tag names are permanently retired |
 | [npm trusted-publisher caller generation 1](npm-trusted-publisher-caller-v1.md) | Source implemented; operator execution pending | npm trusted-publisher records for `cymule` and `@cymule/sdk` |
 | [GitHub release authority generation 1](github-release-authority-v1.md) | Source implemented; operator execution pending | Release tag App, administration-read control-plane App and short-lived receipt, rulesets, environments, immutable Releases, and BOM attestation projection |
 | [Public mirror receipt carrier generation 1](public-mirror-receipt-carrier-v1.md) | Source implemented; operator execution pending | Immutable mirror-created `cymule-mirror/<public-sha>` annotated tags and their creation/update/deletion rulesets |
