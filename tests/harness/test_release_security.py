@@ -5095,6 +5095,28 @@ class PublicHistoryTests(unittest.TestCase):
                 private_sha,
             )
 
+    def test_current_tip_snapshot_survives_real_history_rewrite(self) -> None:
+        if public_history is None:
+            self.skipTest("private mirror rewriter is absent from the public export")
+        private_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
+            text=True, capture_output=True,
+        ).stdout.strip()
+        expected = npm_release.version_domains.commit_source_snapshot_digest(
+            private_sha, root=ROOT
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "public"
+            source_host = "git." + "f.cv"
+            source_path = "intelligence/" + "cymule"
+            rewritten_tip = public_history.rewrite(
+                ROOT, output, private_sha, source_host, source_path
+            )
+            observed = npm_release.version_domains.commit_source_snapshot_digest(
+                rewritten_tip, root=output
+            )
+        self.assertEqual(observed, expected)
+
     def test_export_removes_the_mirror_controller_from_every_commit(self) -> None:
         if public_history is None:
             result = subprocess.run(

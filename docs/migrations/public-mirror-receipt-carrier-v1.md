@@ -43,8 +43,9 @@ Two exact GitHub tag rulesets make the carrier authentic:
 3. Record the current private default-branch SHA, public `main` SHA, raw
    `refs/tags/cymule-mirror/*` inventory, mirror App Integration ID, and all
    current repository rulesets.
-4. Confirm `RETIRED_PRIVATE_PUSH_TOKEN` is protected, masked, and scoped only to
-   the GitLab `public-mirror` environment. Do not print or copy its value.
+4. Confirm the private mirror publisher token is protected, masked, and scoped
+   only to the private `public-mirror` environment. Do not expose its private
+   variable name or print or copy its value into public source or evidence.
 5. Confirm that the token belongs to the same narrowly installed GitHub App
    Integration identified by `CYMULE_GITHUB_MIRROR_INTEGRATION_ID` and has only
    the repository Contents permission required by the mirror controller.
