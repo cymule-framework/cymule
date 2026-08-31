@@ -4581,6 +4581,19 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn shell_executable() -> std::path::PathBuf {
+        let executable = std::fs::canonicalize("/bin/sh").expect("system shell resolves");
+        assert!(
+            executable
+                .metadata()
+                .expect("system shell metadata reads")
+                .is_file(),
+            "resolved system shell is not a regular file"
+        );
+        executable
+    }
+
+    #[cfg(unix)]
     struct DeepDirectoryChain {
         root: nix::dir::Dir,
         root_identity: super::PrivateDirectoryIdentity,
@@ -5262,7 +5275,8 @@ mod tests {
             .name("deep-directory-low-stack-materialization".to_owned())
             .stack_size(TEST_STACK_BYTES)
             .spawn(move || {
-                let mut config = super::ProcessExecutorConfig::new("/bin/sh", runtime_closure());
+                let mut config =
+                    super::ProcessExecutorConfig::new(shell_executable(), runtime_closure());
                 config.working_directory = Some(low_stack_root);
                 config.timeout = Duration::from_secs(30);
                 let executor = super::ProcessExecutor::new(config)
@@ -5566,7 +5580,7 @@ mod tests {
             .expect("source directory mode sets");
         std::fs::set_permissions(nested.join("tool"), std::fs::Permissions::from_mode(0o755))
             .expect("source tool mode sets");
-        let mut config = ProcessExecutorConfig::new("/bin/sh", runtime_closure());
+        let mut config = ProcessExecutorConfig::new(shell_executable(), runtime_closure());
         config.working_directory = Some(source.path().to_path_buf());
         let executor = ProcessExecutor::new(config).expect("executor captures source");
         umask(Mode::from_bits_truncate(mask));
@@ -5932,7 +5946,7 @@ mod tests {
         let _test_authority = PRE_EXEC_TEST_MUTEX
             .lock()
             .expect("pre-exec test authority locks");
-        let mut config = ProcessExecutorConfig::new("/bin/sh", runtime_closure());
+        let mut config = ProcessExecutorConfig::new(shell_executable(), runtime_closure());
         config.arguments = vec!["-c".to_owned(), "exit 0".to_owned()];
         config.timeout = Duration::from_millis(50);
         let executor = ProcessExecutor::new(config).expect("executor captures shell");
@@ -5970,7 +5984,7 @@ mod tests {
             .lock()
             .expect("pre-exec test authority locks");
         let cancellation = ProcessCancellation::new().expect("cancellation authority creates");
-        let mut config = ProcessExecutorConfig::new("/bin/sh", runtime_closure());
+        let mut config = ProcessExecutorConfig::new(shell_executable(), runtime_closure());
         config.arguments = vec!["-c".to_owned(), "exit 0".to_owned()];
         config.timeout = Duration::from_secs(3);
         config.cancellation = Some(cancellation.clone());
@@ -6022,7 +6036,7 @@ mod tests {
         let cancellation = ProcessCancellation::new().expect("cancellation authority creates");
         let fixture = tempfile::tempdir().expect("pre-start marker fixture creates");
         let marker = fixture.path().join("provider-started");
-        let mut config = ProcessExecutorConfig::new("/bin/sh", runtime_closure());
+        let mut config = ProcessExecutorConfig::new(shell_executable(), runtime_closure());
         config.arguments = vec![
             "-c".to_owned(),
             format!("printf started > '{}'", marker.display()),
@@ -6129,7 +6143,7 @@ mod tests {
         use super::{ProcessExecutor, ProcessExecutorConfig};
         use std::time::Duration;
 
-        let mut config = ProcessExecutorConfig::new("/bin/sh", runtime_closure());
+        let mut config = ProcessExecutorConfig::new(shell_executable(), runtime_closure());
         config.arguments = vec!["-c".to_owned(), "exit 0".to_owned()];
         config.timeout = Duration::from_secs(10);
         let executor = ProcessExecutor::new(config).expect("helper executor captures shell");
