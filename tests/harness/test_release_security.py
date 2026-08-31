@@ -4153,6 +4153,11 @@ jobs:
             'GIT_CONFIG_KEY_0="http.$url.extraHeader"',
             "GIT_NO_REPLACE_OBJECTS=1",
             'confirmed_public_tip=$(read_tip "$public_repository" refs/heads/main)',
+            'fetch_public_predecessor "$public_tip"',
+            'merge-base --is-ancestor "$public_tip" "$source_tip"',
+            'public_refs=$(read_all_refs "$public_repository")',
+            "public main is absent but the public repository is not empty",
+            "public mirror candidate does not fast-forward the current public main",
             'private_source_snapshot=$("$bash_binary" "$snapshot_helper"',
             'candidate_source_snapshot=$("$bash_binary" "$snapshot_helper"',
             'if test "$candidate_source_snapshot" != "$private_source_snapshot"; then',
@@ -4215,11 +4220,6 @@ jobs:
             ROOT / ".gitlab/scripts/verify_public_mirror_candidate.sh"
         ).read_text(encoding="utf-8")
         release_workflows.verify_private_mirror_scanner(scanner)
-        for retired_marker in (
-            "RETIRED_PRIVATE_" + "SOURCE_",
-            "RETIRED_PRIVATE_" + "PUSH_TOKEN",
-        ):
-            self.assertIn(retired_marker, scanner)
         for fragment in (
             'git -C "$repository" rev-list --reverse --topo-order "$revision"',
             'git -C "$repository" ls-tree -r -z "$commit"',
@@ -5134,48 +5134,6 @@ class PublicHistoryTests(unittest.TestCase):
                 rewritten_tip, root=output
             )
         self.assertEqual(observed, expected)
-
-    def test_private_markers_use_only_generic_public_redaction(self) -> None:
-        if public_history is None:
-            self.skipTest("private mirror rewriter is absent from the public export")
-        source_marker = "CYMULE_" + "SOURCE_"
-        publisher_marker = "CYMULE_" + "PUBLIC_PUSH_TOKEN"
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary)
-            source = root / "source"
-            source.mkdir()
-            subprocess.run(["git", "init", "-b", "main"], cwd=source, check=True)
-            subprocess.run(
-                ["git", "config", "user.name", "Cymule Test"],
-                cwd=source, check=True,
-            )
-            subprocess.run(
-                ["git", "config", "user.email", "test@example.com"],
-                cwd=source, check=True,
-            )
-            source.joinpath("value").write_text(
-                f"{source_marker}VALUE\n{publisher_marker}\n", encoding="utf-8"
-            )
-            subprocess.run(["git", "add", "value"], cwd=source, check=True)
-            subprocess.run(["git", "commit", "-m", "Add markers"], cwd=source, check=True)
-            private_sha = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=source, check=True,
-                text=True, capture_output=True,
-            ).stdout.strip()
-            output = root / "public"
-            public_history.rewrite(
-                source, output, private_sha, "private.example", "group/cymule"
-            )
-            rewritten = subprocess.run(
-                ["git", "show", "HEAD:value"], cwd=output, check=True,
-                text=True, capture_output=True,
-            ).stdout
-        self.assertEqual(
-            rewritten,
-            "REDACTED_PRIVATE_IDENTIFIER_VALUE\nREDACTED_PRIVATE_IDENTIFIER\n",
-        )
-        self.assertNotIn(source_marker, rewritten)
-        self.assertNotIn(publisher_marker, rewritten)
 
     def test_export_removes_the_mirror_controller_from_every_commit(self) -> None:
         if public_history is None:

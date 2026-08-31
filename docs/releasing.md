@@ -65,7 +65,10 @@ default branch:
    read;
 7. no mirror stage installs or downloads tools or dependencies at runtime;
 8. re-reads the private default branch and fails if the pipeline is stale;
-9. no-ops when the public tip already matches;
+9. before any remote receipt publication or write, requires a nonempty current
+   public main to be fetched into the candidate graph and to be its ancestor;
+   a missing main skips this ancestry gate only when the remote advertises no
+   refs at all, and an exact matching tip no-ops;
 10. deterministically constructs the registered
     `cymule.public-mirror-receipt/2` inside the annotated
     `cymule-mirror/<public-source-sha>` tag from the exact private SHA,
@@ -174,8 +177,10 @@ non-dispatchable controller. Complete the linked migration runbook and its live
 readback before treating this source boundary as enabled.
 
 The private mirror identity may receive the one explicit integration bypass
-needed to update rewritten public history. Human administrator bypass is not a
-substitute.
+needed to pass required-status admission for a reviewed public main update.
+That bypass does not authorize non-fast-forward history replacement; the
+publisher's object-existence, ancestry, lease, and readback gates remain
+mandatory. Human administrator bypass is not a substitute.
 
 ## Candidate verification
 
