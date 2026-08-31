@@ -4215,6 +4215,11 @@ jobs:
             ROOT / ".gitlab/scripts/verify_public_mirror_candidate.sh"
         ).read_text(encoding="utf-8")
         release_workflows.verify_private_mirror_scanner(scanner)
+        for retired_marker in (
+            "RETIRED_PRIVATE_" + "SOURCE_",
+            "RETIRED_PRIVATE_" + "PUSH_TOKEN",
+        ):
+            self.assertIn(retired_marker, scanner)
         for fragment in (
             'git -C "$repository" rev-list --reverse --topo-order "$revision"',
             'git -C "$repository" ls-tree -r -z "$commit"',
@@ -5107,8 +5112,21 @@ class PublicHistoryTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary:
             output = pathlib.Path(temporary) / "public"
-            source_host = "git." + "f.cv"
-            source_path = "intelligence/" + "cymule"
+            remote_url = subprocess.run(
+                ["git", "remote", "get-url", "origin"], cwd=ROOT, check=True,
+                text=True, capture_output=True,
+            ).stdout.strip()
+            parsed_remote = urllib.parse.urlsplit(remote_url)
+            if parsed_remote.scheme:
+                source_host = parsed_remote.hostname or ""
+                source_path = parsed_remote.path.removeprefix("/")
+            else:
+                authority, separator, source_path = remote_url.rpartition(":")
+                self.assertEqual(separator, ":")
+                source_host = authority.rsplit("@", 1)[-1]
+            source_path = source_path.removesuffix(".git")
+            self.assertTrue(source_host)
+            self.assertTrue(source_path)
             rewritten_tip = public_history.rewrite(
                 ROOT, output, private_sha, source_host, source_path
             )
@@ -5116,6 +5134,48 @@ class PublicHistoryTests(unittest.TestCase):
                 rewritten_tip, root=output
             )
         self.assertEqual(observed, expected)
+
+    def test_private_markers_use_only_generic_public_redaction(self) -> None:
+        if public_history is None:
+            self.skipTest("private mirror rewriter is absent from the public export")
+        source_marker = "CYMULE_" + "SOURCE_"
+        publisher_marker = "CYMULE_" + "PUBLIC_PUSH_TOKEN"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=source, check=True)
+            subprocess.run(
+                ["git", "config", "user.name", "Cymule Test"],
+                cwd=source, check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=source, check=True,
+            )
+            source.joinpath("value").write_text(
+                f"{source_marker}VALUE\n{publisher_marker}\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "add", "value"], cwd=source, check=True)
+            subprocess.run(["git", "commit", "-m", "Add markers"], cwd=source, check=True)
+            private_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=source, check=True,
+                text=True, capture_output=True,
+            ).stdout.strip()
+            output = root / "public"
+            public_history.rewrite(
+                source, output, private_sha, "private.example", "group/cymule"
+            )
+            rewritten = subprocess.run(
+                ["git", "show", "HEAD:value"], cwd=output, check=True,
+                text=True, capture_output=True,
+            ).stdout
+        self.assertEqual(
+            rewritten,
+            "REDACTED_PRIVATE_IDENTIFIER_VALUE\nREDACTED_PRIVATE_IDENTIFIER\n",
+        )
+        self.assertNotIn(source_marker, rewritten)
+        self.assertNotIn(publisher_marker, rewritten)
 
     def test_export_removes_the_mirror_controller_from_every_commit(self) -> None:
         if public_history is None:
