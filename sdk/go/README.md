@@ -14,6 +14,8 @@ cd sdk/go && go test ./...
 
 ```go
 engine := cymule.CliEngine{}
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
 candidate := cymule.NewFlow("hello", map[string]any{}, map[string]any{}).
     Component(
         "example.echo",
@@ -25,7 +27,7 @@ candidate := cymule.NewFlow("hello", map[string]any{}, map[string]any{}).
     Call("call.echo", "example.echo", cymule.Expression{"kind": "input"}, "message").
     Finish(cymule.Expression{"kind": "binding", "name": "message"})
 
-plan, err := engine.Seal(candidate)
+plan, err := engine.SealContext(ctx, candidate)
 
 plugin := cymule.ProcessPlugin(cymule.EngineProcessConfig{
     Executable:       "/absolute/path/to/plugin",
@@ -37,7 +39,7 @@ plugin := cymule.ProcessPlugin(cymule.EngineProcessConfig{
     MessageLimit:     8 * 1024 * 1024,
     ClosureLimit:     64 * 1024 * 1024,
 })
-outcome, err := engine.Run(plan, map[string]any{"message": "hello"}, plugin, "run:hello")
+outcome, err := engine.RunContext(ctx, plan, map[string]any{"message": "hello"}, plugin, "run:hello")
 ```
 
 The fourth `Component` argument is the required Plan-owned output Artifact
@@ -51,18 +53,24 @@ stored under that kind.
 child pages, exact `RunItem`, `Resume`, `Takeover`, `Signal`, `Release`,
 `ResolveEffect`, `Cancel`, and `Evolve` operations over a configured
 durable store and immutable process plugin. No separate generic control-submit
-interface is provided. `Finish` returns a deep-frozen
-candidate: later builder changes cannot mutate it. `CliEngine` intentionally
-has no `context.Context`: its finite `Timeout` is the only deadline authority,
-and a one-shot `EngineCancellation` is the only cancellation authority. Bind
-`NewEngineCancellation()` through `CliEngine.Cancellation` and call `Cancel()`.
+interface is provided. Every I/O operation also has a `Context`-suffixed form,
+such as `SealContext`, `RunContext`, `StartContext`, and `CancelContext`, whose
+first argument is one non-nil `context.Context`. The unsuffixed compatibility
+methods use `context.Background()`. `Finish` returns a deep-frozen candidate:
+later builder changes cannot mutate it. `CliEngine.Timeout` is an independent
+hard transport ceiling. A call context supplies the caller's wait budget; it
+does not commit semantic cancellation or prove a mutation was not applied.
+`EngineCancellation` and `CliEngine.Cancellation` are deprecated source-
+compatibility gates for existing callers.
 Cancellation-first never starts the CLI and returns the safe `cancelled`
 failure; launch-first terminates the owned direct Child and preserves the
 read-versus-mutation interruption classification. Deadline loss preserves the
 same structured classification, including `unknown_world_outcome` for a lost
-mutating response. Cancellation arbitrates completion only after a success or
-remote failure is fully validated; it never masks a local transport, I/O,
-overflow, timeout, kill, wait, or termination failure.
+mutating response. An observed direct-Child exit closes process ownership and
+wins against later cancellation; bounded pipe drain and strict response
+validation still run, and malformed output remains a transport/response-loss
+failure. Cancellation never masks a local transport, I/O, overflow, timeout,
+kill, wait, or termination failure.
 Every query carries explicit revision/cursor and item/byte bounds and returns
 one revision/StateRoot-pinned response; there is no query ID or full
 Run/domain mirror.
@@ -98,10 +106,12 @@ Store targets keep provider, location, and optional domain as an open transport
 boundary. `DirectoryStore` and `SQLiteStore` select the current official
 generations, while Engine ingress decides provider support. Queries omit the
 executor. Migration and shadow commands accept exact-revision process targets.
-The zero-value CLI transport installs a 30-second SDK deadline; a positive
-Timeout overrides it. There is no caller Context deadline or second
-cancellation route. The process/I/O timeout begins only after `Cmd.Start`
-succeeds; pre-launch validation does not create another deadline race.
+The zero-value CLI transport installs a 30-second hard transport deadline; a
+positive `Timeout` overrides it. A per-call context may end earlier. The
+process/I/O timeout begins only after `Cmd.Start` succeeds; an already-cancelled
+context prevents launch. `DurableEngine.CancelContext` is intentionally two
+things kept separate: its context bounds the exchange, while the enclosed
+idempotent `CancelRun` command is the semantic cancellation authority.
 Every process target carries the complete ambient-cleared realization shown
 above; there is no path-only `Run` or location-only plugin target. Use
 `PinnedProcessPlugin` for migration and shadow providers.

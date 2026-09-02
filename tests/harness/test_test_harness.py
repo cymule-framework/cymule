@@ -54,6 +54,7 @@ class ChangeRoutingTests(unittest.TestCase):
             {
                 "example",
                 "protocol",
+                "rust-internal-api",
                 "rust-resource-plugins",
                 "rust-virtual",
                 "sdk-go",
@@ -113,7 +114,20 @@ class ChangeRoutingTests(unittest.TestCase):
 
     def test_core_property_test_change_stays_in_core_suite(self) -> None:
         suites, _ = HARNESS.select_suites(["crates/cymule-core/tests/semantic_kernel.rs"])
-        self.assertEqual(suites, ["rust-core"])
+        self.assertEqual(suites, ["rust-core", "rust-internal-api"])
+
+    def test_rust_sources_route_the_internal_api_smoke_gate(self) -> None:
+        for path in (
+            "crates/cymule-sdk/src/lib.rs",
+            "crates/cymule-runtime/src/engine.rs",
+            "plugins/directory-store/src/lib.rs",
+            "examples/hello-world/src/main.rs",
+            "examples/hello-world/Cargo.toml",
+            "tests/test-world/src/lib.rs",
+            "tests/test-world/Cargo.toml",
+        ):
+            suites, _ = HARNESS.select_suites([path])
+            self.assertIn("rust-internal-api", suites, path)
 
     def test_durable_executor_change_does_not_run_unrelated_profiles(self) -> None:
         suites, _ = HARNESS.select_suites(["crates/cymule-durable/src/executor.rs"])
@@ -301,7 +315,7 @@ class ChangeRoutingTests(unittest.TestCase):
             ),
         ):
             suites, _ = HARNESS.select_suites([path])
-            self.assertEqual(suites, [expected], path)
+            self.assertEqual(set(suites), {expected, "rust-internal-api"}, path)
 
     def test_protocol_leaf_executes_the_test_adapter_conformance_suite(self) -> None:
         protocol = HARNESS.load_manifest()["suites"]["protocol"]

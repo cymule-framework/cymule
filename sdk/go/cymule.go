@@ -6140,15 +6140,20 @@ func cloneStrings(values map[string]string) map[string]string {
 
 // CliEngine invokes the trusted Rust command-line Engine.
 type CliEngine struct {
-	Executable   string
-	Timeout      time.Duration
+	Executable string
+	Timeout    time.Duration
+	// Deprecated: pass a per-call context to the Context-suffixed methods.
+	// This field remains only for source compatibility and is combined with the
+	// call context at the process launch/completion gate.
 	Cancellation *EngineCancellation
 }
 
-// EngineCancellation is a one-shot launch and completion authority shared by CLI calls.
+// EngineCancellation is the legacy one-shot transport interruption gate.
+// It never commits semantic Run cancellation; use DurableEngine.Cancel for that.
 type EngineCancellation struct {
 	mu        sync.Mutex
 	cancelled bool
+	cause     error
 	done      chan struct{}
 }
 
@@ -6159,6 +6164,10 @@ func NewEngineCancellation() *EngineCancellation {
 
 // Cancel linearizes cancellation before a pending launch or admitted completion.
 func (cancellation *EngineCancellation) Cancel() {
+	cancellation.cancel(context.Canceled)
+}
+
+func (cancellation *EngineCancellation) cancel(cause error) {
 	cancellation.mu.Lock()
 	defer cancellation.mu.Unlock()
 	if cancellation.cancelled {
@@ -6168,11 +6177,13 @@ func (cancellation *EngineCancellation) Cancel() {
 		cancellation.done = make(chan struct{})
 	}
 	cancellation.cancelled = true
+	cancellation.cause = cause
 	close(cancellation.done)
 }
 
 type engineCall struct {
 	cancellation *EngineCancellation
+	legacy       *EngineCancellation
 	active       bool
 	terminal     bool
 }
@@ -6190,6 +6201,13 @@ func (cancellation *EngineCancellation) begin() (*engineCall, bool) {
 }
 
 func (call *engineCall) start(command *exec.Cmd) error {
+	if call.legacy != nil {
+		call.legacy.mu.Lock()
+		defer call.legacy.mu.Unlock()
+		if call.legacy.cancelled {
+			return context.Canceled
+		}
+	}
 	call.cancellation.mu.Lock()
 	defer call.cancellation.mu.Unlock()
 	if call.cancellation.cancelled {
@@ -6234,6 +6252,28 @@ func (call *engineCall) abandon() {
 
 func (call *engineCall) done() <-chan struct{} {
 	return call.cancellation.done
+}
+
+func (call *engineCall) interruption() error {
+	return call.cancellation.interruption()
+}
+
+func (cancellation *EngineCancellation) interruption() error {
+	cancellation.mu.Lock()
+	defer cancellation.mu.Unlock()
+	if cancellation.cause != nil {
+		return cancellation.cause
+	}
+	return context.Canceled
+}
+
+func (cancellation *EngineCancellation) doneChannel() <-chan struct{} {
+	cancellation.mu.Lock()
+	defer cancellation.mu.Unlock()
+	if cancellation.done == nil {
+		cancellation.done = make(chan struct{})
+	}
+	return cancellation.done
 }
 
 // EngineStoreTarget selects one provider-owned durable domain.
@@ -6587,13 +6627,18 @@ func validateEngineEvolutionTarget(target EngineEvolutionTarget, command LiveEvo
 	return nil
 }
 
-// Seal validates and content-addresses a candidate.
+// Seal validates and content-addresses a candidate with a background context.
 func (engine CliEngine) Seal(candidate PlanCandidate) (SealedPlan, error) {
+	return engine.SealContext(context.Background(), candidate)
+}
+
+// SealContext validates and content-addresses a candidate for one caller context.
+func (engine CliEngine) SealContext(ctx context.Context, candidate PlanCandidate) (SealedPlan, error) {
 	var response struct {
 		Type string     `json:"type"`
 		Plan SealedPlan `json:"plan"`
 	}
-	err := engine.request(map[string]any{"type": "seal", "candidate": candidate}, &response)
+	err := engine.requestContext(ctx, map[string]any{"type": "seal", "candidate": candidate}, &response)
 	if err == nil && response.Type != "sealed" {
 		err = unexpectedEngineResponse("sealed", response.Type)
 	}
@@ -6602,11 +6647,16 @@ func (engine CliEngine) Seal(candidate PlanCandidate) (SealedPlan, error) {
 
 // SealResource validates and seals a Resource Candidate with the Rust engine.
 func (engine CliEngine) SealResource(candidate ResourceCandidate) (ResourceHandle, error) {
+	return engine.SealResourceContext(context.Background(), candidate)
+}
+
+// SealResourceContext validates and seals a Resource Candidate for one caller context.
+func (engine CliEngine) SealResourceContext(ctx context.Context, candidate ResourceCandidate) (ResourceHandle, error) {
 	var response struct {
 		Type     string         `json:"type"`
 		Resource ResourceHandle `json:"resource"`
 	}
-	err := engine.request(map[string]any{"type": "seal_resource", "candidate": candidate}, &response)
+	err := engine.requestContext(ctx, map[string]any{"type": "seal_resource", "candidate": candidate}, &response)
 	if err == nil && response.Type != "sealed_resource" {
 		err = unexpectedEngineResponse("sealed_resource", response.Type)
 	}
@@ -6615,11 +6665,16 @@ func (engine CliEngine) SealResource(candidate ResourceCandidate) (ResourceHandl
 
 // VerifyWaitActivation validates a signal or timer delivery with the Rust engine.
 func (engine CliEngine) VerifyWaitActivation(activation WaitActivation) (WaitActivation, error) {
+	return engine.VerifyWaitActivationContext(context.Background(), activation)
+}
+
+// VerifyWaitActivationContext validates a delivery for one caller context.
+func (engine CliEngine) VerifyWaitActivationContext(ctx context.Context, activation WaitActivation) (WaitActivation, error) {
 	var response struct {
 		Type       string         `json:"type"`
 		Activation WaitActivation `json:"activation"`
 	}
-	err := engine.request(map[string]any{
+	err := engine.requestContext(ctx, map[string]any{
 		"type": "verify_wait_activation", "activation": activation,
 	}, &response)
 	if err == nil && response.Type != "verified_wait_activation" {
@@ -6630,11 +6685,16 @@ func (engine CliEngine) VerifyWaitActivation(activation WaitActivation) (WaitAct
 
 // VerifyDurableCommand validates one M1 envelope with the Rust engine.
 func (engine CliEngine) VerifyDurableCommand(command DurableCommand) (DurableCommand, error) {
+	return engine.VerifyDurableCommandContext(context.Background(), command)
+}
+
+// VerifyDurableCommandContext validates one M1 envelope for one caller context.
+func (engine CliEngine) VerifyDurableCommandContext(ctx context.Context, command DurableCommand) (DurableCommand, error) {
 	var response struct {
 		Type    string         `json:"type"`
 		Command DurableCommand `json:"command"`
 	}
-	err := engine.request(map[string]any{
+	err := engine.requestContext(ctx, map[string]any{
 		"type": "verify_durable_command", "command": command,
 	}, &response)
 	if err == nil && response.Type != "verified_durable_command" {
@@ -6645,6 +6705,11 @@ func (engine CliEngine) VerifyDurableCommand(command DurableCommand) (DurableCom
 
 // ObserveClock issues one retained logical Clock reference for a Run.
 func (engine CliEngine) ObserveClock(target EngineClockTarget, runID string) (ClockObservationResult, error) {
+	return engine.ObserveClockContext(context.Background(), target, runID)
+}
+
+// ObserveClockContext issues one retained logical Clock reference for one caller context.
+func (engine CliEngine) ObserveClockContext(ctx context.Context, target EngineClockTarget, runID string) (ClockObservationResult, error) {
 	if !validRunIdentity(runID) || validateEngineClockTarget(target) != nil {
 		return ClockObservationResult{}, validationFailure(
 			"invalid_engine_request", "Clock observation request is invalid",
@@ -6654,7 +6719,7 @@ func (engine CliEngine) ObserveClock(target EngineClockTarget, runID string) (Cl
 		Type   string                 `json:"type"`
 		Result ClockObservationResult `json:"result"`
 	}
-	err := engine.request(map[string]any{
+	err := engine.requestContext(ctx, map[string]any{
 		"type": "observe_clock", "target": target, "run_id": runID,
 	}, &response)
 	if err == nil && response.Type != "clock_observed" {
@@ -7081,11 +7146,16 @@ func validBareSHA256(value string) bool {
 
 // VerifyEvolutionCommand validates one M4 envelope with the Rust engine.
 func (engine CliEngine) VerifyEvolutionCommand(command EvolutionCommand) (EvolutionCommand, error) {
+	return engine.VerifyEvolutionCommandContext(context.Background(), command)
+}
+
+// VerifyEvolutionCommandContext validates one M4 envelope for one caller context.
+func (engine CliEngine) VerifyEvolutionCommandContext(ctx context.Context, command EvolutionCommand) (EvolutionCommand, error) {
 	var response struct {
 		Type    string           `json:"type"`
 		Command EvolutionCommand `json:"command"`
 	}
-	err := engine.request(map[string]any{
+	err := engine.requestContext(ctx, map[string]any{
 		"type": "verify_evolution_command", "command": command,
 	}, &response)
 	if err == nil && response.Type != "verified_evolution_command" {
@@ -7098,11 +7168,19 @@ func (engine CliEngine) VerifyEvolutionCommand(command EvolutionCommand) (Evolut
 func (engine CliEngine) VerifyLiveEvolutionCommand(
 	command LiveEvolutionCommand,
 ) (LiveEvolutionCommand, error) {
+	return engine.VerifyLiveEvolutionCommandContext(context.Background(), command)
+}
+
+// VerifyLiveEvolutionCommandContext validates one unified control envelope for one caller context.
+func (engine CliEngine) VerifyLiveEvolutionCommandContext(
+	ctx context.Context,
+	command LiveEvolutionCommand,
+) (LiveEvolutionCommand, error) {
 	var response struct {
 		Type    string               `json:"type"`
 		Command LiveEvolutionCommand `json:"command"`
 	}
-	err := engine.request(map[string]any{
+	err := engine.requestContext(ctx, map[string]any{
 		"type": "verify_live_evolution_command", "command": command,
 	}, &response)
 	if err == nil && response.Type != "verified_live_evolution_command" {
@@ -7113,6 +7191,11 @@ func (engine CliEngine) VerifyLiveEvolutionCommand(
 
 // ExecuteDurable submits one stateful command to a durable Rust domain.
 func (engine CliEngine) ExecuteDurable(target EngineDurableTarget, command DurableCommand) (DurableResponse, error) {
+	return engine.ExecuteDurableContext(context.Background(), target, command)
+}
+
+// ExecuteDurableContext submits one stateful command for one caller context.
+func (engine CliEngine) ExecuteDurableContext(ctx context.Context, target EngineDurableTarget, command DurableCommand) (DurableResponse, error) {
 	if err := validateDurableCommandResponse(command); err != nil {
 		return DurableResponse{}, validationFailure(
 			"invalid_engine_request", "durable command failed local validation",
@@ -7125,7 +7208,7 @@ func (engine CliEngine) ExecuteDurable(target EngineDurableTarget, command Durab
 	}
 	expectedStartPlanID := ""
 	if command.Type == "start_run" {
-		sealed, err := engine.Seal(*command.Candidate)
+		sealed, err := engine.SealContext(ctx, *command.Candidate)
 		if err != nil {
 			return DurableResponse{}, err
 		}
@@ -7138,7 +7221,7 @@ func (engine CliEngine) ExecuteDurable(target EngineDurableTarget, command Durab
 	request := map[string]any{
 		"type": "execute_durable", "target": target, "command": command,
 	}
-	err := engine.request(request, &response)
+	err := engine.requestContext(ctx, request, &response)
 	if err == nil && response.Type != "durable_executed" {
 		err = unexpectedEngineResponse("durable_executed", response.Type)
 	}
@@ -7153,6 +7236,15 @@ func (engine CliEngine) ExecuteDurable(target EngineDurableTarget, command Durab
 
 // ExecuteLiveEvolution submits one atomic command to durable evolution authority.
 func (engine CliEngine) ExecuteLiveEvolution(
+	target EngineEvolutionTarget, evolutionID string,
+	command LiveEvolutionCommand,
+) (EvolutionCommit, error) {
+	return engine.ExecuteLiveEvolutionContext(context.Background(), target, evolutionID, command)
+}
+
+// ExecuteLiveEvolutionContext submits one atomic evolution command for one caller context.
+func (engine CliEngine) ExecuteLiveEvolutionContext(
+	ctx context.Context,
 	target EngineEvolutionTarget, evolutionID string,
 	command LiveEvolutionCommand,
 ) (EvolutionCommit, error) {
@@ -7174,7 +7266,7 @@ func (engine CliEngine) ExecuteLiveEvolution(
 	expectedTargetPlanID := ""
 	if command.Operation == "apply" && command.Command != nil &&
 		command.Command.Operation == "apply_patch" && command.Command.Patch != nil {
-		sealedTarget, err := engine.Seal(command.Command.Patch.Target)
+		sealedTarget, err := engine.SealContext(ctx, command.Command.Patch.Target)
 		if err != nil {
 			return EvolutionCommit{}, err
 		}
@@ -7189,7 +7281,7 @@ func (engine CliEngine) ExecuteLiveEvolution(
 		"type": "execute_live_evolution", "target": target,
 		"evolution_id": evolutionID, "command": command,
 	}
-	err := engine.request(request, &response)
+	err := engine.requestContext(ctx, request, &response)
 	if err == nil && response.Type != "live_evolution_executed" {
 		err = unexpectedEngineResponse("live_evolution_executed", response.Type)
 	}
@@ -7236,10 +7328,15 @@ type DurableEngine struct {
 
 // ObserveClock issues one exact retained Clock reference for a later command.
 func (engine DurableEngine) ObserveClock(runID string) (ClockObservationRef, error) {
+	return engine.ObserveClockContext(context.Background(), runID)
+}
+
+// ObserveClockContext issues one exact retained Clock reference for one caller context.
+func (engine DurableEngine) ObserveClockContext(ctx context.Context, runID string) (ClockObservationRef, error) {
 	if engine.Clock == nil {
 		return ClockObservationRef{}, fmt.Errorf("durable Clock target is missing")
 	}
-	result, err := engine.Transport.ObserveClock(*engine.Clock, runID)
+	result, err := engine.Transport.ObserveClockContext(ctx, *engine.Clock, runID)
 	if err != nil {
 		return ClockObservationRef{}, err
 	}
@@ -7256,29 +7353,44 @@ func (engine DurableEngine) ObserveClock(runID string) (ClockObservationRef, err
 
 // Start creates or idempotently reopens one Run.
 func (engine DurableEngine) Start(runID string, candidate PlanCandidate, input any, execution ExecutionClaimRequest) (DurableResponse, error) {
+	return engine.StartContext(context.Background(), runID, candidate, input, execution)
+}
+
+// StartContext creates or idempotently reopens one Run for one caller context.
+func (engine DurableEngine) StartContext(ctx context.Context, runID string, candidate PlanCandidate, input any, execution ExecutionClaimRequest) (DurableResponse, error) {
 	command, err := StartDurableRun(runID, candidate, input, execution)
 	if err != nil {
 		return DurableResponse{}, validationFailure("invalid_engine_request", "durable start command is invalid")
 	}
-	return engine.submit(command)
+	return engine.submitContext(ctx, command)
 }
 
 // RunIndexPage reads one bounded revision-pinned page of Run summaries.
 func (engine DurableEngine) RunIndexPage(options DurablePageQueryOptions) (DurableQueryPage, error) {
+	return engine.RunIndexPageContext(context.Background(), options)
+}
+
+// RunIndexPageContext reads one bounded page for one caller context.
+func (engine DurableEngine) RunIndexPageContext(ctx context.Context, options DurablePageQueryOptions) (DurableQueryPage, error) {
 	command, err := QueryDurableRunIndexPage(options)
 	if err != nil {
 		return DurableQueryPage{}, validationFailure("invalid_engine_request", "durable Run-index query is invalid")
 	}
-	return engine.queryPage(command, "run_index_page")
+	return engine.queryPageContext(ctx, command, "run_index_page")
 }
 
 // RunCurrent reads one bounded semantic Run-current projection.
 func (engine DurableEngine) RunCurrent(runID string, expectedRevision *string) (DurableResponse, error) {
+	return engine.RunCurrentContext(context.Background(), runID, expectedRevision)
+}
+
+// RunCurrentContext reads one bounded Run projection for one caller context.
+func (engine DurableEngine) RunCurrentContext(ctx context.Context, runID string, expectedRevision *string) (DurableResponse, error) {
 	command, err := QueryDurableRunCurrent(runID, expectedRevision)
 	if err != nil {
 		return DurableResponse{}, validationFailure("invalid_engine_request", "durable Run-current query is invalid")
 	}
-	response, err := engine.submit(command)
+	response, err := engine.submitContext(ctx, command)
 	if err == nil && response.Type != "run_current" {
 		err = unexpectedEngineResponse("run_current", response.Type)
 	}
@@ -7287,47 +7399,72 @@ func (engine DurableEngine) RunCurrent(runID string, expectedRevision *string) (
 
 // RunWaitPage reads one bounded revision-pinned page of wait summaries.
 func (engine DurableEngine) RunWaitPage(runID string, options DurablePageQueryOptions) (DurableQueryPage, error) {
+	return engine.RunWaitPageContext(context.Background(), runID, options)
+}
+
+// RunWaitPageContext reads wait summaries for one caller context.
+func (engine DurableEngine) RunWaitPageContext(ctx context.Context, runID string, options DurablePageQueryOptions) (DurableQueryPage, error) {
 	command, err := QueryDurableRunWaitPage(runID, options)
 	if err != nil {
 		return DurableQueryPage{}, validationFailure("invalid_engine_request", "durable wait-page query is invalid")
 	}
-	return engine.queryPage(command, "run_wait_page")
+	return engine.queryPageContext(ctx, command, "run_wait_page")
 }
 
 // RunEffectPage reads one bounded revision-pinned page of Effect summaries.
 func (engine DurableEngine) RunEffectPage(runID string, options DurablePageQueryOptions) (DurableQueryPage, error) {
+	return engine.RunEffectPageContext(context.Background(), runID, options)
+}
+
+// RunEffectPageContext reads Effect summaries for one caller context.
+func (engine DurableEngine) RunEffectPageContext(ctx context.Context, runID string, options DurablePageQueryOptions) (DurableQueryPage, error) {
 	command, err := QueryDurableRunEffectPage(runID, options)
 	if err != nil {
 		return DurableQueryPage{}, validationFailure("invalid_engine_request", "durable Effect-page query is invalid")
 	}
-	return engine.queryPage(command, "run_effect_page")
+	return engine.queryPageContext(ctx, command, "run_effect_page")
 }
 
 // RunOccurrencePage reads one bounded revision-pinned page of occurrence summaries.
 func (engine DurableEngine) RunOccurrencePage(runID string, options DurablePageQueryOptions) (DurableQueryPage, error) {
+	return engine.RunOccurrencePageContext(context.Background(), runID, options)
+}
+
+// RunOccurrencePageContext reads occurrence summaries for one caller context.
+func (engine DurableEngine) RunOccurrencePageContext(ctx context.Context, runID string, options DurablePageQueryOptions) (DurableQueryPage, error) {
 	command, err := QueryDurableRunOccurrencePage(runID, options)
 	if err != nil {
 		return DurableQueryPage{}, validationFailure("invalid_engine_request", "durable occurrence-page query is invalid")
 	}
-	return engine.queryPage(command, "run_occurrence_page")
+	return engine.queryPageContext(ctx, command, "run_occurrence_page")
 }
 
 // RunAttemptPage reads one bounded revision-pinned page of Attempt summaries.
 func (engine DurableEngine) RunAttemptPage(runID string, options DurablePageQueryOptions) (DurableQueryPage, error) {
+	return engine.RunAttemptPageContext(context.Background(), runID, options)
+}
+
+// RunAttemptPageContext reads Attempt summaries for one caller context.
+func (engine DurableEngine) RunAttemptPageContext(ctx context.Context, runID string, options DurablePageQueryOptions) (DurableQueryPage, error) {
 	command, err := QueryDurableRunAttemptPage(runID, options)
 	if err != nil {
 		return DurableQueryPage{}, validationFailure("invalid_engine_request", "durable Attempt-page query is invalid")
 	}
-	return engine.queryPage(command, "run_attempt_page")
+	return engine.queryPageContext(ctx, command, "run_attempt_page")
 }
 
 // RunItem reads one complete Run-owned typed leaf by exact identity.
 func (engine DurableEngine) RunItem(query DurableRunItemQuery) (DurableResponse, error) {
+	return engine.RunItemContext(context.Background(), query)
+}
+
+// RunItemContext reads one exact Run-owned item for one caller context.
+func (engine DurableEngine) RunItemContext(ctx context.Context, query DurableRunItemQuery) (DurableResponse, error) {
 	command, err := QueryDurableRunItem(query)
 	if err != nil {
 		return DurableResponse{}, validationFailure("invalid_engine_request", "exact durable Run-item query is invalid")
 	}
-	response, err := engine.submit(command)
+	response, err := engine.submitContext(ctx, command)
 	if err == nil && response.Type != "run_item" {
 		err = unexpectedEngineResponse("run_item", response.Type)
 	}
@@ -7335,7 +7472,11 @@ func (engine DurableEngine) RunItem(query DurableRunItemQuery) (DurableResponse,
 }
 
 func (engine DurableEngine) queryPage(command DurableCommand, expectedType string) (DurableQueryPage, error) {
-	response, err := engine.submit(command)
+	return engine.queryPageContext(context.Background(), command, expectedType)
+}
+
+func (engine DurableEngine) queryPageContext(ctx context.Context, command DurableCommand, expectedType string) (DurableQueryPage, error) {
+	response, err := engine.submitContext(ctx, command)
 	if err != nil {
 		return DurableQueryPage{}, err
 	}
@@ -7347,19 +7488,29 @@ func (engine DurableEngine) queryPage(command DurableCommand, expectedType strin
 
 // Resume advances one ready Run to its next boundary.
 func (engine DurableEngine) Resume(runID string, execution ExecutionClaimRequest) (DurableResponse, error) {
+	return engine.ResumeContext(context.Background(), runID, execution)
+}
+
+// ResumeContext advances one ready Run for one caller context.
+func (engine DurableEngine) ResumeContext(ctx context.Context, runID string, execution ExecutionClaimRequest) (DurableResponse, error) {
 	if !validRunIdentity(runID) {
 		return DurableResponse{}, validationFailure("invalid_engine_request", "durable resume Run identity is invalid")
 	}
-	return engine.submit(ResumeDurableRun(runID, execution))
+	return engine.submitContext(ctx, ResumeDurableRun(runID, execution))
 }
 
 // Takeover explicitly replaces one expired persisted Running claim.
 func (engine DurableEngine) Takeover(runID string, expectedFence uint64, execution ExecutionClaimRequest) (DurableResponse, error) {
+	return engine.TakeoverContext(context.Background(), runID, expectedFence, execution)
+}
+
+// TakeoverContext replaces one expired claim for one caller context.
+func (engine DurableEngine) TakeoverContext(ctx context.Context, runID string, expectedFence uint64, execution ExecutionClaimRequest) (DurableResponse, error) {
 	command, err := TakeoverDurableRun(runID, expectedFence, execution)
 	if err != nil {
 		return DurableResponse{}, validationFailure("invalid_engine_request", "durable takeover command is invalid")
 	}
-	return engine.submit(command)
+	return engine.submitContext(ctx, command)
 }
 
 // Signal admits one identified signal delivery.
@@ -7368,20 +7519,51 @@ func (engine DurableEngine) Signal(
 	waitIDs []string,
 	value any,
 ) (DurableResponse, error) {
+	return engine.SignalContext(context.Background(), activationID, key, waitIDs, value)
+}
+
+// SignalContext admits one identified signal delivery for one caller context.
+func (engine DurableEngine) SignalContext(
+	ctx context.Context,
+	activationID, key string,
+	waitIDs []string,
+	value any,
+) (DurableResponse, error) {
 	command, err := ActivateDurableSignal(activationID, key, waitIDs, value)
 	if err != nil {
 		return DurableResponse{}, validationFailure("invalid_engine_request", "durable activation command is invalid")
 	}
-	return engine.submit(command)
+	return engine.submitContext(ctx, command)
 }
 
 // Release releases one explicit effect intent.
 func (engine DurableEngine) Release(intentID string, execution ExecutionClaimRequest) (DurableResponse, error) {
-	return engine.submit(ReleaseDurableEffect(intentID, execution))
+	return engine.ReleaseContext(context.Background(), intentID, execution)
+}
+
+// ReleaseContext releases one explicit Effect intent for one caller context.
+func (engine DurableEngine) ReleaseContext(ctx context.Context, intentID string, execution ExecutionClaimRequest) (DurableResponse, error) {
+	return engine.submitContext(ctx, ReleaseDurableEffect(intentID, execution))
 }
 
 // ResolveEffect commits one exact claimed-effect reconciliation result.
 func (engine DurableEngine) ResolveEffect(
+	resolutionID, runID, intentID string,
+	executionBinding ArtifactRef,
+	occurrenceBinding, claimOwner string,
+	claimEpoch uint64,
+	resolution string,
+	value any,
+) (DurableResponse, error) {
+	return engine.ResolveEffectContext(
+		context.Background(), resolutionID, runID, intentID, executionBinding,
+		occurrenceBinding, claimOwner, claimEpoch, resolution, value,
+	)
+}
+
+// ResolveEffectContext commits one reconciliation result for one caller context.
+func (engine DurableEngine) ResolveEffectContext(
+	ctx context.Context,
 	resolutionID, runID, intentID string,
 	executionBinding ArtifactRef,
 	occurrenceBinding, claimOwner string,
@@ -7396,20 +7578,30 @@ func (engine DurableEngine) ResolveEffect(
 	if err != nil {
 		return DurableResponse{}, validationFailure("invalid_engine_request", "durable effect resolution command is invalid")
 	}
-	return engine.submit(command)
+	return engine.submitContext(ctx, command)
 }
 
 // Cancel commits one provider-independent semantic Run cancellation.
 func (engine DurableEngine) Cancel(cancellationID, runID string, reason any) (DurableResponse, error) {
+	return engine.CancelContext(context.Background(), cancellationID, runID, reason)
+}
+
+// CancelContext commits semantic Run cancellation while ctx controls only this exchange.
+func (engine DurableEngine) CancelContext(ctx context.Context, cancellationID, runID string, reason any) (DurableResponse, error) {
 	command, err := CancelDurableRun(cancellationID, runID, reason)
 	if err != nil {
 		return DurableResponse{}, validationFailure("invalid_engine_request", "durable cancellation command is invalid")
 	}
-	return engine.submit(command)
+	return engine.submitContext(ctx, command)
 }
 
 // Evolve applies one atomic command to the same durable domain.
 func (engine DurableEngine) Evolve(command LiveEvolutionCommand) (EvolutionCommit, error) {
+	return engine.EvolveContext(context.Background(), command)
+}
+
+// EvolveContext applies one atomic evolution command for one caller context.
+func (engine DurableEngine) EvolveContext(ctx context.Context, command LiveEvolutionCommand) (EvolutionCommit, error) {
 	evolutionID := engine.EvolutionID
 	if evolutionID == "" {
 		evolutionID = "cymule.sdk.live-evolution"
@@ -7431,10 +7623,14 @@ func (engine DurableEngine) Evolve(command LiveEvolutionCommand) (EvolutionCommi
 			target.ShadowDriver = engine.ShadowDriver
 		}
 	}
-	return engine.Transport.ExecuteLiveEvolution(target, evolutionID, command)
+	return engine.Transport.ExecuteLiveEvolutionContext(ctx, target, evolutionID, command)
 }
 
 func (engine DurableEngine) submit(command DurableCommand) (DurableResponse, error) {
+	return engine.submitContext(context.Background(), command)
+}
+
+func (engine DurableEngine) submitContext(ctx context.Context, command DurableCommand) (DurableResponse, error) {
 	target := EngineDurableTarget{Store: engine.Store}
 	storeOnly := command.Type == "activate_wait" || command.Type == "cancel_run" ||
 		slices.Contains([]string{
@@ -7447,11 +7643,16 @@ func (engine DurableEngine) submit(command DurableCommand) (DurableResponse, err
 			target.Clock = engine.Clock
 		}
 	}
-	return engine.Transport.ExecuteDurable(target, command)
+	return engine.Transport.ExecuteDurableContext(ctx, target, command)
 }
 
 // Run executes a sealed plan through one complete plugin realization.
 func (engine CliEngine) Run(plan SealedPlan, input any, plugin EnginePluginTarget, runID string) (ExecutionOutcome, error) {
+	return engine.RunContext(context.Background(), plan, input, plugin, runID)
+}
+
+// RunContext executes a sealed plan for one caller context.
+func (engine CliEngine) RunContext(ctx context.Context, plan SealedPlan, input any, plugin EnginePluginTarget, runID string) (ExecutionOutcome, error) {
 	if !validRunIdentity(runID) {
 		return ExecutionOutcome{}, validationFailure(
 			"invalid_engine_request", "execution request Run identity is invalid",
@@ -7466,7 +7667,7 @@ func (engine CliEngine) Run(plan SealedPlan, input any, plugin EnginePluginTarge
 		Type      string           `json:"type"`
 		Execution ExecutionOutcome `json:"execution"`
 	}
-	err := engine.request(map[string]any{
+	err := engine.requestContext(ctx, map[string]any{
 		"type": "run", "plan": plan, "input": input, "plugin": plugin, "run_id": runID,
 	}, &response)
 	if err == nil && response.Type != "execution_boundary" {
@@ -7476,6 +7677,16 @@ func (engine CliEngine) Run(plan SealedPlan, input any, plugin EnginePluginTarge
 }
 
 func (engine CliEngine) request(request any, response any) error {
+	return engine.requestContext(context.Background(), request, response)
+}
+
+func (engine CliEngine) requestContext(ctx context.Context, request any, response any) error {
+	if ctx == nil {
+		return validationFailure("invalid_engine_context", "Engine context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return interruptedFailure(request, err, false)
+	}
 	timeout := engine.Timeout
 	if timeout < 0 {
 		return validationFailure("invalid_engine_timeout", "Engine timeout must be a positive duration")
@@ -7483,14 +7694,32 @@ func (engine CliEngine) request(request any, response any) error {
 	if timeout == 0 {
 		timeout = defaultEngineTimeout
 	}
-	cancellation := engine.Cancellation
-	if cancellation == nil {
-		cancellation = NewEngineCancellation()
+	cancellation := NewEngineCancellation()
+	stopContext := context.AfterFunc(ctx, func() {
+		cancellation.cancel(ctx.Err())
+	})
+	defer stopContext()
+	legacyBridgeDone := make(chan struct{})
+	if legacy := engine.Cancellation; legacy != nil {
+		legacyDone := legacy.doneChannel()
+		go func() {
+			select {
+			case <-legacyDone:
+				cancellation.cancel(legacy.interruption())
+			case <-legacyBridgeDone:
+			}
+		}()
 	}
+	defer close(legacyBridgeDone)
 	call, admitted := cancellation.begin()
 	if !admitted {
-		return interruptedFailure(request, context.Canceled, false)
+		cause := ctx.Err()
+		if cause == nil {
+			cause = cancellation.interruption()
+		}
+		return interruptedFailure(request, cause, false)
 	}
+	call.legacy = engine.Cancellation
 	defer call.abandon()
 	if err := validateGoJSONStrings(reflect.ValueOf(request)); err != nil {
 		return validationFailure("invalid_engine_request", "Engine request contains invalid JSON text")
@@ -7558,7 +7787,7 @@ func (engine CliEngine) request(request any, response any) error {
 		_ = stdoutPipe.Close()
 		_ = stderrPipe.Close()
 		if errors.Is(startErr, context.Canceled) {
-			return interruptedFailure(request, context.Canceled, false)
+			return interruptedFailure(request, call.interruption(), false)
 		}
 		return transportFailure("engine_start_failed", "the Engine process could not be started")
 	}
@@ -7598,6 +7827,9 @@ func (engine CliEngine) request(request any, response any) error {
 		call.observeTerminal,
 		terminateEngineProcess,
 	)
+	if errors.Is(processResult.interruption, context.Canceled) {
+		processResult.interruption = call.interruption()
+	}
 	if processErr := classifyEngineProcessResult(request, processResult); processErr != nil {
 		return processErr
 	}

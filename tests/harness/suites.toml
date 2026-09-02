@@ -13,6 +13,7 @@ suites = [
   "rust-profile-protocol",
   "rust-core",
   "rust-workspace",
+  "rust-internal-api",
   "rust-durable",
   "rust-virtual",
   "rust-resource",
@@ -110,6 +111,12 @@ description = "Run formatting, static analysis, and documentation for the Rust w
 lane = "rust-static"
 tools = ["rust"]
 commands = [["./scripts/verify-rust-static.sh"]]
+
+[suites.rust-internal-api]
+description = "Reject unreviewed growth of the temporary Rust internal bridge and its consumers."
+lane = "rust-static"
+tools = ["rust"]
+commands = [["sh", "scripts/verify-rust-internal-api.sh"]]
 
 [suites.rust-core]
 description = "Run the small Rust semantic kernel and its property tests."
@@ -336,6 +343,7 @@ requires = [
   "rust-durable-protocol",
   "rust-profile-protocol",
   "rust-workspace",
+  "rust-internal-api",
   "rust-core",
   "rust-durable",
   "rust-virtual",
@@ -438,6 +446,10 @@ suites = ["full"]
 [[routes]]
 patterns = ["schemas/version-domain-registry.schema.json", "schemas/release-bom.schema.json"]
 suites = ["full"]
+
+[[routes]]
+patterns = ["Cargo.toml", "crates/**/*.rs", "crates/**/Cargo.toml", "plugins/**/*.rs", "plugins/**/Cargo.toml", "examples/**/*.rs", "examples/**/Cargo.toml", "tests/test-world/**/*.rs", "tests/test-world/Cargo.toml", "tests/test-world/**/Cargo.toml"]
+suites = ["rust-internal-api"]
 
 [[routes]]
 patterns = ["crates/cymule-core/tests/**"]
@@ -626,6 +638,10 @@ suites = ["package-typescript"]
 [[routes]]
 patterns = ["scripts/verify-rust-static.sh"]
 suites = ["rust-workspace"]
+
+[[routes]]
+patterns = ["scripts/verify-rust-internal-api.sh"]
+suites = ["rust-internal-api"]
 
 [[routes]]
 patterns = ["scripts/verify.sh", "scripts/verify-rust.sh", ".github/workflows/**"]

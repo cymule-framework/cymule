@@ -20,6 +20,13 @@
   escalation.
 - Scripts must be non-interactive, fail closed, and run from any working
   directory.
+- `verify-rust-internal-api.sh` is a temporary lexical smoke gate that freezes
+  the existing `cymule_core::durable_internal` lexical consumer set and module
+  block text while
+  ADR 0006's physical crate split is pending. It is selected for every Rust
+  source or manifest change. It is not a compiler or dependency-graph proof;
+  any tracked-debt removal or consumer/surface change must update the ADR and
+  snapshots deliberately, and application-facing crates must never be added.
 - Do not hide skipped coverage. Optional-tool skips exit with code 77 and are
   recorded as `skipped`; execution failures are `infrastructure_error`, never
   a report whose aggregate status says passed.

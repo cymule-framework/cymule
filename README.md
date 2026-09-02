@@ -18,11 +18,21 @@ an exact-head quiescence decision.
 
 The public model stays deliberately small - `Flow -> Run -> Result`, with
 `call / wait / effect / scope` inside a Flow and `observe / decide / change`
-around a Run. Under that facade, immutable Plans, causal Events, and Artifacts
-are the only canonical truth; graphs, frontiers, schedulers, and debugger views
-are rebuildable projections. Languages, databases, queues, sandboxes,
+around a Run. Under that facade, canonical authority consists of admitted
+sealed Plans, immutable Artifacts, complete ordered command batches, receipts,
+admissions and causal Events; staged proposals are not authority. Graphs,
+frontiers, schedulers, and debugger views are rebuildable projections.
+Languages, databases, queues, sandboxes,
 providers, and deployment topologies remain replaceable realizations rather
 than framework semantics.
+
+Hosting topology is likewise non-semantic. An application may embed one
+authority domain locally or place many logically separated authority domains
+behind an authenticated Authority Host without changing Plan or Run meaning.
+Logical separation alone is not a strong infrastructure-isolation claim. The
+multi-tenant host is a
+[proposed profile](docs/profiles/multi-tenant-authority-host.md), not a claim of
+the current M1 implementation.
 
 > **Project status:** the current unreleased tree is a **partial terminal
 > candidate** for the complete single-domain execution profile: durable

@@ -321,6 +321,22 @@ scan or another target authority. The external provider separately linearizes
 world-write claim against a terminal NotApplied tombstone in its durable ledger
 for the exact dispatch.
 
+## Authority domains and hosting
+
+The framework addresses a topology-neutral authority domain rather than a
+local or cloud deployment. A proposed multi-tenant Authority Host authenticates
+the caller, selects one domain, authorizes the typed operation and then invokes
+the existing Engine facade. It owns routing, quotas, credentials, transport
+security and audit evidence; none enter Plan semantics. Shared-domain
+application tenancy and domain-per-tenant isolation are distinct, explicit
+deployment choices. See [ADR 0005](decisions/0005-authority-domains-and-hosts.md).
+
+Rust's intended API layers are the stable semantic facade, narrow provider
+SPIs and exact-version sibling implementation protocols. The current
+`cymule_core::durable_internal` bridge is public despite documentation hiding;
+the compiler-enforced package split remains proposed in
+[ADR 0006](decisions/0006-rust-api-boundaries.md).
+
 ## Verification boundary
 
 [Test ownership and commands](testing.md) define focused and full verification.

@@ -4,7 +4,18 @@ Implementation status: source integration is in progress for the bounded
 semantic, embedded, durable single-domain, large-virtual-work, and
 live-evolution profiles. Branch-wide verification and version-authority closure
 remain pending the final source freeze. Distributed ownership, federation, and
-strong isolation remain separate proposed profiles.
+strong isolation and the multi-tenant Authority Host remain separate proposed
+profiles.
+
+An authority domain is topology-neutral: local and hosted realizations MUST NOT
+change semantic identity. Authentication, principal membership in an explicit
+tenant context, tenant/domain routing, authorization, quotas, credentials and
+transport security belong to an Authority Host rather than the semantic
+kernel. `Actor` records provenance and
+MUST NOT be treated as authentication or capability authorization. See
+[ADR 0005](decisions/0005-authority-domains-and-hosts.md). This paragraph fixes
+the semantic boundary; the host protocol and conformance profile remain
+proposed.
 
 ## 1. Normative language
 
@@ -27,6 +38,15 @@ Effect observations before reaching a terminal Result. The Run is the default
 live handle. Graphs are views. Incremental output transport and Agent streams
 belong to their owning integration profiles; the frozen IR has no generic
 stream-output operation.
+
+Plan author metadata is execution-neutral but identity-bearing: reducers MUST
+NOT interpret it, while canonical Plan sealing MUST include its exact keys and
+values. Changing metadata therefore changes Plan identity even when execution
+behavior is otherwise identical.
+
+`RecordFact` is a Machine-wide immutable application fact primitive. A key may
+be admitted once and replayed causally; the same key with another value
+conflicts. Its use in conformance tests does not make it test-only authority.
 
 ## 3. Version domains
 
@@ -186,6 +206,14 @@ numbers, and integers outside the shared exact range of
 `-9007199254740991..=9007199254740991` MUST be rejected before semantic
 admission. If a deadline or cancellation loses the response to a mutating
 request, SDKs MUST report `unknown_world_outcome` with `reconcile`.
+A caller cancellation token or Go `context.Context` controls only that
+exchange's wait and transport resources. It MUST NOT commit semantic Run
+cancellation, release a durable claim, settle an Effect, or prove that an
+accepted mutation was not applied. Semantic Run cancellation remains an
+explicit idempotent command. A configured hard transport timeout, a caller
+deadline, provider execution limits, durable lease expiry and a Plan-level
+business deadline are separate mechanisms and MUST NOT be inferred from one
+another.
 A store head publish or transaction commit whose receipt is unavailable has the
 same closed failure and recovery disposition; it MUST NOT report
 `retry_same_request`.

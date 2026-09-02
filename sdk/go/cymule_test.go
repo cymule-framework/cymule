@@ -951,6 +951,98 @@ func TestEngineCancellationAfterLaunchInterruptsTheOwnedChild(t *testing.T) {
 	}
 }
 
+func TestCliEngineContextLinearizesBeforeLaunch(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "engine")
+	marker := executable + ".started"
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n: > \"$0.started\"\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := (CliEngine{Executable: executable}).SealContext(ctx, fixedCandidate())
+	requireFailure(t, err, "cancelled", "engine_response_cancelled", "never")
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("pre-cancelled context still launched the Engine: %v", statErr)
+	}
+}
+
+func TestCliEngineContextIsScopedToOneCall(t *testing.T) {
+	engine := engineWithSuccess(t, map[string]any{"type": "sealed", "plan": fixedPlan()})
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := engine.SealContext(ctx, fixedCandidate())
+	requireFailure(t, err, "cancelled", "engine_response_cancelled", "never")
+
+	plan, err := engine.SealContext(t.Context(), fixedCandidate())
+	if err != nil {
+		t.Fatalf("one cancelled call poisoned the transport: %v", err)
+	}
+	if plan.PlanID != fixedPlan().PlanID {
+		t.Fatalf("unexpected Plan after cancelled sibling call: %#v", plan)
+	}
+}
+
+func TestCliEngineContextDoesNotCancelLegacySource(t *testing.T) {
+	legacy := NewEngineCancellation()
+	blocking, marker := blockingEngine(t)
+	blocking.Cancellation = legacy
+	ctx, cancel := context.WithCancel(t.Context())
+	result := make(chan error, 1)
+	go func() {
+		_, err := blocking.SealContext(ctx, fixedCandidate())
+		result <- err
+	}()
+	waitForEngineStart(t, marker)
+	cancel()
+	requireFailure(t, <-result, "cancelled", "engine_response_cancelled", "never")
+
+	next := engineWithSuccess(t, map[string]any{"type": "sealed", "plan": fixedPlan()})
+	next.Cancellation = legacy
+	if _, err := next.SealContext(t.Context(), fixedCandidate()); err != nil {
+		t.Fatalf("call context cancelled the legacy source or a later call: %v", err)
+	}
+}
+
+func TestCliEngineContextClassifiesPostStartMutationAsUnknown(t *testing.T) {
+	engine, marker := blockingEngine(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	result := make(chan error, 1)
+	go func() {
+		_, err := engine.ObserveClockContext(
+			ctx,
+			SQLiteClock("unused", "clock:context-cancel", fixedContentID("1")),
+			"run:context-cancel",
+		)
+		result <- err
+	}()
+	waitForEngineStart(t, marker)
+	cancel()
+	select {
+	case err := <-result:
+		requireFailure(t, err, "unknown_world_outcome", "engine_response_cancelled", "reconcile")
+	case <-time.After(3 * time.Second):
+		t.Fatal("context cancellation did not terminate the launched Engine")
+	}
+}
+
+func TestCliEngineContextDeadlineKeepsReadRetryClassification(t *testing.T) {
+	engine, _ := blockingEngine(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	_, err := engine.SealContext(ctx, fixedCandidate())
+	requireFailure(t, err, "timed_out", "engine_response_timed_out", "retry_same_request")
+}
+
+func TestCliEngineContextDeadlineCauseKeepsDeadlineClassification(t *testing.T) {
+	engine, _ := blockingEngine(t)
+	ctx, cancel := context.WithTimeoutCause(
+		t.Context(), 200*time.Millisecond, errors.New("caller-specific deadline detail"),
+	)
+	defer cancel()
+	_, err := engine.SealContext(ctx, fixedCandidate())
+	requireFailure(t, err, "timed_out", "engine_response_timed_out", "retry_same_request")
+}
+
 func TestCliEngineTimeoutSelectionIsFinite(t *testing.T) {
 	t.Run("positive transport timeout overrides the default", func(t *testing.T) {
 		engine, _ := blockingEngine(t)

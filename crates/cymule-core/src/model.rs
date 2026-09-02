@@ -552,7 +552,10 @@ pub enum Command {
         /// Canonical digest of the complete target Continuation/frame stack.
         target_continuation_digest: String,
     },
-    /// Append an independent immutable fact for causal conformance tests.
+    /// Append a Machine-wide immutable application fact.
+    ///
+    /// Facts are a small, general causal primitive used by conformance tests
+    /// and applications; they are not test-only state.
     RecordFact {
         /// Stable logical fact key.
         key: String,

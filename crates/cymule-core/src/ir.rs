@@ -28,7 +28,10 @@ pub struct PlanCandidate {
     pub effects: Vec<EffectContract>,
     /// Structured definitions.
     pub definitions: Vec<Definition>,
-    /// Non-semantic author metadata. Keys and values are still content-addressed.
+    /// Execution-neutral, identity-bearing author metadata.
+    ///
+    /// Reducers do not interpret these values, but they remain part of the
+    /// canonical Plan preimage and therefore change Plan identity.
     pub metadata: BTreeMap<String, String>,
 }
 

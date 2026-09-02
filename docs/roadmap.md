@@ -9,6 +9,19 @@ but remains a partial terminal candidate with final frozen-tree validation
 pending. It has no release tag, package publication, operator migration, or
 deployment.
 
+## Optional hosting track - Multi-tenant Authority Host
+
+Status: proposed. This is a product-hosting P0 when Cymule is offered to
+multiple application tenants, but it does not redefine or block the
+topology-neutral M0/M1 semantic contracts.
+
+The host must authenticate principals, resolve exactly one authority domain,
+authorize each typed operation, enforce domain quotas and retain redacted audit
+evidence before it can expose a remote endpoint. Local embedding and hosted
+routing share semantic identities; provider locations and credentials never
+cross the remote client boundary. Required design and adversarial gates are in
+[ADR 0005](decisions/0005-authority-domains-and-hosts.md).
+
 ## M0 - Semantic kernel
 
 Status: source-implemented in the current candidate; frozen-tree validation
@@ -191,3 +204,22 @@ Status: proposed.
 - mechanized minimal state machine;
 - trace-to-flow compilation and guarded specialization;
 - pure-region optimization and deoptimization.
+
+## Open release-evidence work
+
+The following review findings remain real and are not converted into feature
+claims by the source work above:
+
+- freeze one exact source generation and run the complete release, package,
+  public-consumer, fault and process-death gates before capability promotion;
+- publish a reproducible latency, allocation, write-amplification and CAS-
+  contention matrix for Start/Resume, large wait sets, virtual claims,
+  StateRoot reopen/audit/compaction, Effect reconciliation and M4 rollout;
+- measure schema compilation on seal, Start and execution hot paths before
+  adding a bounded exact-schema cache; boundedness alone is not performance
+  evidence;
+- continue replacing raw-map/string Go authoring unions and panic-style builder
+  paths with typed, error-returning APIs, independently of the completed
+  per-call Context transport boundary;
+- complete ADR 0006's physical internal-crate split and stable facade/SPI API
+  snapshots; the interim consumer allowlist only prevents further leakage.

@@ -23,6 +23,12 @@ Use this precedence order when guidance conflicts:
 - An Actor identifies command provenance, not authentication or capability
   authorization. Embeddings own those policy boundaries; neither an Actor
   string nor a coordination lease grants permission by itself.
+- Authority domains are topology-neutral; local and hosted realizations do not
+  change semantic identity. A multi-tenant Authority Host is a separate
+  proposed profile that owns authentication, principal/tenant membership,
+  tenant/domain routing, authorization, quotas, credentials, transport
+  security, and audit evidence.
+  It must not add those concerns to Plans or reinterpret Actor as identity.
 - Every raw JSON ingress uses the shared duplicate-rejecting decode contract
   before typed deserialization. CLI, SDK, plugin, canonical Artifact, and
   persisted-state readers must never pass wire bytes through a permissive
@@ -254,6 +260,10 @@ Use this precedence order when guidance conflicts:
   and must surface contention instead of waiting indefinitely.
 - Cross-language SDKs author the same frozen IR and use the same engine contract.
   They must not implement a second reducer or invent language-specific semantics.
+- Rust API privacy must be compiler-enforced by package boundaries. The current
+  `cymule_core::durable_internal` public bridge is a tracked migration exception,
+  not a private or stable API; add no new consumers. The target split is stable
+  facade, narrow provider SPI, and exact-version internal implementation crates.
 - SDK and self-hosting example conformance binaries use the workspace's
   `conformance` Cargo profile: dev semantics with debug symbols stripped and
   incremental state disabled. Tests retain the real 64/128 MiB closure budgets;
@@ -347,8 +357,10 @@ Use this precedence order when guidance conflicts:
   Child if still live and closes local transport descriptors. The official
   Engine/executor watchdog remains the sole descendant-closure authority.
 - Rust, Python, and Go process clients use SDK-owned cancellation gates that
-  linearize launch and admitted completion; Go exposes no caller Context as a
-  second cancellation authority. Engine failures omit `issues` or carry 1..=100
+  linearize launch and admitted completion. Go accepts a per-call Context only
+  as caller/transport cancellation: it never commits semantic Run cancellation
+  or authorizes state. A post-start mutating interruption is
+  `unknown_world_outcome/reconcile`. Engine failures omit `issues` or carry 1..=100
   entries, and every SDK admits an Effect result if and only if the state is
   `Applied`, with exact kind `cymule.effect-result/1`.
 - `cymule.ir/3` reusable definition calls resolve inside one immutable Plan.

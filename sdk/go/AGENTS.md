@@ -38,15 +38,29 @@
   Child; it never delegates `Cmd.Wait` to an unbounded goroutine. The
   Engine/executor watchdog owns descendants; the SDK never signals a raw PID or
   PGID after reaping.
-- `EngineCancellation` is a one-shot SDK launch/completion authority. `Cancel`
+- Context-suffixed Engine methods accept one non-nil `context.Context` per
+  exchange. Context controls caller waiting and the owned CLI child only; it
+  never commits semantic Run cancellation, releases a lease, changes an Effect,
+  or proves that an accepted mutation did not happen. Cancellation before
+  launch is safe. Cancellation or deadline after a mutating request starts is
+  `unknown_world_outcome/reconcile`; read-only requests keep their safe
+  interruption classification. `DurableEngine.CancelContext` still sends the
+  explicit idempotent `CancelRun` command, while its context only bounds that
+  exchange.
+- `EngineCancellation` is the deprecated one-shot SDK launch/completion gate
+  retained for source compatibility. `Cancel`
   and `Cmd.Start` linearize under the same lock: cancellation-first means no
   process creation and a safe `cancelled` failure; launch-first means the
   request began and follows the read/mutation interruption classification.
-  Completion arbitration runs only for a fully validated success or valid
-  remote failure; cancellation never replaces a local transport, I/O,
-  overflow, timeout, kill, wait, or termination failure.
-  `CliEngine` exposes no `context.Context`; this token is the only cancellation
-  authority, and its finite SDK-owned `Timeout` is the only deadline authority.
+  Observed direct-Child exit closes process ownership and wins against a later
+  caller cancellation, after which bounded pipe drain and strict outcome
+  validation must still succeed. This is not early semantic acceptance:
+  malformed or incomplete output remains its original transport/response-loss
+  failure. Cancellation never replaces a local transport, I/O, overflow,
+  timeout, kill, wait, or termination failure.
+  New code uses per-call contexts. `CliEngine.Timeout` remains the independent
+  hard transport ceiling; a context deadline is the caller's shorter wait
+  budget and neither is a durable business deadline.
 - Every process-backed request carries a complete `EngineProcessConfig` inside
   `EnginePluginTarget`: absolute executable, ordered arguments, ambient-cleared
   environment, required nullable working directory, non-empty runtime closure,

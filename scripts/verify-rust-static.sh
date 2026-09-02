@@ -7,6 +7,9 @@ cd "$ROOT"
 echo "== Rust formatting =="
 cargo fmt --all -- --check
 
+echo "== Rust internal API smoke gate =="
+sh scripts/verify-rust-internal-api.sh
+
 echo "== Rust workspace static analysis =="
 cargo clippy --workspace --all-targets -- \
   -D warnings \
