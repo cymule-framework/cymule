@@ -7,7 +7,7 @@ cd "$ROOT"
 # Temporary lexical smoke gate for ADR 0006. This does not replace the planned
 # package split, cargo-metadata allowlist, rustdoc public-API snapshot, semver
 # check, or facade compile-fail fixtures.
-internal_consumers=$(rg -l 'cymule_core::durable_internal' --glob '*.rs' \
+internal_consumers=$(git grep -l 'cymule_core::durable_internal' -- '*.rs' \
   | cut -d/ -f1-2 | sort -u)
 expected_internal_consumers='crates/cymule-core
 crates/cymule-durable
@@ -20,8 +20,8 @@ if [ "$internal_consumers" != "$expected_internal_consumers" ]; then
   exit 1
 fi
 
-if rg -n 'package[[:space:]]*=[[:space:]]*"cymule-core"' \
-  --glob 'Cargo.toml' >/dev/null; then
+if git grep -n -E 'package[[:space:]]*=[[:space:]]*"cymule-core"' \
+  -- ':(glob)**/Cargo.toml' Cargo.toml >/dev/null; then
   echo "renaming the cymule-core Cargo dependency is forbidden while the internal bridge exists" >&2
   exit 1
 fi
